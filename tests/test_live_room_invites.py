@@ -20,7 +20,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
 from mindroom.matrix.rooms import leave_rooms as leave_matrix_rooms
-from mindroom.matrix.sync_loop import OwnRoomMembership
+from mindroom.matrix.sync_loop import OwnRoomMembership, own_membership_from_sync
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.membership_models import ReportedDeparture
 from tests.bot_helpers import FencedRoomRecorder, make_test_agent_bot
@@ -449,6 +449,61 @@ async def test_replaced_live_invite_survives_rejected_old_join(
     tmp_path: Path,
 ) -> None:
     """Compensating an old join cannot reject the newer Matrix invite."""
+    replacement_inviter = "@replacement:localhost"
+    config = bind_runtime_paths(
+        Config(
+            administrators=[INVITER_ID, replacement_inviter],
+            router=RouterConfig(
+                model="default",
+                accept_invites=True,
+                access=ResponderAccessConfig(
+                    current_room_members=False,
+                    members_of_rooms=[],
+                ),
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot, room = _router_bot(config)
+    server_membership = "invite"
+
+    async def join_after_replacement(_client: object, _room_id: str) -> RoomJoinOutcome:
+        nonlocal server_membership
+        room.inviter = replacement_inviter
+        server_membership = "join"
+        return RoomJoinOutcome.JOINED
+
+    async def leave_current_membership(_client: object, _room_id: str) -> bool:
+        nonlocal server_membership
+        server_membership = "leave"
+        return True
+
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(side_effect=join_after_replacement),
+    )
+    leave_room = AsyncMock(side_effect=leave_current_membership)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
+
+    await bot._room_lifecycle.handle_invite(room, INVITER_ID)
+
+    leave_room.assert_not_awaited()
+    assert server_membership == "join"
+    assert load_invited_rooms(_accepted_path(config)) == set()
+    assert bot.client.invited_rooms == {ROOM_ID: room}
+    assert room.inviter == replacement_inviter
+
+    await bot._room_lifecycle.handle_invite(room, replacement_inviter)
+
+    assert load_invited_rooms(_accepted_path(config)) == {ROOM_ID}
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_replacement_cannot_retain_joined_membership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A replacement from a denied inviter cannot suppress compensation."""
     config = bind_runtime_paths(
         Config(
             administrators=[INVITER_ID],
@@ -468,7 +523,9 @@ async def test_replaced_live_invite_survives_rejected_old_join(
     server_membership = "invite"
 
     async def join_after_replacement(_client: object, _room_id: str) -> RoomJoinOutcome:
+        nonlocal server_membership
         room.inviter = replacement_inviter
+        server_membership = "join"
         return RoomJoinOutcome.JOINED
 
     async def leave_current_membership(_client: object, _room_id: str) -> bool:
@@ -485,11 +542,9 @@ async def test_replaced_live_invite_survives_rejected_old_join(
 
     await bot._room_lifecycle.handle_invite(room, INVITER_ID)
 
-    leave_room.assert_not_awaited()
-    assert server_membership == "invite"
+    leave_room.assert_awaited_once_with(bot.client, ROOM_ID)
+    assert server_membership == "leave"
     assert load_invited_rooms(_accepted_path(config)) == set()
-    assert bot.client.invited_rooms == {ROOM_ID: room}
-    assert room.inviter == replacement_inviter
 
 
 @pytest.mark.asyncio
@@ -1317,6 +1372,56 @@ async def test_departure_admitted_during_invite_join_abandons_that_join(
 
     assert load_invited_rooms(_accepted_path(config)) == set()
     bot.client.room_leave.assert_awaited_once_with(ROOM_ID)
+
+
+@pytest.mark.asyncio
+async def test_same_invite_snapshot_during_join_is_superseded_by_that_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An invite snapshot captured before join completion cannot revoke the later join."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot.client.room_leave = AsyncMock(return_value=nio.RoomLeaveResponse())
+    join_started = asyncio.Event()
+    release_join = asyncio.Event()
+
+    async def delayed_join(_client: object, _room_id: str) -> RoomJoinOutcome:
+        join_started.set()
+        await release_join.wait()
+        return RoomJoinOutcome.JOINED
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", delayed_join)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_room_members",
+        AsyncMock(return_value={INVITER_ID, bot.agent_user.user_id}),
+    )
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+    await bot.reconcile_live_invites()
+    await asyncio.wait_for(join_started.wait(), timeout=1)
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s_same_invite",
+            "rooms": {
+                "join": {},
+                "invite": {ROOM_ID: {"invite_state": {"events": []}}},
+                "leave": {},
+            },
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    bot._before_sync_response_admission(response)
+    membership = own_membership_from_sync(response, self_user_id=bot.agent_user.user_id)
+    application = asyncio.create_task(bot._apply_own_room_membership_before_invites(membership))
+    await asyncio.sleep(0)
+    assert not application.done()
+
+    release_join.set()
+    await application
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    bot.client.room_leave.assert_not_awaited()
+    assert load_invited_rooms(_accepted_path(config)) == {ROOM_ID}
 
 
 @pytest.mark.asyncio

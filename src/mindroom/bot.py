@@ -1897,8 +1897,9 @@ class AgentBot:
             membership = own_membership_from_sync(response, self_user_id=self.agent_user.user_id)
         else:
             membership = own_membership_from_sliding_sync(response, self_user_id=self.agent_user.user_id)
-        self._room_lifecycle.invalidate_active_invite_joins(
-            membership.departed_room_ids | membership.authoritative_invited_room_ids,
+        self._room_lifecycle.pre_admit_invite_membership(
+            membership.departures,
+            membership.authoritative_invited_room_ids,
         )
         if self.agent_name != ROUTER_AGENT_NAME:
             return
@@ -2094,33 +2095,50 @@ class AgentBot:
 
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
-        departed_room_ids = membership.departed_room_ids
-        ownership_lost_room_ids = departed_room_ids | membership.authoritative_invited_room_ids
+        candidate_ownership_lost_room_ids = membership.departed_room_ids | membership.authoritative_invited_room_ids
         forget_error: Exception | None = None
         async with AsyncExitStack() as ownership:
-            for room_id in sorted(ownership_lost_room_ids):
+            for room_id in sorted(candidate_ownership_lost_room_ids):
                 await ownership.enter_async_context(self._room_lifecycle.invite_ownership(room_id))
+            superseded_invited_room_ids = frozenset(
+                departure.room_id
+                for departure in membership.departures
+                if departure.room_id in membership.authoritative_invited_room_ids
+                and departure.observation_id is not None
+                and self._room_lifecycle.invite_departure_was_superseded(departure.observation_id)
+            )
+            departed_room_ids = membership.departed_room_ids - superseded_invited_room_ids
+            authoritative_invited_room_ids = membership.authoritative_invited_room_ids - superseded_invited_room_ids
+            ownership_lost_room_ids = departed_room_ids | authoritative_invited_room_ids
+            departures = tuple(
+                replace(departure, rejoined_after=True)
+                if departure.room_id in superseded_invited_room_ids
+                else departure
+                for departure in membership.departures
+            )
             for room_id in sorted(ownership_lost_room_ids):
-                if room_id not in membership.authoritative_invited_room_ids:
+                if room_id not in authoritative_invited_room_ids:
                     self._room_lifecycle.discard_live_invite(room_id)
                 try:
                     self._room_lifecycle.forget_invited_room(room_id)
                 except Exception as error:
                     forget_error = forget_error or error
-            await self._membership_fence.fence_reported_departures(membership.departures)
+            await self._membership_fence.fence_reported_departures(departures)
             for room_id in departed_room_ids:
                 await self._room_lifecycle.settle_authoritative_departure(room_id)
         if forget_error is not None:
             raise forget_error
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
         current_joined_room_ids = (
-            membership.joined_room_ids - membership.left_room_ids - self._local_departures_awaiting_sync
+            (membership.joined_room_ids | superseded_invited_room_ids)
+            - membership.left_room_ids
+            - self._local_departures_awaiting_sync
         )
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_sync_room_membership(
                 joined_room_ids=current_joined_room_ids,
-                left_room_ids=membership.left_room_ids | membership.authoritative_invited_room_ids,
+                left_room_ids=membership.left_room_ids | authoritative_invited_room_ids,
             )
 
     def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:

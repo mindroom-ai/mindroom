@@ -61,6 +61,13 @@ class _SendRoomResponse(Protocol):
         ...
 
 
+class _ReportedDeparture(Protocol):
+    """Membership-loss fields needed before sync fanout."""
+
+    room_id: str
+    observation_id: str | None
+
+
 @dataclass(frozen=True)
 class BotRoomLifecycleDeps:
     """Dependencies required for room membership and invite handling."""
@@ -98,6 +105,8 @@ class BotRoomLifecycle:
         self._next_invite_join_generation = 0
         self._active_invite_join_generations: dict[str, set[int]] = {}
         self._invalidated_invite_join_generations: set[int] = set()
+        self._pre_admitted_invite_observation_ids: dict[int, set[str]] = {}
+        self._superseded_invite_observation_ids: set[str] = set()
         self._applied_continuity_revision = -1
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
@@ -145,12 +154,37 @@ class BotRoomLifecycle:
         """Return whether startup skipped setup for an accepted room."""
         return bool(self._accepted_rooms_awaiting_joined_setup)
 
-    def invalidate_active_invite_joins(self, room_ids: Iterable[str]) -> None:
-        """Fail closed joins overlapped by authoritative ownership loss."""
-        for room_id in room_ids:
+    def pre_admit_invite_membership(
+        self,
+        departures: Iterable[_ReportedDeparture],
+        authoritative_invited_room_ids: Iterable[str],
+    ) -> None:
+        """Order active joins against membership loss before sync fanout."""
+        departure_records = tuple(departures)
+        invited_room_ids = set(authoritative_invited_room_ids)
+        departed_room_ids = {departure.room_id for departure in departure_records}
+        for room_id in departed_room_ids - invited_room_ids:
             generations = self._active_invite_join_generations.get(room_id)
             if generations:
                 self._invalidated_invite_join_generations.update(generations)
+        for room_id in invited_room_ids:
+            generations = self._active_invite_join_generations.get(room_id)
+            if not generations:
+                continue
+            observation_ids = {
+                departure.observation_id
+                for departure in departure_records
+                if departure.room_id == room_id and departure.observation_id is not None
+            }
+            if not observation_ids:
+                self._invalidated_invite_join_generations.update(generations)
+                continue
+            for generation in generations:
+                self._pre_admitted_invite_observation_ids.setdefault(generation, set()).update(observation_ids)
+
+    def invite_departure_was_superseded(self, observation_id: str) -> bool:
+        """Return whether a later accepted join superseded this invite snapshot."""
+        return observation_id in self._superseded_invite_observation_ids
 
     @asynccontextmanager
     async def _invite_join_ownership(self, room_id: str) -> AsyncIterator[int]:
@@ -167,6 +201,7 @@ class BotRoomLifecycle:
             if not room_generations:
                 self._active_invite_join_generations.pop(room_id, None)
             self._invalidated_invite_join_generations.discard(generation)
+            self._pre_admitted_invite_observation_ids.pop(generation, None)
 
     def decrypt_notice_is_fenced(self, room_id: str) -> bool:
         """Return whether pre-join decrypt failures in this room stay silent."""
@@ -789,6 +824,9 @@ class BotRoomLifecycle:
         ):
             return False
         self._remember_invited_room(room_id)
+        self._superseded_invite_observation_ids.update(
+            self._pre_admitted_invite_observation_ids.get(invite_join_generation, ()),
+        )
         self._join_fence_protected_room_ids.discard(room_id)
         return True
 
@@ -814,10 +852,21 @@ class BotRoomLifecycle:
             self._logger().exception("invite_compensating_leave_fence_failed", room_id=room_id)
         current_invite = self._client().invited_rooms.get(room_id)
         if current_invite is not None and (current_invite is not expected_invite or current_invite.inviter != sender):
-            self._logger().info("invite_compensating_leave_skipped_for_replacement", room_id=room_id)
-            if fence_error is not None:
-                raise fence_error
-            return
+            replacement_inviter = current_invite.inviter
+            replacement_is_authorized = replacement_inviter is not None and is_sender_allowed_for_agent_invite(
+                replacement_inviter,
+                self.deps.agent_name,
+                room_id,
+                self._config(),
+                self.deps.runtime_paths,
+                self.deps.runtime.agent_reply_memberships,
+                current_inviter_id=replacement_inviter,
+            )
+            if self._should_accept_invite() and replacement_is_authorized:
+                self._logger().info("invite_compensating_leave_skipped_for_replacement", room_id=room_id)
+                if fence_error is not None:
+                    raise fence_error
+                return
         try:
             confirmed = await self._leave_room_with_confirmed_cleanup(room_id)
         except asyncio.CancelledError:
