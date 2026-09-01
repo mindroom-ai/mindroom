@@ -10,7 +10,7 @@ router:
   # Model for routing decisions (defaults to "default")
   model: haiku
 
-  # Accept authorized room invites and preserve them across restarts (default: true)
+  # Accept all, none, or matching inviter ID patterns (default: true)
   accept_invites: true
 
 ```
@@ -20,7 +20,11 @@ The router has two configuration options:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model to use for routing decisions |
-| `accept_invites` | bool | `true` | When enabled, the router accepts authorized human and internal-agent room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
+| `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted room IDs are persisted, rejoined after restart, and preserved during room cleanup |
+
+Invitation patterns are matched after identity alias resolution and use the same case-sensitive wildcard semantics as responder `access.users`.
+Invitation acceptance grants room membership only and remains independent from responder access.
+The router applies its ordinary `access` policy to every interaction after joining.
 
 ## How Routing Works
 
@@ -75,7 +79,7 @@ That welcome message lists:
 - Quick command reference
 
 Startup welcomes with no requester list configured room responders when the room is statically configured.
-Startup does not send requester-less welcomes in persisted ad-hoc invite rooms because the original inviter cannot be re-authorized safely after restart.
+Startup does not send requester-less welcomes in persisted ad-hoc invite rooms because the original inviter cannot be re-authorized safely from persisted state.
 The live invite callback sends the requester-scoped welcome when the inviter currently has router reply access.
 
 Use `!hi` in any room to see the welcome message again.
@@ -96,7 +100,8 @@ The router creates and manages rooms:
 
 Every concrete Matrix agent operating in a room also receives a built-in zero-argument `invite_router` recovery tool.
 The tool can invite only the persisted router identity and only into the agent's current room.
-The router treats the configured agent identity as an authorized internal sender, auto-accepts the invite, and persists the room when `router.accept_invites` is enabled.
+The router accepts the invite and persists the room only when `router.accept_invites` allows the current Matrix transport account's user ID.
+A team member therefore authorizes recovery through the team's Matrix account, not the member agent's account.
 The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
 This lets an agent recover router-backed approvals without adding persistent prompt instructions or exposing arbitrary invite targets.
 

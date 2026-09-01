@@ -12,7 +12,7 @@ from agno.tools import Toolkit
 
 import mindroom.agents as agents_module
 from mindroom.agents import apply_tool_approval_capability, create_agent
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.custom_tools.invite_router import InviteRouterTools
@@ -36,7 +36,12 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def _tool_context(tmp_path: Path, *, accept_invites: bool = True) -> tuple[ToolRuntimeContext, AsyncMock]:
+def _tool_context(
+    tmp_path: Path,
+    *,
+    accept_invites: bool | list[str] = True,
+    transport_agent_name: str | None = None,
+) -> tuple[ToolRuntimeContext, AsyncMock]:
     config = bind_runtime_paths(
         Config(
             agents={
@@ -46,6 +51,17 @@ def _tool_context(tmp_path: Path, *, accept_invites: bool = True) -> tuple[ToolR
                     include_default_tools=False,
                 ),
             },
+            teams=(
+                {
+                    "builders": TeamConfig(
+                        display_name="Builders",
+                        role="Build software",
+                        agents=["code"],
+                    ),
+                }
+                if transport_agent_name == "builders"
+                else {}
+            ),
             router=RouterConfig(model="default", accept_invites=accept_invites),
         ),
         test_runtime_paths(tmp_path),
@@ -59,6 +75,7 @@ def _tool_context(tmp_path: Path, *, accept_invites: bool = True) -> tuple[ToolR
             reply_to_event_id=None,
         ),
         requester_id="@alice:localhost",
+        transport_agent_name=transport_agent_name,
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -309,8 +326,76 @@ async def test_invite_router_reports_disabled_router_auto_accept(tmp_path: Path)
     with tool_runtime_context(context):
         result = await InviteRouterTools().invite_router()
 
-    assert result == "Error: Router auto-accept is disabled."
+    assert result == "Error: Router auto-accept does not allow this Matrix transport account."
     client.room_invite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("policy", "expected", "invite_sent"),
+    [
+        (["@mindroom_code:localhost"], "Router joined.", True),
+        (["@other:localhost"], "Error: Router auto-accept does not allow this Matrix transport account.", False),
+    ],
+)
+async def test_invite_router_respects_inviter_list_for_transport_agent(
+    tmp_path: Path,
+    policy: list[str],
+    expected: str,
+    invite_sent: bool,
+) -> None:
+    """The recovery tool must not send an invitation its router policy will reject."""
+    context, client = _tool_context(tmp_path, accept_invites=policy)
+    client.room_get_state_event.side_effect = [
+        nio.RoomGetStateEventError(
+            "Not found",
+            status_code="M_NOT_FOUND",
+            room_id="!project:localhost",
+        ),
+        nio.RoomGetStateEventResponse(
+            content={"membership": "join"},
+            event_type="m.room.member",
+            state_key="@mindroom_router:localhost",
+            room_id="!project:localhost",
+        ),
+    ]
+    client.room_invite.return_value = nio.RoomInviteResponse()
+
+    with tool_runtime_context(context):
+        result = await InviteRouterTools().invite_router()
+
+    assert result == expected
+    assert client.room_invite.await_count == int(invite_sent)
+
+
+@pytest.mark.asyncio
+async def test_invite_router_uses_team_transport_account_for_member_execution(tmp_path: Path) -> None:
+    """A member agent must authorize the Matrix account that actually sends the team invite."""
+    context, client = _tool_context(
+        tmp_path,
+        accept_invites=["@mindroom_builders:localhost"],
+        transport_agent_name="builders",
+    )
+    client.room_get_state_event.side_effect = [
+        nio.RoomGetStateEventError(
+            "Not found",
+            status_code="M_NOT_FOUND",
+            room_id="!project:localhost",
+        ),
+        nio.RoomGetStateEventResponse(
+            content={"membership": "join"},
+            event_type="m.room.member",
+            state_key="@mindroom_router:localhost",
+            room_id="!project:localhost",
+        ),
+    ]
+    client.room_invite.return_value = nio.RoomInviteResponse()
+
+    with tool_runtime_context(context):
+        result = await InviteRouterTools().invite_router()
+
+    assert result == "Router joined."
+    client.room_invite.assert_awaited_once_with("!project:localhost", "@mindroom_router:localhost")
 
 
 @pytest.mark.asyncio

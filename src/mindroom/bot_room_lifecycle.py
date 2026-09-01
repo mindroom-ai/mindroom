@@ -15,6 +15,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
+    is_inviter_allowed,
     load_invited_rooms,
     load_pending_room_invites,
     pending_room_invites_path,
@@ -175,12 +176,20 @@ class BotRoomLifecycle:
         room_id: str,
     ) -> RoomJoinOutcome:
         """Fence decrypt callbacks before a live join can race its first sync."""
+        await self._add_join_decrypt_notice_fence(room_id)
+        return await self._join_fenced_room(client, room_id)
+
+    async def _add_join_decrypt_notice_fence(self, room_id: str) -> None:
+        """Persist the decrypt-notice fence required before one Matrix join."""
         self.apply_continuity_record(
             await asyncio.to_thread(
                 self.deps.continuity_store.update_join_fences,
                 add=(room_id,),
             ),
         )
+
+    async def _join_fenced_room(self, client: nio.AsyncClient, room_id: str) -> RoomJoinOutcome:
+        """Start one Matrix join after its decrypt-notice fence is durable."""
         join_outcome = await join_room(client, room_id)
         if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
             await self._clear_join_decrypt_notice_fence(room_id)
@@ -436,11 +445,11 @@ class BotRoomLifecycle:
         return True
 
     async def handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:
-        """Handle one invite whose identity is already durable."""
+        """Handle one invite after its pending work is durable."""
         await self._handle_invite(room, sender, invite_is_current=True)
 
     async def reconcile_pending_invites(self) -> None:
-        """Re-evaluate durable and cached invites after responder access changes."""
+        """Re-evaluate durable and cached invites after configuration changes."""
         client = self._client()
         self._pending_room_invites = load_pending_room_invites(self._pending_room_invites_file_path())
         for room in tuple(client.invited_rooms.values()):
@@ -454,6 +463,31 @@ class BotRoomLifecycle:
                 room.inviter = sender
             await self._handle_invite(room, sender, invite_is_current=invite_is_current)
 
+    def _allowed_current_inviter(self, room_id: str) -> str | None:
+        """Return the current Matrix inviter when the latest policy allows it."""
+        current_invite = self._client().invited_rooms.get(room_id)
+        if current_invite is None or current_invite.inviter is None:
+            return None
+        sender = current_invite.inviter
+        return sender if is_inviter_allowed(self._config(), self.deps.agent_name, sender) else None
+
+    def _allowed_invite_sender(self, room_id: str, sender: str, config: Config) -> str | None:
+        """Apply the dedicated policy or preserve legacy team authorization."""
+        if self.deps.agent_name == ROUTER_AGENT_NAME or self.deps.agent_name in config.agents:
+            return self._allowed_current_inviter(room_id)
+        return (
+            sender
+            if is_sender_allowed_for_agent_reply_in_room(
+                sender,
+                self.deps.agent_name,
+                config,
+                room_id,
+                self.deps.runtime_paths,
+                self.deps.runtime.agent_reply_memberships,
+            )
+            else None
+        )
+
     async def _handle_invite(
         self,
         room: nio.MatrixRoom,
@@ -461,30 +495,24 @@ class BotRoomLifecycle:
         *,
         invite_is_current: bool,
     ) -> None:
-        """Accept one invite when its inviter currently passes responder access."""
+        """Accept one invite when its dedicated invitation policy allows it."""
         client = self._client()
-        if not self._should_accept_invite():
-            self._logger().info("Ignored invite", room_id=room.room_id, sender=sender)
-            return
-
-        config = self._config()
-        invite_allowed = is_sender_allowed_for_agent_reply_in_room(
-            sender,
-            self.deps.agent_name,
-            config,
-            room.room_id,
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-        )
-        if not invite_allowed:
-            self._logger().debug(
-                "ignoring_invite_from_unauthorized_sender",
-                user_id=sender,
-                room_id=room.room_id,
-            )
-            return
-
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
+            if not self._should_accept_invite():
+                self._logger().info("Ignored invite", room_id=room.room_id, sender=sender)
+                return
+            config = self._config()
+            uses_invitation_policy = self.deps.agent_name == ROUTER_AGENT_NAME or self.deps.agent_name in config.agents
+            allowed_sender = self._allowed_invite_sender(room.room_id, sender, config)
+            if allowed_sender is None:
+                self._logger().debug(
+                    "ignoring_invite_from_disallowed_sender",
+                    user_id=sender,
+                    room_id=room.room_id,
+                )
+                return
+            sender = allowed_sender
+
             if room.room_id in self._handled_invite_room_ids:
                 self._logger().debug("Invite already handled", room_id=room.room_id, sender=sender)
                 await self.deps.on_room_joined(room.room_id)
@@ -494,7 +522,14 @@ class BotRoomLifecycle:
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=sender)
-            join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
+            await self._add_join_decrypt_notice_fence(room.room_id)
+            if uses_invitation_policy:
+                current_sender = self._allowed_current_inviter(room.room_id)
+                if current_sender is None:
+                    await self._clear_join_decrypt_notice_fence(room.room_id)
+                    return
+                sender = current_sender
+            join_outcome = await self._join_fenced_room(client, room.room_id)
             if join_outcome is not RoomJoinOutcome.JOINED:
                 self._logger().error("Failed to join room", room_id=room.room_id)
                 if join_outcome is RoomJoinOutcome.ACCESS_DENIED and not invite_is_current:

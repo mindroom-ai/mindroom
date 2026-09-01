@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from mindroom.tool_system.worker_routing import agent_state_root_path
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.config.access import InviteAcceptancePolicy
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
@@ -112,8 +114,7 @@ def remember_invited_room(path: Path, room_id: str) -> None:
     save_invited_rooms(path, room_ids)
 
 
-def should_accept_invites(config: Config, agent_name: str) -> bool:
-    """Return whether one configured entity accepts authorized room invites."""
+def _invite_acceptance_policy(config: Config, agent_name: str) -> InviteAcceptancePolicy | None:
     if agent_name == ROUTER_AGENT_NAME:
         return config.router.accept_invites
 
@@ -121,6 +122,25 @@ def should_accept_invites(config: Config, agent_name: str) -> bool:
     if agent_config is not None:
         return agent_config.accept_invites
 
+    return None
+
+
+def is_inviter_allowed(config: Config, agent_name: str, sender_id: str) -> bool:
+    """Apply one router or agent's dedicated inbound invitation policy."""
+    policy = _invite_acceptance_policy(config, agent_name)
+    if isinstance(policy, bool):
+        return policy
+    if policy is None:
+        return False
+    canonical_sender = config.authorization.resolve_alias(sender_id)
+    return any(fnmatchcase(canonical_sender, pattern) for pattern in policy)
+
+
+def should_accept_invites(config: Config, agent_name: str) -> bool:
+    """Return whether one configured entity has any enabled invitation policy."""
+    policy = _invite_acceptance_policy(config, agent_name)
+    if policy is not None:
+        return bool(policy)
     return agent_name in config.teams
 
 

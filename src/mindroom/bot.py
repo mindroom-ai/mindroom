@@ -1333,9 +1333,17 @@ class AgentBot:
             await call_manager.reconcile_reply_authorization()
 
     async def reconcile_pending_invites(self) -> None:
-        """Recheck cached room invites against the shared responder policy."""
+        """Recheck cached room invites against this entity's invitation policy."""
         if self.client is not None:
             await self._room_lifecycle.reconcile_pending_invites()
+
+    def schedule_pending_invite_reconciliation(self) -> None:
+        """Recheck cached invites without making config publication await Matrix work."""
+        create_background_task(
+            self.reconcile_pending_invites(),
+            name=f"pending_invite_reconciliation_{self.agent_name}",
+            owner=self._runtime_view,
+        )
 
     async def revoke_reply_authorized_calls(self) -> None:
         """End active calls that no longer pass current reply access."""
@@ -2019,6 +2027,10 @@ class AgentBot:
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
         departed_room_ids = membership.departed_room_ids
+        client = self.client
+        if client is not None:
+            for room_id in departed_room_ids:
+                client.invited_rooms.pop(room_id, None)
         await self._membership_fence.fence_reported_departures(membership.departures)
         for room_id in departed_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
@@ -2472,8 +2484,14 @@ class AgentBot:
 
         An invite has no Matrix event ID to key durable work on.
         Persist its room and inviter before network work moves to the
-        background so access changes and process restarts can reconcile it.
+        background so policy changes and process restarts can reconcile it.
         """
+        if (
+            not isinstance(event, nio.InviteMemberEvent)
+            or event.state_key != self.agent_user.user_id
+            or event.membership != "invite"
+        ):
+            return
         self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
         create_background_task(
             self._room_lifecycle.handle_recorded_invite(room, event.sender),

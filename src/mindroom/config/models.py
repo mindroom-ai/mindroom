@@ -7,7 +7,7 @@ from typing import Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
-from mindroom.config.access import ResponderAccessConfig  # noqa: TC001
+from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
@@ -601,7 +601,10 @@ class RouterConfig(BaseModel):
     """Configuration for the router system."""
 
     model: str = Field(default="default", description="Model to use for routing decisions")
-    accept_invites: bool = Field(default=True, description="Whether the router accepts and persists room invites")
+    accept_invites: InviteAcceptancePolicy = Field(
+        default=True,
+        description="Whether the router accepts all, no, or matching inviter room invites",
+    )
     access: ResponderAccessConfig | None = Field(
         default=None,
         description="Optional membership-based conversation access policy",

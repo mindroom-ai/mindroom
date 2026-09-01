@@ -108,6 +108,11 @@ Invitations do not count as joined membership, and leave, kick, or ban events re
 The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
 
+Inbound invitation policy is independent from responder access.
+Accepting an invitation grants room membership but never grants permission to interact with the router or an agent.
+The router and agents use their own `accept_invites` setting to accept all inviters, reject all inviters, or allow explicit Matrix user ID patterns.
+Every interaction after joining still uses the responder rules above.
+
 The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.
 
 ## Platform and credential authority

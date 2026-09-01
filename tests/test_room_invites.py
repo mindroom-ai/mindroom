@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -19,7 +18,7 @@ import pytest
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -27,10 +26,12 @@ from mindroom.hooks.matrix_admin import build_hook_matrix_admin
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
+    is_inviter_allowed,
     load_invited_rooms,
     load_pending_room_invites,
     pending_room_invites_path,
     save_invited_rooms,
+    should_accept_invites,
 )
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
@@ -54,7 +55,6 @@ if TYPE_CHECKING:
     from nio.responses import Response
 
     from mindroom.bot import AgentBot
-    from mindroom.constants import RuntimePaths
 
 
 def _invited_rooms_path(config: Config, agent_name: str) -> Path:
@@ -66,9 +66,26 @@ def _pending_room_invites(config: Config, agent_name: str) -> dict[str, str]:
     return load_pending_room_invites(path)
 
 
+def _cache_current_invite(bot: AgentBot, room_id: str, sender: str) -> nio.MatrixInvitedRoom:
+    """Mirror nio's current-invite cache before delivering its callback."""
+    client = bot.client
+    assert client is not None
+    invited_rooms = client.invited_rooms
+    if not isinstance(invited_rooms, dict):
+        invited_rooms = {}
+    current_room = invited_rooms.get(room_id)
+    if not isinstance(current_room, nio.MatrixInvitedRoom):
+        current_room = nio.MatrixInvitedRoom(room_id, bot.agent_user.user_id)
+        invited_rooms[room_id] = current_room
+    current_room.inviter = sender
+    client.invited_rooms = invited_rooms
+    return current_room
+
+
 async def _handle_invite(bot: AgentBot, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
+    current_room = _cache_current_invite(bot, room.room_id, event.sender)
     bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
-    await bot._room_lifecycle.handle_recorded_invite(room, event.sender)
+    await bot._room_lifecycle.handle_recorded_invite(current_room, event.sender)
 
 
 def _router_user() -> AgentMatrixUser:
@@ -78,6 +95,231 @@ def _router_user() -> AgentMatrixUser:
         display_name="Router",
         password=TEST_PASSWORD,
     )
+
+
+@pytest.mark.parametrize(
+    ("policy", "sender_id", "expected"),
+    [
+        (True, "@anyone:anywhere.example", True),
+        (False, "@owner:example.com", False),
+        ([], "@owner:example.com", False),
+        (["@owner:example.com"], "@owner:example.com", True),
+        (["@*:trusted.example.com"], "@member:trusted.example.com", True),
+        (["@owner:example.com"], "@outsider:example.com", False),
+    ],
+)
+def test_invitation_policy_is_independent_for_router_and_agents(
+    policy: bool | list[str],
+    sender_id: str,
+    expected: bool,
+) -> None:
+    """The dedicated invite policy must decide joins without responder access."""
+    config = Config(
+        router=RouterConfig(model="default", accept_invites=policy),
+        agents={
+            "research": AgentConfig(
+                display_name="Research",
+                accept_invites=policy,
+            ),
+        },
+    )
+    assert is_inviter_allowed(config, ROUTER_AGENT_NAME, sender_id) is expected
+    assert is_inviter_allowed(config, "research", sender_id) is expected
+    assert should_accept_invites(config, ROUTER_AGENT_NAME) is bool(policy)
+    assert should_accept_invites(config, "research") is bool(policy)
+
+
+def test_invitation_policy_resolves_aliases_before_matching() -> None:
+    """An inviter alias must match the same canonical pattern as conversation access."""
+    config = Config(
+        router=RouterConfig(model="default", accept_invites=["@owner:example.com"]),
+        agents={
+            "research": AgentConfig(
+                display_name="Research",
+                accept_invites=["@owner:example.com"],
+            ),
+        },
+    )
+    config.authorization.aliases = {"@owner:example.com": ["@bridge-owner:example.com"]}
+    assert is_inviter_allowed(config, ROUTER_AGENT_NAME, "@bridge-owner:example.com") is True
+    assert is_inviter_allowed(config, "research", "@bridge-owner:example.com") is True
+
+
+def _live_router_invite_scenario(
+    tmp_path: Path,
+    *,
+    room_id: str = "!invited:localhost",
+    sender_id: str = "@owner:localhost",
+) -> tuple[Config, AgentBot, nio.MatrixInvitedRoom, nio.InviteMemberEvent]:
+    """Build one fresh router invitation scenario."""
+    config = bind_runtime_paths(
+        Config(
+            router=RouterConfig(
+                model="default",
+                accept_invites=True,
+                access=ResponderAccessConfig(current_room_members=True),
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_journal_support(bot)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room = nio.MatrixInvitedRoom(room_id, bot.agent_user.user_id)
+    room.inviter = sender_id
+    bot.client.invited_rooms = {room_id: room}
+    event = nio.InviteEvent.parse_event(
+        {
+            "type": "m.room.member",
+            "sender": sender_id,
+            "state_key": bot.agent_user.user_id,
+            "content": {"membership": "invite"},
+        },
+    )
+    assert isinstance(event, nio.InviteMemberEvent)
+    return config, bot, room, event
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("policy", "sender_id", "accepted"),
+    [
+        (["@owner:localhost"], "@owner:localhost", True),
+        (["@*:localhost"], "@owner:localhost", True),
+        (["@other:localhost"], "@owner:localhost", False),
+        ([], "@owner:localhost", False),
+    ],
+)
+async def test_router_invitation_list_controls_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    policy: list[str],
+    sender_id: str,
+    accepted: bool,
+) -> None:
+    """The room lifecycle must enforce the router's dedicated inviter patterns."""
+    config, bot, room, event = _live_router_invite_scenario(tmp_path, sender_id=sender_id)
+    config.router.accept_invites = policy
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+
+    await _handle_invite(bot, room, event)
+
+    if accepted:
+        join_room.assert_awaited_once_with(bot.client, room.room_id)
+        assert bot._room_lifecycle.invited_rooms == {room.room_id}
+    else:
+        join_room.assert_not_awaited()
+        assert bot._room_lifecycle.invited_rooms == set()
+
+
+@pytest.mark.asyncio
+async def test_router_invitation_list_uses_current_inviter_at_join_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A replacement invite must own authorization before the join starts."""
+    allowed_sender = "@owner:localhost"
+    replacement_sender = "@outsider:localhost"
+    config, bot, room, event = _live_router_invite_scenario(tmp_path, sender_id=allowed_sender)
+    config.router.accept_invites = [allowed_sender]
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+    update_join_fences = bot._sync_continuity_store.update_join_fences
+    fence_started = threading.Event()
+    release_fence = threading.Event()
+
+    def block_fence_persistence(
+        *,
+        add: tuple[str, ...] = (),
+        remove: tuple[str, ...] = (),
+        retain: tuple[str, ...] | None = None,
+    ) -> object:
+        if add:
+            fence_started.set()
+            assert release_fence.wait(timeout=2)
+        return update_join_fences(add=add, remove=remove, retain=retain)
+
+    monkeypatch.setattr(bot._sync_continuity_store, "update_join_fences", block_fence_persistence)
+    task = asyncio.create_task(_handle_invite(bot, room, event))
+    try:
+        assert await asyncio.to_thread(fence_started.wait, 2)
+        room.inviter = replacement_sender
+        bot._room_lifecycle.record_pending_room_invite(room.room_id, replacement_sender)
+    finally:
+        release_fence.set()
+
+    await task
+
+    join_room.assert_not_awaited()
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {
+        room.room_id: replacement_sender,
+    }
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced(room.room_id)
+
+
+@pytest.mark.asyncio
+async def test_authoritative_departure_revokes_current_invite_before_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A leave observed while invite fencing is pending must prevent the join from starting."""
+    _config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+    update_join_fences = bot._sync_continuity_store.update_join_fences
+    invite_fence_started = threading.Event()
+    release_invite_fence = threading.Event()
+    departure_started = asyncio.Event()
+    release_departure = asyncio.Event()
+
+    def block_invite_fence_persistence(
+        *,
+        add: tuple[str, ...] = (),
+        remove: tuple[str, ...] = (),
+        retain: tuple[str, ...] | None = None,
+    ) -> object:
+        if add:
+            invite_fence_started.set()
+            assert release_invite_fence.wait(timeout=2)
+        return update_join_fences(add=add, remove=remove, retain=retain)
+
+    async def block_departure_fence(_fence: object, _departures: object) -> None:
+        departure_started.set()
+        await release_departure.wait()
+
+    monkeypatch.setattr(bot._sync_continuity_store, "update_join_fences", block_invite_fence_persistence)
+    monkeypatch.setattr(type(bot._membership_fence), "fence_reported_departures", block_departure_fence)
+    invite_task = asyncio.create_task(_handle_invite(bot, room, event))
+    departure_task: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(invite_fence_started.wait, 2)
+        response = MagicMock(spec=nio.SyncResponse)
+        response.next_batch = "s_after_cancel"
+        response.rooms = MagicMock(join={}, invite={}, leave={room.room_id: MagicMock()})
+        departure_task = asyncio.create_task(bot._apply_own_room_membership_from_sync(response))
+        await asyncio.wait_for(departure_started.wait(), timeout=2)
+
+        release_invite_fence.set()
+        await invite_task
+
+        join_room.assert_not_awaited()
+        client = bot.client
+        assert client is not None
+        assert room.room_id not in client.invited_rooms
+    finally:
+        release_invite_fence.set()
+        release_departure.set()
+        if departure_task is not None:
+            await departure_task
 
 
 @pytest.fixture
@@ -461,10 +703,8 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
     )
     assert isinstance(event, nio.InviteMemberEvent)
 
-    await bot._on_invite_before_sync_certification(
-        nio.MatrixRoom("!invalid-state:localhost", bot.agent_user.user_id),
-        event,
-    )
+    room = _cache_current_invite(bot, "!invalid-state:localhost", event.sender)
+    await bot._on_invite_before_sync_certification(room, event)
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     bot.client.join.assert_awaited_once_with("!invalid-state:localhost")
@@ -473,11 +713,11 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
 
 
 @pytest.mark.asyncio
-async def test_recovered_revoked_invite_is_forgotten_after_forbidden_join(
+async def test_recovered_invite_waits_for_current_matrix_evidence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A durable invite revoked while offline must not retry forever."""
+    """A durable pending record must not supply current inviter authority."""
     config = bind_runtime_paths(
         Config(router=RouterConfig(model="default", accept_invites=True)),
         test_runtime_paths(tmp_path),
@@ -502,8 +742,10 @@ async def test_recovered_revoked_invite_is_forgotten_after_forbidden_join(
     await bot._room_lifecycle.reconcile_pending_invites()
     await bot._room_lifecycle.reconcile_pending_invites()
 
-    bot.client.join.assert_awaited_once_with(room_id)
-    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+    bot.client.join.assert_not_awaited()
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {
+        room_id: "@owner:localhost",
+    }
     assert not bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
 
 
@@ -543,7 +785,7 @@ async def test_initial_sync_invite_is_current_membership_work(
         },
     )
     assert isinstance(event, nio.InviteMemberEvent)
-    room = nio.MatrixRoom("!invited:localhost", bot.agent_user.user_id)
+    room = _cache_current_invite(bot, "!invited:localhost", event.sender)
 
     await bot._on_invite_before_sync_certification(room, event)
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
@@ -552,6 +794,52 @@ async def test_initial_sync_invite_is_current_membership_work(
     welcome_message.assert_awaited_once_with(room.room_id, event.sender)
     assert bot._room_lifecycle.invited_rooms == {room.room_id}
     assert await bot._journal_dispatcher.store.pending() == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "state_key", "membership"),
+    [
+        ("m.room.name", "", None),
+        ("m.room.member", "@other:localhost", "invite"),
+        ("m.room.member", "self", "leave"),
+    ],
+    ids=["room-metadata", "other-member", "non-invite-membership"],
+)
+async def test_only_authenticated_self_invites_start_invite_work(
+    tmp_path: Path,
+    event_type: str,
+    state_key: str,
+    membership: str | None,
+) -> None:
+    """Unrelated invite-state callbacks must not create join authority or work."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot._room_lifecycle.handle_recorded_invite = AsyncMock()
+    room = nio.MatrixInvitedRoom("!metadata:localhost", bot.matrix_id.full_id)
+    event = nio.InviteEvent.parse_event(
+        {
+            "type": event_type,
+            "sender": "@event-sender:localhost",
+            "state_key": bot.matrix_id.full_id if state_key == "self" else state_key,
+            "content": {"membership": membership} if membership is not None else {"name": "Project"},
+        },
+    )
+    assert isinstance(event, nio.InviteEvent)
+
+    await bot._on_invite_before_sync_certification(room, event)
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+    bot._room_lifecycle.handle_recorded_invite.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1267,7 +1555,7 @@ async def test_redelivered_invite_retries_a_failed_welcome(
         },
     )
     assert isinstance(event, nio.InviteEvent)
-    room = nio.MatrixRoom("!router-invited:localhost", bot.matrix_id.full_id)
+    room = _cache_current_invite(bot, "!router-invited:localhost", event.sender)
     await bot._on_invite_before_sync_certification(room, event)
     await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
@@ -1998,11 +2286,13 @@ async def test_agent_refuses_invite_when_accept_invites_disabled(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_agent_refuses_invite_from_unauthorized_sender(
+@pytest.mark.parametrize("private", [False, True], ids=["shared", "requester-private"])
+async def test_agent_accepts_invite_independently_of_conversation_access(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    private: bool,
 ) -> None:
-    """Unauthorized users should not be able to force durable membership via invites."""
+    """Joining must not grant or require permission to converse with an agent."""
     agent_user = AgentMatrixUser(
         agent_name="agent1",
         user_id="@mindroom_agent1:localhost",
@@ -2015,6 +2305,7 @@ async def test_agent_refuses_invite_from_unauthorized_sender(
                 "agent1": AgentConfig(
                     display_name="Agent 1",
                     role="Test agent",
+                    private=AgentPrivateConfig(per="user") if private else None,
                 ),
             },
             router=RouterConfig(model="default"),
@@ -2030,240 +2321,32 @@ async def test_agent_refuses_invite_from_unauthorized_sender(
     bot.client = AsyncMock()
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: False,
-    )
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
 
     room = MagicMock(room_id="!invited-room:localhost")
     room.canonical_alias = None
     event = MagicMock(sender="@intruder:localhost")
+    assert not is_sender_allowed_for_responder(
+        event.sender,
+        "agent1",
+        room.room_id,
+        config,
+        runtime_paths_for(config),
+        bot._runtime_view.agent_reply_memberships,
+    )
 
     await _handle_invite(bot, room, event)
 
-    join_room.assert_not_awaited()
-    assert bot._room_lifecycle.invited_rooms == set()
-    assert not _invited_rooms_path(config, "agent1").exists()
-
-
-@dataclass(frozen=True)
-class _GrantInviteScenario:
-    config: Config
-    runtime_paths: RuntimePaths
-    orchestrator: _MultiAgentOrchestrator
-    agent_user: AgentMatrixUser
-    bot: AgentBot
-    router_bot: AgentBot
-    join_room: AsyncMock
-    sender_id: str
-    grant_room_id: str
-    invited_room_id: str
-
-
-async def _grant_invite_scenario(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> _GrantInviteScenario:
-    """Build a denied invite whose first authorized join will fail."""
-    sender_id = "@alice:localhost"
-    grant_room_id = "!canonical:localhost"
-    invited_room_id = "!invited-room:localhost"
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "agent1": AgentConfig(
-                    display_name="Agent 1",
-                    role="Test agent",
-                    rooms=["canonical"],
-                    access=ResponderAccessConfig(
-                        current_room_members=False,
-                        members_of_rooms=["canonical"],
-                    ),
-                ),
-            },
-            router=RouterConfig(
-                model="default",
-                access=ResponderAccessConfig(
-                    current_room_members=False,
-                    members_of_rooms=[],
-                ),
-            ),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    runtime_paths = runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_room("canonical", grant_room_id, "#canonical:localhost", "Canonical")
-    state.save(runtime_paths=runtime_paths)
-
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator.config = config
-    agent_user = AgentMatrixUser(
-        agent_name="agent1",
-        user_id="@mindroom_agent1:localhost",
-        display_name="Agent 1",
-        password=TEST_PASSWORD,
-    )
-    bot = make_test_agent_bot(
-        agent_user=agent_user,
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=orchestrator.agent_reply_memberships,
-    )
-    install_runtime_journal_support(bot)
-    router_bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=orchestrator.agent_reply_memberships,
-        agent_reply_membership_sync=orchestrator.agent_reply_membership_sync,
-    )
-    bot.orchestrator = orchestrator
-    router_bot.orchestrator = orchestrator
-    orchestrator.agent_bots = {"agent1": bot, ROUTER_AGENT_NAME: router_bot}
-    orchestrator.reconcile_reply_authorized_calls = AsyncMock()
-
-    bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
-    invited_room = nio.MatrixInvitedRoom(invited_room_id, agent_user.user_id)
-    invited_room.inviter = sender_id
-    bot.client.invited_rooms = {invited_room_id: invited_room}
-    router_bot.client = make_matrix_client_mock(user_id=router_bot.agent_user.user_id)
-    router_bot.client.invited_rooms = {}
-    router_bot.client.joined_rooms = AsyncMock(
-        return_value=nio.JoinedRoomsResponse(rooms=[grant_room_id]),
-    )
-    router_bot.client.joined_members = AsyncMock(
-        return_value=nio.JoinedMembersResponse(members=[], room_id=grant_room_id),
-    )
-    join_room = AsyncMock(
-        side_effect=[RoomJoinOutcome.RETRYABLE_FAILURE, RoomJoinOutcome.JOINED],
-    )
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
-    event = nio.InviteEvent.parse_event(
-        {
-            "type": "m.room.member",
-            "sender": sender_id,
-            "state_key": agent_user.user_id,
-            "content": {"membership": "invite"},
-        },
-    )
-    assert isinstance(event, nio.InviteMemberEvent)
-
-    await orchestrator.agent_reply_memberships.refresh(config, runtime_paths, router_bot.client)
-    await _handle_invite(bot, invited_room, event)
-    assert bot._room_lifecycle.invited_rooms == set()
-    assert _pending_room_invites(config, "agent1") == {invited_room_id: sender_id}
-    return _GrantInviteScenario(
-        config=config,
-        runtime_paths=runtime_paths,
-        orchestrator=orchestrator,
-        agent_user=agent_user,
-        bot=bot,
-        router_bot=router_bot,
-        join_room=join_room,
-        sender_id=sender_id,
-        grant_room_id=grant_room_id,
-        invited_room_id=invited_room_id,
-    )
-
-
-async def _restart_grant_invite_scenario(
-    scenario: _GrantInviteScenario,
-    tmp_path: Path,
-) -> AgentBot:
-    """Rebuild the bot fleet and recover its durable pending invite."""
-    restarted_orchestrator = _MultiAgentOrchestrator(runtime_paths=scenario.runtime_paths)
-    restarted_orchestrator.config = scenario.config
-    recovered_bot = make_test_agent_bot(
-        agent_user=scenario.agent_user,
-        storage_path=tmp_path,
-        config=scenario.config,
-        runtime_paths=scenario.runtime_paths,
-        agent_reply_memberships=restarted_orchestrator.agent_reply_memberships,
-    )
-    install_runtime_journal_support(recovered_bot)
-    restarted_router = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=scenario.config,
-        runtime_paths=scenario.runtime_paths,
-        agent_reply_memberships=restarted_orchestrator.agent_reply_memberships,
-        agent_reply_membership_sync=restarted_orchestrator.agent_reply_membership_sync,
-    )
-    recovered_bot.orchestrator = restarted_orchestrator
-    restarted_router.orchestrator = restarted_orchestrator
-    restarted_orchestrator.agent_bots = {
-        "agent1": recovered_bot,
-        ROUTER_AGENT_NAME: restarted_router,
-    }
-    recovered_bot.client = make_matrix_client_mock(user_id=scenario.agent_user.user_id)
-    restarted_router.client = make_matrix_client_mock(user_id=restarted_router.agent_user.user_id)
-    restarted_router.client.joined_rooms = AsyncMock(
-        return_value=nio.JoinedRoomsResponse(rooms=[scenario.grant_room_id]),
-    )
-    restarted_router.client.joined_members = AsyncMock(
-        return_value=nio.JoinedMembersResponse(
-            members=[nio.RoomMember(scenario.sender_id, None, None)],
-            room_id=scenario.grant_room_id,
-        ),
-    )
-    await restarted_orchestrator.refresh_agent_reply_memberships()
-    return recovered_bot
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("enforce_turn_authorization")
-@pytest.mark.parametrize("restart", [False, True], ids=["event-replay", "process-restart"])
-async def test_grant_room_join_reconciles_previously_denied_invite(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    restart: bool,
-) -> None:
-    """Grant-room membership should recover a denied invite after a transient failure."""
-    scenario = await _grant_invite_scenario(monkeypatch, tmp_path)
-
-    join_event = nio.RoomMemberEvent.from_dict(
-        {
-            "type": "m.room.member",
-            "event_id": "$alice-joined-canonical",
-            "sender": scenario.sender_id,
-            "state_key": scenario.sender_id,
-            "origin_server_ts": 1,
-            "content": {"membership": "join"},
-            "unsigned": {"prev_content": {"membership": "invite"}},
-        },
-    )
-    assert isinstance(join_event, nio.RoomMemberEvent)
-    with pytest.raises(RuntimeError, match="Failed to join invited room"):
-        await scenario.router_bot._apply_live_reply_membership_transition(scenario.grant_room_id, join_event)
-
-    assert is_sender_allowed_for_responder(
-        scenario.sender_id,
+    join_room.assert_awaited_once_with(bot.client, room.room_id)
+    assert bot._room_lifecycle.invited_rooms == {room.room_id}
+    assert not is_sender_allowed_for_responder(
+        event.sender,
         "agent1",
-        scenario.invited_room_id,
-        scenario.config,
-        scenario.runtime_paths,
-        scenario.orchestrator.agent_reply_memberships,
+        room.room_id,
+        config,
+        runtime_paths_for(config),
+        bot._runtime_view.agent_reply_memberships,
     )
-    assert scenario.bot._room_lifecycle.invited_rooms == set()
-    scenario.orchestrator.reconcile_reply_authorized_calls.assert_not_awaited()
-
-    if restart:
-        recovered_bot = await _restart_grant_invite_scenario(scenario, tmp_path)
-    else:
-        recovered_bot = scenario.bot
-        await scenario.router_bot._apply_live_reply_membership_transition(scenario.grant_room_id, join_event)
-        scenario.orchestrator.reconcile_reply_authorized_calls.assert_awaited_once_with()
-
-    assert recovered_bot._room_lifecycle.invited_rooms == {scenario.invited_room_id}
-    assert _pending_room_invites(scenario.config, "agent1") == {}
-    assert scenario.join_room.await_args_list == [
-        ((scenario.bot.client, scenario.invited_room_id),),
-        ((recovered_bot.client, scenario.invited_room_id),),
-    ]
 
 
 @pytest.mark.asyncio

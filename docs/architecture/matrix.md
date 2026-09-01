@@ -113,7 +113,13 @@ An event reaches an agent through durable admission, never straight from the syn
 4. `PendingEventWorker` drains what is still pending, so an event whose turn was interrupted is re-dispatched instead of lost.
 5. `TurnController` owns the turn and the agent responds in thread.
 
-Invites are the deliberate exception: an invite has no Matrix event ID to key a durable row on, and an unacted-on invite reappears in every sync response, so `_on_invite` is a plain background task relying on homeserver redelivery.
+Invites are the deliberate event-journal exception because an invite has no stable Matrix event ID to key a journal row on.
+`_on_invite_before_sync_certification` stores the pending room and inviter before starting plain background handling.
+The pending record wakes unfinished work, but it does not make Matrix repeat an already-checkpointed invite and does not grant authority.
+The stored inviter is not authorization evidence: routers and agents require nio's current invite sender after fence persistence and immediately before starting the Matrix join request.
+An authoritative departure clears nio's invited-room cache entry before asynchronous departure fencing, so a cancellation observed before the join starts revokes that sender evidence.
+A restart without current invite-cache evidence may require another invitation.
+All activity after joining uses ordinary responder conversation authorization.
 See [Bot Runtime](bot-runtime.md) for the full durable dispatch boundary.
 
 ### Streaming Responses
