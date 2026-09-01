@@ -27,6 +27,7 @@ from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks.matrix_admin import build_hook_matrix_admin
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
+from mindroom.matrix.client_session import _MindRoomAsyncClient, matrix_client_config
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     load_invited_rooms,
@@ -34,6 +35,7 @@ from mindroom.matrix.invited_rooms_store import (
 )
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.sync_loop import OwnRoomMembership
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.access_schema_support import with_responder_access
@@ -786,6 +788,80 @@ async def test_sync_response_does_not_wait_for_invite_join(
         release_join.set()
         await sync_response
         await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["reconciliation", "sync_invite", "joined_setup"])
+async def test_sync_spawned_room_lifecycle_tasks_use_detached_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+) -> None:
+    """Sync-spawned lifecycle work must not inherit nio's active executor."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    client = _MindRoomAsyncClient(
+        "http://localhost:8008",
+        bot.agent_user.user_id,
+        store_path="",
+        config=matrix_client_config(),
+    )
+    bot.client = client
+    room_id = "!detached-context:localhost"
+    network_calls: list[str] = []
+
+    async def send_leave() -> nio.RoomLeaveResponse:
+        network_calls.append("sent")
+        return nio.RoomLeaveResponse()
+
+    async def membership_work(*_args: object) -> None:
+        await client._run_room_membership_reset(room_id, send_leave)
+
+    empty_membership = OwnRoomMembership(
+        joined_room_ids=frozenset(),
+        left_room_ids=frozenset(),
+        invited_room_ids=frozenset(),
+        departures=(),
+    )
+    monkeypatch.setattr(bot, "_apply_own_room_membership", AsyncMock())
+    if source == "reconciliation":
+        monkeypatch.setattr(bot._room_lifecycle, "reconcile_invites", membership_work)
+    elif source == "sync_invite":
+        room = nio.MatrixInvitedRoom(room_id, bot.agent_user.user_id)
+        bot._pending_sync_invites = [(room, "@owner:localhost")]
+        monkeypatch.setattr(bot._room_lifecycle, "handle_invite", membership_work)
+    else:
+        bot._room_lifecycle._accepted_rooms_awaiting_joined_setup.add(room_id)
+        monkeypatch.setattr(bot._room_lifecycle, "restore_pending_joined_room_setup", membership_work)
+
+    async def callback(_response: nio.SyncResponse) -> None:
+        if source == "reconciliation":
+            await bot.reconcile_live_invites()
+        else:
+            await bot._apply_own_room_membership_before_invites(empty_membership)
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    client.add_response_callback(callback, nio.SyncResponse)
+    token = object()
+    client._active_sync_executor_token = token
+    context_token = client._sync_executor_context.set(token)
+    response = nio.SyncResponse.from_dict(
+        {"next_batch": "s_context", "rooms": {"join": {}, "invite": {}, "leave": {}}},
+    )
+    assert isinstance(response, nio.SyncResponse)
+    try:
+        await client._on_response(response)
+    finally:
+        client._sync_executor_context.reset(context_token)
+        client._active_sync_executor_token = None
+        await client.close()
+
+    assert network_calls == ["sent"]
 
 
 @pytest.mark.asyncio

@@ -399,6 +399,7 @@ class AgentBot:
     _local_departures_awaiting_sync: set[str]
     _pending_sync_invites: list[tuple[nio.MatrixRoom, str]]
     _sync_response_applying: bool
+    _sync_response_active_invite_join_generations: dict[str, int]
     _live_invite_reconciliation_pending: bool
     _sync_continuity_store: SyncContinuityStore
     _sync_checkpoint_trust: SyncCheckpointTrust
@@ -490,6 +491,7 @@ class AgentBot:
         self._local_departures_awaiting_sync = set()
         self._pending_sync_invites = []
         self._sync_response_applying = False
+        self._sync_response_active_invite_join_generations = {}
         self._live_invite_reconciliation_pending = False
 
         async def send_room_lifecycle_response(
@@ -1350,6 +1352,7 @@ class AgentBot:
             self._reconcile_live_invites_when_safe(),
             name=f"matrix_invite_reconciliation_{self.agent_name}",
             owner=self._runtime_view,
+            context=Context(),
         )
 
     async def _reconcile_live_invites_when_safe(self) -> None:
@@ -1859,12 +1862,15 @@ class AgentBot:
 
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
+        if not self._sync_response_applying:
+            self._sync_response_active_invite_join_generations = {}
         self._sync_response_applying = True
         try:
             await self._apply_sync_response(_response)
         finally:
             self._pending_sync_invites.clear()
             self._sync_response_applying = False
+            self._sync_response_active_invite_join_generations = {}
             if self._live_invite_reconciliation_pending:
                 self._live_invite_reconciliation_pending = False
                 self._schedule_live_invite_reconciliation()
@@ -1876,6 +1882,7 @@ class AgentBot:
     def _before_sync_response_admission(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Fail closed on a sync gap or router departure before timeline admission."""
         self._sync_response_applying = True
+        self._sync_response_active_invite_join_generations = self._room_lifecycle.active_invite_join_generations
         if self.agent_name != ROUTER_AGENT_NAME:
             return
         effects = self._router_reply_membership_sync.pre_admit_response(
@@ -2057,42 +2064,60 @@ class AgentBot:
                 self._room_lifecycle.restore_pending_joined_room_setup(),
                 name=f"matrix_joined_room_setup_{self.agent_name}",
                 owner=self._runtime_view,
+                context=Context(),
             )
         pending_invites, self._pending_sync_invites = self._pending_sync_invites, []
         for room, sender in pending_invites:
             create_background_task(
                 self._room_lifecycle.handle_invite(room, sender),
                 owner=self._runtime_view,
+                context=Context(),
             )
 
     async def _apply_own_room_membership(self, membership: OwnRoomMembership) -> None:
         """Fence departed rooms and report current membership for one sync response."""
-        departed_room_ids = membership.departed_room_ids
-        ownership_lost_room_ids = departed_room_ids | membership.authoritative_invited_room_ids
+        reported_departed_room_ids = membership.departed_room_ids
+        reported_ownership_lost_room_ids = reported_departed_room_ids | membership.authoritative_invited_room_ids
         forget_error: Exception | None = None
         async with AsyncExitStack() as ownership:
-            for room_id in sorted(ownership_lost_room_ids):
+            for room_id in sorted(reported_ownership_lost_room_ids):
                 await ownership.enter_async_context(self._room_lifecycle.invite_ownership(room_id))
-                if room_id not in membership.authoritative_invited_room_ids:
+            overlapped_invite_join_generations = {
+                room_id: generation
+                for room_id, generation in self._sync_response_active_invite_join_generations.items()
+                if room_id in reported_ownership_lost_room_ids
+            }
+            superseded_room_ids = self._room_lifecycle.consume_ownership_losses_overlapped_by_accepted_join(
+                overlapped_invite_join_generations,
+            )
+            departed_room_ids = reported_departed_room_ids - superseded_room_ids
+            authoritative_invited_room_ids = membership.authoritative_invited_room_ids - superseded_room_ids
+            ownership_lost_room_ids = departed_room_ids | authoritative_invited_room_ids
+            for room_id in sorted(ownership_lost_room_ids):
+                if room_id not in authoritative_invited_room_ids:
                     self._room_lifecycle.discard_live_invite(room_id)
                 try:
                     self._room_lifecycle.forget_invited_room(room_id)
                 except Exception as error:
                     forget_error = forget_error or error
-            await self._membership_fence.fence_reported_departures(membership.departures)
+            departures = tuple(
+                departure for departure in membership.departures if departure.room_id not in superseded_room_ids
+            )
+            await self._membership_fence.fence_reported_departures(departures)
             for room_id in departed_room_ids:
                 await self._room_lifecycle.settle_authoritative_departure(room_id)
         if forget_error is not None:
             raise forget_error
         self._local_departures_awaiting_sync.difference_update(departed_room_ids)
+        left_room_ids = membership.left_room_ids - superseded_room_ids
         current_joined_room_ids = (
-            membership.joined_room_ids - membership.left_room_ids - self._local_departures_awaiting_sync
+            (membership.joined_room_ids | superseded_room_ids) - left_room_ids - self._local_departures_awaiting_sync
         )
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_sync_room_membership(
                 joined_room_ids=current_joined_room_ids,
-                left_room_ids=membership.left_room_ids | membership.authoritative_invited_room_ids,
+                left_room_ids=left_room_ids | authoritative_invited_room_ids,
             )
 
     def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:

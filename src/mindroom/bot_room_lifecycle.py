@@ -93,6 +93,9 @@ class BotRoomLifecycle:
         self._decrypt_notice_fenced_room_ids: set[str] = set()
         self._join_fence_protected_room_ids: set[str] = set()
         self._accepted_rooms_awaiting_joined_setup: set[str] = set()
+        self._next_invite_join_generation = 0
+        self._active_invite_join_generations: dict[str, int] = {}
+        self._accepted_invite_join_generations: dict[str, int] = {}
         self._applied_continuity_revision = -1
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
@@ -139,6 +142,25 @@ class BotRoomLifecycle:
     def has_pending_joined_room_setup(self) -> bool:
         """Return whether startup skipped setup for an accepted room."""
         return bool(self._accepted_rooms_awaiting_joined_setup)
+
+    @property
+    def active_invite_join_generations(self) -> dict[str, int]:
+        """Return exact serialized invite joins that have reached network work."""
+        return dict(self._active_invite_join_generations)
+
+    def consume_ownership_losses_overlapped_by_accepted_join(
+        self,
+        invite_join_generations: Mapping[str, int],
+    ) -> frozenset[str]:
+        """Consume response losses made stale by a later accepted invite join."""
+        superseded_room_ids = frozenset(
+            room_id
+            for room_id, generation in invite_join_generations.items()
+            if self._accepted_invite_join_generations.get(room_id) == generation
+        )
+        for room_id in superseded_room_ids:
+            self._accepted_invite_join_generations.pop(room_id, None)
+        return superseded_room_ids
 
     def decrypt_notice_is_fenced(self, room_id: str) -> bool:
         """Return whether pre-join decrypt failures in this room stay silent."""
@@ -260,6 +282,7 @@ class BotRoomLifecycle:
     def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
         self._accepted_rooms_awaiting_joined_setup.discard(room_id)
+        self._accepted_invite_join_generations.pop(room_id, None)
         invited_rooms_file_exists = self._invited_rooms_file_path().exists()
         if not self._should_persist_invited_rooms() and not invited_rooms_file_exists:
             self.invited_rooms.discard(room_id)
@@ -438,6 +461,7 @@ class BotRoomLifecycle:
     async def settle_authoritative_departure(self, room_id: str) -> None:
         """Clear transient join state after Matrix authoritatively reports departure."""
         self._join_fence_protected_room_ids.discard(room_id)
+        self._accepted_invite_join_generations.pop(room_id, None)
         if self.decrypt_notice_is_fenced(room_id):
             await self._clear_join_decrypt_notice_fence(room_id)
 
@@ -615,21 +639,29 @@ class BotRoomLifecycle:
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=sender)
-            if not await self._attempt_invite_join(client, room.room_id, sender, current_invite):
-                return
-
-            self._logger().info("Joined room", room_id=room.room_id)
+            self._next_invite_join_generation += 1
+            invite_join_generation = self._next_invite_join_generation
+            self._active_invite_join_generations[room.room_id] = invite_join_generation
             try:
-                accepted = await self._accept_joined_invite(room.room_id, sender, current_invite)
-            except asyncio.CancelledError:
-                self._discard_invite_if_current(room.room_id, sender, current_invite)
-                raise
-            except Exception:
-                self._logger().exception("invite_acceptance_failed", room_id=room.room_id)
-                accepted = False
-            if not accepted:
-                await self._leave_unaccepted_invite(room.room_id, sender, current_invite)
-                return
+                if not await self._attempt_invite_join(client, room.room_id, sender, current_invite):
+                    return
+
+                self._logger().info("Joined room", room_id=room.room_id)
+                try:
+                    accepted = await self._accept_joined_invite(room.room_id, sender, current_invite)
+                except asyncio.CancelledError:
+                    self._discard_invite_if_current(room.room_id, sender, current_invite)
+                    raise
+                except Exception:
+                    self._logger().exception("invite_acceptance_failed", room_id=room.room_id)
+                    accepted = False
+                if not accepted:
+                    await self._leave_unaccepted_invite(room.room_id, sender, current_invite)
+                    return
+
+                self._accepted_invite_join_generations[room.room_id] = invite_join_generation
+            finally:
+                self._active_invite_join_generations.pop(room.room_id, None)
 
             self._discard_invite_if_current(room.room_id, sender, current_invite)
             welcome_after_acceptance = send_welcome

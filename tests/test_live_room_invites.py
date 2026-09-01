@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
@@ -58,6 +59,7 @@ def _router_bot(config: Config):  # noqa: ANN202
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
+    bot._reply_membership_sync = AgentReplyMembershipSync(bot._runtime_view.agent_reply_memberships)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     invited_room = nio.MatrixInvitedRoom(ROOM_ID, bot.agent_user.user_id)
@@ -68,6 +70,30 @@ def _router_bot(config: Config):  # noqa: ANN202
 
 def _accepted_path(config: Config) -> Path:
     return invited_rooms_path(runtime_paths_for(config).storage_root, ROUTER_AGENT_NAME)
+
+
+def _departure_membership() -> OwnRoomMembership:
+    return OwnRoomMembership(
+        joined_room_ids=frozenset(),
+        left_room_ids=frozenset({ROOM_ID}),
+        invited_room_ids=frozenset(),
+        departures=(ReportedDeparture(room_id=ROOM_ID, observation_id="departure"),),
+    )
+
+
+def _departure_sync_response() -> nio.SyncResponse:
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s_overlapping_departure",
+            "rooms": {
+                "join": {},
+                "invite": {},
+                "leave": {ROOM_ID: {"timeline": {"events": []}, "state": {"events": []}}},
+            },
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    return response
 
 
 @pytest.mark.asyncio
@@ -1238,6 +1264,89 @@ async def test_accepted_owner_releases_failed_leave_fence_protection(
 
 
 @pytest.mark.asyncio
+async def test_departure_admitted_during_invite_join_cannot_revoke_later_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A response older than a completed join cannot erase its new ownership."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    join_started = asyncio.Event()
+    release_join = asyncio.Event()
+
+    async def delayed_join(_client: object, _room_id: str) -> RoomJoinOutcome:
+        join_started.set()
+        await release_join.wait()
+        return RoomJoinOutcome.JOINED
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", delayed_join)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_room_members",
+        AsyncMock(return_value={INVITER_ID, bot.agent_user.user_id}),
+    )
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+    reconciliation = asyncio.create_task(bot._reconcile_live_invites_when_safe())
+    await asyncio.wait_for(join_started.wait(), timeout=1)
+    bot._before_sync_response_admission(_departure_sync_response())
+    departure = asyncio.create_task(bot._apply_own_room_membership_before_invites(_departure_membership()))
+    await asyncio.sleep(0)
+    assert not departure.done()
+
+    release_join.set()
+    await reconciliation
+    await departure
+
+    assert load_invited_rooms(_accepted_path(config)) == {ROOM_ID}
+    bot.client.room_leave.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_departure_overlapping_later_failed_join_revokes_prior_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only the exact successful join overlapped by a response can supersede it."""
+    config = _router_config(tmp_path)
+    bot, room = _router_bot(config)
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_room_members",
+        AsyncMock(return_value={INVITER_ID, bot.agent_user.user_id}),
+    )
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.join_room",
+        AsyncMock(return_value=RoomJoinOutcome.JOINED),
+    )
+    await bot._room_lifecycle.handle_invite(room, INVITER_ID)
+    assert load_invited_rooms(_accepted_path(config)) == {ROOM_ID}
+
+    replacement_room = nio.MatrixInvitedRoom(ROOM_ID, bot.agent_user.user_id)
+    replacement_room.inviter = INVITER_ID
+    bot.client.invited_rooms = {ROOM_ID: replacement_room}
+    join_started = asyncio.Event()
+    release_join = asyncio.Event()
+
+    async def delayed_failed_join(_client: object, _room_id: str) -> RoomJoinOutcome:
+        join_started.set()
+        await release_join.wait()
+        return RoomJoinOutcome.RETRYABLE_FAILURE
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", delayed_failed_join)
+    reconciliation = asyncio.create_task(bot._reconcile_live_invites_when_safe())
+    await asyncio.wait_for(join_started.wait(), timeout=1)
+    bot._before_sync_response_admission(_departure_sync_response())
+    departure = asyncio.create_task(bot._apply_own_room_membership_before_invites(_departure_membership()))
+    await asyncio.sleep(0)
+    assert not departure.done()
+
+    release_join.set()
+    await reconciliation
+    await departure
+
+    assert load_invited_rooms(_accepted_path(config)) == set()
+
+
+@pytest.mark.asyncio
 async def test_authoritative_departure_revokes_live_and_accepted_ownership(tmp_path: Path) -> None:
     """A Matrix departure is the single boundary that revokes both room owners."""
     config = _router_config(tmp_path)
@@ -1245,12 +1354,7 @@ async def test_authoritative_departure_revokes_live_and_accepted_ownership(tmp_p
     bot._room_lifecycle._remember_invited_room(ROOM_ID)
 
     await bot._apply_own_room_membership(
-        OwnRoomMembership(
-            joined_room_ids=frozenset(),
-            left_room_ids=frozenset({ROOM_ID}),
-            invited_room_ids=frozenset(),
-            departures=(ReportedDeparture(room_id=ROOM_ID, observation_id="departure"),),
-        ),
+        _departure_membership(),
     )
 
     assert ROOM_ID not in bot.client.invited_rooms
