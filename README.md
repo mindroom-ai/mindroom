@@ -212,7 +212,7 @@ agents:
     model: default
     rooms: [lobby]
     tools: [matrix_message]
-    accept_invites: true  # Optional: accept authorized ad-hoc room invites
+    accept_invites: true  # Accept all, none, or matching inviter ID patterns
     knowledge_bases: [engineering_docs]
 
 models:

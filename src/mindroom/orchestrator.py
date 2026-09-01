@@ -1368,7 +1368,7 @@ class _MultiAgentOrchestrator:
         await asyncio.gather(*(bot.reconcile_reply_authorized_calls() for bot in self.agent_bots.values()))
 
     async def reconcile_pending_invites(self) -> None:
-        """Recheck every cached room invite against current responder access."""
+        """Recheck cached invites against router, agent, or legacy team policy."""
         await asyncio.gather(*(bot.reconcile_pending_invites() for bot in self.agent_bots.values()))
 
     async def revoke_reply_authorized_calls(self) -> None:
@@ -1878,7 +1878,7 @@ class _MultiAgentOrchestrator:
             if router_invite_policy_changed and ROUTER_AGENT_NAME not in plan.entities_to_restart:
                 router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
                 if router_bot is not None:
-                    await router_bot.reconcile_pending_invites()
+                    router_bot.schedule_pending_invite_reconciliation()
 
             if plan.only_support_service_changes:
                 await self._finalize_config_reload(

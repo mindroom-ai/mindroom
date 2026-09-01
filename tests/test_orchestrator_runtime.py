@@ -4079,7 +4079,8 @@ class TestMultiAgentOrchestrator:
         router_bot.config = current_config
         router_bot.enable_streaming = True
         router_bot._set_presence_with_model_info = AsyncMock()
-        router_bot.reconcile_pending_invites = AsyncMock()
+        router_bot.reconcile_pending_invites = AsyncMock(side_effect=RuntimeError("join failed"))
+        router_bot.schedule_pending_invite_reconciliation = MagicMock()
         orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
 
         with (
@@ -4091,7 +4092,8 @@ class TestMultiAgentOrchestrator:
             updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
-        router_bot.reconcile_pending_invites.assert_awaited_once_with()
+        router_bot.schedule_pending_invite_reconciliation.assert_called_once_with()
+        router_bot.reconcile_pending_invites.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_sync_runtime_support_services_rebinds_approval_cards(self, tmp_path: Path) -> None:

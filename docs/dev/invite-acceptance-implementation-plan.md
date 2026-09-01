@@ -101,4 +101,6 @@ Keep existing pending work, room locking, join fencing, accepted-room persistenc
 - [x] Task 5 passed the affected test surface, the full repository suite, and all repository hooks.
 - [x] The first independent full-review round produced one approval and two reproduced integration findings.
 - [x] Router invite-policy reload now revisits cached invitations, and `invite_router` now applies the transport agent's exact inviter policy.
+- [x] The second independent full-review round found stale contract wording and config publication awaiting Matrix reconciliation.
+- [x] Invite reconciliation triggered by hot reload is now best-effort bot-owned work, and all stale responder-access wording is removed.
 - [ ] A fresh two-reviewer round remains before the final deletion-only commit.

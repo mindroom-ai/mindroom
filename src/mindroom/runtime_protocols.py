@@ -89,7 +89,7 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         ...
 
     def reconcile_pending_invites(self) -> Awaitable[None]:
-        """Recheck cached room invites against current responder access."""
+        """Recheck cached room invites against each entity's invitation policy."""
         ...
 
     def revoke_reply_authorized_calls(self) -> Awaitable[None]:

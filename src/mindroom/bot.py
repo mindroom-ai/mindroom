@@ -1333,9 +1333,17 @@ class AgentBot:
             await call_manager.reconcile_reply_authorization()
 
     async def reconcile_pending_invites(self) -> None:
-        """Recheck cached room invites against the shared responder policy."""
+        """Recheck cached room invites against this entity's invitation policy."""
         if self.client is not None:
             await self._room_lifecycle.reconcile_pending_invites()
+
+    def schedule_pending_invite_reconciliation(self) -> None:
+        """Recheck cached invites without making config publication await Matrix work."""
+        create_background_task(
+            self.reconcile_pending_invites(),
+            name=f"pending_invite_reconciliation_{self.agent_name}",
+            owner=self._runtime_view,
+        )
 
     async def revoke_reply_authorized_calls(self) -> None:
         """End active calls that no longer pass current reply access."""
