@@ -351,11 +351,11 @@ class TurnPolicy:
         requester_user_id: str,
         availability: _ResponderAvailability | None = None,
     ) -> list[MatrixID]:
-        """Return sender-visible candidates filtered by live responder availability."""
+        """Return candidates from the boundary-prepared room membership snapshot."""
         if availability is None:
             availability = self.responder_availability()
         available_responders = await responder_candidate_entities_for_room(
-            self.deps.runtime.client,
+            None,
             room,
             requester_user_id,
             self.deps.runtime.config,
@@ -695,7 +695,7 @@ class TurnPolicy:
         planning_thread_history = context.planning_thread_history
         availability = self.responder_availability()
         sender_visible_responders_in_room = await responder_candidate_entities_for_room(
-            self.deps.runtime.client,
+            None,
             room,
             requester_user_id,
             self.deps.runtime.config,
