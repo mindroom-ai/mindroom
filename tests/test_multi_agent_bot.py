@@ -544,12 +544,11 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
-        mock_room = MagicMock()
-        mock_room.room_id = "!test:localhost"
-        mock_room.canonical_alias = None
-
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
+        mock_room = nio.MatrixInvitedRoom("!test:localhost", bot.agent_user.user_id)
+        mock_room.inviter = mock_event.sender
+        bot.client.invited_rooms = {mock_room.room_id: mock_room}
 
         join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
         with (

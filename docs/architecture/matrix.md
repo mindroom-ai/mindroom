@@ -114,7 +114,8 @@ An event reaches an agent through durable admission, never straight from the syn
 5. `TurnController` owns the turn and the agent responds in thread.
 
 Invites are the deliberate event-journal exception because an invite has no stable Matrix event ID to key a journal row on.
-The homeserver repeats an unacted-on invite in sync responses, and MindRoom separately stores the pending room and inviter for invitation-policy recovery.
+The homeserver repeats an unacted-on invite in sync responses, and MindRoom separately stores the pending room and inviter to wake unfinished work.
+The stored inviter is not authorization evidence: routers and agents require nio's current invite sender after fence persistence and immediately before starting the Matrix join request.
 `_on_invite` remains a plain background task, while all activity after joining uses ordinary responder conversation authorization.
 See [Bot Runtime](bot-runtime.md) for the full durable dispatch boundary.
 

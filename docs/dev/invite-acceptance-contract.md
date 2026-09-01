@@ -60,18 +60,21 @@ A user who invites that agent into another room but lacks the configured-room gr
 Only an authenticated Matrix self-membership event with membership `invite` and a state key equal to the bot account may start invite work.
 Room metadata and membership events targeting another account are not invitations to this bot.
 The authenticated event sender is the inviter checked by a list-valued `accept_invites` policy.
+The durable pending record wakes unfinished work but never supplies current inviter authority.
+For routers and agents, the current matrix-nio invite cache must still identify the inviter when the join starts.
 
 ## Intended flow
 
 1. Receive a valid self-invite event.
 2. Persist the existing pending invite record before background work starts.
 3. Acquire the existing per-room invite lock.
-4. Read the latest `accept_invites` policy and evaluate the authenticated inviter.
-5. Join once when the policy allows it.
-6. Run the existing joined-room setup.
-7. Persist the room as accepted so ordinary restart and cleanup behavior preserves it.
-8. Send the existing welcome message as best effort.
-9. Let all later activity use ordinary responder authorization.
+4. Persist the existing decrypt-notice fence.
+5. Read the current Matrix inviter and latest `accept_invites` policy immediately before starting the join request.
+6. Join once when the policy allows it.
+7. Run the existing joined-room setup.
+8. Persist the room as accepted so ordinary restart and cleanup behavior preserves it.
+9. Send the existing welcome message as best effort.
+10. Let all later activity use ordinary responder authorization.
 
 ## Complexity boundaries
 
@@ -86,6 +89,7 @@ A process stop, cancellation, temporary Matrix failure, or revoked invitation ma
 A crash after Matrix joins but before accepted-room persistence may require cleanup or reinvitation.
 Welcome delivery is best effort and receives no new retry guarantee.
 Configuration changes made while a Matrix join request is already in flight may apply only to later invitations.
+Invitation replacement or cancellation after the Matrix join request starts may require reinviting and does not add rollback ownership.
 This PR does not guarantee exact convergence for overlapping cancellation, departure, replacement invitation, persistence failure, or restart timing.
 These outcomes are non-blocking unless they bypass the configured invitation policy or post-join responder authorization.
 
@@ -103,6 +107,8 @@ These outcomes are non-blocking unless they bypass the configured invitation pol
 10. Non-membership metadata, non-invite membership, and membership targeting another account create no invite work.
 11. Successful joins retain the existing setup and accepted-room persistence behavior.
 12. Existing team invitation behavior remains unchanged.
+13. A queued replacement invite is evaluated by its current sender immediately before the join request starts.
+14. A durable pending record without current Matrix invite evidence does not start a router or agent join.
 
 ## Review contract
 

@@ -62,8 +62,9 @@ Keep existing pending work, room locking, join fencing, accepted-room persistenc
 5. Run the tests and confirm the corrected behavior fails on the current router-bootstrap implementation.
 6. Remove the live invite token, bootstrap helper, post-join membership query, and invite-time responder authorization for router and agents.
 7. Evaluate the latest invitation policy under the existing room lock immediately before the existing fenced join.
-8. Retain existing setup, persistence, welcome, pending-work, and team behavior.
-9. Run the focused invitation and authorization suites.
+8. Treat the durable pending record only as a wake-up hint and re-read the current Matrix inviter after fence persistence.
+9. Retain existing setup, persistence, welcome, pending-work, and team behavior.
+10. Run the focused invitation and authorization suites.
 
 ## Task 4: Align documentation and generated references
 
@@ -103,4 +104,7 @@ Keep existing pending work, room locking, join fencing, accepted-room persistenc
 - [x] Router invite-policy reload now revisits cached invitations, and `invite_router` now applies the transport agent's exact inviter policy.
 - [x] The second independent full-review round found stale contract wording and config publication awaiting Matrix reconciliation.
 - [x] Invite reconciliation triggered by hot reload is now best-effort bot-owned work, and all stale responder-access wording is removed.
+- [x] The third review round found one shared authority defect in queued and recovered work.
+- [x] Current Matrix invite state now owns inviter authorization immediately before the join request, while durable pending state only wakes work.
+- [x] Cross-model consultation was attempted for the third-round architecture decision; the local agent CLI was unavailable, so the decision used the inspected code and nio behavior.
 - [ ] A fresh two-reviewer round remains before the final deletion-only commit.

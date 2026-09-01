@@ -297,11 +297,11 @@ class TestDMIntegration:
                 return_value=RoomJoinOutcome.JOINED,
             ) as mock_join,
         ):
-            room = MagicMock()
-            room.room_id = "!dm:localhost"
-            room.canonical_alias = None
             event = MagicMock()
             event.sender = "@user:localhost"
+            room = nio.MatrixInvitedRoom("!dm:localhost", bot.agent_user.user_id)
+            room.inviter = event.sender
+            bot.client.invited_rooms = {room.room_id: room}
 
             bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
             await bot._room_lifecycle.handle_recorded_invite(room, event.sender)
