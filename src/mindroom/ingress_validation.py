@@ -78,39 +78,41 @@ class IngressValidator:
         """Return the effective requester for reply-permission checks."""
         source_dict = cast("dict[str, Any] | None", source if isinstance(source, dict) else None)
         content = source_dict.get("content") if source_dict is not None else None
+        requester_id: str
         if isinstance(content, dict):
             original_sender = content.get(ORIGINAL_SENDER_KEY)
             if not isinstance(original_sender, str):
-                return get_effective_sender_id_for_reply_permissions(
+                requester_id = get_effective_sender_id_for_reply_permissions(
                     sender,
                     source_dict,
                     self.deps.runtime.config,
                     self.deps.runtime_paths,
                 )
-            source_kind = source_kind_from_content(content)
-            trusted_requester = requester_id_from_trusted_original_sender(
-                original_sender=original_sender,
-                original_sender_entity_name=self.managed_entity_name_for_sender(original_sender),
-                original_sender_is_human=is_human_requester_id(
-                    original_sender,
-                    self.deps.runtime.config,
-                    self.deps.runtime_paths,
-                ),
-                source_kind=source_kind,
-                sender_trusts_original_sender=self._should_trust_original_sender_metadata(
-                    sender=sender,
+            else:
+                source_kind = source_kind_from_content(content)
+                trusted_requester = requester_id_from_trusted_original_sender(
+                    original_sender=original_sender,
+                    original_sender_entity_name=self.managed_entity_name_for_sender(original_sender),
+                    original_sender_is_human=is_human_requester_id(
+                        original_sender,
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                    ),
                     source_kind=source_kind,
-                ),
+                    sender_trusts_original_sender=self._should_trust_original_sender_metadata(
+                        sender=sender,
+                        source_kind=source_kind,
+                    ),
+                )
+                requester_id = trusted_requester if trusted_requester is not None else sender
+        else:
+            requester_id = get_effective_sender_id_for_reply_permissions(
+                sender,
+                source_dict,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
             )
-            if trusted_requester is not None:
-                return trusted_requester
-            return sender
-        return get_effective_sender_id_for_reply_permissions(
-            sender,
-            source_dict,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-        )
+        return self.deps.runtime.config.authorization.resolve_alias(requester_id)
 
     def sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
         """Return whether one sender may supply trusted ingress metadata overrides."""

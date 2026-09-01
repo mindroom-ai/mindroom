@@ -167,12 +167,12 @@ The remaining work is documentation, generated starter clarity, and focused test
 - Modify `tests/test_turn_controller_focused.py` to prove the canonical requester reaches the response envelope used for requester-owned scope selection.
 - Modify `src/mindroom/ingress_validation.py`.
 
-- [ ] Write failing tests for direct aliases, trusted relayed aliases, preserved transport identity, and requester-owned scope reuse.
-- [ ] Run the focused tests with `uv run pytest -n auto` and confirm the new expectations fail.
-- [ ] Resolve aliases only after the trusted requester has been selected.
-- [ ] Keep `event.sender` as `TurnOrigin.transport_sender_id`.
-- [ ] Run the focused ingress, turn-origin, runtime-resolution, and private-identity tests.
-- [ ] Commit the independently testable identity boundary change.
+- [x] Write failing tests for direct aliases, trusted relayed aliases, preserved transport identity, and requester-owned scope reuse.
+- [x] Run the focused tests with `uv run pytest -n auto` and confirm the new expectations fail.
+- [x] Resolve aliases only after the trusted requester has been selected.
+- [x] Keep `event.sender` as `TurnOrigin.transport_sender_id`.
+- [x] Run the focused ingress, turn-origin, runtime-resolution, and private-identity tests.
+- [x] Commit the independently testable identity boundary change.
 
 ### Task 2: Give teams the same invitation policy
 
@@ -258,4 +258,5 @@ The remaining work is documentation, generated starter clarity, and focused test
 - [x] Reconstructed the current authority model from code, tests, documentation, and merged invitation policy.
 - [x] Selected the minimal boundary correction and rejected a general policy framework.
 - [x] Defined explicit production changes, accepted semantics, non-goals, and required tests.
+- [x] Task 1 canonicalizes trusted requesters once at Matrix ingress while preserving transport identity.
 - [ ] Implementation and verification remain.

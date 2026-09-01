@@ -636,6 +636,7 @@ def _text_event(
     event_id: str = _EVENT_ID,
     thread_id: str | None = None,
     origin_server_ts: int = 1_000_000,
+    sender: str = _SENDER,
 ) -> nio.RoomMessageText:
     content: dict[str, Any] = {"body": body, "msgtype": "m.text"}
     if thread_id is not None:
@@ -644,7 +645,7 @@ def _text_event(
         {
             "content": content,
             "event_id": event_id,
-            "sender": _SENDER,
+            "sender": sender,
             "origin_server_ts": origin_server_ts,
             "room_id": _ROOM_ID,
             "type": "m.room.message",
@@ -1710,6 +1711,37 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert metadata is not None
     assert metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] == "general"
     assert harness.turn_store.is_handled(event.event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_bridge_alias_crosses_execution_seam_as_one_canonical_requester(tmp_path: Path) -> None:
+    """Requester-owned execution must not split one human across configured bridge identities."""
+    canonical_sender = "@owner:localhost"
+    bridge_sender = "@bridge_owner:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access=ResponderAccessConfig(users=[canonical_sender]),
+                ),
+            },
+            authorization={"aliases": {canonical_sender: [bridge_sender]}},
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    room.add_member(bridge_sender, bridge_sender, None)
+    event = _text_event("use my private state", sender=bridge_sender)
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.user_id == canonical_sender
+    assert request.response_envelope.requester_id == canonical_sender
+    assert request.response_envelope.origin.transport_sender_id == bridge_sender
 
 
 @pytest.mark.asyncio
