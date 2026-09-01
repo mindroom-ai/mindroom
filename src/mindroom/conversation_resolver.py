@@ -268,6 +268,8 @@ class ConversationResolver:
     def _mention_facts(
         self,
         event_source: dict[str, Any],
+        *,
+        room: nio.MatrixRoom,
     ) -> tuple[list[MatrixID], bool, bool]:
         """Return mention facts from one already-normalized event source."""
         if _should_skip_mentions(event_source):
@@ -277,6 +279,7 @@ class ConversationResolver:
             self._matrix_id(),
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            room=room,
         )
 
     def _mentioned_agent_names(self, mentioned_agents: Sequence[MatrixID]) -> tuple[str, ...]:
@@ -360,6 +363,7 @@ class ConversationResolver:
     def pre_hydration_policy_facts(
         self,
         *,
+        room: nio.MatrixRoom,
         event: DispatchEvent,
         requester_user_id: str,
         payload_metadata: DispatchPayloadMetadata | None = None,
@@ -369,7 +373,10 @@ class ConversationResolver:
     ) -> _PreHydrationPolicyFacts:
         """Classify mention and origin policy without reading conversation history."""
         event_source = _source_with_payload_metadata(event.source, payload_metadata)
-        mentioned_agents, am_i_mentioned, _has_non_agent_mentions = self._mention_facts(event_source)
+        mentioned_agents, am_i_mentioned, _has_non_agent_mentions = self._mention_facts(
+            event_source,
+            room=room,
+        )
         resolved_source_kind, _hook_source, _message_received_depth = self._envelope_ingress_metadata(
             event=event,
             source_kind=source_kind,
@@ -890,7 +897,10 @@ class ConversationResolver:
         resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
         config = self.deps.runtime.config
 
-        mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(resolved_event_source)
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(
+            resolved_event_source,
+            room=room,
+        )
 
         if am_i_mentioned:
             self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
@@ -954,7 +964,10 @@ class ConversationResolver:
         resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
         config = self.deps.runtime.config
 
-        mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(resolved_event_source)
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(
+            resolved_event_source,
+            room=room,
+        )
 
         if am_i_mentioned:
             self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)

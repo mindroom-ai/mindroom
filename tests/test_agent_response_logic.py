@@ -987,6 +987,7 @@ class TestAgentResponseLogic:
             router_id,
             self.config,
             self.runtime_paths,
+            room=create_mock_room(config=self.config),
         )
 
         assert mentioned_agents == [router_id]

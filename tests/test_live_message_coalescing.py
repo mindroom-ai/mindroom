@@ -31,6 +31,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
@@ -315,6 +316,8 @@ def _make_room(room_id: str = "!room:localhost") -> MagicMock:
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = room_id
     room.canonical_alias = None
+    room.users = {}
+    room.invited_users = {}
     return room
 
 
@@ -7503,6 +7506,48 @@ async def test_router_early_skip_keeps_sidecar_preview_for_hydration(tmp_path: P
     )
 
     assert should_skip is False
+
+
+@pytest.mark.parametrize(
+    ("membership", "expected"),
+    [
+        ("absent", False),
+        ("invited", False),
+        ("joined", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_router_early_skip_only_honors_joined_non_agent_mentions(
+    tmp_path: Path,
+    membership: str,
+    expected: bool,
+) -> None:
+    """An absent or merely invited human mention must not bypass normal router dispatch."""
+    bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+    room.add_member(bot.matrix_id.full_id, "Router", None)
+    room.add_member("@user:localhost", "User", None)
+    mentioned_user_id = "@human:localhost"
+    if membership != "absent":
+        room.add_member(
+            mentioned_user_id,
+            "Human",
+            None,
+            invited=membership == "invited",
+        )
+    event = _text_event(event_id="$human-mention", body=f"hello {mentioned_user_id}")
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content["m.mentions"] = {"user_ids": [mentioned_user_id]}
+
+    should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
+        room,
+        event,
+        requester_user_id="@user:localhost",
+        thread_id=None,
+    )
+
+    assert should_skip is expected
 
 
 @pytest.mark.asyncio

@@ -494,6 +494,7 @@ class TurnController:
 
     def _event_allows_queued_notice(
         self,
+        room: nio.MatrixRoom,
         event: PreparedIngress,
         envelope: MessageEnvelope,
     ) -> bool:
@@ -505,6 +506,7 @@ class TurnController:
             self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            room=room,
         )
         return am_i_mentioned or not (mentioned_agents or has_non_agent_mentions)
 
@@ -555,7 +557,7 @@ class TurnController:
             reply_to_event_id=prepared_event.event_id,
             event_source=prepared_event.source,
         )
-        if self._event_allows_queued_notice(prepared_event, envelope):
+        if self._event_allows_queued_notice(room, prepared_event, envelope):
             queued_notice_reservation = self._queued_notice_reservation_if_busy(
                 target=target,
                 envelope=envelope,
@@ -657,6 +659,7 @@ class TurnController:
             self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            room=room,
         )
         if mentioned_agents or has_non_agent_mentions:
             return not is_router_only_agent_mention(
@@ -1024,6 +1027,7 @@ class TurnController:
     ) -> bool:
         """Settle managed chatter before thread hydration can make it retryable."""
         policy = self.deps.resolver.pre_hydration_policy_facts(
+            room=room,
             event=event,
             requester_user_id=requester_user_id,
             payload_metadata=payload_metadata,

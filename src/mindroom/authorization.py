@@ -233,13 +233,12 @@ def get_available_responders_in_room(
 
     The router is excluded because it is not a regular conversation participant.
     """
-    return _available_responders_from_member_ids(_joined_member_ids(room), config, runtime_paths)
+    return _available_responders_from_member_ids(joined_member_ids(room), config, runtime_paths)
 
 
-def _joined_member_ids(room: nio.MatrixRoom) -> Iterable[str]:
+def joined_member_ids(room: nio.MatrixRoom) -> frozenset[str]:
     """Return cached room members that are joined rather than merely invited."""
-    invited_user_ids = set(room.invited_users)
-    return (user_id for user_id in room.users if user_id not in invited_user_ids)
+    return frozenset(room.users).difference(room.invited_users)
 
 
 def _get_available_responders_for_sender(

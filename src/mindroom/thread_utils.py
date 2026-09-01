@@ -103,20 +103,25 @@ def check_agent_mentioned(
     agent_id: MatrixID | None,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    room: nio.MatrixRoom,
 ) -> tuple[list[MatrixID], bool, bool]:
     """Check if an agent is mentioned in a message.
 
     Returns (mentioned_agents, am_i_mentioned, has_non_agent_mentions).
     ``has_non_agent_mentions`` is True when the message explicitly tags a
-    user who is *not* a configured agent and not in ``config.bot_accounts``
-    (i.e. a real human user).
+    joined user who is *not* a configured agent and not in
+    ``config.bot_accounts`` (i.e. a real human participant).
     """
     raw_content = event_source.get("content", {})
     content = visible_content_from_content(raw_content) if isinstance(raw_content, dict) else {}
     all_mentioned_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
     mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config, runtime_paths)
     am_i_mentioned = agent_id in mentioned_agents
-    has_non_agent_mentions = any(not _is_bot_or_agent(uid, config, runtime_paths) for uid in all_mentioned_ids)
+    non_agent_mentions = [uid for uid in all_mentioned_ids if not _is_bot_or_agent(uid, config, runtime_paths)]
+    has_non_agent_mentions = bool(non_agent_mentions) and not authorization.joined_member_ids(room).isdisjoint(
+        non_agent_mentions,
+    )
 
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
 
@@ -335,7 +340,7 @@ def decide_agent_response(
         runtime_paths: Explicit runtime context for permissions and mention resolution
         membership_index: Shared authoritative grant-room membership index
         mentioned_agents: List of all agent MatrixIDs mentioned in the message
-        has_non_agent_mentions: True when the message explicitly tags a non-agent user
+        has_non_agent_mentions: True when the message explicitly tags a joined non-agent user
         sender_id: Sender Matrix ID used for per-agent reply permissions
         available_responders_in_room: Optional precomputed sender-visible responders for the room
         agents_in_thread: Optional precomputed agents that have participated in the thread
@@ -369,7 +374,7 @@ def decide_agent_response(
     if am_i_mentioned:
         return AgentResponseDecision(True)
 
-    # Never respond if anyone else is explicitly mentioned (agent or not)
+    # Never respond if another managed entity or joined human is explicitly mentioned.
     if mentioned_agents or has_non_agent_mentions:
         return AgentResponseDecision(False, "other_explicit_mention")
 

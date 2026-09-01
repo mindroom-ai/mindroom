@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
 _ROOM_ID = "!test:localhost"
 _SENDER = "@user:localhost"
+_HUMAN_USER_ID = "@human:localhost"
 _BOT_USER_ID = "@mindroom_general:localhost"
 _EVENT_ID = "$event:localhost"
 _THREAD_ROOT = "$root:localhost"
@@ -435,7 +436,7 @@ async def test_dispatch_context_extracts_agent_mentions(config: Config) -> None:
     event = _event(
         {
             "body": "hello @general",
-            "m.mentions": {"user_ids": [general_id.full_id, "@human:localhost"]},
+            "m.mentions": {"user_ids": [general_id.full_id, _HUMAN_USER_ID]},
         },
     )
 
@@ -443,7 +444,43 @@ async def test_dispatch_context_extracts_agent_mentions(config: Config) -> None:
 
     assert result.context.am_i_mentioned is True
     assert [agent.full_id for agent in result.context.mentioned_agents] == [general_id.full_id]
-    assert result.context.has_non_agent_mentions is True
+    assert result.context.has_non_agent_mentions is False
+
+
+@pytest.mark.parametrize(
+    ("membership", "expected"),
+    [
+        ("absent", False),
+        ("invited", False),
+        ("joined", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dispatch_context_only_counts_joined_non_agent_mentions(
+    config: Config,
+    membership: str,
+    expected: bool,
+) -> None:
+    """Only a human who is joined to the room should suppress automatic agent replies."""
+    resolver = _resolver(config)
+    room = _room()
+    if membership != "absent":
+        room.add_member(
+            _HUMAN_USER_ID,
+            "Human",
+            None,
+            invited=membership == "invited",
+        )
+    event = _event(
+        {
+            "body": f"hello {_HUMAN_USER_ID}",
+            "m.mentions": {"user_ids": [_HUMAN_USER_ID]},
+        },
+    )
+
+    result = await resolver.extract_dispatch_context(room, event)
+
+    assert result.context.has_non_agent_mentions is expected
 
 
 @pytest.mark.asyncio

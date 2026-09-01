@@ -360,7 +360,13 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]
 
-        mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config, context.runtime_paths)
+        mentioned_agents, _, _ = check_agent_mentioned(
+            event.source,
+            None,
+            context.config,
+            context.runtime_paths,
+            room=room,
+        )
 
         _, response_text = await schedule_task(
             runtime=_scheduling_runtime(context, room),

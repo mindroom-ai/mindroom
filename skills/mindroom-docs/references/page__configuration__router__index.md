@@ -148,7 +148,9 @@ The rules are:
 2. **Non-thread messages** — a single eligible agent or team can auto-respond, regardless of how many humans are present.
 3. **Threads with one human** — normal auto-response behavior applies, so the agent or team continues the conversation.
 4. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
-5. **Mentioning a non-MindRoom user** — if a message tags only humans or unmanaged users, agents and teams stay silent.
+5. **Mentioning another joined room participant** — if a message tags only joined humans or unmanaged users, agents and teams stay silent.
+
+Mentions of absent or merely invited user IDs do not suppress normal routing or automatic responses.
 
 #### Bot accounts
 
