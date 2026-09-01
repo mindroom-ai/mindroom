@@ -113,10 +113,11 @@ class IngressValidator:
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
             )
-        config = self.deps.runtime.config
-        if not is_human_requester_id(requester_id, config, self.deps.runtime_paths):
-            return requester_id
-        return resolve_human_requester_alias(requester_id, config, self.deps.runtime_paths)
+        return resolve_human_requester_alias(
+            requester_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
 
     def sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
         """Return whether one sender may supply trusted ingress metadata overrides."""

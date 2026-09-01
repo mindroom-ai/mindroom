@@ -321,7 +321,7 @@ def test_store_rejects_local_generated_managed_owner_before_account_exists(tmp_p
     runtime_paths = _runtime_paths(tmp_path, server_name="example.org")
     store = ExternalTriggerStore(runtime_paths)
 
-    with pytest.raises(ExternalTriggerStoreError, match="managed entity"):
+    with pytest.raises(ExternalTriggerStoreError, match="human requester"):
         store.create_record(
             trigger_id="campground",
             owner_user_id="@mindroom_watcher:example.org",
@@ -347,7 +347,7 @@ def test_store_rejects_persisted_managed_account_owner(tmp_path: Path) -> None:
     matrix_state.save(runtime_paths)
     store = ExternalTriggerStore(runtime_paths)
 
-    with pytest.raises(ExternalTriggerStoreError, match="managed entity"):
+    with pytest.raises(ExternalTriggerStoreError, match="human requester"):
         store.create_record(
             trigger_id="campground",
             owner_user_id="@custom_watcher:example.org",
@@ -364,7 +364,7 @@ def test_store_rejects_configured_bot_account_owner(tmp_path: Path) -> None:
     """Configured bot accounts cannot own trigger records."""
     store = ExternalTriggerStore(_runtime_paths(tmp_path))
 
-    with pytest.raises(ExternalTriggerStoreError, match="bot account"):
+    with pytest.raises(ExternalTriggerStoreError, match="human requester"):
         store.create_record(
             trigger_id="campground",
             owner_user_id="@bridgebot:example.org",
@@ -383,7 +383,7 @@ def test_store_rejects_local_mindroom_user_but_allows_federated_same_localpart(t
     config = _config(mindroom_user={"username": "mindroom_user"})
     store = ExternalTriggerStore(runtime_paths)
 
-    with pytest.raises(ExternalTriggerStoreError, match="MindRoom user"):
+    with pytest.raises(ExternalTriggerStoreError, match="human requester"):
         store.create_record(
             trigger_id="local",
             owner_user_id="@mindroom_user:example.org",

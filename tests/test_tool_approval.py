@@ -1849,12 +1849,14 @@ def test_resolve_tool_approval_approver_rejects_internal_users(tmp_path: Path) -
     internal_user_id = mindroom_user_id(config, runtime_paths)
     assert internal_user_id is not None
     agent_user_id = entity_identity_registry(config, runtime_paths).current_id("code").full_id
+    config.authorization.aliases = {"@user:localhost": ["@bridge-user:localhost"]}
 
     assert resolve_tool_approval_approver(config, runtime_paths, None) is None
     assert resolve_tool_approval_approver(config, runtime_paths, agent_user_id) is None
     assert resolve_tool_approval_approver(config, runtime_paths, internal_user_id) is None
     assert resolve_tool_approval_approver(config, runtime_paths, "@bridge_bot:localhost") is None
     assert resolve_tool_approval_approver(config, runtime_paths, "@user:localhost") == "@user:localhost"
+    assert resolve_tool_approval_approver(config, runtime_paths, "@bridge-user:localhost") == "@user:localhost"
 
 
 @pytest.mark.asyncio

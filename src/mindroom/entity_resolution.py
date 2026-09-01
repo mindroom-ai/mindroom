@@ -234,11 +234,6 @@ def managed_entity_power_user_ids_for_room(
     return entity_ids
 
 
-def _matrix_domain(runtime_paths: RuntimePaths) -> str:
-    """Return the Matrix domain for one explicit runtime context."""
-    return runtime_matrix_domain(runtime_paths)
-
-
 @dataclass(frozen=True)
 class EntityIdentityRegistry:
     """Current configured entity aliases mapped to actual persisted Matrix IDs."""
@@ -278,11 +273,11 @@ def entity_identity_registry(config: Config, runtime_paths: RuntimePaths) -> Ent
 
 def current_entity_id(entity_name: str, runtime_paths: RuntimePaths) -> MatrixID:
     """Return one persisted Matrix ID without resolving unrelated configured entities."""
-    return _persisted_entity_matrix_id(entity_name, _matrix_domain(runtime_paths), runtime_paths)
+    return _persisted_entity_matrix_id(entity_name, runtime_matrix_domain(runtime_paths), runtime_paths)
 
 
 def _persisted_entity_id_map(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
-    domain = _matrix_domain(runtime_paths)
+    domain = runtime_matrix_domain(runtime_paths)
     return {
         entity_name: _persisted_entity_matrix_id(entity_name, domain, runtime_paths)
         for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]

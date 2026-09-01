@@ -18,7 +18,7 @@ from mindroom.approval_manager import (
 )
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
-from mindroom.requester_identity import is_human_requester_id
+from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.tool_system.approval_exemptions import tool_call_is_approval_exempt
 
 if TYPE_CHECKING:
@@ -166,9 +166,10 @@ def resolve_tool_approval_approver(
     """Return the human requester allowed to resolve one approval request."""
     if requester_id is None or not requester_id.startswith("@") or ":" not in requester_id:
         return None
-    if not is_human_requester_id(requester_id, config, runtime_paths):
+    canonical_requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
+    if not is_human_requester_id(canonical_requester_id, config, runtime_paths):
         return None
-    return requester_id
+    return canonical_requester_id
 
 
 async def evaluate_tool_approval(
