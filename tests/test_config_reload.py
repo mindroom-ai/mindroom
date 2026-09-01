@@ -2039,6 +2039,80 @@ async def test_config_publication_updates_restarting_bot_room_ownership_before_a
             await asyncio.gather(compensation, reload_task, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+async def test_early_room_ownership_defers_setup_until_bot_config_matches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Early ownership must not initialize a room with the bot's stale config."""
+    room_id = "!newly-configured:localhost"
+    inviter_id = "@owner:localhost"
+    current_config = _runtime_bound_config(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        tmp_path,
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={
+                "worker": AgentConfig(
+                    display_name="Worker",
+                    rooms=[room_id],
+                ),
+            },
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+        tmp_path,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
+    orchestrator.config = current_config
+    bot = make_test_agent_bot(
+        agent_user=AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="Router",
+            password=TEST_PASSWORD,
+        ),
+        storage_path=tmp_path,
+        config=current_config,
+        runtime_paths=runtime_paths_for(current_config),
+    )
+    bot.client = AsyncMock()
+    invite = MagicMock()
+    invite.inviter = inviter_id
+    bot.client.invited_rooms = {room_id: invite}
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: bot}
+    setup_configs: list[Config] = []
+
+    async def record_setup_config(_room_id: str) -> None:
+        setup_configs.append(bot.config)
+
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        on_room_joined=AsyncMock(),
+        on_configured_room_joined=record_setup_config,
+    )
+    leave_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.matrix.rooms.leave_room", leave_room)
+
+    orchestrator._publish_config_with_room_ownership(new_config)
+    assert bot.config is current_config
+    assert room_id in bot.rooms
+
+    await bot._room_lifecycle._leave_unaccepted_invite(room_id, inviter_id, invite)
+
+    leave_room.assert_not_awaited()
+    assert setup_configs == []
+
+    bot.config = new_config
+    monkeypatch.setattr(
+        "mindroom.bot_room_lifecycle.get_joined_rooms",
+        AsyncMock(return_value=[room_id]),
+    )
+    await bot.join_configured_rooms()
+
+    assert setup_configs == [new_config]
+
+
 def test_config_update_plan_reconciles_router_invites_when_access_changes() -> None:
     """Router access changes immediately reconsider invites cached by Matrix."""
     old_config = _runtime_bound_config(

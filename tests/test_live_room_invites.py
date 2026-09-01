@@ -362,13 +362,25 @@ async def test_new_configured_owner_prevents_invite_compensating_leave(
     """A config update that owns the joined room defeats older invite rejection."""
     config = _router_config(tmp_path)
     bot, room = _router_bot(config)
+    updated_config = bind_runtime_paths(
+        Config(
+            agents={
+                "worker": AgentConfig(
+                    display_name="Worker",
+                    rooms=[ROOM_ID],
+                ),
+            },
+            router=config.router,
+        ),
+        runtime_paths_for(config),
+    )
     monkeypatch.setattr(
         "mindroom.bot_room_lifecycle.join_room",
         AsyncMock(return_value=RoomJoinOutcome.JOINED),
     )
 
     async def configure_before_denial(_client: object, _room_id: str) -> set[str]:
-        bot.rooms = [ROOM_ID]
+        bot.config = updated_config
         return {bot.agent_user.user_id}
 
     monkeypatch.setattr(

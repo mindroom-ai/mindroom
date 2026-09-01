@@ -79,6 +79,7 @@ class BotRoomLifecycleDeps:
     continuity_store: SyncContinuityStore
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]
+    get_active_configured_rooms: Callable[[], Sequence[str]]
     send_response: _SendRoomResponse
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
     on_room_joined: Callable[[str], Awaitable[None]]
@@ -924,7 +925,8 @@ class BotRoomLifecycle:
         if room_id not in self.deps.get_configured_rooms():
             return False
         self._discard_invite_if_current(room_id, sender, expected_invite)
-        await self._on_configured_room_joined(room_id)
+        if room_id in self.deps.get_active_configured_rooms():
+            await self._on_configured_room_joined(room_id)
         return True
 
     def _discard_invite_if_current(

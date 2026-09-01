@@ -519,6 +519,7 @@ class AgentBot:
                 continuity_store=self._sync_continuity_store,
                 get_logger=lambda: self.logger,
                 get_configured_rooms=lambda: self.rooms,
+                get_active_configured_rooms=lambda: self._resolved_configured_rooms(self.config),
                 send_response=send_room_lifecycle_response,
                 admit_response=lambda: admitted_response_decision(
                     self.admission_gate,
@@ -973,11 +974,15 @@ class AgentBot:
         """Return the canonical live config."""
         return self._runtime_view.config
 
+    def _resolved_configured_rooms(self, config: Config) -> list[str]:
+        """Return configured room IDs resolved against current Matrix state."""
+        room_refs = get_rooms_for_entity(self.agent_name, config)
+        return resolve_room_aliases(room_refs, runtime_paths=self.runtime_paths)
+
     @config.setter
     def config(self, value: Config) -> None:
         """Update the canonical live config."""
-        room_refs = get_rooms_for_entity(self.agent_name, value)
-        resolved_rooms = resolve_room_aliases(room_refs, runtime_paths=self.runtime_paths)
+        resolved_rooms = self._resolved_configured_rooms(value)
         self._runtime_view.config = value
         self.rooms = resolved_rooms
         if self._call_manager is not None:
