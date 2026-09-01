@@ -106,12 +106,12 @@ Internal MindRoom identities bypass responder restrictions because they are syst
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
 The router owns this authoritative index, so it must be joined to a room before `current_room_members` can authorize activity there.
-A fresh authenticated self-invite callback is the only pre-join exception.
-When the router uses `current_room_members`, the exact inviter may authorize that router invitation.
-The exception never applies to agents or teams, saved pending records, or cache-only observations.
-After joining through the exception, MindRoom rechecks the latest policy and requires the inviter to remain a joined member before preserving the room.
-If that live attempt fails or the process stops before preservation, the inviter may need to invite the router again.
 For an ad-hoc room where an agent arrived first, use the agent's `invite_router` recovery tool and retry after the router joins.
+
+Inbound invitation policy is independent from responder access.
+Accepting an invitation grants room membership but never grants permission to interact with the router or an agent.
+The router and agents use their own `accept_invites` setting to accept all inviters, reject all inviters, or allow explicit Matrix user ID patterns.
+Every interaction after joining still uses the responder rules above.
 
 The same responder gate covers text, media, calls, reactions, approval actors, external triggers, background scripts, delegation, attachment access, visible voice echoes, room lifecycle responses, and scheduled resumes.
 

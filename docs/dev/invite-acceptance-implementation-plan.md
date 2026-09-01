@@ -94,5 +94,9 @@ Keep existing pending work, room locking, join fencing, accepted-room persistenc
 
 - [x] The original product regression and configuration ownership were reconstructed from the first commit of PR 1925.
 - [x] The contract now separates inbound invitation policy from post-join responder access.
-- [ ] Task 1 is next and must begin with failing configuration tests.
-- [ ] Tasks 2 through 5 remain pending.
+- [x] Task 1 added and validated boolean-or-pattern-list configuration semantics.
+- [x] Task 2 added and validated exact, wildcard, empty-list, boolean, and alias-aware inviter evaluation.
+- [x] Task 3 removed invite-time responder authorization and process-local bootstrap machinery while preserving the existing join flow.
+- [x] Task 4 aligned user documentation and regenerated the checked-in documentation references.
+- [x] Task 5 passed the affected test surface, the full repository suite, and all repository hooks.
+- [ ] Two fresh independent full reviews remain before the final deletion-only commit.

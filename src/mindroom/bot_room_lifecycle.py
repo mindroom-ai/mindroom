@@ -14,8 +14,8 @@ from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room
 from mindroom.matrix.invited_rooms_store import (
-    is_inviter_allowed,
     invited_rooms_path,
+    is_inviter_allowed,
     load_invited_rooms,
     load_pending_room_invites,
     pending_room_invites_path,
