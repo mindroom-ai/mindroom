@@ -279,6 +279,7 @@ def test_google_drive_model_functions_do_not_collide_with_local_file_tools(tmp_p
         "google_drive_search_files",
         "google_drive_read_file",
         "google_drive_upload_file",
+        "google_drive_update_file",
         "google_drive_create_folder",
         "google_drive_move_file",
         "google_drive_trash_file",
@@ -307,6 +308,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
     )
     write_functions = {
         "google_drive_upload_file",
+        "google_drive_update_file",
         "google_drive_create_folder",
         "google_drive_move_file",
         "google_drive_trash_file",
@@ -322,6 +324,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
 def test_google_drive_write_functions_can_require_approval() -> None:
     write_functions = (
         "google_drive_upload_file",
+        "google_drive_update_file",
         "google_drive_create_folder",
         "google_drive_move_file",
         "google_drive_trash_file",
@@ -577,6 +580,7 @@ def test_google_drive_readonly_grant_blocks_direct_async_write_methods(tmp_path:
 
     results = (
         asyncio.run(tool._aupload_file("plan.txt")),
+        asyncio.run(tool.aupdate_file("file-id", "plan.txt")),
         asyncio.run(tool.acreate_folder("Plans")),
         asyncio.run(tool.amove_file("file-id", "parent-id")),
         asyncio.run(tool.atrash_file("file-id")),
@@ -867,6 +871,63 @@ def test_google_drive_upload_rejects_workspace_escape(
 
     assert "must stay within the workspace root" in result["error"]
     assert service.files_resource.create_kwargs is None
+
+
+def test_google_drive_update_replaces_binary_file_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    replacement = workspace_root / "reports" / "plan.md"
+    replacement.parent.mkdir()
+    replacement.write_text("revised plan")
+    service.files_resource.file_metadata = {
+        "id": "file-id",
+        "name": "plan.md",
+        "mimeType": "text/markdown",
+    }
+
+    result = json.loads(tool.update_file("file-id", "reports/plan.md"))
+
+    assert result == {"id": "file-id"}
+    assert service.files_resource.get_kwargs == {
+        "fileId": "file-id",
+        "fields": "id,name,mimeType",
+        "supportsAllDrives": True,
+    }
+    assert service.files_resource.update_kwargs is not None
+    media = service.files_resource.update_kwargs["media_body"]
+    assert isinstance(media, _FakeMediaFileUpload)
+    assert Path(media.filename) == replacement
+    assert media.mimetype == "text/markdown"
+    assert service.files_resource.update_kwargs == {
+        "fileId": "file-id",
+        "media_body": media,
+        "fields": "id,name,mimeType,modifiedTime,size,parents,trashed,webViewLink",
+        "supportsAllDrives": True,
+    }
+
+
+def test_google_drive_update_rejects_google_workspace_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    replacement = workspace_root / "plan.txt"
+    replacement.write_text("revised plan")
+    service.files_resource.file_metadata = {
+        "id": "file-id",
+        "name": "Plan",
+        "mimeType": "application/vnd.google-apps.document",
+    }
+
+    result = json.loads(tool.update_file("file-id", "plan.txt"))
+
+    assert result["error"] == (
+        "Google Drive content replacement only supports binary files; "
+        "application/vnd.google-apps.document requires its Google Workspace API"
+    )
+    assert service.files_resource.update_kwargs is None
 
 
 def test_google_drive_upload_rejects_absolute_workspace_escape(

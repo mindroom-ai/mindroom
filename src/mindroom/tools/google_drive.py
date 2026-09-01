@@ -67,7 +67,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Allow uploading, creating folders, moving or renaming files, and trashing files.",
+            description="Allow uploading, replacing file contents, creating folders, moving or renaming, and trashing.",
         ),
         ConfigField(
             name="max_read_size",
@@ -98,6 +98,7 @@ if TYPE_CHECKING:
         "google_drive_read_file",
         "google_drive_download_file",
         "google_drive_upload_file",
+        "google_drive_update_file",
         "google_drive_create_folder",
         "google_drive_move_file",
         "google_drive_trash_file",

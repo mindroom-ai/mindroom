@@ -51,13 +51,15 @@ _MODEL_FUNCTION_NAME_ALIASES = {
     "read_file": "google_drive_read_file",
     "download_file": "google_drive_download_file",
     "upload_file": "google_drive_upload_file",
+    "update_file": "google_drive_update_file",
     "create_folder": "google_drive_create_folder",
     "move_file": "google_drive_move_file",
     "trash_file": "google_drive_trash_file",
 }
-_WRITE_FUNCTION_NAMES = ("upload_file", "create_folder", "move_file", "trash_file")
+_WRITE_FUNCTION_NAMES = ("upload_file", "update_file", "create_folder", "move_file", "trash_file")
 _WRITE_RESULT_FIELDS = "id,name,mimeType,modifiedTime,size,parents,trashed,webViewLink"
 _FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+_GOOGLE_WORKSPACE_MIME_PREFIX = "application/vnd.google-apps."
 
 
 def _max_read_size_finite_error(value: object) -> TypeError | ValueError:
@@ -180,12 +182,14 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
     def _register_write_tools(self) -> None:
         sync_tools = (
             (self._upload_file, "upload_file"),
+            (self.update_file, "update_file"),
             (self.create_folder, "create_folder"),
             (self.move_file, "move_file"),
             (self.trash_file, "trash_file"),
         )
         async_tools = (
             (self._aupload_file, "upload_file"),
+            (self.aupdate_file, "update_file"),
             (self.acreate_folder, "create_folder"),
             (self.amove_file, "move_file"),
             (self.atrash_file, "trash_file"),
@@ -332,6 +336,51 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             name=name,
             mime_type=mime_type,
         )
+
+    @authenticate
+    def update_file(self, file_id: str, local_path: str, mime_type: str | None = None) -> str:
+        """Replace the contents of one binary Drive file from the agent workspace."""
+        try:
+            path = self._resolve_upload_path(local_path)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        if not path.is_file():
+            return json.dumps({"error": f"The file '{path}' does not exist or is not a file."})
+
+        try:
+            metadata = self._get_file_metadata(file_id, "id,name,mimeType")
+            existing_mime_type = metadata.get("mimeType")
+            if isinstance(existing_mime_type, str) and existing_mime_type.startswith(_GOOGLE_WORKSPACE_MIME_PREFIX):
+                return json.dumps(
+                    {
+                        "error": (
+                            "Google Drive content replacement only supports binary files; "
+                            f"{existing_mime_type} requires its Google Workspace API"
+                        ),
+                    },
+                )
+            resolved_mime_type = mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            service = cast("Any", self.service)
+            updated_file = (
+                service.files()
+                .update(
+                    fileId=file_id,
+                    media_body=MediaFileUpload(str(path), mimetype=resolved_mime_type),
+                    fields=_WRITE_RESULT_FIELDS,
+                    supportsAllDrives=True,
+                )
+                .execute()
+            )
+            return json.dumps(updated_file)
+        except HttpError as exc:
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        except Exception as exc:
+            log_error(f"Could not update Google Drive file '{file_id}': {exc}")
+            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+
+    async def aupdate_file(self, file_id: str, local_path: str, mime_type: str | None = None) -> str:
+        """Replace one binary Drive file without blocking the async agent loop."""
+        return await asyncio.to_thread(self.update_file, file_id, local_path, mime_type=mime_type)
 
     @authenticate
     def create_folder(self, name: str, parent_id: str | None = None) -> str:
