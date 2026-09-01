@@ -106,6 +106,7 @@ from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.client_session import _MindRoomAsyncClient
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.media import is_matrix_media_dispatch_event
@@ -1141,7 +1142,7 @@ class _AutoRoomCache(MutableMapping[str, nio.MatrixRoom]):
 
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:
     """Return an AsyncClient-shaped mock with safe defaults for sync nio APIs."""
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = AsyncMock(spec=_MindRoomAsyncClient)
     client.user_id = user_id
     # A logged-in client always has one, and delivery records it on every claim
     # so a resend can tell whether its frozen transaction ID still deduplicates.

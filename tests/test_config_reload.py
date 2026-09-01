@@ -1934,6 +1934,37 @@ def test_config_update_plan_reconciles_router_invites_when_access_changes() -> N
     assert plan.entities_to_reconcile_rooms == {ROUTER_AGENT_NAME}
 
 
+def test_config_update_plan_reconciles_router_invites_when_administrators_change() -> None:
+    """Administrator changes reconsider invites cached by every live entity."""
+    agent = AgentConfig(display_name="Code", role="Test")
+    old_config = _runtime_bound_config(
+        Config(
+            administrators=[],
+            agents={"code": agent},
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            administrators=["@allowed:localhost"],
+            agents={"code": agent},
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+    )
+    running_entities = {ROUTER_AGENT_NAME, "code"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity_name: AsyncMock() for entity_name in running_entities},
+    )
+
+    assert plan.entities_to_restart == set()
+    assert plan.entities_to_reconcile_rooms == running_entities
+
+
 def test_config_update_plan_restarts_agents_when_tool_output_threshold_changes() -> None:
     """The tool output auto-save threshold is captured when agent and team toolkits are built."""
     old_config = _runtime_bound_config(

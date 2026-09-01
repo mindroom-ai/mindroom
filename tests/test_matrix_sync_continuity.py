@@ -1116,10 +1116,7 @@ async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
     # replay stays gated until the coordinator releases it.
     start_worker.assert_called_once_with()
     release_turn_replay.assert_not_called()
-    if agent_name == ROUTER_AGENT_NAME:
-        set_before_sync_response_callback.assert_called_once_with(client, bot._before_sync_response_admission)
-    else:
-        set_before_sync_response_callback.assert_not_called()
+    set_before_sync_response_callback.assert_called_once_with(client, bot._before_sync_response_admission)
 
 
 @pytest.mark.asyncio

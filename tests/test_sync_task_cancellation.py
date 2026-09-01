@@ -1313,6 +1313,8 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = False
     bot._pending_sync_invites = []
+    bot._sync_response_applying = False
+    bot._live_invite_reconciliation_pending = False
     bot._journal_dispatcher = MagicMock()
     # The sync callback delegates its body, which a spec'd mock would swallow.
     bot._apply_sync_response = partial(AgentBot._apply_sync_response, bot)

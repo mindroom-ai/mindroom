@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
@@ -114,6 +115,7 @@ async def test_invite_reconciliation_uses_only_current_matrix_cache(
     await bot._room_lifecycle.reconcile_invites()
 
     join_room.assert_awaited_once_with(bot.client, ROOM_ID)
+    bot._room_lifecycle._send_invite_welcome.assert_awaited_once_with(ROOM_ID, INVITER_ID)
     assert load_invited_rooms(_accepted_path(config)) == {ROOM_ID}
 
 
@@ -652,6 +654,41 @@ async def test_absent_accepted_room_is_not_rejoined(
 
     join_room.assert_not_awaited()
     assert load_invited_rooms(accepted_path) == {ROOM_ID}
+
+
+@pytest.mark.asyncio
+async def test_joined_sync_restores_accepted_room_setup_after_unavailable_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A trusted joined snapshot retries accepted-room setup missed at startup."""
+    config = _router_config(tmp_path)
+    bot, _room = _router_bot(config)
+    bot.client.invited_rooms = {}
+    bot._room_lifecycle._remember_invited_room(ROOM_ID)
+    joined_rooms = AsyncMock(side_effect=[None, [ROOM_ID]])
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", joined_rooms)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    joined_setup = AsyncMock()
+    monkeypatch.setattr(bot._room_lifecycle, "_on_configured_room_joined", joined_setup)
+
+    await bot.join_configured_rooms()
+    join_room.assert_not_awaited()
+    joined_setup.assert_not_awaited()
+
+    await bot._apply_own_room_membership_before_invites(
+        OwnRoomMembership(
+            joined_room_ids=frozenset({ROOM_ID}),
+            left_room_ids=frozenset(),
+            invited_room_ids=frozenset(),
+            departures=(),
+        ),
+    )
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert joined_rooms.await_count == 2
+    joined_setup.assert_awaited_once_with(ROOM_ID)
 
 
 @pytest.mark.asyncio

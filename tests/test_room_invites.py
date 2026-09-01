@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
@@ -16,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
@@ -65,12 +67,11 @@ async def _handle_invite(bot: AgentBot, room: nio.MatrixRoom, event: nio.InviteE
     await bot._room_lifecycle.handle_invite(room, event.sender)
 
 
-async def _apply_classic_invite_membership(
-    bot: AgentBot,
+def _classic_invite_membership_response(
     room_id: str,
     *,
     next_batch: str,
-) -> None:
+) -> nio.SyncResponse:
     response = nio.SyncResponse.from_dict(
         {
             "next_batch": next_batch,
@@ -82,6 +83,16 @@ async def _apply_classic_invite_membership(
         },
     )
     assert isinstance(response, nio.SyncResponse)
+    return response
+
+
+async def _apply_classic_invite_membership(
+    bot: AgentBot,
+    room_id: str,
+    *,
+    next_batch: str,
+) -> None:
+    response = _classic_invite_membership_response(room_id, next_batch=next_batch)
     await bot._apply_own_room_membership_from_sync(response)
 
 
@@ -648,6 +659,133 @@ async def test_sync_membership_applies_before_invite_join(
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
     join_room.assert_awaited_once_with(bot.client, room.room_id)
     assert load_invited_rooms(_invited_rooms_path(config, ROUTER_AGENT_NAME)) == {room.room_id}
+
+
+@pytest.mark.asyncio
+async def test_config_reconciliation_waits_for_current_sync_membership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Config reconciliation cannot join from nio's half-applied sync cache."""
+    inviter_id = "@owner:localhost"
+    config = bind_runtime_paths(
+        Config(
+            administrators=[inviter_id],
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot._reply_membership_sync = AgentReplyMembershipSync(bot._runtime_view.agent_reply_memberships)
+    install_runtime_journal_support(bot)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room = nio.MatrixInvitedRoom("!config-race:localhost", bot.agent_user.user_id)
+    room.inviter = inviter_id
+    bot.client.invited_rooms = {room.room_id: room}
+    response = _classic_invite_membership_response(room.room_id, next_batch="s_config_race")
+    bot._before_sync_response_admission(response)
+    join_started = asyncio.Event()
+    release_join = asyncio.Event()
+
+    async def delayed_join(_client: object, _room_id: str) -> RoomJoinOutcome:
+        join_started.set()
+        await release_join.wait()
+        return RoomJoinOutcome.JOINED
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", delayed_join)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+    reconciliation = asyncio.create_task(bot.reconcile_live_invites())
+    try:
+        await asyncio.sleep(0)
+        assert reconciliation.done()
+        assert not join_started.is_set()
+        await reconciliation
+
+        event = nio.InviteEvent.parse_event(
+            {
+                "type": "m.room.member",
+                "sender": inviter_id,
+                "state_key": bot.agent_user.user_id,
+                "content": {"membership": "invite"},
+            },
+        )
+        assert isinstance(event, nio.InviteMemberEvent)
+        await bot._on_invite_before_sync_certification(room, event)
+        await bot._on_sync_response(response)
+        await asyncio.wait_for(join_started.wait(), timeout=1)
+    finally:
+        release_join.set()
+        if not reconciliation.done():
+            reconciliation.cancel()
+            with suppress(asyncio.CancelledError):
+                await reconciliation
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert load_invited_rooms(_invited_rooms_path(config, ROUTER_AGENT_NAME)) == {room.room_id}
+
+
+@pytest.mark.asyncio
+async def test_sync_response_does_not_wait_for_invite_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sync-side invite reconciliation cannot wait for room network work."""
+    inviter_id = "@owner:localhost"
+    config = bind_runtime_paths(
+        Config(
+            administrators=[inviter_id],
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot._reply_membership_sync = AgentReplyMembershipSync(bot._runtime_view.agent_reply_memberships)
+    install_runtime_journal_support(bot)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room = nio.MatrixInvitedRoom("!nonblocking-sync:localhost", bot.agent_user.user_id)
+    room.inviter = inviter_id
+    bot.client.invited_rooms = {room.room_id: room}
+    response = _classic_invite_membership_response(room.room_id, next_batch="s_nonblocking")
+    bot._before_sync_response_admission(response)
+    event = nio.InviteEvent.parse_event(
+        {
+            "type": "m.room.member",
+            "sender": inviter_id,
+            "state_key": bot.agent_user.user_id,
+            "content": {"membership": "invite"},
+        },
+    )
+    assert isinstance(event, nio.InviteMemberEvent)
+    await bot._on_invite_before_sync_certification(room, event)
+    bot._router_reply_membership_sync.invalidate(config, reason="test_refresh")
+    join_started = asyncio.Event()
+    release_join = asyncio.Event()
+
+    async def delayed_join(_client: object, _room_id: str) -> RoomJoinOutcome:
+        join_started.set()
+        await release_join.wait()
+        return RoomJoinOutcome.JOINED
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", delayed_join)
+    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
+    sync_response = asyncio.create_task(bot._on_sync_response(response))
+    await asyncio.wait_for(join_started.wait(), timeout=1)
+    try:
+        await asyncio.wait_for(asyncio.shield(sync_response), timeout=1)
+    finally:
+        release_join.set()
+        await sync_response
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
 
 @pytest.mark.asyncio
@@ -2364,6 +2502,7 @@ async def test_grant_room_join_consumes_one_attempt_from_the_live_invite(
         recovered_bot._runtime_view.agent_reply_memberships,
     )
     await recovered_bot.reconcile_live_invites()
+    assert await wait_for_background_tasks(timeout=1, owner=recovered_bot._runtime_view)
     assert recovered_bot._room_lifecycle.invited_rooms == set()
     assert recovered_bot.client.invited_rooms == {}
     first_attempt_client = recovered_bot.client if restart else scenario.bot.client

@@ -92,6 +92,7 @@ class BotRoomLifecycle:
         self._welcomed_room_ids: set[str] = set()
         self._decrypt_notice_fenced_room_ids: set[str] = set()
         self._join_fence_protected_room_ids: set[str] = set()
+        self._accepted_rooms_awaiting_joined_setup: set[str] = set()
         self._applied_continuity_revision = -1
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
@@ -133,6 +134,11 @@ class BotRoomLifecycle:
     def _should_persist_invited_rooms(self) -> bool:
         """Return whether this entity persists invited room IDs across restarts."""
         return should_persist_invited_rooms(self._config(), self.deps.agent_name)
+
+    @property
+    def has_pending_joined_room_setup(self) -> bool:
+        """Return whether startup skipped setup for an accepted room."""
+        return bool(self._accepted_rooms_awaiting_joined_setup)
 
     def decrypt_notice_is_fenced(self, room_id: str) -> bool:
         """Return whether pre-join decrypt failures in this room stay silent."""
@@ -226,6 +232,7 @@ class BotRoomLifecycle:
         self._join_fence_protected_room_ids.discard(room_id)
         await self.deps.on_room_joined(room_id)
         await self.deps.on_configured_room_joined(room_id)
+        self._accepted_rooms_awaiting_joined_setup.discard(room_id)
 
     def _invited_rooms_file_path(self) -> Path:
         """Return the durable path for invited room IDs for this entity."""
@@ -252,6 +259,7 @@ class BotRoomLifecycle:
 
     def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
+        self._accepted_rooms_awaiting_joined_setup.discard(room_id)
         invited_rooms_file_exists = self._invited_rooms_file_path().exists()
         if not self._should_persist_invited_rooms() and not invited_rooms_file_exists:
             self.invited_rooms.discard(room_id)
@@ -301,12 +309,37 @@ class BotRoomLifecycle:
                     await self._on_configured_room_joined(room_id)
                     continue
                 if room_id not in configured_rooms:
+                    if joined_rooms is None:
+                        self._accepted_rooms_awaiting_joined_setup.add(room_id)
                     continue
                 if await self._join_room_with_decrypt_notice_fence(client, room_id) is RoomJoinOutcome.JOINED:
                     self._logger().info("Joined room", room_id=room_id)
                     await self._on_configured_room_joined(room_id)
                 else:
                     self._logger().warning("Failed to join room", room_id=room_id)
+
+    async def restore_pending_joined_room_setup(self) -> None:
+        """Retry setup after Matrix's authoritative joined-room inventory recovers."""
+        joined_room_ids = await get_joined_rooms(self._client())
+        if joined_room_ids is None:
+            return
+        pending_room_ids = set(self._accepted_rooms_awaiting_joined_setup)
+        self._accepted_rooms_awaiting_joined_setup.difference_update(pending_room_ids - set(joined_room_ids))
+        for room_id in sorted(pending_room_ids):
+            if room_id not in joined_room_ids:
+                continue
+            async with self.invite_ownership(room_id):
+                if room_id not in self._accepted_rooms_awaiting_joined_setup:
+                    continue
+                if room_id not in await self._owned_room_ids():
+                    self._accepted_rooms_awaiting_joined_setup.discard(room_id)
+                    continue
+                try:
+                    await self._on_configured_room_joined(room_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._logger().exception("accepted_room_setup_retry_failed", room_id=room_id)
 
     async def leave_unconfigured_rooms(self, room_ids: list[str] | None = None) -> None:
         """Leave any rooms this bot is no longer configured for."""
@@ -526,7 +559,7 @@ class BotRoomLifecycle:
         """Re-evaluate only invites currently cached by Matrix."""
         for room in tuple(self._client().invited_rooms.values()):
             if room.inviter is not None:
-                await self.handle_invite(room, room.inviter, send_welcome=False)
+                await self.handle_invite(room, room.inviter)
 
     async def _attempt_invite_join(
         self,

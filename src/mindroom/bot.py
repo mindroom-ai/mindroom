@@ -398,6 +398,8 @@ class AgentBot:
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
     _pending_sync_invites: list[tuple[nio.MatrixRoom, str]]
+    _sync_response_applying: bool
+    _live_invite_reconciliation_pending: bool
     _sync_continuity_store: SyncContinuityStore
     _sync_checkpoint_trust: SyncCheckpointTrust
 
@@ -487,6 +489,8 @@ class AgentBot:
         self._calls_reconcile_pending = False
         self._local_departures_awaiting_sync = set()
         self._pending_sync_invites = []
+        self._sync_response_applying = False
+        self._live_invite_reconciliation_pending = False
 
         async def send_room_lifecycle_response(
             *,
@@ -1335,9 +1339,25 @@ class AgentBot:
             await call_manager.reconcile_reply_authorization()
 
     async def reconcile_live_invites(self) -> None:
-        """Recheck live Matrix invites against the shared responder policy."""
-        if self.client is not None:
-            await self._room_lifecycle.reconcile_invites()
+        """Schedule live-invite policy reconciliation outside sync application."""
+        self._schedule_live_invite_reconciliation()
+
+    def _schedule_live_invite_reconciliation(self) -> None:
+        """Schedule invite reconciliation without blocking sync or config work."""
+        if self.client is None:
+            return
+        create_background_task(
+            self._reconcile_live_invites_when_safe(),
+            name=f"matrix_invite_reconciliation_{self.agent_name}",
+            owner=self._runtime_view,
+        )
+
+    async def _reconcile_live_invites_when_safe(self) -> None:
+        """Use nio's invite cache only outside a partially applied response."""
+        if self._sync_response_applying:
+            self._live_invite_reconciliation_pending = True
+            return
+        await self._room_lifecycle.reconcile_invites()
 
     async def revoke_reply_authorized_calls(self) -> None:
         """End active calls that no longer pass current reply access."""
@@ -1839,10 +1859,15 @@ class AgentBot:
 
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
+        self._sync_response_applying = True
         try:
             await self._apply_sync_response(_response)
         finally:
             self._pending_sync_invites.clear()
+            self._sync_response_applying = False
+            if self._live_invite_reconciliation_pending:
+                self._live_invite_reconciliation_pending = False
+                self._schedule_live_invite_reconciliation()
             # nio states an event's provenance once, to admission, and only for
             # the response carrying it. Anything this response's own consumers
             # did not read is stale the moment the response is done.
@@ -1850,6 +1875,7 @@ class AgentBot:
 
     def _before_sync_response_admission(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Fail closed on a sync gap or router departure before timeline admission."""
+        self._sync_response_applying = True
         if self.agent_name != ROUTER_AGENT_NAME:
             return
         effects = self._router_reply_membership_sync.pre_admit_response(
@@ -2026,6 +2052,12 @@ class AgentBot:
         except BaseException:
             self._pending_sync_invites.clear()
             raise
+        if self._room_lifecycle.has_pending_joined_room_setup:
+            create_background_task(
+                self._room_lifecycle.restore_pending_joined_room_setup(),
+                name=f"matrix_joined_room_setup_{self.agent_name}",
+                owner=self._runtime_view,
+            )
         pending_invites, self._pending_sync_invites = self._pending_sync_invites, []
         for room, sender in pending_invites:
             create_background_task(
@@ -2126,8 +2158,7 @@ class AgentBot:
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
             self._journal_dispatcher.register(client)
-            if self.agent_name == ROUTER_AGENT_NAME:
-                set_before_sync_response_callback(client, self._before_sync_response_admission)
+            set_before_sync_response_callback(client, self._before_sync_response_admission)
             self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(
                 self.config,

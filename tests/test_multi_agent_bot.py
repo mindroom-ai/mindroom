@@ -49,6 +49,7 @@ from tests.bot_helpers import (
 from tests.conftest import (
     TEST_PASSWORD,
     drain_coalescing,
+    make_matrix_client_mock,
     runtime_paths_for,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -230,12 +231,7 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Test starting an agent bot."""
-        mock_client = AsyncMock()
-        # add_event_callback is a sync method, not async
-        mock_client.add_event_callback = MagicMock()
-        mock_client.add_event_admission_callback = MagicMock()
-        mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
+        mock_client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
         mock_login.return_value = mock_client
 
         # Mock ensure_user_account to not change the agent_user
@@ -357,12 +353,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="GeneralAgent",
             password=TEST_PASSWORD,
         )
-        mock_client = AsyncMock()
-        mock_client.user_id = actual_user_id
-        mock_client.add_event_callback = MagicMock()
-        mock_client.add_event_admission_callback = MagicMock()
-        mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
+        mock_client = make_matrix_client_mock(user_id=actual_user_id)
         mock_ensure_user.return_value = None
 
         async def _login_with_actual_identity(
@@ -468,11 +459,7 @@ class TestAgentBot(AgentBotTestBase):
         """AgentBot should enter sync directly because orchestrator owns stale cleanup."""
         config = self._config_for_storage(tmp_path)
         call_order: list[str] = []
-        mock_client = AsyncMock()
-        mock_client.add_event_callback = MagicMock()
-        mock_client.add_event_admission_callback = MagicMock()
-        mock_client.add_response_callback = MagicMock()
-        mock_client.clear_persisted_sync_recovery = MagicMock()
+        mock_client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
         mock_client.has_uncommitted_classic_sync_state = False
         mock_client.next_batch = ""
 
