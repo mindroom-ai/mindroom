@@ -242,6 +242,7 @@ def resolve_requester_credentials_target(
     execution_identity = build_dashboard_execution_identity(
         request,
         agent_name or "oauth",
+        config=config_lifecycle.bind_current_request_snapshot(request).runtime_config,
         runtime_paths=base_target.runtime_paths,
     )
     reject_unbound_private_dashboard_requester("user", execution_identity)

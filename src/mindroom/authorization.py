@@ -49,7 +49,7 @@ def is_sender_allowed_for_responder(
     allowed = allowed or (
         room_id is not None
         and access.current_room_members
-        and membership_index.is_current_room_member(resolved_sender, room_id, config)
+        and membership_index.is_current_room_member(resolved_sender, room_id, config, runtime_paths)
     )
     return allowed or (
         bool(access.members_of_rooms)
@@ -57,6 +57,7 @@ def is_sender_allowed_for_responder(
             resolved_sender,
             access.members_of_rooms,
             config,
+            runtime_paths,
         )
     )
 

@@ -328,7 +328,8 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     await bot._turn_controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id="@user:localhost",
+        transport_sender_id="@user:localhost",
+        requester_user_id="@user:localhost",
         source_event_id="$selection:localhost",
     )
 
@@ -415,7 +416,8 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
         await bot._turn_controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id="@user:localhost",
+            transport_sender_id="@user:localhost",
+            requester_user_id="@user:localhost",
             source_event_id="$selection:localhost",
         )
 

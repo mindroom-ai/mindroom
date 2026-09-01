@@ -568,6 +568,7 @@ class TestDynamicConfigUpdate:
             "@alice:example.com",
             ["lobby"],
             updated_config,
+            orchestrator.runtime_paths,
         )
         assert membership_client.joined_members.await_count == 1
 
@@ -646,6 +647,7 @@ class TestDynamicConfigUpdate:
             "@alice:example.com",
             ["lobby"],
             updated_config,
+            orchestrator.runtime_paths,
         )
 
     @pytest.mark.asyncio

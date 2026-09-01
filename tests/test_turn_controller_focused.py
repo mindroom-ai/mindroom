@@ -3406,7 +3406,8 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$selection:localhost",
     )
 
@@ -3487,7 +3488,8 @@ async def test_interactive_selection_waits_for_reload_and_rechecks_authorization
         harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id=source_event_id,
         ),
     )
@@ -3530,13 +3532,15 @@ async def test_edited_question_selection_uses_its_exact_source_as_turn_identity(
     await harness.controller._handle_interactive_selection(
         room,
         selection=original,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$original-selection:localhost",
     )
     await harness.controller._handle_interactive_selection(
         room,
         selection=replacement,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$replacement-selection:localhost",
     )
 
@@ -3600,7 +3604,8 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id=selection_event_id,
         )
 
@@ -3613,7 +3618,8 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id=selection_event_id,
     )
 
@@ -3654,7 +3660,8 @@ async def test_interactive_selection_persistence_failure_prevents_ack_and_genera
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id="$selection:localhost",
         )
 
@@ -3695,7 +3702,8 @@ async def test_interactive_selection_claim_conflict_accepts_racing_terminal_turn
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$selection:localhost",
     )
 
@@ -3732,7 +3740,8 @@ async def test_interactive_selection_replacement_refusal_uses_checkpoint_replay(
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id=selection_event_id,
         )
 
@@ -3779,7 +3788,8 @@ async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id=selection_event_id,
     )
 
@@ -3843,7 +3853,8 @@ async def test_interactive_selection_rehydrates_attachment_context_from_thread(
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$selection:localhost",
     )
 
@@ -3888,7 +3899,8 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
     await harness.controller._handle_interactive_selection(
         room,
         selection=selection,
-        user_id=_SENDER,
+        transport_sender_id=_SENDER,
+        requester_user_id=_SENDER,
         source_event_id="$selection:localhost",
     )
 
@@ -3949,7 +3961,8 @@ async def test_interactive_selection_failure_leaves_the_notice_to_the_outbox(
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id="$selection:localhost",
         )
 
@@ -3980,7 +3993,8 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id="$selection:localhost",
         )
 
@@ -4012,7 +4026,8 @@ async def test_interactive_selection_interruption_registers_exact_source_before_
         await harness.controller._handle_interactive_selection(
             room,
             selection=selection,
-            user_id=_SENDER,
+            transport_sender_id=_SENDER,
+            requester_user_id=_SENDER,
             source_event_id=selection_event_id,
         )
 

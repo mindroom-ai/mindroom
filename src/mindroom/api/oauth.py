@@ -74,7 +74,6 @@ from mindroom.oauth.service import (
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
 )
-from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
@@ -423,17 +422,13 @@ def _conversation_context_from_pending_payload(
 
 
 def _verify_connect_target_authorized(request: Request, requester_id: str | None, runtime_paths: RuntimePaths) -> None:
-    dashboard_identity = build_dashboard_execution_identity(request, "oauth", runtime_paths=runtime_paths)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    if dashboard_identity.requester_id and snapshot.runtime_config is not None:
-        dashboard_identity = replace(
-            dashboard_identity,
-            requester_id=resolve_human_requester_alias(
-                dashboard_identity.requester_id,
-                snapshot.runtime_config,
-                runtime_paths,
-            ),
-        )
+    dashboard_identity = build_dashboard_execution_identity(
+        request,
+        "oauth",
+        config=snapshot.runtime_config,
+        runtime_paths=runtime_paths,
+    )
     if requester_id and requester_id != dashboard_identity.requester_id:
         raise HTTPException(status_code=403, detail="OAuth link does not belong to the current user")
 

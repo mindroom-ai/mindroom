@@ -14,6 +14,7 @@ from mindroom.authorization import (
     is_sender_allowed_for_agent_oauth_connection_management,
 )
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 if TYPE_CHECKING:
@@ -84,6 +85,7 @@ def build_dashboard_execution_identity(
     request: Request,
     agent_name: str,
     *,
+    config: Config | None,
     runtime_paths: RuntimePaths,
 ) -> ToolExecutionIdentity:
     """Build one dashboard-scoped execution identity for API credential and tool lookups.
@@ -95,10 +97,13 @@ def build_dashboard_execution_identity(
     """
     tenant_id = runtime_paths.env_value("CUSTOMER_ID")
     account_id = runtime_paths.env_value("ACCOUNT_ID")
+    requester_id = _dashboard_requester_id_for_request(request, runtime_paths)
+    if requester_id is not None and config is not None:
+        requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
     return ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,
-        requester_id=_dashboard_requester_id_for_request(request, runtime_paths),
+        requester_id=requester_id,
         room_id=None,
         thread_id=None,
         resolved_thread_id=None,
@@ -230,6 +235,7 @@ def require_agent_credential_management_authorized(
     execution_identity = build_dashboard_execution_identity(
         request,
         agent_name,
+        config=config,
         runtime_paths=runtime_paths,
     )
     requester_id = execution_identity.requester_id
@@ -254,6 +260,7 @@ def require_agent_oauth_connection_authorized(
     execution_identity = build_dashboard_execution_identity(
         request,
         agent_name,
+        config=config,
         runtime_paths=runtime_paths,
     )
     requester_id = execution_identity.requester_id
@@ -280,6 +287,7 @@ def require_platform_administrator_authorized(
     execution_identity = build_dashboard_execution_identity(
         request,
         "global_credentials",
+        config=config,
         runtime_paths=runtime_paths,
     )
     requester_id = execution_identity.requester_id

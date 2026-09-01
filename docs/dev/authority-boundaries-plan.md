@@ -42,7 +42,8 @@ Managed responders, configured bot accounts, and MindRoom's internal account mus
 Alias configuration must reject chains, cycles, and self-aliases so canonicalization is idempotent at downstream policy boundaries.
 The exact transport sender remains available through `TurnOrigin` for Matrix provenance, membership, and transport-specific behavior.
 Downstream ownership code must receive the canonical requester.
-Any independent boundary that accepts a raw Matrix ID, including invitations and dashboard requests, must use the same human-requester resolver instead of reading the alias map directly.
+Every independent event adapter, including messages, reactions, approval actions, invitations, and dashboard requests, must resolve the canonical requester before creating ownership or execution records.
+Raw room-membership rosters must use the same resolver when matching configured aliases.
 
 This change intentionally makes one human use one requester-owned scope when they enter through a canonical Matrix account or a configured bridge alias.
 It must not trust unverified original-sender metadata or turn a managed bot account into a human requester.
@@ -129,10 +130,10 @@ This PR does not add creator-only schedule permissions or new resource ACLs.
 
 The implementation has four production changes.
 
-1. Put human requester classification and alias resolution in one leaf policy module, use it at ingress, and retain the raw transport sender in `TurnOrigin`.
+1. Put human requester classification and alias resolution in one leaf policy module, use it at every Matrix event adapter, and retain the raw transport sender in `TurnOrigin`.
 2. Add `accept_invites` to `TeamConfig` and remove the room-lifecycle branch that authorizes legacy team invitations through responder access.
 3. Make platform administrators and additive trigger administrators share one alias-aware external-trigger administrator predicate.
-4. Route raw-ID policy and requester-owned OAuth boundaries through the same human-requester resolver without changing OAuth storage or lifecycle semantics.
+4. Route raw-ID policy plus requester-owned OAuth and dashboard boundaries through the same human-requester resolver without changing credential storage or lifecycle semantics.
 
 The remaining work is documentation, generated starter clarity, and focused tests.
 
@@ -152,7 +153,10 @@ The remaining work is documentation, generated starter clarity, and focused test
 2. A trusted internal relay with an aliased original human returns the canonical requester while preserving the managed relay account as the transport sender.
 3. Untrusted original-sender metadata remains ignored.
 4. Canonical requester identity reaches a requester-owned runtime scope without another alias decision.
-5. Teams parse `true`, `false`, exact-pattern lists, wildcard lists, and empty invitation lists.
+5. Approval reactions and denial replies preserve the transport sender but compare ownership as the canonical human requester.
+6. Interactive reactions record and execute as the canonical requester without losing Matrix transport provenance.
+7. Dashboard credential targets use the same canonical requester as Matrix and OAuth runtime paths.
+8. Teams parse `true`, `false`, exact-pattern lists, wildcard lists, and empty invitation lists.
 6. A team accepts and rejects inviters through `accept_invites` independently from responder `access`.
 7. Router, agent, and team invitation policies use the same pure evaluator.
 8. A platform administrator can manage external triggers without appearing in `external_trigger_policy.admin_users`.
@@ -272,4 +276,5 @@ The remaining work is documentation, generated starter clarity, and focused test
 - [x] Task 2 gives teams the same dedicated invitation policy and removes their lifecycle exception.
 - [x] Task 3 makes platform and additive external-trigger administrators use one alias-aware predicate.
 - [x] The scoped implementation is complete.
+- [x] Third-round review aligned grant-room rosters, approval actions, interactive reactions, and dashboard credentials with the shared human-requester boundary.
 - [ ] Whole-PR verification and review remain.
