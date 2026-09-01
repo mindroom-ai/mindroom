@@ -1832,6 +1832,7 @@ class _MultiAgentOrchestrator:
             current_config,
             new_config,
         )
+        router_invite_policy_changed = current_config.router.accept_invites != new_config.router.accept_invites
         await self._prepare_accounts_for_config_update(new_config, plan)
         replay_startup_maintenance = False
         await self._script_runtime.apply_update_plan(plan, plugins_changed=bool(plugin_changes))
@@ -1874,6 +1875,10 @@ class _MultiAgentOrchestrator:
                     ),
                 )
             await self._update_unchanged_bots(plan)
+            if router_invite_policy_changed and ROUTER_AGENT_NAME not in plan.entities_to_restart:
+                router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+                if router_bot is not None:
+                    await router_bot.reconcile_pending_invites()
 
             if plan.only_support_service_changes:
                 await self._finalize_config_reload(

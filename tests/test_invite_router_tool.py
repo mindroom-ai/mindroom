@@ -36,7 +36,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def _tool_context(tmp_path: Path, *, accept_invites: bool = True) -> tuple[ToolRuntimeContext, AsyncMock]:
+def _tool_context(
+    tmp_path: Path,
+    *,
+    accept_invites: bool | list[str] = True,
+) -> tuple[ToolRuntimeContext, AsyncMock]:
     config = bind_runtime_paths(
         Config(
             agents={
@@ -309,8 +313,46 @@ async def test_invite_router_reports_disabled_router_auto_accept(tmp_path: Path)
     with tool_runtime_context(context):
         result = await InviteRouterTools().invite_router()
 
-    assert result == "Error: Router auto-accept is disabled."
+    assert result == "Error: Router auto-accept does not allow this agent."
     client.room_invite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("policy", "expected", "invite_sent"),
+    [
+        (["@mindroom_code:localhost"], "Router joined.", True),
+        (["@other:localhost"], "Error: Router auto-accept does not allow this agent.", False),
+    ],
+)
+async def test_invite_router_respects_inviter_list_for_transport_agent(
+    tmp_path: Path,
+    policy: list[str],
+    expected: str,
+    invite_sent: bool,
+) -> None:
+    """The recovery tool must not send an invitation its router policy will reject."""
+    context, client = _tool_context(tmp_path, accept_invites=policy)
+    client.room_get_state_event.side_effect = [
+        nio.RoomGetStateEventError(
+            "Not found",
+            status_code="M_NOT_FOUND",
+            room_id="!project:localhost",
+        ),
+        nio.RoomGetStateEventResponse(
+            content={"membership": "join"},
+            event_type="m.room.member",
+            state_key="@mindroom_router:localhost",
+            room_id="!project:localhost",
+        ),
+    ]
+    client.room_invite.return_value = nio.RoomInviteResponse()
+
+    with tool_runtime_context(context):
+        result = await InviteRouterTools().invite_router()
+
+    assert result == expected
+    assert client.room_invite.await_count == int(invite_sent)
 
 
 @pytest.mark.asyncio

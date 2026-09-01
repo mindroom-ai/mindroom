@@ -4068,6 +4068,32 @@ class TestMultiAgentOrchestrator:
         assert not hasattr(orchestrator, "_schedule_knowledge_refresh")
 
     @pytest.mark.asyncio
+    async def test_router_invite_policy_reload_reconciles_cached_invites(self, tmp_path: Path) -> None:
+        """Allowing router invites must revisit invitations already present in the Matrix cache."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        current_config = _runtime_bound_config(Config(router={"accept_invites": False}), tmp_path)
+        new_config = _runtime_bound_config(Config(router={"accept_invites": True}), tmp_path)
+        orchestrator.config = current_config
+        orchestrator.running = True
+        router_bot = MagicMock()
+        router_bot.config = current_config
+        router_bot.enable_streaming = True
+        router_bot._set_presence_with_model_info = AsyncMock()
+        router_bot.reconcile_pending_invites = AsyncMock()
+        orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+
+        with (
+            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch("mindroom.orchestrator.load_plugins"),
+            patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        ):
+            updated = await orchestrator.config_reload._update_config()
+
+        assert updated is False
+        router_bot.reconcile_pending_invites.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     async def test_sync_runtime_support_services_rebinds_approval_cards(self, tmp_path: Path) -> None:
         """Approval transport should track the router bot that owns the card store.
 

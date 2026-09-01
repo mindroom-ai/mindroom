@@ -9,6 +9,7 @@ from agno.tools import Toolkit
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.matrix.invited_rooms_store import is_inviter_allowed
 from mindroom.tool_system.declarations import MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -56,14 +57,9 @@ class InviteRouterTools(Toolkit):
         if context is None:
             return "Error: Matrix room context unavailable."
 
-        router_id = (
-            entity_identity_registry(
-                context.current_config,
-                context.runtime_paths,
-            )
-            .current_id(ROUTER_AGENT_NAME)
-            .full_id
-        )
+        config = context.current_config
+        identities = entity_identity_registry(config, context.runtime_paths)
+        router_id = identities.current_id(ROUTER_AGENT_NAME).full_id
         membership_response = await context.client.room_get_state_event(
             context.room_id,
             "m.room.member",
@@ -72,8 +68,10 @@ class InviteRouterTools(Toolkit):
         membership = _membership(membership_response)
         if membership == "join":
             return "Router already joined."
-        if not context.current_config.router.accept_invites:
-            return "Error: Router auto-accept is disabled."
+        transport_agent_name = context.transport_agent_name or context.agent_name
+        transport_agent_id = identities.current_id(transport_agent_name).full_id
+        if not is_inviter_allowed(config, ROUTER_AGENT_NAME, transport_agent_id):
+            return "Error: Router auto-accept does not allow this agent."
         if membership == "invite":
             return "Router invite pending; retry after it joins."
 

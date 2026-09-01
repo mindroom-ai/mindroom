@@ -99,4 +99,6 @@ Keep existing pending work, room locking, join fencing, accepted-room persistenc
 - [x] Task 3 removed invite-time responder authorization and process-local bootstrap machinery while preserving the existing join flow.
 - [x] Task 4 aligned user documentation and regenerated the checked-in documentation references.
 - [x] Task 5 passed the affected test surface, the full repository suite, and all repository hooks.
-- [ ] Two fresh independent full reviews remain before the final deletion-only commit.
+- [x] The first independent full-review round produced one approval and two reproduced integration findings.
+- [x] Router invite-policy reload now revisits cached invitations, and `invite_router` now applies the transport agent's exact inviter policy.
+- [ ] A fresh two-reviewer round remains before the final deletion-only commit.
