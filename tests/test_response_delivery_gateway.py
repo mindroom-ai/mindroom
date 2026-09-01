@@ -1242,16 +1242,19 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         ) -> str | None:
             if delivery_content == row.payload:
                 return "$primary"
-            if delivery_content == continuations[1]:
-                return "$continuation-2"
             return None
 
+        missing_indices = [index for index in range(len(continuations)) if index != 1]
         recovered_gateway = _gateway(tmp_path, outbox, sending_device_id="NEW-DEVICE")
-        delivered = DeliveredMatrixEvent("$continuation-1", continuations[0])
+        delivered = DeliveredMatrixEvent("$continuation", {})
         with (
             patch(
                 "mindroom.delivery_gateway.find_outbox_delivery_event_id_via_room_messages",
                 AsyncMock(side_effect=found_events),
+            ),
+            patch(
+                "mindroom.delivery_gateway.missing_outbox_delivery_copy_indices_via_room_messages",
+                AsyncMock(return_value=missing_indices),
             ),
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
@@ -1261,10 +1264,9 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             recovered = await recovered_gateway.recover_deliveries()
 
         assert recovered.recovered == 1
-        expected_missing = [(index, c) for index, c in enumerate(continuations, start=1) if index != 2]
-        assert [call.args[2] for call in send.await_args_list] == [c for _, c in expected_missing]
+        assert [call.args[2] for call in send.await_args_list] == [continuations[i] for i in missing_indices]
         assert [call.kwargs["transaction_id"] for call in send.await_args_list] == [
-            _segment_transaction_id(row.transaction_id, index) for index, _ in expected_missing
+            _segment_transaction_id(row.transaction_id, index + 1) for index in missing_indices
         ]
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$primary"
 
@@ -3167,6 +3169,89 @@ class TestGenericDeliveryDeviceChangePolicy:
         assert stored is not None
         assert stored.acknowledged_event_id == "$prior"
         gateway.deps.runtime.client.room_messages.assert_awaited_once()
+
+    async def test_identical_continuations_reconcile_by_copy_count(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """One delivered copy must not satisfy two byte-identical continuations.
+
+        Long homogeneous responses can repeat a continuation payload exactly.
+        Existence-based reconciliation would see the first copy in the room and
+        acknowledge the row with the second copy never sent; counting copies
+        leaves exactly the missing positions to resend.
+        """
+        duplicate = {
+            "msgtype": "m.text",
+            "body": "z" * 1_000,
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>zzz</p>\n",
+        }
+        tail = {**duplicate, "body": "the end", "formatted_body": "<p>the end</p>\n"}
+        await alice.enqueue_matrix_delivery(
+            delivery_id="segmented-turn",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "the start"},
+            result={_SEGMENT_PAYLOADS_RESULT_KEY: [duplicate, duplicate, tail]},
+        )
+        claimed = await alice.claim_matrix_delivery(
+            delivery_id="segmented-turn",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="OLD-DEVICE",
+        )
+        assert claimed is not None
+        assert claimed.result is not None
+        continuations = claimed.result[_SEGMENT_PAYLOADS_RESULT_KEY]
+
+        def room_event(event_id: str, content: Mapping[str, object]) -> nio.Event:
+            event = nio.Event.parse_event(
+                {
+                    "event_id": event_id,
+                    "room_id": _ROOM_ID,
+                    "sender": _AGENT_USER_ID,
+                    "origin_server_ts": 1_000,
+                    "type": "m.room.message",
+                    "content": dict(content),
+                },
+            )
+            assert isinstance(event, nio.Event)
+            return event
+
+        # The earlier device delivered the primary and one copy of the
+        # duplicated continuation before crashing.
+        prior_primary = room_event("$prior-primary", dict(claimed.payload))
+        prior_continuation = room_event("$prior-continuation", dict(continuations[0]))
+        gateway = _gateway(tmp_path, alice, sending_device_id="NEW-DEVICE")
+        gateway.deps.runtime.client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse(
+                room_id=_ROOM_ID,
+                chunk=[prior_continuation, prior_primary],
+                start="start",
+                end=None,
+            ),
+        )
+        sent = AsyncMock(return_value=DeliveredMatrixEvent("$resent", {}))
+
+        async def never_sends(_claimed: MatrixDelivery) -> str:
+            msg = "an adopted primary is never resent"
+            raise AssertionError(msg)
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", sent):
+            outcome = await gateway._response_delivery(never_sends, handoff=None).recover()
+
+        stored = await alice.load_matrix_delivery(delivery_id="segmented-turn", stage=DeliveryStage.FINAL)
+        assert outcome == RecoveryOutcome(recovered=1, failed=0)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$prior-primary"
+        # The second duplicate and the tail were missing: exactly those go out.
+        assert [call.args[2] for call in sent.await_args_list] == [continuations[1], continuations[2]]
+        assert [call.kwargs["transaction_id"] for call in sent.await_args_list] == [
+            _segment_transaction_id(claimed.transaction_id, 2),
+            _segment_transaction_id(claimed.transaction_id, 3),
+        ]
 
     async def test_final_marker_does_not_adopt_the_initial_placeholder(
         self,

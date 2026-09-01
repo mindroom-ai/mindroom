@@ -64,6 +64,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
+    missing_outbox_delivery_copy_indices_via_room_messages,
 )
 from mindroom.matrix.segmented_messages import segment_matrix_content
 from mindroom.matrix_delivery import (
@@ -994,10 +995,13 @@ class DeliveryGateway:
 
         Adopting a segmented delivery keys on the primary event alone, so a
         crash between the primary and its continuations would acknowledge the
-        row with most of the answer never sent. Each continuation is matched
-        by its exact frozen content first -- transaction IDs are scoped to the
-        device that used them, so a blind resend from this device would
-        duplicate every segment the earlier device did deliver. A failed
+        row with most of the answer never sent. Reconciliation counts copies
+        rather than checking existence: long homogeneous responses can repeat
+        a byte-identical continuation payload, and one observed event must not
+        satisfy several positions. Found copies are consumed as credits across
+        the expected positions, so exactly the missing ones are sent -- a
+        blind resend from this device would duplicate them, because
+        transaction IDs are scoped to the device that used them. A failed
         lookup or send raises, leaving the row unacknowledged so the next
         recovery pass resumes exactly here.
         """
@@ -1007,26 +1011,26 @@ class DeliveryGateway:
         client = self._client()
         response_sender = client.user_id
         assert response_sender, "continuation reconciliation requires a logged-in client"
-        missing: list[tuple[int, dict[str, Any]]] = []
-        for index, continuation in enumerate(continuations, start=1):
-            delivered = await find_outbox_delivery_event_id_via_room_messages(
-                client,
-                claimed.room_id,
-                delivery_sender=response_sender,
-                source_event_ids=(),
-                delivery_content=continuation,
-                delivery_event_type=claimed.event_type,
+        missing_indices = await missing_outbox_delivery_copy_indices_via_room_messages(
+            client,
+            claimed.room_id,
+            delivery_sender=response_sender,
+            delivery_contents=continuations,
+            delivery_event_type=claimed.event_type,
+        )
+        for index in missing_indices:
+            await self._send_continuation(
+                claimed,
+                continuations[index],
+                index=index + 1,
+                retry_sync_recovery=True,
             )
-            if delivered is None:
-                missing.append((index, continuation))
-        for index, continuation in missing:
-            await self._send_continuation(claimed, continuation, index=index, retry_sync_recovery=True)
-        if missing:
+        if missing_indices:
             self.deps.logger.info(
                 "Recovered segmented Matrix response continuations",
                 delivery_id=claimed.delivery_id,
                 stage=claimed.stage.value,
-                continuation_count=len(missing),
+                continuation_count=len(missing_indices),
             )
 
     async def recover_deliveries(self) -> RecoveryOutcome:

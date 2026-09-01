@@ -10,6 +10,7 @@ here.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -57,7 +58,7 @@ from mindroom.matrix.visible_body import visible_body_from_event_source
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Mapping
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 
 logger = get_logger(__name__)
 
@@ -335,6 +336,129 @@ async def find_outbox_delivery_event_id_via_room_messages(
         msg = f"Matrix delivery has {len(delivered)} exact copies in {room_id}"
         raise RuntimeError(msg)
     return next(iter(delivered), None)
+
+
+def _canonical_content_key(content: Mapping[str, Any]) -> str:
+    """Return the canonical form exact-content matching groups payloads by."""
+    return json.dumps(dict(content), sort_keys=True, separators=(",", ":"))
+
+
+def _matched_delivery_copy_key(
+    event: object,
+    *,
+    room_id: str,
+    delivery_sender: str,
+    delivery_event_type: str,
+    expected: Mapping[str, int],
+) -> str | None:
+    """Return the expected key one scanned event is an exact copy of, if any."""
+    if not isinstance(event, nio.Event):
+        return None
+    event_source = event.source if isinstance(event.source, dict) else {}
+    _refuse_opaque_exact_delivery_candidate(
+        room_id=room_id,
+        event_source=event_source,
+        response_sender=delivery_sender,
+        exact_content_required=True,
+    )
+    if event_source.get("sender") != delivery_sender or event_source.get("type") != delivery_event_type:
+        return None
+    content = event_source.get("content")
+    if not isinstance(content, dict):
+        return None
+    key = _canonical_content_key(content)
+    return key if key in expected else None
+
+
+async def _count_delivery_copies_via_room_messages(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    delivery_sender: str,
+    expected: Mapping[str, int],
+    delivery_event_type: str,
+) -> dict[str, int]:
+    """Count exact-content copies per canonical key, stopping when all are found."""
+    found: dict[str, int] = {}
+    from_token: str | None = None
+    seen_pagination_tokens: set[str] = set()
+    pages_fetched = 0
+
+    while any(found.get(key, 0) < count for key, count in expected.items()):
+        response = await client.room_messages(
+            room_id,
+            start=from_token,
+            limit=100,
+            message_filter={"types": [delivery_event_type, "m.room.encrypted"]},
+            direction=nio.MessageDirection.back,
+        )
+        if not isinstance(response, nio.RoomMessagesResponse):
+            msg = f"delivery copy count room scan failed for {room_id}: {response}"
+            raise RuntimeError(msg)  # noqa: TRY004
+        pages_fetched += 1
+        for event in response.chunk:
+            key = _matched_delivery_copy_key(
+                event,
+                room_id=room_id,
+                delivery_sender=delivery_sender,
+                delivery_event_type=delivery_event_type,
+                expected=expected,
+            )
+            if key is not None:
+                found[key] = found.get(key, 0) + 1
+        if not response.end:
+            break
+        if response.end in seen_pagination_tokens:
+            msg = f"delivery copy count room scan repeated pagination token for {room_id}"
+            raise RuntimeError(msg)
+        if _finish_exact_delivery_scan_at_bound(
+            room_id=room_id,
+            pages_fetched=pages_fetched,
+            delivery_found=all(found.get(key, 0) >= count for key, count in expected.items()),
+        ):
+            break
+        seen_pagination_tokens.add(response.end)
+        from_token = response.end
+
+    return found
+
+
+async def missing_outbox_delivery_copy_indices_via_room_messages(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    delivery_sender: str,
+    delivery_contents: Sequence[Mapping[str, Any]],
+    delivery_event_type: str,
+) -> list[int]:
+    """Return which expected payloads the room does not hold enough copies of.
+
+    One frozen payload can legitimately appear several times -- segmented
+    responses repeat byte-identical continuation events -- so reconciliation
+    needs multiplicities, not existence. Each room copy satisfies exactly one
+    expected position, consumed in order; the result lists the indices left
+    unsatisfied. The scan stops as soon as every position is accounted for,
+    and fails closed at the page bound while an absence stays unproven.
+    """
+    expected: dict[str, int] = {}
+    for content in delivery_contents:
+        key = _canonical_content_key(content)
+        expected[key] = expected.get(key, 0) + 1
+    found = await _count_delivery_copies_via_room_messages(
+        client,
+        room_id,
+        delivery_sender=delivery_sender,
+        expected=expected,
+        delivery_event_type=delivery_event_type,
+    )
+    missing: list[int] = []
+    for index, content in enumerate(delivery_contents):
+        key = _canonical_content_key(content)
+        if found.get(key, 0) > 0:
+            found[key] -= 1
+        else:
+            missing.append(index)
+    return missing
 
 
 @dataclass(frozen=True)
