@@ -408,6 +408,10 @@ class TeamConfig(BaseModel):
         default=None,
         description="Optional membership-based conversation access policy",
     )
+    accept_invites: InviteAcceptancePolicy = Field(
+        default=True,
+        description="Whether this team accepts all, no, or matching inviter room invites",
+    )
     model: str | None = Field(default="default", description="Default model for this team (optional)")
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
     compaction: CompactionOverrideConfig | None = Field(

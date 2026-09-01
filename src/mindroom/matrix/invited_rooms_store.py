@@ -122,6 +122,10 @@ def _invite_acceptance_policy(config: Config, agent_name: str) -> InviteAcceptan
     if agent_config is not None:
         return agent_config.accept_invites
 
+    team_config = config.teams.get(agent_name)
+    if team_config is not None:
+        return team_config.accept_invites
+
     return None
 
 
@@ -139,9 +143,7 @@ def is_inviter_allowed(config: Config, agent_name: str, sender_id: str) -> bool:
 def should_accept_invites(config: Config, agent_name: str) -> bool:
     """Return whether one configured entity has any enabled invitation policy."""
     policy = _invite_acceptance_policy(config, agent_name)
-    if policy is not None:
-        return bool(policy)
-    return agent_name in config.teams
+    return bool(policy) if policy is not None else False
 
 
 def invited_room_entity_names(config: Config) -> tuple[str, ...]:

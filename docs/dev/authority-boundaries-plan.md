@@ -183,14 +183,14 @@ The remaining work is documentation, generated starter clarity, and focused test
 - Modify `src/mindroom/bot_room_lifecycle.py`.
 - Modify focused access and invite tests.
 
-- [ ] Write failing configuration and lifecycle tests for team boolean and pattern-list policies.
-- [ ] Run those tests with `uv run pytest -n auto` and confirm the missing policy fails.
-- [ ] Add `TeamConfig.accept_invites` with the shared policy type and `true` default.
-- [ ] Return the team policy from the shared invitation-policy resolver.
-- [ ] Make the lifecycle use the dedicated invitation policy for every entity.
-- [ ] Delete the legacy team responder-access branch and its imports.
-- [ ] Run the focused invite, authorization, access-schema, and orchestrator tests.
-- [ ] Commit the independently testable invitation symmetry change.
+- [x] Write failing configuration and lifecycle tests for team boolean and pattern-list policies.
+- [x] Run those tests with `uv run pytest -n auto` and confirm the missing policy fails.
+- [x] Add `TeamConfig.accept_invites` with the shared policy type and `true` default.
+- [x] Return the team policy from the shared invitation-policy resolver.
+- [x] Make the lifecycle use the dedicated invitation policy for every entity.
+- [x] Delete the legacy team responder-access branch and its imports.
+- [x] Run the focused invite, authorization, access-schema, and orchestrator tests.
+- [x] Commit the independently testable invitation symmetry change.
 
 ### Task 3: Unify external-trigger administrator authority
 
@@ -259,4 +259,5 @@ The remaining work is documentation, generated starter clarity, and focused test
 - [x] Selected the minimal boundary correction and rejected a general policy framework.
 - [x] Defined explicit production changes, accepted semantics, non-goals, and required tests.
 - [x] Task 1 canonicalizes trusted requesters once at Matrix ingress while preserving transport identity.
+- [x] Task 2 gives teams the same dedicated invitation policy and removes their lifecycle exception.
 - [ ] Implementation and verification remain.
