@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING, Literal
 
@@ -193,8 +193,6 @@ class _UsageAccumulator:
         self,
         row: UsageSessionRow,
         *,
-        config: Config,
-        runtime_paths: RuntimePaths,
         scope: _Scope,
         expected_agent: str | None,
         expected_requester: str | None,
@@ -207,8 +205,6 @@ class _UsageAccumulator:
             if scope == "self":
                 row_totals = _self_row_totals(
                     row,
-                    config=config,
-                    runtime_paths=runtime_paths,
                     expected_agent=expected_agent,
                     expected_requester=expected_requester,
                     seen_runs=self.seen_runs,
@@ -238,8 +234,6 @@ class _ModelUsageAccumulator:
         self,
         row: UsageSessionRow,
         *,
-        config: Config,
-        runtime_paths: RuntimePaths,
         scope: _Scope,
         expected_agent: str | None,
         expected_requester: str | None,
@@ -250,8 +244,6 @@ class _ModelUsageAccumulator:
         try:
             entries = _model_entries_for_row(
                 row,
-                config=config,
-                runtime_paths=runtime_paths,
                 scope=scope,
                 expected_agent=expected_agent,
                 expected_requester=expected_requester,
@@ -329,18 +321,19 @@ def _collect_usage(
                 usage.unavailable_sources.add(item.path_label)
                 model_usage.unavailable_sources.add(item.path_label)
                 continue
+            row = (
+                _canonicalize_run_requesters(item, config, runtime_paths)
+                if scope == "self" and not item.source.requester_isolated
+                else item
+            )
             usage.add_row(
-                item,
-                config=config,
-                runtime_paths=runtime_paths,
+                row,
                 scope=scope,
                 expected_agent=expected_agent,
                 expected_requester=expected_requester,
             )
             model_usage.add_row(
-                item,
-                config=config,
-                runtime_paths=runtime_paths,
+                row,
                 scope=scope,
                 expected_agent=expected_agent,
                 expected_requester=expected_requester,
@@ -416,8 +409,6 @@ def _add_model_entries(
 def _model_entries_for_row(
     row: UsageSessionRow,
     *,
-    config: Config,
-    runtime_paths: RuntimePaths,
     scope: _Scope,
     expected_agent: str | None,
     expected_requester: str | None,
@@ -431,12 +422,9 @@ def _model_entries_for_row(
     entries: list[tuple[UsageRunNode, TokenTotals]] = []
     for run in row.runs:
         if scope == "self" and not row.source.requester_isolated:
-            requester_id = (
-                resolve_human_requester_alias(run.requester_id, config, runtime_paths) if run.requester_id else None
-            )
-            if requester_id is None:
+            if run.requester_id is None:
                 raise ValueError
-            if requester_id != expected_requester:
+            if run.requester_id != expected_requester:
                 continue
         totals = _metrics_totals(run.metrics)
         if totals is not None:
@@ -447,8 +435,6 @@ def _model_entries_for_row(
 def _self_row_totals(
     row: UsageSessionRow,
     *,
-    config: Config,
-    runtime_paths: RuntimePaths,
     expected_agent: str | None,
     expected_requester: str | None,
     seen_runs: set[tuple[str, str, str]],
@@ -460,12 +446,9 @@ def _self_row_totals(
     total = TokenTotals()
     accepted = False
     for run in row.runs:
-        requester_id = (
-            resolve_human_requester_alias(run.requester_id, config, runtime_paths) if run.requester_id else None
-        )
-        if requester_id is None:
+        if run.requester_id is None:
             raise ValueError
-        if requester_id != expected_requester:
+        if run.requester_id != expected_requester:
             continue
         run_totals = _metrics_totals(run.metrics)
         if run_totals is None:
@@ -478,6 +461,26 @@ def _self_row_totals(
         total = total.plus(run_totals)
         accepted = True
     return total if accepted else None
+
+
+def _canonicalize_run_requesters(
+    row: UsageSessionRow,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> UsageSessionRow:
+    """Resolve historical human aliases once at the storage-read boundary."""
+    return replace(
+        row,
+        runs=tuple(
+            replace(
+                run,
+                requester_id=resolve_human_requester_alias(run.requester_id, config, runtime_paths),
+            )
+            if run.requester_id is not None
+            else run
+            for run in row.runs
+        ),
+    )
 
 
 def _admin_entity_id(row: UsageSessionRow) -> str | None:
