@@ -119,7 +119,13 @@ class ToolRuntimeContext:
         room: nio.MatrixRoom,
         requester_user_id: str,
     ) -> list[MatrixID]:
-        """Resolve current-room candidates through this context's membership boundary."""
+        """Resolve current-room candidates through this context's membership boundary.
+
+        Inside a turn (``membership_turn_id`` set) the candidates come from the
+        member cache the turn already resolved, even when that turn's refresh
+        failed: a tool call must not see a different room than the routing
+        decision that dispatched it. Detached contexts refresh on demand.
+        """
         from mindroom.authorization import (  # noqa: PLC0415
             responder_candidate_entities_from_cached_room,
             responder_candidate_entities_with_membership_refresh,
