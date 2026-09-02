@@ -72,8 +72,9 @@ class _MindRoomFileTools(AgnoFileTools):
     def _check_path(self, file_name: str, base_dir: Path, restrict_to_base_dir: bool = True) -> tuple[bool, Path]:
         """Resolve a path against base_dir, honoring this toolkit's restriction setting.
 
-        Overrides Agno's Toolkit helper so the upstream methods this class does not
-        override (``search_content``) follow the same ``restrict_to_base_dir`` rule.
+        Replaces Agno's Toolkit helper so every method here shares one rule.
+        Upstream ``search_content`` still confines itself to base_dir because it
+        relativizes each hit against it.
         """
         del restrict_to_base_dir
         try:
@@ -82,14 +83,10 @@ class _MindRoomFileTools(AgnoFileTools):
             log_error(f"Path escapes base directory: {file_name}")
             return False, base_dir
 
-    def check_escape(self, relative_path: str) -> tuple[bool, Path]:
-        """Check whether a path stays within base_dir when restriction is enabled."""
-        return self._check_path(relative_path, self.base_dir)
-
     def save_file(self, contents: str, file_name: str, overwrite: bool = True, encoding: str = "utf-8") -> str:
         """Save content to a file, with clear blocked-path errors."""
         try:
-            safe, file_path = self.check_escape(file_name)
+            safe, file_path = self._check_path(file_name, self.base_dir)
             if not safe:
                 log_error(f"Attempted to save file: {file_name}")
                 return blocked_file_action_message("saving file", file_name, self.base_dir)
@@ -109,7 +106,7 @@ class _MindRoomFileTools(AgnoFileTools):
         """Read a range of lines from a file."""
         try:
             log_debug(f"Reading file: {file_name}")
-            safe, file_path = self.check_escape(file_name)
+            safe, file_path = self._check_path(file_name, self.base_dir)
             if not safe:
                 log_error(f"Attempted to read file: {file_name}")
                 return blocked_file_action_message("reading file", file_name, self.base_dir)
@@ -131,7 +128,7 @@ class _MindRoomFileTools(AgnoFileTools):
         """Replace a range of lines in a file."""
         try:
             log_debug(f"Patching file: {file_name}")
-            safe, file_path = self.check_escape(file_name)
+            safe, file_path = self._check_path(file_name, self.base_dir)
             if not safe:
                 log_error(f"Attempted to replace file chunk: {file_name}")
                 return blocked_file_action_message("replacing file chunk", file_name, self.base_dir)
@@ -152,7 +149,7 @@ class _MindRoomFileTools(AgnoFileTools):
         """Read a file with clear blocked-path errors."""
         try:
             log_debug(f"Reading file: {file_name}")
-            safe, file_path = self.check_escape(file_name)
+            safe, file_path = self._check_path(file_name, self.base_dir)
             if not safe:
                 log_error(f"Attempted to read file: {file_name}")
                 return blocked_file_action_message("reading file", file_name, self.base_dir)
@@ -168,7 +165,7 @@ class _MindRoomFileTools(AgnoFileTools):
 
     def delete_file(self, file_name: str) -> str:
         """Delete a file or empty directory with clear blocked-path errors."""
-        safe, path = self.check_escape(file_name)
+        safe, path = self._check_path(file_name, self.base_dir)
         try:
             if safe:
                 if path.is_dir():
@@ -186,7 +183,7 @@ class _MindRoomFileTools(AgnoFileTools):
         """List files in a directory, falling back to absolute paths outside base_dir."""
         try:
             log_debug(f"Reading files in : {self.base_dir}/{directory}")
-            safe, resolved_directory = self.check_escape(str(directory))
+            safe, resolved_directory = self._check_path(str(directory), self.base_dir)
             if not safe:
                 return blocked_file_action_message("listing files", str(directory), self.base_dir)
             return json.dumps(
@@ -370,7 +367,6 @@ class _MindRoomFileTools(AgnoFileTools):
     dependencies=["agno"],  # From agno requirements
     docs_url="https://docs.agno.com/tools/toolkits/local/file",
     function_names=(
-        "check_escape",
         "delete_file",
         "list_files",
         "read_file",

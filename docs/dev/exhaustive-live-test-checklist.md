@@ -371,16 +371,16 @@ Expected outcome: Requester-local roots are created from the template without ov
 - [ ] `MEM-010` Configure `private.knowledge` for a private agent and compare chat behavior between the normal runtime and `/v1`.
 Expected outcome: Requester-private knowledge remains isolated to the private runtime path and is not exposed through the shared `/v1` API surface.
 
-- [ ] `MEM-014` Configure `defaults.learning`, override one agent with `learning: false`, and compare runtime behavior plus persisted `learning/` state.
+- [ ] `MEM-011` Configure `defaults.learning`, override one agent with `learning: false`, and compare runtime behavior plus persisted `learning/` state.
 Expected outcome: Agents inherit learning from defaults unless explicitly disabled, disabled agents do not create or update learning state, and enabled agents persist learning data in their state roots.
 
-- [ ] `MEM-015` Compare `learning_mode: agentic` with the default always-on learning mode for an otherwise identical agent.
+- [ ] `MEM-012` Compare `learning_mode: agentic` with the default always-on learning mode for an otherwise identical agent.
 Expected outcome: Both modes keep learning enabled, but agentic mode follows the agentic learning profile instead of the always-on mode.
 
-- [ ] `MEM-016` Configure Mem0 with a local `sentence_transformers` embedder once with optional dependency auto-install enabled and once with it disabled or unavailable.
+- [ ] `MEM-013` Configure Mem0 with a local `sentence_transformers` embedder once with optional dependency auto-install enabled and once with it disabled or unavailable.
 Expected outcome: The runtime auto-installs required local embedder dependencies when allowed and otherwise fails clearly instead of silently degrading memory setup.
 
-- [ ] `MEM-017` Enable auto-flush for a private agent across multiple requester scopes and then change that agent back to a shared configuration.
+- [ ] `MEM-014` Enable auto-flush for a private agent across multiple requester scopes and then change that agent back to a shared configuration.
 Expected outcome: Dirty-session reprioritization and later flushes stay isolated to the original requester scope, stale private entries are purged when the agent stops being private, and persisted execution identity is reused for later writes.
 
 ## 11. Skills, Plugins, Tools, Workers, And Runtime Context
@@ -534,43 +534,43 @@ Expected outcome: Agent CRUD supports private settings, delegation, learning and
 - [ ] `UI-007` Perform create, edit, and delete flows on the Teams tab.
 Expected outcome: Team mode, room assignment, model override, and member selection persist correctly.
 
-- [ ] `UI-009` Perform create, edit, and delete flows on the Rooms tab.
+- [ ] `UI-008` Perform create, edit, and delete flows on the Rooms tab.
 Expected outcome: Room membership, descriptions, and room-model overrides persist correctly and stay aligned with backend config.
 
-- [ ] `UI-010` Use the Schedules tab after creating schedules through chat or API.
+- [ ] `UI-009` Use the Schedules tab after creating schedules through chat or API.
 Expected outcome: The page lists tasks, supports editing and cancellation, and renders schedule timing consistently with the runtime timezone.
 
-- [ ] `UI-011` Use the External Rooms tab after placing agents in unmanaged rooms.
+- [ ] `UI-010` Use the External Rooms tab after placing agents in unmanaged rooms.
 Expected outcome: The UI lists per-agent room memberships and single or bulk leave actions mutate the actual runtime state.
 
-- [ ] `UI-012` Use the Models tab for create, duplicate, edit, filter, and delete flows.
+- [ ] `UI-011` Use the Models tab for create, duplicate, edit, filter, and delete flows.
 Expected outcome: Provider-specific fields, model IDs, base URLs, advanced settings, and masked API-key state all behave consistently.
 
-- [ ] `UI-013` Use the Memory tab to switch backends and edit embedder or auto-flush settings.
+- [ ] `UI-012` Use the Memory tab to switch backends and edit embedder or auto-flush settings.
 Expected outcome: Memory settings persist correctly and provider-specific helper text or warnings match the active backend.
 
-- [ ] `UI-014` Use the Knowledge tab for local and Git-backed bases.
+- [ ] `UI-013` Use the Knowledge tab for local and Git-backed bases.
 Expected outcome: Base CRUD, upload, delete, status, file listing, and reindex flows all hit the expected backend state and guard against unsaved settings where required.
 
-- [ ] `UI-015` Use the Credentials tab for create, edit, save, delete, test, and copy flows.
+- [ ] `UI-014` Use the Credentials tab for create, edit, save, delete, test, and copy flows.
 Expected outcome: Service validation, masked values, raw JSON editing, and credential-status loading all match backend behavior.
 
-- [ ] `UI-016` Use the Voice tab to edit STT and transcript-normalization settings.
+- [ ] `UI-015` Use the Voice tab to edit STT and transcript-normalization settings.
 Expected outcome: Enablement, router echo, host normalization, API key fields, and model settings all persist and display the effective current state.
 
-- [ ] `UI-017` Use the Tools or Integrations tab with agents across different execution scopes.
+- [ ] `UI-016` Use the Tools or Integrations tab with agents across different execution scopes.
 Expected outcome: Catalog filters, provider connect flows, setup gating, and scope-aware restrictions behave consistently with runtime capability rules.
 
-- [ ] `UI-018` Use the Skills tab to create, edit, save, switch, and delete skills.
+- [ ] `UI-017` Use the Skills tab to create, edit, save, switch, and delete skills.
 Expected outcome: Skill origin labeling, kebab-case name validation, unsaved-change prompts, and editable-versus-read-only behavior all work correctly.
 
-- [ ] `UI-019` Put the Agents and Teams editors into draft states where policy preview cannot be derived or a member becomes team-ineligible.
+- [ ] `UI-018` Put the Agents and Teams editors into draft states where policy preview cannot be derived or a member becomes team-ineligible.
 Expected outcome: Scoped tool previews fail closed when policy derivation is unavailable and team member pickers show explicit eligibility reasons instead of leaving blocked members selectable.
 
-- [ ] `UI-020` Use the External Rooms tab and trigger a bulk leave where at least one room succeeds and another fails.
+- [ ] `UI-019` Use the External Rooms tab and trigger a bulk leave where at least one room succeeds and another fails.
 Expected outcome: Partial failure does not present as full success, and the UI surfaces the current generic failure-count messaging for the rooms that could not be left.
 
-- [ ] `UI-021` Use the Tools or Integrations tab while switching between `shared`, `user`, and `user_agent` execution scopes during load.
+- [ ] `UI-020` Use the Tools or Integrations tab while switching between `shared`, `user`, and `user_agent` execution scopes during load.
 Expected outcome: Shared-only integrations are hidden from the catalog for non-shared scopes, dashboard-managed credential controls show the current unsupported or preview warnings, stale in-flight scope requests do not bleed status across selections, and unsaved draft scope overrides are treated as non-authoritative.
 
 ## 15. SaaS Platform

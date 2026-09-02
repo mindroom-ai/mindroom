@@ -36,6 +36,7 @@ IGNORED_AGNO_PARAMS = {
     # Mapping-only inputs have no safe authored ConfigField representation.
     "mem0": {"config"},
     "scrapegraph": {"headers"},
+    "tavily": {"search_params"},
     # Agno accepts an SSLContext for Slack, but MindRoom has no safe serialized UI/config path for it.
     "slack": {"ssl"},
     "youtube": {"proxies"},

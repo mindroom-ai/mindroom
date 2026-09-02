@@ -10,14 +10,15 @@ from typing import TYPE_CHECKING, Any, cast
 
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
-from agno.db.utils import deserialize_history_run
+from agno.db.utils import build_single_run_row, deserialize_history_run
 from agno.learn import LearningMachine
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
-from sqlalchemy import Engine, create_engine, event, select, text
+from sqlalchemy import Engine, Text, create_engine, event, func, select, text
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mindroom import agno_session_persistence_patch
 from mindroom.constants import prompt_roles_for_history_storage
@@ -146,40 +147,52 @@ def _ensure_current_schema(database: _ConversationSqliteDb, db_file: str) -> Non
 
 
 def _migrate_legacy_runs(database: _ConversationSqliteDb) -> None:
+    """Copy every 2.x ``runs`` blob into the runs table in one transaction, then drop the column."""
     session_table = _quote_identifier(database.session_table_name)
-    with database.Session() as sess:
+    runs_table = database._get_table(table_type="runs", create_table_if_not_found=True)
+    if runs_table is None:
+        return
+    with database.Session() as sess, sess.begin():
         columns = {row[1] for row in sess.execute(text(f"PRAGMA table_info({session_table})"))}
         if "runs" not in columns:
             return
         legacy_rows = sess.execute(
             text(f"SELECT session_id, user_id, runs FROM {session_table} WHERE runs IS NOT NULL"),  # noqa: S608
         ).fetchall()
-
-    for session_id, user_id, raw_runs in legacy_rows:
-        legacy_runs = json.loads(raw_runs) if isinstance(raw_runs, str) else raw_runs
-        if not isinstance(legacy_runs, list):
-            continue
-        persisted_run_ids = set(database._persisted_run_ids(session_id))
-        run_payloads = [
-            cast("dict[str, Any]", run) for run in legacy_runs if isinstance(run, dict) and run.get("run_id")
-        ]
-        for run_index, run_payload in enumerate(run_payloads):
-            if run_payload["run_id"] in persisted_run_ids:
+        expected_by_session: dict[str, int] = {}
+        rows: list[dict[str, Any]] = []
+        for session_id, user_id, raw_runs in legacy_rows:
+            legacy_runs = json.loads(raw_runs) if isinstance(raw_runs, str) else raw_runs
+            if not isinstance(legacy_runs, list):
                 continue
-            database.upsert_run(run=run_payload, session_id=session_id, user_id=user_id, run_index=run_index)
-        migrated = len(database._persisted_run_ids(session_id))
-        expected = len(run_payloads)
-        if migrated < expected:
-            logger.warning(
-                "agno_legacy_runs_column_kept",
-                db_file=database.db_file,
-                session_id=session_id,
-                legacy_runs=expected,
-                migrated_runs=migrated,
+            run_payloads = [
+                cast("dict[str, Any]", run) for run in legacy_runs if isinstance(run, dict) and run.get("run_id")
+            ]
+            expected_by_session[session_id] = len(run_payloads)
+            rows.extend(
+                build_single_run_row(run_payload, session_id=session_id, user_id=user_id, run_index=run_index)
+                for run_index, run_payload in enumerate(run_payloads)
             )
-            return
-
-    with database.Session() as sess, sess.begin():
+        if rows:
+            sess.execute(sqlite_insert(runs_table).on_conflict_do_nothing(index_elements=["run_id"]), rows)
+        migrated_by_session = dict(
+            sess.execute(
+                select(runs_table.c.session_id, func.count())
+                .where(runs_table.c.session_id.in_(list(expected_by_session)))
+                .group_by(runs_table.c.session_id),
+            ).fetchall(),
+        )
+        for session_id, expected in expected_by_session.items():
+            migrated = migrated_by_session.get(session_id, 0)
+            if migrated < expected:
+                logger.warning(
+                    "agno_legacy_runs_column_kept",
+                    db_file=database.db_file,
+                    session_id=session_id,
+                    legacy_runs=expected,
+                    migrated_runs=migrated,
+                )
+                return
         sess.execute(text(f"ALTER TABLE {session_table} DROP COLUMN runs"))
     database._invalidate_table_cache(database.session_table_name)
     logger.info("agno_legacy_runs_column_migrated", db_file=database.db_file, sessions=len(legacy_rows))
@@ -287,9 +300,11 @@ class _ConversationSqliteDb(SqliteDb):
     Agno 3.0 writes only the session row from ``upsert_session`` and expects
     callers to persist runs one at a time. MindRoom's history, compaction, and
     redaction paths still rewrite ``session.runs`` and save the whole session,
-    so ``upsert_session`` here also reconciles the runs table with the session:
-    runs the session no longer holds are deleted and the rest are upserted in
-    session order. Reads always load the full run history for the same reason.
+    so ``upsert_session`` here also reconciles the runs table with the session
+    in one transaction: runs the session no longer holds are deleted, changed
+    or new runs are written, and every row's ``run_index`` is set to the run's
+    position in ``session.runs``. Reads always load the full run history for
+    the same reason.
     """
 
     def __init__(
@@ -334,11 +349,20 @@ class _ConversationSqliteDb(SqliteDb):
         user_id: str | None = None,
         run_index: int | None = None,
     ) -> None:
+        """Persist one run, letting the database place a new run after the existing ones.
+
+        Agno derives ``run_index`` from the run's position in ``session.runs``.
+        MindRoom removes runs from the middle of a session (compaction,
+        redaction), after which that position collides with the indexes stored
+        rows keep, so new rows take ``MAX(run_index) + 1`` instead and existing
+        rows keep their index either way.
+        """
+        del run_index
         super().upsert_run(
             run=_run_without_prompt_messages(run, self._prompt_roles),
             session_id=session_id,
             user_id=user_id,
-            run_index=run_index,
+            run_index=None,
         )
 
     def upsert_session(
@@ -368,26 +392,60 @@ class _ConversationSqliteDb(SqliteDb):
         return result
 
     def _reconcile_runs(self, session: Session) -> None:
-        """Make the runs table hold exactly ``session.runs``, in session order."""
+        """Make the runs table hold exactly ``session.runs``, indexed by session position, in one commit.
+
+        Unchanged rows are left alone so a steady-state save costs one
+        transaction with no run writes; agno's own ``upsert_run`` would commit
+        once per run and keep stale indexes.
+        """
         if not isinstance(session, (AgentSession, TeamSession)):
             return
-        runs = [run for run in session.runs or [] if isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id]
-        wanted_run_ids = {run.run_id for run in runs}
-        stale_run_ids = [
-            run_id for run_id in self._persisted_run_ids(session.session_id) if run_id not in wanted_run_ids
-        ]
-        if stale_run_ids:
-            self.delete_runs(stale_run_ids)
-        for run_index, run in enumerate(runs):
-            super().upsert_run(run=run, session_id=session.session_id, user_id=run.user_id, run_index=run_index)
-
-    def _persisted_run_ids(self, session_id: str) -> list[str]:
         runs_table = self._get_table(table_type="runs", create_table_if_not_found=True)
         if runs_table is None:
-            return []
-        with self.Session() as sess:
-            rows = sess.execute(select(runs_table.c.run_id).where(runs_table.c.session_id == session_id)).fetchall()
-        return [run_id for (run_id,) in rows]
+            return
+        wanted_rows = [
+            build_single_run_row(run, session_id=session.session_id, user_id=run.user_id, run_index=run_index)
+            for run_index, run in enumerate(
+                run for run in session.runs or [] if isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id
+            )
+        ]
+        with self.Session() as sess, sess.begin():
+            stored_rows = sess.execute(
+                select(runs_table.c.run_id, runs_table.c.run_index, runs_table.c.run_data.cast(Text)).where(
+                    runs_table.c.session_id == session.session_id,
+                ),
+            ).fetchall()
+            stored = {
+                run_id: (run_index, json.loads(run_data) if isinstance(run_data, str) else run_data)
+                for run_id, run_index, run_data in stored_rows
+            }
+            wanted_run_ids = {row["run_id"] for row in wanted_rows}
+            stale_run_ids = [run_id for run_id in stored if run_id not in wanted_run_ids]
+            if stale_run_ids:
+                sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(stale_run_ids)))
+            new_rows = [row for row in wanted_rows if row["run_id"] not in stored]
+            if new_rows:
+                sess.execute(sqlite_insert(runs_table), new_rows)
+            for row in wanted_rows:
+                if row["run_id"] not in stored:
+                    continue
+                stored_index, stored_data = stored[row["run_id"]]
+                if stored_index == row["run_index"] and stored_data == row["run_data"]:
+                    continue
+                sess.execute(
+                    runs_table.update()
+                    .where(runs_table.c.run_id == row["run_id"])
+                    .values(
+                        run_index=row["run_index"],
+                        run_data=row["run_data"],
+                        status=row["status"],
+                        user_id=row["user_id"],
+                        parent_run_id=row["parent_run_id"],
+                        updated_at=row["updated_at"],
+                    ),
+                )
+        if stale_run_ids:
+            self._scrub_run_ids_from_legacy_blob(stale_run_ids)
 
 
 def _session_without_prompt_messages(session: Session, prompt_roles: frozenset[str]) -> Session:

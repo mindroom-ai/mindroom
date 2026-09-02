@@ -14,6 +14,7 @@ wrapper exists and is replaced with an empty resolver.
 
 from __future__ import annotations
 
+import types
 from typing import TYPE_CHECKING, Any
 
 from agno.tools.function import Function
@@ -37,7 +38,7 @@ def _release_frame_namespace(wrapped: Callable[..., Any]) -> None:
         validator = getattr(contents, "__self__", contents)
         if isinstance(validator, ValidateCallWrapper):
             validator.ns_resolver = NsResolver()
-        elif callable(contents) and getattr(contents, "_wrapped_for_validation", False):
+        elif isinstance(contents, types.FunctionType):
             # Async-generator tools wrap the validated callable in one more shim.
             _release_frame_namespace(contents)
 

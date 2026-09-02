@@ -134,7 +134,6 @@ class TestGmailTools:
                 runtime_paths=runtime_paths,
                 credentials_manager=CredentialsManager(tmp_path / "credentials"),
             )
-            gmail_tools.service_account_path = None
 
         assert gmail_tools._should_fallback_to_original_auth() is True
 
@@ -193,7 +192,6 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
-            gmail_tools.service_account_path = None
 
             gmail_tools.creds = MagicMock()
             gmail_tools.creds.valid = True
@@ -214,7 +212,6 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
-            gmail_tools.service_account_path = None
 
             gmail_tools.creds = None
 
@@ -254,7 +251,6 @@ class TestGmailTools:
             mock_parent_init.return_value = None
 
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_manager)
-            gmail_tools.service_account_path = None
             gmail_tools.creds = None
 
             mock_parent_auth = Mock()
@@ -278,7 +274,6 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
-            gmail_tools.service_account_path = None
             gmail_tools.creds = None
 
             # Mock Credentials to raise an exception

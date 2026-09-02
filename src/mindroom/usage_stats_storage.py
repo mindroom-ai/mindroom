@@ -57,7 +57,7 @@ _REQUIRED_COLUMNS = frozenset(
 # Agno 3 keeps one row per run in ``<session table>_runs``; the legacy ``runs``
 # blob on the session row only survives on databases whose migration could not
 # be verified.
-_RUNS_TABLE_REQUIRED_COLUMNS = frozenset({"run_id", "session_id", "run_index", "run_data"})
+_RUNS_TABLE_REQUIRED_COLUMNS = frozenset({"run_id", "session_id", "run_index", "run_data", "created_at"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,11 +355,8 @@ def iter_usage_storage_rows(
                 "SELECT session_id, session_type, agent_id, team_id, user_id, "  # noqa: S608
                 f"{payload_columns} FROM {table}"
             )
-            persisted_runs = (
-                _persisted_runs_by_session(connection, _runs_table(source.expected_session_table))
-                if mode != "session_metrics"
-                else {}
-            )
+            runs_table = _runs_table(source.expected_session_table)
+            read_runs = mode != "session_metrics" and _table_exists(connection, runs_table)
             for row in connection.execute(query):
                 session_payload_bytes = row["session_payload_bytes"]
                 legacy_payload_bytes = row["legacy_runs_payload_bytes"] if schema.legacy_runs_column else None
@@ -373,7 +370,9 @@ def iter_usage_storage_rows(
                         source,
                         row,
                         mode=mode,
-                        persisted_runs=persisted_runs.get(row["session_id"], _PersistedRuns()),
+                        persisted_runs=_persisted_runs(connection, runs_table, row["session_id"])
+                        if read_runs
+                        else _PersistedRuns(),
                         legacy_runs_payload=row["legacy_runs_payload"] if schema.legacy_runs_column else None,
                         legacy_payload_bytes=legacy_payload_bytes or 0,
                         session_payload_bytes=session_payload_bytes or 0,
@@ -445,25 +444,22 @@ def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({_quote_identifier(table)})")}
 
 
-def _persisted_runs_by_session(connection: sqlite3.Connection, runs_table: str) -> dict[str, _PersistedRuns]:
-    """Read every run row once, grouped by session in run order."""
-    if not _table_exists(connection, runs_table):
-        return {}
-    runs_by_session: dict[str, _PersistedRuns] = {}
+def _persisted_runs(connection: sqlite3.Connection, runs_table: str, session_id: object) -> _PersistedRuns:
+    """Read one session's run rows in run order, bounded by that session's history."""
+    persisted = _PersistedRuns()
+    if not isinstance(session_id, str):
+        return persisted
     query = (
-        "SELECT session_id, run_data AS run_payload, length(CAST(run_data AS BLOB)) AS run_payload_bytes "  # noqa: S608
-        f"FROM {_quote_identifier(runs_table)} ORDER BY run_index ASC, created_at ASC, run_id ASC"
+        "SELECT run_data AS run_payload, length(CAST(run_data AS BLOB)) AS run_payload_bytes "  # noqa: S608
+        f"FROM {_quote_identifier(runs_table)} WHERE session_id = ? "
+        "ORDER BY run_index ASC, created_at ASC, run_id ASC"
     )
-    for row in connection.execute(query):
-        session_id = row["session_id"]
-        if not isinstance(session_id, str):
-            continue
+    for row in connection.execute(query, (session_id,)):
         payload_bytes = row["run_payload_bytes"]
-        persisted = runs_by_session.setdefault(session_id, _PersistedRuns())
         persisted.payloads.append(row["run_payload"])
         if isinstance(payload_bytes, int) and not isinstance(payload_bytes, bool) and payload_bytes > 0:
             persisted.payload_bytes += payload_bytes
-    return runs_by_session
+    return persisted
 
 
 def _extract_row(
@@ -527,8 +523,8 @@ def _extract_runs(
 ) -> tuple[UsageRunNode, ...]:
     """Merge run-table rows with any legacy blob runs the run table does not hold yet.
 
-    Mirrors Agno's own read merge: the run table wins on ``run_id`` conflicts and
-    legacy-only runs are appended after it.
+    Run-table rows come first and win on ``run_id``; legacy-only runs are
+    appended. Aggregation does not depend on the order.
     """
     raw_runs = [_decode_agno_json(payload) for payload in run_payloads]
     seen_run_ids = {run_id for run_id in map(_raw_run_id, raw_runs) if run_id is not None}

@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING
 from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
-from mindroom.agent_storage import create_state_storage, get_agent_session
+from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -125,7 +127,10 @@ def test_legacy_runs_blob_moves_into_the_runs_table(tmp_path: Path) -> None:
     db_path.parent.mkdir(parents=True)
     legacy_runs = [
         RunOutput(
-            run_id=f"r{index}", agent_id="code", session_id="s1", messages=[Message(role="user", content=str(index))]
+            run_id=f"r{index}",
+            agent_id="code",
+            session_id="s1",
+            messages=[Message(role="user", content=str(index))],
         ).to_dict()
         for index in range(3)
     ]
@@ -155,3 +160,71 @@ def test_legacy_runs_blob_moves_into_the_runs_table(tmp_path: Path) -> None:
     finally:
         connection.close()
     assert "runs" not in columns
+
+
+def test_runs_appended_after_removal_load_in_session_order(tmp_path: Path) -> None:
+    """Compaction removes leading runs; later per-run saves must still sort after the survivors."""
+    storage = _storage(tmp_path)
+    db_path = tmp_path / "sessions" / "code.db"
+    try:
+        storage.upsert_session(_session("s1", ["r1", "r2", "r3"]))
+        compacted = _session("s1", ["r3"])
+        storage.upsert_session(compacted)
+        appended = _session("s1", ["r3", "r4"])
+        # Agno's per-run save passes the run's position in the shortened session.
+        storage.upsert_run(run=(appended.runs or [])[1], session_id="s1", user_id="@alice:example.test", run_index=1)
+        loaded = get_agent_session(storage, "s1")
+        storage.upsert_session(_session("s1", ["r4", "r3"]))
+        reordered = get_agent_session(storage, "s1")
+    finally:
+        storage.close()
+
+    assert loaded is not None
+    assert [run.run_id for run in loaded.runs or []] == ["r3", "r4"]
+    assert _run_rows(db_path) == [("r4", 0), ("r3", 1)]
+    assert reordered is not None
+    assert [run.run_id for run in reordered.runs or []] == ["r4", "r3"]
+
+
+def test_unchanged_session_save_writes_no_run_rows(tmp_path: Path) -> None:
+    """A steady-state save must not rewrite run rows it does not change."""
+    storage = _storage(tmp_path)
+    db_path = tmp_path / "sessions" / "code.db"
+    try:
+        storage.upsert_session(_session("s1", ["r1", "r2"]))
+        connection = sqlite3.connect(db_path)
+        try:
+            before = connection.execute(
+                "SELECT run_id, updated_at FROM code_sessions_runs ORDER BY run_index",
+            ).fetchall()
+        finally:
+            connection.close()
+        storage.upsert_session(_session("s1", ["r1", "r2"]))
+        connection = sqlite3.connect(db_path)
+        try:
+            after = connection.execute(
+                "SELECT run_id, updated_at FROM code_sessions_runs ORDER BY run_index",
+            ).fetchall()
+        finally:
+            connection.close()
+    finally:
+        storage.close()
+
+    assert after == before
+
+
+def test_team_session_reconciles_member_runs(tmp_path: Path) -> None:
+    """Team sessions keep member rows (parent_run_id) alongside the team run across saves."""
+    storage = create_state_storage("eng", tmp_path, subdir="sessions", session_table="eng_sessions")
+    member_run = RunOutput(run_id="m1", agent_id="code", session_id="t1", parent_run_id="team1")
+    team_run = TeamRunOutput(run_id="team1", team_id="eng", session_id="t1", member_responses=[member_run])
+    session = TeamSession(session_id="t1", team_id="eng", runs=[team_run, member_run])
+    try:
+        storage.upsert_session(session)
+        storage.upsert_session(session)
+        loaded = get_team_session(storage, "t1")
+    finally:
+        storage.close()
+
+    assert loaded is not None
+    assert [(run.run_id, run.parent_run_id) for run in loaded.runs or []] == [("team1", None), ("m1", "team1")]

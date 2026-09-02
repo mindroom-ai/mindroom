@@ -1557,14 +1557,9 @@ def test_agno_workflow_run_fails_and_stops_when_step_execution_fails(tmp_path: P
     )
     workflow = factory.resolve(RequestContext(user_id="@user:localhost", input={"topic": "Agno factories"}), Workflow)
 
-    run_output = workflow.run(input={"topic": "Agno factories"}, user_id="@user:localhost")
+    with pytest.raises(DynamicWorkflowExecutionError, match="provider auth failed"):
+        workflow.run(input={"topic": "Agno factories"}, user_id="@user:localhost")
 
-    # Agno 3 reports an executor failure as a failed step instead of raising; the
-    # adapter marks it as stopping so the remaining steps never run.
-    step_results = run_output.step_results or []
-    assert [(step.step_name, step.success, step.error) for step in step_results] == [
-        ("write", False, "provider auth failed"),
-    ]
     assert prompts == ["Write about Agno factories."]
 
 

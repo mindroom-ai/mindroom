@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     dependencies=["python-docx", "reportlab"],
     docs_url="https://docs.agno.com/tools/toolkits/others/file_generation",
     function_names=(
+        "generate_code_file",
         "generate_csv_file",
         "generate_docx_file",
         "generate_html_file",
