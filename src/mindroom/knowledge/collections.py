@@ -10,6 +10,8 @@ needs as arguments.
 from __future__ import annotations
 
 import asyncio
+import shutil
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -279,13 +281,60 @@ async def delete_collection(space: CollectionSpace, collection_name: str) -> boo
 def _delete_collection_sync(space: CollectionSpace, collection_name: str) -> bool:
     """Delete one collection, treating an already-absent one as success."""
     vector_db = build_vector_db(space, collection_name)
-    if vector_db.delete():
-        return True
+    deleted = vector_db.delete()
+    if not deleted:
+        try:
+            vector_db.client.get_collection(name=vector_db.collection_name)
+        except NotFoundError:
+            deleted = True
+    if deleted:
+        _reclaim_orphaned_segment_directories(space)
+    return deleted
+
+
+def _reclaim_orphaned_segment_directories(space: CollectionSpace) -> None:
+    """Remove UUID-named Chroma directories that no live segment references."""
+    database_path = space.storage_path / "chroma.sqlite3"
+    if not database_path.is_file():
+        return
     try:
-        vector_db.client.get_collection(name=vector_db.collection_name)
-    except NotFoundError:
-        return True
-    return False
+        database_uri = f"{database_path.resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(database_uri, uri=True) as connection:
+            live_segment_ids = {row[0] for row in connection.execute("SELECT id FROM segments")}
+        entries = tuple(space.storage_path.iterdir())
+    except (OSError, sqlite3.Error):
+        logger.warning(
+            "Failed to inspect knowledge segment storage for cleanup",
+            base_id=space.base_id,
+            exc_info=True,
+        )
+        return
+
+    reclaimed = 0
+    for path in entries:
+        try:
+            is_segment_directory = not path.is_symlink() and path.is_dir() and str(uuid.UUID(path.name)) == path.name
+        except (OSError, ValueError):
+            continue
+        if not is_segment_directory or path.name in live_segment_ids:
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            logger.warning(
+                "Failed to reclaim orphaned knowledge segment directory",
+                base_id=space.base_id,
+                segment_id=path.name,
+                exc_info=True,
+            )
+        else:
+            reclaimed += 1
+    if reclaimed:
+        logger.info(
+            "Reclaimed orphaned knowledge segment directories",
+            base_id=space.base_id,
+            segments=reclaimed,
+        )
 
 
 def cleanup_superseded_collections(
@@ -342,6 +391,7 @@ def cleanup_superseded_collections(
                 collection=collection_name,
                 exc_info=True,
             )
+    _reclaim_orphaned_segment_directories(space)
     if unowned:
         logger.info(
             "Preserved knowledge collections with unprovable ownership",
