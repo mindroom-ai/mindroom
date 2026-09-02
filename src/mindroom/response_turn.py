@@ -19,6 +19,8 @@ out of it and crosses via ``TurnSinks`` or the adapters.
 from __future__ import annotations
 
 import asyncio
+import sys
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -28,6 +30,7 @@ from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
 from mindroom.ai_turn_state import AITurnState
+from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -759,6 +762,49 @@ def _advance_turn_continuation(
     return advanced
 
 
+def _enter_scope_context(
+    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]],
+) -> tuple[AbstractContextManager[ScopeSessionContext | None], ScopeSessionContext | None]:
+    """Enter one synchronous scope context on a worker thread."""
+    manager = open_scope()
+    return manager, manager.__enter__()
+
+
+@asynccontextmanager
+async def _open_scope_off_event_loop(
+    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]],
+) -> AsyncIterator[ScopeSessionContext | None]:
+    """Keep synchronous session storage open and close work off the event loop."""
+    entry_task = asyncio.create_task(asyncio.to_thread(_enter_scope_context, open_scope))
+    try:
+        manager, scope_context = await wait_for_future_until_complete(entry_task)
+    except asyncio.CancelledError as cancellation:
+        # The guarded wait drains the entry task before propagating cancellation.
+        # If entry succeeded, close the newly opened storage before returning it.
+        try:
+            manager, _scope_context = entry_task.result()
+        except BaseException as entry_error:
+            raise cancellation from entry_error
+        try:
+            await run_blocking_until_complete(
+                manager.__exit__,
+                type(cancellation),
+                cancellation,
+                cancellation.__traceback__,
+            )
+        except BaseException as exit_error:
+            raise cancellation from exit_error
+        raise
+
+    try:
+        yield scope_context
+    except BaseException:
+        if not await run_blocking_until_complete(manager.__exit__, *sys.exc_info()):
+            raise
+    else:
+        await run_blocking_until_complete(manager.__exit__, None, None, None)
+
+
 async def run_blocking_response_turn(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter,
@@ -769,7 +815,7 @@ async def run_blocking_response_turn(
     """Run one blocking response turn to a final user-visible text."""
     run = TurnRunState()
     try:
-        with adapter.open_scope() as scope_context:
+        async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             run.scope_context = scope_context
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
@@ -1023,7 +1069,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
     run = TurnRunState()
     try:
-        with adapter.open_scope() as scope_context:
+        async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             run.scope_context = scope_context
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
