@@ -218,7 +218,7 @@ class _CandidateRun:
     knowledge: Knowledge
     vector_db: ChromaDb
     embedder: BatchPrefetchEmbedder | None
-    #: Revision whose file signatures seeded this candidate, when known.
+    #: Revision the candidate's file signatures describe, when known.
     baseline_revision: str | None = None
     completed: dict[str, FileSignature] = field(default_factory=dict)
     failed: dict[str, CandidateFailure] = field(default_factory=dict)
@@ -2028,7 +2028,6 @@ class KnowledgeManager:
                     base_id=self.base_id,
                     collection=run.checkpoint.collection,
                 )
-                changed_files = None
                 continue
 
             await self._publish_candidate(run, candidate_source_signature)
