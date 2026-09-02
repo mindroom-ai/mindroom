@@ -315,7 +315,7 @@ def resolve_agent_knowledge_access(
     return _merge_agent_knowledge_resolutions(agent_name, base_ids, resolved_bases)
 
 
-async def _resolve_agent_knowledge_access_async(
+async def resolve_agent_knowledge_access_async(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -323,7 +323,8 @@ async def _resolve_agent_knowledge_access_async(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> _KnowledgeResolution:
     """Resolve agent knowledge without blocking the event loop on published-index I/O."""
-    file_memory = resolve_agent_file_memory_knowledge(
+    file_memory = await asyncio.to_thread(
+        resolve_agent_file_memory_knowledge,
         agent_name,
         config,
         runtime_paths,
@@ -387,19 +388,31 @@ def resolve_knowledge_base_access(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> KnowledgeBaseAccessResolution:
     """Resolve one knowledge base without going through an agent assignment."""
-    lookup = _lookup_knowledge_for_base(
+    knowledge, availability, last_error = _resolve_base_knowledge(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
+        refresh_scheduler=None,
         execution_identity=execution_identity,
     )
-    availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
-    if lookup is not None and availability is KnowledgeAvailability.READY:
-        availability = ready_index_effective_availability(lookup, config, wall_now=datetime.now(tz=UTC))
-    knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
-    if knowledge is not None:
-        _apply_knowledge_metadata(base_id, knowledge, config)
-    last_error = lookup.state.last_error if lookup is not None and lookup.state is not None else None
+    return KnowledgeBaseAccessResolution(knowledge=knowledge, availability=availability, last_error=last_error)
+
+
+async def resolve_knowledge_base_access_async(
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> KnowledgeBaseAccessResolution:
+    """Resolve one knowledge base without blocking the event loop on index I/O."""
+    knowledge, availability, last_error = await _resolve_base_knowledge_async(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        refresh_scheduler=None,
+        execution_identity=execution_identity,
+    )
     return KnowledgeBaseAccessResolution(knowledge=knowledge, availability=availability, last_error=last_error)
 
 
@@ -507,7 +520,7 @@ class KnowledgeAccessSupport:
         orchestrator = self.runtime.orchestrator
         refresh_scheduler = orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
 
-        return await _resolve_agent_knowledge_access_async(
+        return await resolve_agent_knowledge_access_async(
             agent_name,
             self.runtime.config,
             self.runtime_paths,

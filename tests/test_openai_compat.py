@@ -5322,7 +5322,8 @@ class TestKnowledgeIntegration:
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
-                "mindroom.api.openai_compat.resolve_agent_knowledge_access",
+                "mindroom.api.openai_compat.resolve_agent_knowledge_access_async",
+                new_callable=AsyncMock,
                 side_effect=RuntimeError("DB connection failed"),
             ),
         ):

@@ -2493,8 +2493,9 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     with (
         patch.object(
             runner.deps.knowledge_access,
-            "for_agent",
-            return_value=knowledge,
+            "resolve_for_agent_async",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(knowledge=knowledge),
         ) as resolve_knowledge,
         patch("mindroom.approval_execution.create_agent", return_value=agent) as create_agent,
         patch.object(agent, "acontinue_run", new=continue_run),
@@ -2518,7 +2519,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert "io.mindroom.ai_run" in result.metadata_content
     assert bool(executed) is approved
     assert observed_metadata == ([original_metadata] if approved else [])
-    resolve_knowledge.assert_called_once_with("general", execution_identity=identity)
+    resolve_knowledge.assert_awaited_once_with("general", execution_identity=identity)
     assert create_agent.call_args.kwargs["knowledge"] is knowledge
     assert create_agent.call_args.kwargs["refresh_scheduler"] is refresh_scheduler
     continued_requirement = continue_run.call_args.kwargs["requirements"][0]
@@ -2614,7 +2615,12 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
     denial_reasons = dict.fromkeys(decision_call_ids)
 
     with (
-        patch.object(runner.deps.knowledge_access, "for_agent", return_value=MagicMock()),
+        patch.object(
+            runner.deps.knowledge_access,
+            "resolve_for_agent_async",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(knowledge=MagicMock()),
+        ),
         patch("mindroom.approval_execution.create_agent", return_value=agent),
         patch("mindroom.approval_execution.close_agent_runtime_state_dbs"),
         pytest.raises(RuntimeError, match="no longer match the approval continuation"),
@@ -2664,7 +2670,12 @@ async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tm
     )
 
     with (
-        patch.object(runner.deps.knowledge_access, "for_agent", return_value=MagicMock()),
+        patch.object(
+            runner.deps.knowledge_access,
+            "resolve_for_agent_async",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(knowledge=MagicMock()),
+        ),
         patch("mindroom.approval_execution.create_session_storage", return_value=storage),
         patch("mindroom.approval_execution.create_agent", return_value=agent),
         patch(
