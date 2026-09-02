@@ -8,7 +8,10 @@ import nio
 import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.authorization import get_available_responders_in_room, responder_candidate_entities_for_room
+from mindroom.authorization import (
+    get_available_responders_in_room,
+    responder_candidate_entities_with_membership_refresh,
+)
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -146,7 +149,7 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
@@ -174,7 +177,7 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
@@ -206,7 +209,7 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
@@ -236,7 +239,7 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
@@ -282,7 +285,7 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
@@ -312,7 +315,7 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
@@ -345,7 +348,7 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
@@ -376,7 +379,7 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
@@ -422,7 +425,7 @@ class TestResponderCandidateSelection:
         dm.add_member(assistant_id, "Assistant", None)
         dm.members_synced = True
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             dm,
             "@alice:localhost",

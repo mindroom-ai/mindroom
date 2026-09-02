@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import nio
 import pytest
 from agno.media import Image
 
@@ -69,8 +70,6 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import nio
-
     from mindroom.ingress_lanes import ReceiptLaneKey
     from mindroom.matrix.users import AgentMatrixUser
 
@@ -90,6 +89,12 @@ def _assert_ready_voice_claim_handoff(ready_event: ReadyPendingEvent | None) -> 
     )
     assert claim_metadata.payload == TurnRecord.create(["$voice_event"], completed=False)
     claim_metadata.close()
+
+
+def _synced_room(own_user_id: str) -> nio.MatrixRoom:
+    room = nio.MatrixRoom("!test:localhost", own_user_id)
+    room.members_synced = True
+    return room
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -124,8 +129,7 @@ class TestAgentBot(AgentBotTestBase):
         generate_response = AsyncMock(return_value="$response")
         install_generate_response_mock(bot, generate_response)
 
-        room = MagicMock()
-        room.room_id = "!test:localhost"
+        room = _synced_room(bot.matrix_id.full_id)
 
         event = _room_image_event(sender="@user:localhost", event_id="$img_event", body="photo.jpg")
         event.source = {"content": {"body": "photo.jpg"}}  # no filename → body is filename
@@ -214,8 +218,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        room = MagicMock()
-        room.room_id = "!test:localhost"
+        room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value=None)
@@ -238,7 +241,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        room = SimpleNamespace(room_id="!test:localhost")
+        room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
         call_order: list[str] = []
         admitted_ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
@@ -319,7 +322,8 @@ class TestAgentBot(AgentBotTestBase):
         """A media replay cannot repeat thread resolution while the first delivery owns the turn."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        room = SimpleNamespace(room_id="!test:localhost")
+        bot.client = _make_matrix_client_mock()
+        room = _synced_room(bot.matrix_id.full_id)
         event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
         resolution_started = asyncio.Event()
 
@@ -355,7 +359,8 @@ class TestAgentBot(AgentBotTestBase):
         """A durable competing owner settles redelivery without repeating media resolution."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        room = SimpleNamespace(room_id="!test:localhost")
+        bot.client = _make_matrix_client_mock()
+        room = _synced_room(bot.matrix_id.full_id)
         event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
 
         ingress = MagicMock(spec=IngressValidator, wraps=bot._ingress_validator)
@@ -384,7 +389,8 @@ class TestAgentBot(AgentBotTestBase):
         """Claim-and-reserve must leave the source retryable when lane creation fails."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        room = SimpleNamespace(room_id="!test:localhost")
+        bot.client = _make_matrix_client_mock()
+        room = _synced_room(bot.matrix_id.full_id)
         event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
         competing_claim = TurnRecord.create([event.event_id], completed=False)
 
@@ -417,8 +423,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        room = MagicMock()
-        room.room_id = "!test:localhost"
+        room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import (
     is_sender_allowed_for_agent_reply_in_room,
-    responder_candidate_entities_for_room,
+    responder_candidate_entities_from_cached_room,
 )
 from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
@@ -351,11 +351,10 @@ class TurnPolicy:
         requester_user_id: str,
         availability: _ResponderAvailability | None = None,
     ) -> list[MatrixID]:
-        """Return sender-visible candidates filtered by live responder availability."""
+        """Return candidates from the boundary-prepared room membership snapshot."""
         if availability is None:
             availability = self.responder_availability()
-        available_responders = await responder_candidate_entities_for_room(
-            self.deps.runtime.client,
+        available_responders = responder_candidate_entities_from_cached_room(
             room,
             requester_user_id,
             self.deps.runtime.config,
@@ -694,8 +693,7 @@ class TurnPolicy:
         requester_user_id = dispatch.requester_user_id
         planning_thread_history = context.planning_thread_history
         availability = self.responder_availability()
-        sender_visible_responders_in_room = await responder_candidate_entities_for_room(
-            self.deps.runtime.client,
+        sender_visible_responders_in_room = responder_candidate_entities_from_cached_room(
             room,
             requester_user_id,
             self.deps.runtime.config,

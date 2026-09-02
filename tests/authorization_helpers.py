@@ -5,9 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    import nio
+
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.commands.handler import CommandHandlerContext
+    from mindroom.matrix.identity import MatrixID
     from mindroom.orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
     from mindroom.scheduling import SchedulingRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -19,6 +22,30 @@ def isolated_membership_index() -> AgentReplyMembershipIndex:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
 
     return AgentReplyMembershipIndex()
+
+
+def _add_default_responder_candidate_resolver(kwargs: dict[str, Any]) -> None:
+    """Give detached test runtimes the production authoritative fallback."""
+    from mindroom.authorization import responder_candidate_entities_with_membership_refresh  # noqa: PLC0415
+
+    membership_index = kwargs.setdefault("agent_reply_memberships", isolated_membership_index())
+    if "responder_candidates_for_room" in kwargs:
+        return
+    client = kwargs["client"]
+    config = kwargs["config"]
+    runtime_paths = kwargs["runtime_paths"]
+
+    async def resolve_responder_candidates(room: nio.MatrixRoom, sender_id: str) -> list[MatrixID]:
+        return await responder_candidate_entities_with_membership_refresh(
+            client,
+            room,
+            sender_id,
+            config,
+            runtime_paths,
+            membership_index,
+        )
+
+    kwargs["responder_candidates_for_room"] = resolve_responder_candidates
 
 
 def make_test_tool_runtime_context(*args: Any, **kwargs: Any) -> ToolRuntimeContext:  # noqa: ANN401
@@ -41,7 +68,7 @@ def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandl
     """Build a detached command context with an explicit isolated index."""
     from mindroom.commands.handler import CommandHandlerContext  # noqa: PLC0415
 
-    kwargs.setdefault("agent_reply_memberships", isolated_membership_index())
+    _add_default_responder_candidate_resolver(kwargs)
     return CommandHandlerContext(*args, **kwargs)
 
 
@@ -49,7 +76,7 @@ def make_test_scheduling_runtime(*args: Any, **kwargs: Any) -> SchedulingRuntime
     """Build a detached scheduling runtime with an explicit isolated index."""
     from mindroom.scheduling import SchedulingRuntime  # noqa: PLC0415
 
-    kwargs.setdefault("agent_reply_memberships", isolated_membership_index())
+    _add_default_responder_candidate_resolver(kwargs)
     return SchedulingRuntime(*args, **kwargs)
 
 

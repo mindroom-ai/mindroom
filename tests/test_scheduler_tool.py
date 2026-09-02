@@ -7,16 +7,22 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    build_scheduling_runtime_from_tool_runtime_context,
+    tool_runtime_context,
+)
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -136,6 +142,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         conversation_reader=context.conversation_reader,
         matrix_admin=matrix_admin,
         agent_reply_memberships=context.agent_reply_memberships,
+        responder_candidates_for_room=context.responder_candidates_for_current_room,
     )
     assert first_call == {
         "runtime": expected_runtime,
@@ -167,6 +174,39 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "history_limit": 0,
         "silent": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_scheduler_tool_reuses_failed_turn_membership_snapshot() -> None:
+    """A turn-bound scheduler runtime must not retry its failed membership refresh."""
+    requester_id = "@user:localhost"
+    config = _bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            administrators=[requester_id],
+        ),
+    )
+    general_id = entity_ids(config, runtime_paths_for(config))["general"]
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id=general_id.full_id)
+    room.add_member(general_id.full_id, "General Agent", None)
+    room.add_member(requester_id, "User", None)
+    client = AsyncMock()
+    client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+    context = replace(
+        _make_context(config),
+        client=client,
+        requester_id=requester_id,
+        room=room,
+        membership_turn_id="$turn",
+    )
+
+    assert not await ensure_room_membership_synced(client, room, sender_id=requester_id)
+
+    runtime = build_scheduling_runtime_from_tool_runtime_context(context)
+    candidates = await runtime.responder_candidates_for_room(room, requester_id)
+
+    assert candidates == [general_id]
+    assert client.joined_members.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -252,6 +292,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         room=context.room,
         conversation_reader=context.conversation_reader,
         agent_reply_memberships=context.agent_reply_memberships,
+        responder_candidates_for_room=context.responder_candidates_for_current_room,
     )
     assert mock_edit.await_count == 3
     assert mock_edit.await_args_list[0].kwargs == {

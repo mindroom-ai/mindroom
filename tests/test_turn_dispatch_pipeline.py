@@ -1460,6 +1460,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.members_synced = True
         event = nio.RoomMessageText.from_dict(
             {
                 "event_id": "$source",
@@ -1507,6 +1508,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.members_synced = True
         event = self._router_relay_event()
         ingress_started = asyncio.Event()
         release_ingress = asyncio.Event()
@@ -1555,6 +1557,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.members_synced = True
         event = nio.RoomMessageText.from_dict(
             {
                 "event_id": "$followup",
@@ -1663,7 +1666,7 @@ class TestAgentBot(AgentBotTestBase):
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mention_kind", ["other_agent", "non_agent"])
+    @pytest.mark.parametrize("mention_kind", ["other_agent", "joined_human"])
     async def test_router_handoff_for_another_target_does_not_signal_active_response(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -1677,14 +1680,16 @@ class TestAgentBot(AgentBotTestBase):
         ids = entity_ids(config, runtime_paths)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         replace_turn_controller_deps(bot, runtime=replace(bot._runtime_view, client=_make_matrix_client_mock()))
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+        room.add_member(bot.matrix_id.full_id, "Calculator", None)
+        room.add_member("@user:localhost", "User", None)
         if mention_kind == "other_agent":
             body = "@general could you help with this?"
             mentioned_user_id = ids["general"].full_id
         else:
             body = "@person:localhost could you help with this?"
             mentioned_user_id = "@person:localhost"
+            room.add_member(mentioned_user_id, "Person", None)
         event = self._router_relay_event(body=body)
         event.source["content"]["m.mentions"] = {"user_ids": [mentioned_user_id]}
         prepared_event = PreparedIngress(
@@ -1722,26 +1727,35 @@ class TestAgentBot(AgentBotTestBase):
         assert all(item.kind != "queued_notice_reservation" for item in ready_result.pending_event.dispatch_metadata)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("explicit_self_target", [True, False])
-    async def test_router_handoff_for_this_agent_or_without_a_target_signals_active_response(
+    @pytest.mark.parametrize("target_kind", ["self", "none", "absent_human"])
+    async def test_router_handoff_without_another_room_participant_signals_active_response(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         *,
-        explicit_self_target: bool,
+        target_kind: str,
     ) -> None:
-        """Only a handoff explicitly addressed elsewhere suppresses the queued notice."""
+        """Only a handoff addressed to another joined participant suppresses the queued notice."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         replace_turn_controller_deps(bot, runtime=replace(bot._runtime_view, client=_make_matrix_client_mock()))
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        body = "@calculator could you help with this?" if explicit_self_target else "could you help with this?"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+        room.add_member(bot.matrix_id.full_id, "Calculator", None)
+        room.add_member("@user:localhost", "User", None)
+        if target_kind == "self":
+            body = "@calculator could you help with this?"
+            mentioned_user_ids = [ids["calculator"].full_id]
+        elif target_kind == "absent_human":
+            body = "@person:localhost could you help with this?"
+            mentioned_user_ids = ["@person:localhost"]
+        else:
+            body = "could you help with this?"
+            mentioned_user_ids = []
         event = self._router_relay_event(body=body)
-        if explicit_self_target:
-            event.source["content"]["m.mentions"] = {"user_ids": [ids["calculator"].full_id]}
+        if mentioned_user_ids:
+            event.source["content"]["m.mentions"] = {"user_ids": mentioned_user_ids}
         prepared_event = PreparedIngress(
             sender=event.sender,
             event_id=event.event_id,
@@ -1790,6 +1804,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.members_synced = True
         event = nio.RoomMessageText.from_dict(
             {
                 "event_id": f"${source_kind}",
@@ -2507,6 +2522,7 @@ class TestAgentBot(AgentBotTestBase):
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
+        room.members_synced = True
         room.canonical_alias = None
         room.users = {"@mindroom_calculator:localhost": MagicMock(), "@user:localhost": MagicMock()}
         event = _room_image_event(sender="@user:localhost", event_id="$img_event_fail", body="photo.jpg")

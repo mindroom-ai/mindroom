@@ -16,7 +16,7 @@ from agno.media import Audio
 
 from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
-from mindroom.authorization import responder_candidate_entities_for_room
+from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.config.voice import normalize_speech_base_url
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -417,8 +417,7 @@ async def _handle_voice_message(
 
         logger.info("voice_transcription_received", transcription=transcription)
 
-        available_agent_names, available_team_names = await _get_available_entities_for_sender(
-            client,
+        available_agent_names, available_team_names = _get_available_entities_for_sender(
             room,
             event.sender,
             config,
@@ -644,8 +643,7 @@ async def _process_transcription(
         return transcription
 
 
-async def _get_available_entities_for_sender(
-    client: nio.AsyncClient,
+def _get_available_entities_for_sender(
     room: nio.MatrixRoom,
     sender_id: str,
     config: Config,
@@ -657,8 +655,7 @@ async def _get_available_entities_for_sender(
     available_team_names: list[str] = []
     registry = entity_identity_registry(config, runtime_paths)
 
-    for matrix_id in await responder_candidate_entities_for_room(
-        client,
+    for matrix_id in responder_candidate_entities_from_cached_room(
         room,
         sender_id,
         config,

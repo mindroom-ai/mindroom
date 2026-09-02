@@ -1961,7 +1961,10 @@ async def test_edit_scheduled_task_persists_via_admin_and_preserves_omitted_sile
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=updated_workflow)),
     ):
         result = await edit_scheduled_task(
@@ -2159,7 +2162,7 @@ async def test_schedule_task_returns_error_when_sender_blocked_from_all_agents()
 
     with (
         patch(
-            "mindroom.scheduling.responder_candidate_entities_for_room",
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
             return_value=[],
         ),
         patch(
@@ -2188,7 +2191,7 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
 
     with (
         patch(
-            "mindroom.scheduling.responder_candidate_entities_for_room",
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
             return_value=[],
         ),
         patch(
@@ -2313,7 +2316,10 @@ async def test_schedule_task_persists_via_admin_when_active_agent_lacks_state_po
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch("mindroom.scheduling._start_scheduled_task", return_value=True),
@@ -2374,7 +2380,10 @@ async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_tr
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch("mindroom.scheduling._start_scheduled_task", return_value=True),
@@ -2435,7 +2444,10 @@ async def test_schedule_task_keeps_parse_produced_history_limit(tmp_path: Path) 
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch("mindroom.scheduling._start_scheduled_task", return_value=True),
@@ -2506,7 +2518,10 @@ async def test_schedule_task_returns_error_when_state_write_fails_without_admin_
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch("mindroom.scheduling._start_scheduled_task", return_value=True) as start_task,
@@ -2577,7 +2592,10 @@ async def test_schedule_task_returns_error_when_active_write_returns_unexpected_
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch("mindroom.scheduling._start_scheduled_task", return_value=True) as start_task,
@@ -2696,13 +2714,6 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
     )
     conversation_reader = make_conversation_reader_mock()
     serve_conversation_reader(conversation_reader, [thread_message])
-    runtime = _scheduling_runtime(
-        client=client,
-        config=config,
-        runtime_paths=runtime_paths,
-        room=room,
-        conversation_reader=conversation_reader,
-    )
     parse_result = ScheduledWorkflow(
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
@@ -2714,12 +2725,19 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
 
     with (
         patch(
-            "mindroom.scheduling.responder_candidate_entities_for_room",
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
             new=AsyncMock(return_value=[ids["assistant"], ids["writer"]]),
         ),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=parse_result)),
         patch("mindroom.scheduling._save_pending_scheduled_task", new=AsyncMock()) as save_task,
     ):
+        runtime = _scheduling_runtime(
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            room=room,
+            conversation_reader=conversation_reader,
+        )
         task_id, message = await schedule_task(
             runtime=runtime,
             room_id="!test:server",

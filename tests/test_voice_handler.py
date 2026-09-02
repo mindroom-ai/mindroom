@@ -14,6 +14,7 @@ import pytest
 from agno.media import Audio
 
 from mindroom import voice_handler
+from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
@@ -479,6 +480,40 @@ class TestVoiceHandler:
         assert mock_process.await_count == 1
         assert mock_process.await_args.kwargs["available_agent_names"] == ["openclaw"]
         assert mock_process.await_args.kwargs["available_team_names"] == []
+
+    @pytest.mark.asyncio
+    async def test_voice_handler_reuses_failed_boundary_membership_snapshot(self) -> None:
+        """Voice normalization must not retry a failed membership refresh from the same turn."""
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        client = AsyncMock()
+        client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+        room = _matrix_room(
+            "!voice:localhost",
+            members=("@mindroom_router:localhost", "@alice:example.com"),
+            members_synced=False,
+        )
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$voice"
+        event.sender = "@alice:example.com"
+        event.body = "voice.ogg"
+        event.source = {"content": {"body": "voice.ogg"}}
+
+        assert not await ensure_room_membership_synced(client, room, sender_id=event.sender)
+
+        with (
+            patch("mindroom.voice_handler._transcribe_audio", return_value="hello"),
+            patch("mindroom.voice_handler._process_transcription", return_value="hello"),
+        ):
+            result = await _handle_voice_message(
+                client,
+                room,
+                event,
+                config,
+                audio=Audio(content=b"audio", mime_type="audio/ogg"),
+            )
+
+        assert result == "🎤 hello"
+        assert client.joined_members.await_count == 1
 
     @pytest.mark.asyncio
     async def test_download_audio_unencrypted(self) -> None:

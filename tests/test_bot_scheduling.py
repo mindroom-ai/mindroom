@@ -1804,8 +1804,8 @@ class TestRouterSkipsSingleAgent:
         with (
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             # Return only one agent (general)
@@ -1891,8 +1891,8 @@ class TestRouterSkipsSingleAgent:
         with (
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             # Return multiple agents
@@ -1995,8 +1995,8 @@ class TestRouterSkipsSingleAgent:
         with (
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             mock_get_available.return_value = [
@@ -2077,8 +2077,8 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
@@ -2145,8 +2145,8 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
@@ -2229,8 +2229,8 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
             patch("mindroom.turn_policy.get_agents_in_thread") as mock_agents_in_thread,
         ):
@@ -2305,8 +2305,8 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             mock_get_available.return_value = [

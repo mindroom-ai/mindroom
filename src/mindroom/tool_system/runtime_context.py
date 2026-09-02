@@ -114,6 +114,39 @@ class ToolRuntimeContext:
             raise RuntimeError(msg)
         return self.agent_reply_memberships
 
+    async def responder_candidates_for_current_room(
+        self,
+        room: nio.MatrixRoom,
+        requester_user_id: str,
+    ) -> list[MatrixID]:
+        """Resolve current-room candidates through this context's membership boundary."""
+        from mindroom.authorization import (  # noqa: PLC0415
+            responder_candidate_entities_from_cached_room,
+            responder_candidate_entities_with_membership_refresh,
+        )
+
+        if room.room_id != self.room_id:
+            msg = "Tool runtime current-room candidate resolution requires the context room"
+            raise ValueError(msg)
+        config = self.current_config
+        membership_index = self.require_agent_reply_memberships()
+        if self.membership_turn_id is not None:
+            return responder_candidate_entities_from_cached_room(
+                room,
+                requester_user_id,
+                config,
+                self.runtime_paths,
+                membership_index,
+            )
+        return await responder_candidate_entities_with_membership_refresh(
+            self.client,
+            room,
+            requester_user_id,
+            config,
+            self.runtime_paths,
+            membership_index,
+        )
+
     @property
     def room_id(self) -> str:
         """Return the canonical target room ID."""
@@ -490,6 +523,7 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
         agent_reply_memberships=context.require_agent_reply_memberships(),
+        responder_candidates_for_room=context.responder_candidates_for_current_room,
     )
 
 
