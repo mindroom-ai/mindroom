@@ -456,7 +456,6 @@ def _record_git_sync(
     *relative_paths: str,
 ) -> GitSyncResult:
     """Record a faked sync's outcome the way a real one would, then return it."""
-    source._last_synced_head = result.head
     source._tracked_relative_paths = set(relative_paths)
     return result
 
@@ -3430,6 +3429,7 @@ async def test_publish_metadata_save_finishes_before_repeated_cancellation_escap
             candidate_vector_db=candidate_vector_db,
             indexed_count=0,
             source_signature="source-signature",
+            published_revision=None,
         ),
     )
     await save_started.wait()
@@ -3473,6 +3473,7 @@ async def test_cancelled_publish_metadata_save_surfaces_a_failed_write(
             candidate_vector_db=candidate_vector_db,
             indexed_count=0,
             source_signature="source-signature",
+            published_revision=None,
         ),
     )
     await save_started.wait()
@@ -3527,6 +3528,7 @@ async def test_publishing_states_every_field_of_the_state_file(tmp_path: Path) -
             candidate_vector_db=candidate_vector_db,
             indexed_count=4,
             source_signature="new-signature",
+            published_revision=None,
         )
         is False
     )
@@ -7874,6 +7876,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
 
     monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_success)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+    _install_git_revisions(monkeypatch, ["rev-git"])
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -7986,6 +7989,7 @@ async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
         return await original_reindex(self, force_reindex=force_reindex)
 
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+    _install_git_revisions(monkeypatch, ["rev-a"])
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -8020,6 +8024,7 @@ async def test_git_noop_refresh_skips_corpus_hash_when_revision_is_unchanged(
             GitSyncResult(head="rev-a", updated=False),
         ],
     )
+    _install_git_revisions(monkeypatch, ["rev-a"])
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     def _unexpected_signature(*_args: object, **_kwargs: object) -> str:
@@ -8225,6 +8230,58 @@ async def test_git_delta_targets_the_revision_verified_by_the_refresh_round(
 
     assert result.index_published is True
     assert result.indexed_count == 2
+
+
+@pytest.mark.asyncio
+async def test_git_publish_records_verified_revision_before_later_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Published metadata must identify the revision whose vectors were verified."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+        ],
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-c", "rev-c", "rev-b", "rev-b"])
+
+    async def _changed_files_between(
+        _self: GitKnowledgeSource,
+        before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str] | None:
+        if before_head is None:
+            return None
+        return frozenset({"doc.md"}) if before_head != after_head else frozenset()
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _changed_files_between)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    docs_path = tmp_path / "docs"
+    (docs_path / "doc.md").write_text("content at rev-c", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state_at_rev_c = load_published_index_state(published_index_metadata_path(key))
+
+    (docs_path / "doc.md").write_text("content at rev-b", encoding="utf-8")
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    state_at_rev_b = load_published_index_state(published_index_metadata_path(key))
+
+    assert state_at_rev_c is not None
+    assert state_at_rev_c.published_revision == "rev-c"
+    assert state_at_rev_b is not None
+    assert state_at_rev_b.published_revision == "rev-b"
+    assert state_at_rev_b.source_signature == _knowledge_source_signature(
+        config,
+        "docs",
+        docs_path,
+        tracked_relative_paths={"doc.md"},
+    )
+    assert result.index_published is True
 
 
 @pytest.mark.asyncio

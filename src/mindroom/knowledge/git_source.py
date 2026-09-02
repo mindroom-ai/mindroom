@@ -417,7 +417,6 @@ class GitKnowledgeSource:
         init=False,
         repr=False,
     )
-    _last_synced_head: str | None = field(default=None, init=False)
     _lfs_checked: bool = field(default=False, init=False)
     _lfs_repository_ready: bool = field(default=False, init=False)
     _tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
@@ -425,11 +424,6 @@ class GitKnowledgeSource:
     def is_configured(self) -> bool:
         """Return whether this knowledge base is backed by a Git repository."""
         return self._git_config() is not None
-
-    @property
-    def last_synced_head(self) -> str | None:
-        """Return the revision this process last synchronized, or None."""
-        return self._last_synced_head
 
     def cached_tracked_relative_paths(self) -> set[str] | None:
         """Return tracked paths already listed in this process, without listing any.
@@ -498,7 +492,6 @@ class GitKnowledgeSource:
             self._clear_orphaned_index_lock()
             changed_files, removed_files, updated = await self._sync_once(git_config)
             current_head = await self._rev_parse("HEAD")
-            self._last_synced_head = current_head
 
         if updated:
             logger.info(

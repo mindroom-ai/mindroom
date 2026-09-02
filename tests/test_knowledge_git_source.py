@@ -174,7 +174,6 @@ async def test_git_source_sync_does_not_mutate_index_directly(
     assert not hasattr(manager, "remove_file")
     assert not hasattr(manager, "index_file")
     assert result == GitSyncResult(head="rev-source-only", updated=True)
-    assert manager.git_source.last_synced_head == "rev-source-only"
 
 
 @pytest.mark.asyncio

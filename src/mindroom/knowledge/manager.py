@@ -747,13 +747,14 @@ class KnowledgeManager:
         candidate_vector_db: ChromaDb,
         indexed_count: int,
         source_signature: str,
+        published_revision: str | None,
     ) -> bool:
         state = state_for_publication(
             settings=self._indexing_settings,
             collection=candidate_vector_db.collection_name,
             indexed_count=indexed_count,
             source_signature=source_signature,
-            published_revision=self.git_source.last_synced_head,
+            published_revision=published_revision,
         )
         save_task = asyncio.create_task(
             asyncio.to_thread(save_published_index_state, self._indexing_settings_path, state),
@@ -774,12 +775,14 @@ class KnowledgeManager:
         candidate_vector_db: ChromaDb,
         indexed_count: int,
         source_signature: str,
+        published_revision: str | None,
         publish_state: _CandidatePublishState,
     ) -> None:
         publish_cancelled = await self._save_candidate_publish_metadata(
             candidate_vector_db=candidate_vector_db,
             indexed_count=indexed_count,
             source_signature=source_signature,
+            published_revision=published_revision,
         )
         publish_state.index_published = True
         # Adopt the candidate as this manager's live vector database:
@@ -2045,6 +2048,7 @@ class KnowledgeManager:
                 candidate_vector_db=run.vector_db,
                 indexed_count=len(run.completed),
                 source_signature=source_signature,
+                published_revision=run.baseline_revision,
                 publish_state=publish_state,
             )
         finally:
