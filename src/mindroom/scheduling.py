@@ -20,7 +20,6 @@ from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
 
 from mindroom import model_loading, scheduling_executor
-from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.logging_config import bound_log_context, get_logger
@@ -183,8 +182,8 @@ class SchedulingRuntime:
     room: nio.MatrixRoom
     conversation_reader: ConversationReader
     agent_reply_memberships: AgentReplyMembershipIndex
+    responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     matrix_admin: HookMatrixAdmin | None = None
-    responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]] | None = None
 
 
 @dataclass
@@ -1383,17 +1382,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
 
-    if runtime.responder_candidates_for_room is None:
-        sender_visible_room_responders = await responder_candidate_entities_for_room(
-            client,
-            room,
-            scheduled_by,
-            config,
-            runtime_paths,
-            runtime.agent_reply_memberships,
-        )
-    else:
-        sender_visible_room_responders = await runtime.responder_candidates_for_room(room, scheduled_by)
+    sender_visible_room_responders = await runtime.responder_candidates_for_room(room, scheduled_by)
 
     available_responders: list[MatrixID] = []
     if new_thread:

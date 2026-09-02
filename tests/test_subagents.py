@@ -13,6 +13,7 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.agent_descriptions import describe_agent
+from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -445,6 +446,28 @@ async def test_agents_list_can_delegate_aligns_with_delegate_tools(tmp_path: Pat
     result = await delegate_tools.delegate_task("C", "task")
     assert "Cannot delegate to 'C'" in result
     assert "Run agents_list to inspect can_delegate flags." in result
+
+
+@pytest.mark.asyncio
+async def test_agents_list_reuses_failed_turn_membership_snapshot(tmp_path: Path) -> None:
+    """Current-room discovery must not retry a failed turn membership refresh."""
+    base_context = _make_context(tmp_path)
+    assert base_context.room is not None
+    base_context.room.members_synced = False
+    base_context.client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+    context = replace(base_context, membership_turn_id="$turn")
+
+    assert not await ensure_room_membership_synced(
+        context.client,
+        context.room,
+        sender_id=context.requester_id,
+    )
+
+    with tool_runtime_context(context):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    assert [agent["name"] for agent in payload["agents"]] == ["code", "research"]
+    assert context.client.joined_members.await_count == 1
 
 
 @pytest.mark.asyncio

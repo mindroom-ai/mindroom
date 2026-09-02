@@ -120,7 +120,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
-            patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
+            patch("mindroom.turn_policy.responder_candidate_entities_from_cached_room") as mock_get_available,
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.dispatch_handoff.extract_media_caption", return_value="[Attached image]"),
         ):
@@ -265,7 +265,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
-            patch("mindroom.turn_policy.responder_candidate_entities_for_room") as mock_get_available,
+            patch("mindroom.turn_policy.responder_candidate_entities_from_cached_room") as mock_get_available,
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch(
                 "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
@@ -659,7 +659,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
                 return_value=[
                     entity_ids(config, runtime_paths_for(config))["calculator"],
                     entity_ids(config, runtime_paths_for(config))["general"],
@@ -750,7 +750,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
                 return_value=[
                     entity_ids(config, runtime_paths_for(config))["calculator"],
                     entity_ids(config, runtime_paths_for(config))["general"],
@@ -925,7 +925,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch("mindroom.turn_policy.thread_requires_explicit_agent_targeting", return_value=False),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
                 return_value=[entity_ids(config, runtime_paths_for(config))["calculator"]],
             ),
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
@@ -1045,7 +1045,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
-            patch("mindroom.turn_policy.responder_candidate_entities_for_room", return_value=[]),
+            patch("mindroom.turn_policy.responder_candidate_entities_from_cached_room", return_value=[]),
             patch(
                 "mindroom.inbound_turn_normalizer.resolve_thread_attachment_ids",
                 new_callable=AsyncMock,

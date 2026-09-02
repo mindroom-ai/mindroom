@@ -410,15 +410,15 @@ def _configured_responder_candidates_for_room(
     )
 
 
-async def responder_candidate_entities_for_room(
-    client: nio.AsyncClient | None,
+async def responder_candidate_entities_with_membership_refresh(
+    client: nio.AsyncClient,
     room: nio.MatrixRoom,
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
-    """Return sender-visible responder candidates without widening configured rooms."""
+    """Return candidates, refreshing unsynced ad-hoc room membership when possible."""
     configured_entities = _configured_responder_candidates_for_room(
         room,
         sender_id,
@@ -428,8 +428,6 @@ async def responder_candidate_entities_for_room(
     )
     if configured_entities is not None:
         return configured_entities
-    if client is None:
-        return _get_available_responders_for_sender(room, sender_id, config, runtime_paths, membership_index)
     return await _get_available_responders_for_sender_authoritative(
         client,
         room,

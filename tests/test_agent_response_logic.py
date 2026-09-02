@@ -15,7 +15,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -362,8 +362,8 @@ class TestAgentResponseLogic:
 
         candidate_ids = entity_ids(self.config, self.runtime_paths)
         with patch(
-            "mindroom.turn_policy.responder_candidate_entities_for_room",
-            new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+            "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+            new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
         ):
             multiple_visible_action = await policy._resolve_response_action(
                 dispatch,
@@ -375,8 +375,8 @@ class TestAgentResponseLogic:
         assert multiple_visible_action.kind == "skip"
 
         with patch(
-            "mindroom.turn_policy.responder_candidate_entities_for_room",
-            new=AsyncMock(return_value=[candidate_ids["calculator"]]),
+            "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+            new=MagicMock(return_value=[candidate_ids["calculator"]]),
         ):
             single_visible_action = await policy._resolve_response_action(
                 dispatch,
@@ -440,8 +440,8 @@ class TestAgentResponseLogic:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
             ),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -522,8 +522,8 @@ class TestAgentResponseLogic:
         candidate_ids = entity_ids(self.config, self.runtime_paths)
 
         with patch(
-            "mindroom.turn_policy.responder_candidate_entities_for_room",
-            new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+            "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+            new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
         ):
             action = await policy._resolve_response_action(
                 dispatch,
@@ -601,8 +601,8 @@ class TestAgentResponseLogic:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
             ),
             patch(
                 "mindroom.turn_policy.decide_team_formation",

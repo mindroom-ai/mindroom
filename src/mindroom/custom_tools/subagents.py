@@ -14,7 +14,10 @@ import nio
 from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
-from mindroom.authorization import responder_candidate_entities_for_room, responder_candidate_entities_from_cached_room
+from mindroom.authorization import (
+    responder_candidate_entities_from_cached_room,
+    responder_candidate_entities_with_membership_refresh,
+)
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -294,19 +297,15 @@ async def _available_subagent_names(context: ToolRuntimeContext, *, room_id: str
     context = replace(context, config=context.current_config, config_provider=None)
     target_room_id = room_id or context.room_id
     target_room = _cached_target_room(context, target_room_id)
-    if target_room is not None:
-        candidates = await responder_candidate_entities_for_room(
+    if target_room_id == context.room_id:
+        candidates = await context.responder_candidates_for_current_room(
+            target_room or _context_room(context),
+            context.requester_id,
+        )
+    elif target_room is not None:
+        candidates = await responder_candidate_entities_with_membership_refresh(
             context.client,
             target_room,
-            context.requester_id,
-            context.config,
-            context.runtime_paths,
-            context.require_agent_reply_memberships(),
-        )
-    elif target_room_id == context.room_id:
-        candidates = await responder_candidate_entities_for_room(
-            context.client,
-            _context_room(context),
             context.requester_id,
             context.config,
             context.runtime_paths,
