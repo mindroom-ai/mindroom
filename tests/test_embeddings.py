@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import mindroom.embeddings as embedding_helpers
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.embeddings import (
     create_sentence_transformers_embedder,
@@ -21,6 +24,11 @@ from mindroom.model_defaults import OPENAI_EMBEDDING_LARGE, SENTENCE_TRANSFORMER
 from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sentence_transformer_client_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(embedding_helpers, "_SENTENCE_TRANSFORMER_CLIENT", None)
 
 
 def _mock_openai_client() -> MagicMock:
@@ -161,7 +169,18 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
 ) -> None:
     """Concurrent index handles should share one expensive local model client."""
     construction_lock = threading.Lock()
+    dependency_checks_active = 0
+    max_dependency_checks_active = 0
     model_constructions = 0
+
+    def _ensure(_runtime_paths: object) -> None:
+        nonlocal dependency_checks_active, max_dependency_checks_active
+        with construction_lock:
+            dependency_checks_active += 1
+            max_dependency_checks_active = max(max_dependency_checks_active, dependency_checks_active)
+        time.sleep(0.02)
+        with construction_lock:
+            dependency_checks_active -= 1
 
     class DummyEmbedder:
         def __init__(
@@ -179,7 +198,7 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
                 sentence_transformer_client = object()
             self.sentence_transformer_client = sentence_transformer_client
 
-    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", _ensure)
     monkeypatch.setattr(
         "mindroom.embeddings.importlib.import_module",
         lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
@@ -197,8 +216,44 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
         )
 
     assert model_constructions == 1
+    assert max_dependency_checks_active == 1
     assert len({id(embedder) for embedder in embedders}) == 8
     assert len({id(embedder.sentence_transformer_client) for embedder in embedders}) == 1
+
+
+def test_sentence_transformers_embedder_releases_retired_cached_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Switching the active model should not permanently retain the old client."""
+
+    class ModelClient:
+        pass
+
+    class DummyEmbedder:
+        def __init__(
+            self,
+            *,
+            sentence_transformer_client: object | None = None,
+            **_kwargs: object,
+        ) -> None:
+            self.sentence_transformer_client = sentence_transformer_client or ModelClient()
+
+    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr(
+        "mindroom.embeddings.importlib.import_module",
+        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
+    )
+
+    old_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/old")
+    old_client = old_embedder.sentence_transformer_client
+    old_client_ref = weakref.ref(old_client)
+
+    new_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/new")
+
+    assert new_embedder.sentence_transformer_client is not old_client
+    del old_embedder, old_client
+    gc.collect()
+    assert old_client_ref() is None
 
 
 class _ConcurrencyProbe:
