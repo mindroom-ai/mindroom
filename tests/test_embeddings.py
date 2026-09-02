@@ -191,6 +191,7 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
         ) -> None:
             nonlocal model_constructions
             self.id = kwargs["id"]
+            self.dimensions = kwargs.get("dimensions")
             if sentence_transformer_client is None:
                 with construction_lock:
                     model_constructions += 1
@@ -210,6 +211,7 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
                 lambda _index: create_sentence_transformers_embedder(
                     TEST_RUNTIME_PATHS,
                     "sentence-transformers/cache-regression-test",
+                    dimensions=384 if _index % 2 == 0 else 768,
                 ),
                 range(8),
             ),
@@ -219,6 +221,7 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
     assert max_dependency_checks_active == 1
     assert len({id(embedder) for embedder in embedders}) == 8
     assert len({id(embedder.sentence_transformer_client) for embedder in embedders}) == 1
+    assert {embedder.dimensions for embedder in embedders} == {384, 768}
 
 
 def test_sentence_transformers_embedder_releases_retired_cached_model(
@@ -254,6 +257,46 @@ def test_sentence_transformers_embedder_releases_retired_cached_model(
     del old_embedder, old_client
     gc.collect()
     assert old_client_ref() is None
+
+
+def test_sentence_transformers_embedder_retries_failed_model_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed replacement should preserve the old client and allow retry."""
+    reject_new_model = True
+
+    class DummyEmbedder:
+        def __init__(
+            self,
+            *,
+            sentence_transformer_client: object | None = None,
+            **kwargs: object,
+        ) -> None:
+            if kwargs["id"] == "sentence-transformers/new" and reject_new_model:
+                error_message = "model load failed"
+                raise RuntimeError(error_message)
+            self.sentence_transformer_client = sentence_transformer_client or object()
+
+    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr(
+        "mindroom.embeddings.importlib.import_module",
+        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
+    )
+
+    old_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/old")
+
+    with pytest.raises(RuntimeError, match="model load failed"):
+        create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/new")
+
+    old_embedder_after_failure = create_sentence_transformers_embedder(
+        TEST_RUNTIME_PATHS,
+        "sentence-transformers/old",
+    )
+    assert old_embedder_after_failure.sentence_transformer_client is old_embedder.sentence_transformer_client
+
+    reject_new_model = False
+    new_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/new")
+    assert new_embedder.sentence_transformer_client is not old_embedder.sentence_transformer_client
 
 
 class _ConcurrencyProbe:
