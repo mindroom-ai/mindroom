@@ -474,7 +474,11 @@ class GitKnowledgeSource:
                 exc_info=True,
             )
             return None
-        return frozenset(path for path in output.split("\0") if path and self._include_relative_path(path))
+        changed_paths = frozenset(path for path in output.split("\0") if path)
+        # Attributes can alter checkout bytes without changing a managed blob.
+        if any(path.rsplit("/", 1)[-1] == ".gitattributes" for path in changed_paths):
+            return None
+        return frozenset(path for path in changed_paths if self._include_relative_path(path))
 
     async def sync(self) -> GitSyncResult:
         """Fetch and force-align one configured Git repository checkout.

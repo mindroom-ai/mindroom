@@ -1680,6 +1680,22 @@ async def test_changed_files_between_preserves_special_character_paths(
 
 
 @pytest.mark.asyncio
+async def test_changed_files_between_falls_back_when_attributes_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attributes can change checkout bytes without changing a managed blob."""
+    manager = _git_manager(tmp_path)
+
+    async def _fake_run_git(_args: list[str], **_: object) -> str:
+        return "nested/.gitattributes\0"
+
+    monkeypatch.setattr(manager.git_source, "_run_git", _fake_run_git)
+
+    assert await manager.git_source.changed_files_between("before", "after") is None
+
+
+@pytest.mark.asyncio
 async def test_hydrate_git_lfs_worktree_ignores_index_extension_filters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
