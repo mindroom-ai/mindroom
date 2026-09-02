@@ -633,8 +633,8 @@ class TestAgentBot(AgentBotTestBase):
                 )
 
         assert generation.delivery.event_id == "$response"
-        bot._knowledge_access_support.resolve_for_agent.assert_called_once()
-        args, kwargs = bot._knowledge_access_support.resolve_for_agent.call_args
+        bot._knowledge_access_support.resolve_for_agent_async.assert_awaited_once()
+        args, kwargs = bot._knowledge_access_support.resolve_for_agent_async.call_args
         assert args == ("calculator",)
         assert kwargs["execution_identity"] is not None
 
@@ -2696,7 +2696,9 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        bot._knowledge_access_support.resolve_for_agent = MagicMock(return_value=_KnowledgeResolution(knowledge=None))
+        bot._knowledge_access_support.resolve_for_agent_async = AsyncMock(
+            return_value=_KnowledgeResolution(knowledge=None),
+        )
         thread_history = [
             _visible_message(
                 sender=f"@user{i}:localhost",
@@ -2819,7 +2821,9 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.thread_summary_first_threshold = 1
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        bot._knowledge_access_support.resolve_for_agent = MagicMock(return_value=_KnowledgeResolution(knowledge=None))
+        bot._knowledge_access_support.resolve_for_agent_async = AsyncMock(
+            return_value=_KnowledgeResolution(knowledge=None),
+        )
         root_event_id = "$root_event"
         resolved_target = MessageTarget.resolve(
             room_id="!test:localhost",

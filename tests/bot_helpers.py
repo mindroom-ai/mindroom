@@ -313,10 +313,10 @@ def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> Magi
 def _set_knowledge_for_agent(bot: AgentBot, knowledge_for_agent: MagicMock) -> MagicMock:
     """Replace the captured knowledge resolver on the real response coordinator."""
     bot._knowledge_access_support.for_agent = knowledge_for_agent
-    resolve_for_agent = MagicMock(
+    resolve_for_agent = AsyncMock(
         return_value=_KnowledgeResolution(knowledge=knowledge_for_agent.return_value),
     )
-    bot._knowledge_access_support.resolve_for_agent = resolve_for_agent
+    bot._knowledge_access_support.resolve_for_agent_async = resolve_for_agent
     return resolve_for_agent
 
 

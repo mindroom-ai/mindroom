@@ -3891,7 +3891,7 @@ class ResponseRunner:
         show_tool_calls = runtime.show_tool_calls
 
         async def build_response_text() -> str:
-            knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
+            knowledge_resolution = await self.deps.knowledge_access.resolve_for_agent_async(
                 self.deps.agent_name,
                 execution_identity=runtime.tool_dispatch.execution_identity,
             )
@@ -3986,7 +3986,7 @@ class ResponseRunner:
             if visible_event_id_callback is not None:
                 visible_event_id_callback(response_event_id)
 
-        knowledge_resolution = self.deps.knowledge_access.resolve_for_agent(
+        knowledge_resolution = await self.deps.knowledge_access.resolve_for_agent_async(
             self.deps.agent_name,
             execution_identity=runtime.tool_dispatch.execution_identity,
         )

@@ -102,6 +102,7 @@ def _knowledge_access_support() -> SimpleNamespace:
     return SimpleNamespace(
         for_agent=MagicMock(return_value=None),
         resolve_for_agent=MagicMock(return_value=_KnowledgeResolution(knowledge=None)),
+        resolve_for_agent_async=AsyncMock(return_value=_KnowledgeResolution(knowledge=None)),
     )
 
 

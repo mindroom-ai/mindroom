@@ -302,6 +302,12 @@ def _knowledge_access_support(
                 unavailable=unavailable or {},
             ),
         ),
+        resolve_for_agent_async=AsyncMock(
+            return_value=_KnowledgeResolution(
+                knowledge=cast("Knowledge | None", knowledge),
+                unavailable=unavailable or {},
+            ),
+        ),
     )
 
 
