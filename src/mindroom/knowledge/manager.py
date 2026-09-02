@@ -1824,9 +1824,9 @@ class KnowledgeManager:
                 status="failed" if run.failed else "building",
                 completed=dict(run.completed),
                 failed=dict(run.failed),
-                # The target revision advances only once the reconciled state
-                # it describes is about to be durable.
-                target_revision=self.git_source.last_synced_head,
+                # The baseline advances only after reconciliation returns, so
+                # this revision describes the durable candidate exactly.
+                target_revision=run.baseline_revision,
                 # The corpus this candidate targets, not a high-water mark of
                 # completed files: status subtracts completed from this to
                 # report how much work is still outstanding.
@@ -1945,18 +1945,19 @@ class KnowledgeManager:
 
     async def _advance_candidate(self, run: _CandidateRun, progress: _CandidateProgress) -> None:
         """Reconcile, index and publish until the candidate matches the live source."""
-        changed_files = (
-            await self.git_source.changed_files_between(
-                run.baseline_revision,
-                self.git_source.last_synced_head,
-            )
-            if self.git_source.is_configured()
-            else None
-        )
         for _round in range(_MAX_CANDIDATE_RECONCILE_ROUNDS):
             round_revision = await self._source_revision()
+            changed_files = (
+                await self.git_source.changed_files_between(
+                    run.baseline_revision,
+                    round_revision,
+                )
+                if _round == 0 and self.git_source.is_configured()
+                else None
+            )
             files = await asyncio.to_thread(self.list_files)
             plan = await self._reconcile_candidate(run, files, changed_files=changed_files)
+            run.baseline_revision = round_revision
             progress.total = len(plan.expected)
             progress.completed = len(run.completed)
             if run.checkpoint.total_files != run.total_files:

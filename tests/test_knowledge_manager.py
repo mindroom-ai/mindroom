@@ -8147,6 +8147,87 @@ async def test_git_update_uses_reliable_delta_for_file_signature_scan(
 
 
 @pytest.mark.asyncio
+async def test_git_candidate_cancelled_before_reconciliation_rescans_on_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled refresh must not checkpoint an unreconciled Git revision."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+            GitSyncResult(head="rev-b", updated=False),
+        ],
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-b", "rev-b"])
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (tmp_path / "docs" / "doc.md").write_text("changed", encoding="utf-8")
+
+    delta_calls = 0
+
+    async def _cancel_once(
+        _self: GitKnowledgeSource,
+        before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str]:
+        nonlocal delta_calls
+        delta_calls += 1
+        if delta_calls == 1:
+            raise asyncio.CancelledError
+        return frozenset({"doc.md"}) if (before_head, after_head) == ("rev-a", "rev-b") else frozenset()
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _cancel_once)
+
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 1
+
+
+@pytest.mark.asyncio
+async def test_git_delta_targets_the_revision_verified_by_the_refresh_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first reconciliation delta must cover the round's exact Git revision."""
+    names = ("first.md", "second.md")
+    config, runtime_paths = _git_noop_config(tmp_path, files=names)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+        ],
+        tracked=names,
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-c", "rev-c"])
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (tmp_path / "docs" / "first.md").write_text("changed in rev-b", encoding="utf-8")
+
+    async def _changed_files_between(
+        _self: GitKnowledgeSource,
+        _before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str]:
+        (tmp_path / "docs" / "second.md").write_text("changed in rev-c", encoding="utf-8")
+        if after_head == "rev-c":
+            return frozenset(names)
+        return frozenset({"first.md"})
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _changed_files_between)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 2
+
+
+@pytest.mark.asyncio
 async def test_reindex_skips_live_corpus_hash_when_revision_is_stable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
