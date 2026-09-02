@@ -508,8 +508,8 @@ async def test_detached_router_invalidation_during_post_refresh_effects_revokes_
     bot.schedule_reply_authorized_call_revocation.reset_mock()
 
     refresh_task = asyncio.create_task(bot._refresh_agent_reply_memberships_if_needed())
-    await asyncio.wait_for(effects_started.wait(), timeout=1.0)
     try:
+        await asyncio.wait_for(effects_started.wait(), timeout=1.0)
         bot._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
     finally:
         release_effects.set()
