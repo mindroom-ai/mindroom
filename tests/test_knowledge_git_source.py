@@ -1614,6 +1614,53 @@ async def test_sync_git_source_once_controls_lfs_hydration_after_reset(
 
 
 @pytest.mark.asyncio
+async def test_sync_git_source_once_falls_back_when_diff_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed best-effort delta must leave the successful checkout usable."""
+    manager = _git_manager(tmp_path)
+
+    async def _fake_ensure_git_repository(_git_config: object) -> bool:
+        return False
+
+    async def _fake_git_rev_parse(ref: str) -> str | None:
+        if ref == "HEAD":
+            return "before"
+        if ref == "origin/main":
+            return "after"
+        return None
+
+    list_tracked_files_results = iter(
+        [
+            {"keep.md", "removed.md"},
+            {"added.md", "keep.md"},
+        ],
+    )
+
+    async def _fake_git_list_tracked_files() -> set[str]:
+        return next(list_tracked_files_results)
+
+    async def _fake_run_git(args: list[str], **_: object) -> str:
+        if args[:3] == ["diff", "--name-only", "--no-renames"]:
+            msg = "diff unavailable"
+            raise RuntimeError(msg)
+        return ""
+
+    monkeypatch.setattr(manager.git_source, "_ensure_repository", _fake_ensure_git_repository)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(manager.git_source, "_list_tracked_files", _fake_git_list_tracked_files)
+    monkeypatch.setattr(manager.git_source, "_run_git", _fake_run_git)
+
+    changed_files, removed_files, updated = await manager.git_source._sync_once(manager.git_source._git_config())
+
+    assert changed_files == {"added.md", "keep.md"}
+    assert removed_files == {"removed.md"}
+    assert updated is True
+    assert await manager.git_source.changed_files_between("before", "after") is None
+
+
+@pytest.mark.asyncio
 async def test_hydrate_git_lfs_worktree_ignores_index_extension_filters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

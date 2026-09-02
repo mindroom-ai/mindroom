@@ -459,6 +459,27 @@ class GitKnowledgeSource:
         """Return the checkout's current revision, or None when it cannot be read."""
         return await self._rev_parse("HEAD")
 
+    async def changed_files_between(
+        self,
+        before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str] | None:
+        """Return a filtered Git delta, or None when callers must inspect everything."""
+        if before_head is None or after_head is None:
+            return None
+        if before_head == after_head:
+            return frozenset()
+        try:
+            output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..{after_head}"])
+        except RuntimeError:
+            logger.warning(
+                "Could not compute knowledge Git delta; falling back to a full scan",
+                base_id=self.base_id,
+                exc_info=True,
+            )
+            return None
+        return frozenset(path for path in output.splitlines() if self._include_relative_path(path))
+
     async def sync(self) -> GitSyncResult:
         """Fetch and force-align one configured Git repository checkout.
 
@@ -806,8 +827,17 @@ class GitKnowledgeSource:
         if before_head is None:
             changed_paths = after_files
         else:
-            diff_output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
-            changed_paths = {path for path in diff_output.splitlines() if self._include_relative_path(path)}
+            try:
+                diff_output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
+            except RuntimeError:
+                logger.warning(
+                    "Could not compute knowledge Git delta; falling back to a full scan",
+                    base_id=self.base_id,
+                    exc_info=True,
+                )
+                changed_paths = after_files
+            else:
+                changed_paths = {path for path in diff_output.splitlines() if self._include_relative_path(path)}
 
         removed_files = before_files - after_files
         changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)

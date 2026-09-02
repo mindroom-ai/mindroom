@@ -99,7 +99,7 @@ from tests.knowledge_test_support import (
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable
+    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Sequence
     from contextlib import AbstractAsyncContextManager
     from types import ModuleType
 
@@ -8085,6 +8085,65 @@ async def test_git_noop_refresh_hashes_corpus_when_index_predates_revision_track
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     assert counter.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changed_files", "expected_scanned"),
+    [
+        pytest.param(frozenset({"second.md"}), [("second.md",)], id="reliable-delta"),
+        pytest.param(None, [("first.md", "second.md", "third.md")], id="full-scan-fallback"),
+    ],
+)
+async def test_git_update_uses_reliable_delta_for_file_signature_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_files: frozenset[str] | None,
+    expected_scanned: list[tuple[str, ...]],
+) -> None:
+    """A revision-matched Git delta should avoid hashing every unchanged file."""
+    names = ("first.md", "second.md", "third.md")
+    config, runtime_paths = _git_noop_config(tmp_path, files=names)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+        ],
+        tracked=names,
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-b", "rev-b"])
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (tmp_path / "docs" / "second.md").write_text("changed", encoding="utf-8")
+
+    async def _changed_files_between(
+        _self: GitKnowledgeSource,
+        before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str] | None:
+        assert before_head == "rev-a"
+        assert after_head == "rev-b"
+        return changed_files
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _changed_files_between)
+
+    scanned: list[tuple[str, ...]] = []
+    original_file_signatures_for = KnowledgeManager._file_signatures_for
+
+    async def _record_scanned_files(
+        self: KnowledgeManager,
+        files: Sequence[Path],
+    ) -> dict[str, tuple[tuple[int, int, str], Path]]:
+        scanned.append(tuple(sorted(path.name for path in files)))
+        return await original_file_signatures_for(self, files)
+
+    monkeypatch.setattr(KnowledgeManager, "_file_signatures_for", _record_scanned_files)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 1
+    assert scanned == expected_scanned
 
 
 @pytest.mark.asyncio
