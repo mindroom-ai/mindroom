@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import threading
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
 
@@ -37,7 +38,7 @@ from mindroom.response_turn import (
 from mindroom.tool_system.events import ToolTraceEntry
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from contextlib import AbstractContextManager
 
     from mindroom.history.runtime import ScopeSessionContext
@@ -201,6 +202,7 @@ def _blocking_adapter(
     log: _AdapterLog,
     run_attempt: Callable[[TurnRunState, DynamicContinuationRunState], Awaitable[Any]],
     *,
+    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]] | None = None,
     with_standalone_replay: bool = True,
     unexpected_error_text: Callable[[Exception], str] | None = None,
 ) -> BlockingTurnAdapter:
@@ -211,7 +213,7 @@ def _blocking_adapter(
         _bump(log, "finalized")
 
     return BlockingTurnAdapter(
-        open_scope=_open_scope_factory(log),
+        open_scope=open_scope or _open_scope_factory(log),
         run_attempt=run_attempt,
         snapshot_partial=lambda: log.snapshot,
         release_attempt_entity=lambda _scope: _bump(log, "released"),
@@ -446,6 +448,7 @@ def _streaming_adapter(
         AsyncGenerator[str | AttemptResolved, None],
     ],
     *,
+    open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]] | None = None,
     with_standalone_replay: bool = True,
     unexpected_error_text: Callable[[Exception], str] | None = None,
 ) -> StreamingTurnAdapter[str]:
@@ -456,7 +459,7 @@ def _streaming_adapter(
         _bump(log, "finalized")
 
     return StreamingTurnAdapter[str](
-        open_scope=_open_scope_factory(log),
+        open_scope=open_scope or _open_scope_factory(log),
         run_attempt=run_attempt,
         snapshot_partial=lambda: log.snapshot,
         release_attempt_entity=lambda _scope: _bump(log, "released"),
@@ -475,6 +478,117 @@ def _bump(log: _AdapterLog, attr: str) -> None:
 
 async def _collect(stream: AsyncIterator[str]) -> list[str]:
     return [chunk async for chunk in stream]
+
+
+@pytest.mark.asyncio
+async def test_blocking_scope_storage_lifecycle_runs_off_event_loop() -> None:
+    """A slow synchronous session open or close must not stall every response."""
+    log = _AdapterLog()
+    event_loop_thread = threading.get_ident()
+    lifecycle_threads: dict[str, int] = {}
+
+    @contextlib.contextmanager
+    def _open_scope() -> Iterator[ScopeSessionContext | None]:
+        lifecycle_threads["enter"] = threading.get_ident()
+        try:
+            yield None
+        finally:
+            lifecycle_threads["exit"] = threading.get_ident()
+
+    async def _attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> CompletedAttempt:
+        return CompletedAttempt(response_text="done", replayable_text="done", has_visible_content=True)
+
+    assert (
+        await run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _attempt, open_scope=_open_scope),
+            TurnSinks(),
+            continuation=_continuation(),
+        )
+        == "done"
+    )
+    assert lifecycle_threads["enter"] != event_loop_thread
+    assert lifecycle_threads["exit"] != event_loop_thread
+
+
+@pytest.mark.asyncio
+async def test_streaming_scope_storage_lifecycle_runs_off_event_loop() -> None:
+    """Streaming responses use the same non-blocking scope-storage boundary."""
+    log = _AdapterLog()
+    event_loop_thread = threading.get_ident()
+    lifecycle_threads: dict[str, int] = {}
+
+    @contextlib.contextmanager
+    def _open_scope() -> Iterator[ScopeSessionContext | None]:
+        lifecycle_threads["enter"] = threading.get_ident()
+        try:
+            yield None
+        finally:
+            lifecycle_threads["exit"] = threading.get_ident()
+
+    async def _attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(CompletedAttempt(replayable_text="done", has_visible_content=True))
+
+    assert (
+        await _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, _attempt, open_scope=_open_scope),
+                TurnSinks(),
+                continuation=_continuation(),
+            ),
+        )
+        == []
+    )
+    assert lifecycle_threads["enter"] != event_loop_thread
+    assert lifecycle_threads["exit"] != event_loop_thread
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_scope_open_closes_entered_context() -> None:
+    """Cancellation waits for an accepted scope open and then closes its storage."""
+    log = _AdapterLog()
+    enter_started = threading.Event()
+    allow_enter = threading.Event()
+    exited = threading.Event()
+
+    @contextlib.contextmanager
+    def _open_scope() -> Iterator[ScopeSessionContext | None]:
+        enter_started.set()
+        if not allow_enter.wait(timeout=5):
+            pytest.fail("scope entry was never released")
+        try:
+            yield None
+        finally:
+            exited.set()
+
+    async def _unexpected_attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> CompletedAttempt:
+        pytest.fail("a cancelled scope open must not start an attempt")
+
+    turn_task = asyncio.create_task(
+        run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, _unexpected_attempt, open_scope=_open_scope),
+            TurnSinks(),
+            continuation=_continuation(),
+        ),
+    )
+    assert await asyncio.to_thread(enter_started.wait, 1)
+    turn_task.cancel()
+    allow_enter.set()
+    with pytest.raises(asyncio.CancelledError):
+        await turn_task
+
+    assert exited.is_set()
 
 
 def test_blocking_completion_records_and_updates_collector() -> None:
