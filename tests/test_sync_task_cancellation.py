@@ -2535,6 +2535,7 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     router_bot.running = True
     router_bot.stop = AsyncMock()
     router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    router_bot.schedule_reply_authorized_call_revocation = MagicMock()
 
     general_bot = AsyncMock()
     general_bot.agent_name = "general"
@@ -2542,6 +2543,7 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     general_bot.running = True
     general_bot.stop = AsyncMock()
     general_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    general_bot.schedule_reply_authorized_call_revocation = MagicMock()
 
     orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
 
@@ -2605,6 +2607,7 @@ async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and
     router_bot.running = True
     router_bot.stop = AsyncMock()
     router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    router_bot.schedule_reply_authorized_call_revocation = MagicMock()
     router_bot.preserve_reply_memberships_on_next_sync_start = MagicMock()
 
     general_bot = AsyncMock()
@@ -2613,6 +2616,7 @@ async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and
     general_bot.running = True
     general_bot.stop = AsyncMock()
     general_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    general_bot.schedule_reply_authorized_call_revocation = MagicMock()
 
     orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
 
@@ -2702,6 +2706,7 @@ def _orchestrator_with_membership_startup_bots(
     router_bot.running = True
     router_bot.stop = AsyncMock()
     router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    router_bot.schedule_reply_authorized_call_revocation = MagicMock()
     router_bot.preserve_reply_memberships_on_next_sync_start = MagicMock()
     general_bot = AsyncMock()
     general_bot.agent_name = "general"
@@ -2709,6 +2714,7 @@ def _orchestrator_with_membership_startup_bots(
     general_bot.running = True
     general_bot.stop = AsyncMock()
     general_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    general_bot.schedule_reply_authorized_call_revocation = MagicMock()
     orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
     return orchestrator, router_bot, general_bot
 
@@ -3024,9 +3030,11 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
         mock_existing_bot.config = old_config
         mock_existing_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
         mock_existing_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+        mock_existing_bot.schedule_reply_authorized_call_revocation = MagicMock()
         mock_router_bot = AsyncMock()
         mock_router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
         mock_router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+        mock_router_bot.schedule_reply_authorized_call_revocation = MagicMock()
         orchestrator.agent_bots = {"general": mock_existing_bot, "router": mock_router_bot}
 
         async def existing_sync_loop() -> None:

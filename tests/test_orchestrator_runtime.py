@@ -28,6 +28,7 @@ from mindroom.approval_manager import (
     initialize_approval_store,
 )
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import EventJournalConfig
@@ -115,7 +116,10 @@ async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_
         "worker": worker_bot,
     }
 
-    with patch.object(orchestrator.agent_reply_memberships, "refresh", new=AsyncMock()) as refresh:
+    with (
+        patch.object(orchestrator.agent_reply_memberships, "refresh", new=AsyncMock()) as refresh,
+        patch.object(orchestrator.agent_reply_memberships, "needs_refresh", return_value=False),
+    ):
         await orchestrator.refresh_agent_reply_memberships()
 
     refresh.assert_awaited_once_with(config, orchestrator.runtime_paths, router_bot.client)
@@ -125,6 +129,104 @@ async def test_reply_membership_refresh_revokes_before_scheduling_positive_call_
     worker_bot.schedule_reply_authorized_call_reconciliation.assert_called_once_with()
     router_bot.reconcile_reply_authorized_calls.assert_not_awaited()
     worker_bot.reconcile_reply_authorized_calls.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_successful_reply_membership_refresh_opens_new_revocation_gap(
+    tmp_path: Path,
+) -> None:
+    """A later invalidation must revoke calls again after an authoritative refresh."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    config.router.access = ResponderAccessConfig(current_room_members=False, members_of_rooms=[])
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    router_bot = MagicMock()
+    router_bot.client = AsyncMock(spec=nio.AsyncClient)
+    router_bot.reconcile_pending_invites = AsyncMock()
+    router_bot.revoke_reply_authorized_calls = AsyncMock()
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+
+    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+    await orchestrator.refresh_agent_reply_memberships()
+    router_bot.schedule_reply_authorized_call_revocation.reset_mock()
+
+    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+
+    router_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_invalidation_during_post_refresh_effects_skips_positive_reconciliation(
+    tmp_path: Path,
+) -> None:
+    """A new gap after refresh publication must revoke again and suppress positive starts."""
+    room_id = "!grant:localhost"
+    config = _runtime_bound_config(Config(), tmp_path)
+    config.router.access = ResponderAccessConfig(current_room_members=False, members_of_rooms=["grant"])
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
+    state.add_room("grant", room_id, "#grant:localhost", "Grant")
+    state.save(runtime_paths=orchestrator.runtime_paths)
+    client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@mindroom_router:localhost", None, None)],
+        room_id=room_id,
+    )
+    effects_started = asyncio.Event()
+    release_effects = asyncio.Event()
+
+    async def block_post_refresh_effects() -> None:
+        effects_started.set()
+        await release_effects.wait()
+
+    router_bot = MagicMock()
+    router_bot.client = client
+    router_bot.reconcile_pending_invites = AsyncMock(side_effect=block_post_refresh_effects)
+    router_bot.revoke_reply_authorized_calls = AsyncMock()
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+    orchestrator.invalidate_agent_reply_memberships(reason="initial_gap")
+    router_bot.schedule_reply_authorized_call_revocation.reset_mock()
+
+    refresh_task = asyncio.create_task(orchestrator.refresh_agent_reply_memberships())
+    await asyncio.wait_for(effects_started.wait(), timeout=1.0)
+    try:
+        orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+    finally:
+        release_effects.set()
+        await refresh_task
+
+    router_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
+    router_bot.schedule_reply_authorized_call_reconciliation.assert_not_called()
+
+
+@pytest.mark.parametrize("preserve_startup_snapshot", [False, True])
+def test_repeated_reply_membership_invalidation_schedules_one_revocation_wave(
+    tmp_path: Path,
+    preserve_startup_snapshot: bool,
+) -> None:
+    """Uncertain sync batches must not start overlapping positive call reconciliation."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    router_bot = MagicMock()
+    worker_bot = MagicMock()
+    orchestrator.agent_bots = {
+        ROUTER_AGENT_NAME: router_bot,
+        "worker": worker_bot,
+    }
+    if preserve_startup_snapshot:
+        orchestrator.agent_reply_membership_sync.preserve_on_next_sync_start()
+        assert not orchestrator.agent_reply_membership_sync.sync_loop_started()
+
+    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+    orchestrator.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+
+    router_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
+    worker_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
+    router_bot.schedule_reply_authorized_call_reconciliation.assert_not_called()
+    worker_bot.schedule_reply_authorized_call_reconciliation.assert_not_called()
 
 
 if TYPE_CHECKING:
