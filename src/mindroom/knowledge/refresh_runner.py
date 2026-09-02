@@ -217,7 +217,8 @@ async def refresh_knowledge_binding_in_subprocess(
             config=config,
             runtime_paths=runtime_paths,
         )
-        request_payload = _serialize_subprocess_refresh_request(
+        request_payload = await asyncio.to_thread(
+            _serialize_subprocess_refresh_request,
             base_id,
             config=config,
             runtime_paths=runtime_paths,

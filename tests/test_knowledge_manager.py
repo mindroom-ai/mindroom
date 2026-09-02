@@ -5365,6 +5365,32 @@ async def test_refresh_scheduler_runs_independent_per_binding_tasks(
 
 
 @pytest.mark.asyncio
+async def test_refresh_scheduler_does_not_deep_copy_config_on_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scheduling a refresh must not deep-copy the full config on the event loop."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    refreshed = asyncio.Event()
+
+    async def _fake_refresh(_base_id: str, **_kwargs: object) -> None:
+        refreshed.set()
+
+    def _unexpected_copy(_self: Config, **_kwargs: object) -> Config:
+        pytest.fail("schedule_refresh deep-copied the config")
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr(Config, "model_copy", _unexpected_copy)
+
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await asyncio.wait_for(refreshed.wait(), timeout=5)
+    await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5775,6 +5801,47 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert captured_request["config_data"]["knowledge_bases"]["docs"]["chunk_size"] == 1234
     assert captured_request["runtime_knowledge_base"] is None
     assert captured_request["execution_identity"]["requester_id"] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
+async def test_subprocess_refresh_serializes_request_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large config serialization must not block the control-plane event loop."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    event_loop_thread = get_ident()
+    serialization_threads: list[int] = []
+    process = MagicMock(returncode=0)
+    process.wait = AsyncMock(return_value=0)
+    process.stdin.drain = AsyncMock()
+    process.stdin.wait_closed = AsyncMock()
+
+    def _fake_serialize(*_args: object, **_kwargs: object) -> bytes:
+        serialization_threads.append(get_ident())
+        return b"{}"
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> MagicMock:
+        return process
+
+    async def _fake_terminate(_process: object) -> None:
+        pass
+
+    monkeypatch.setattr(knowledge_refresh_runner, "_serialize_subprocess_refresh_request", _fake_serialize)
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_subprocess_session_kwargs", dict)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert serialization_threads
+    assert serialization_threads[0] != event_loop_thread
 
 
 @pytest.mark.asyncio
