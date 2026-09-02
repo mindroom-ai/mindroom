@@ -3986,45 +3986,45 @@ class ResponseRunner:
             if visible_event_id_callback is not None:
                 visible_event_id_callback(response_event_id)
 
-        knowledge_resolution = await self.deps.knowledge_access.resolve_for_agent_async(
-            self.deps.agent_name,
-            execution_identity=runtime.tool_dispatch.execution_identity,
-        )
-        transient_enrichment_items = append_knowledge_availability_enrichment(
-            request.transient_enrichment_items,
-            knowledge_resolution.unavailable,
-        )
-        response_stream = stream_agent_response(
-            self._agent_turn_context(
-                request,
-                runtime=runtime,
-                run_id=run_id,
-                active_event_ids=active_event_ids,
-                transient_enrichment_items=transient_enrichment_items,
-                system_enrichment_items=request.system_enrichment_items,
-            ),
-            prompt=request.prompt,
-            runtime_paths=self.deps.runtime_paths,
-            config=self.deps.runtime.config,
-            thread_history=request.thread_history,
-            model_prompt=runtime.model_prompt,
-            current_timestamp_ms=request.current_timestamp_ms,
-            current_prompt_is_structured=request.current_prompt_is_structured,
-            knowledge=knowledge_resolution.knowledge,
-            run_id_callback=note_attempt_run_id,
-            media=runtime.media_inputs,
-            show_tool_calls=runtime.show_tool_calls,
-            run_metadata_collector=run_metadata_content,
-            execution_identity=runtime.tool_dispatch.execution_identity,
-            compaction_lifecycle=compaction_lifecycle,
-            refresh_scheduler=self._knowledge_refresh_scheduler(),
-            turn_recorder=turn_recorder,
-            pipeline_timing=pipeline_timing,
-            supports_native_tool_approval=True,
-            attempt_model_runtime=self.deps.tool_runtime,
-        )
-
         try:
+            knowledge_resolution = await self.deps.knowledge_access.resolve_for_agent_async(
+                self.deps.agent_name,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+            )
+            transient_enrichment_items = append_knowledge_availability_enrichment(
+                request.transient_enrichment_items,
+                knowledge_resolution.unavailable,
+            )
+            response_stream = stream_agent_response(
+                self._agent_turn_context(
+                    request,
+                    runtime=runtime,
+                    run_id=run_id,
+                    active_event_ids=active_event_ids,
+                    transient_enrichment_items=transient_enrichment_items,
+                    system_enrichment_items=request.system_enrichment_items,
+                ),
+                prompt=request.prompt,
+                runtime_paths=self.deps.runtime_paths,
+                config=self.deps.runtime.config,
+                thread_history=request.thread_history,
+                model_prompt=runtime.model_prompt,
+                current_timestamp_ms=request.current_timestamp_ms,
+                current_prompt_is_structured=request.current_prompt_is_structured,
+                knowledge=knowledge_resolution.knowledge,
+                run_id_callback=note_attempt_run_id,
+                media=runtime.media_inputs,
+                show_tool_calls=runtime.show_tool_calls,
+                run_metadata_collector=run_metadata_content,
+                execution_identity=runtime.tool_dispatch.execution_identity,
+                compaction_lifecycle=compaction_lifecycle,
+                refresh_scheduler=self._knowledge_refresh_scheduler(),
+                turn_recorder=turn_recorder,
+                pipeline_timing=pipeline_timing,
+                supports_native_tool_approval=True,
+                attempt_model_runtime=self.deps.tool_runtime,
+            )
+
             async with _response_typing_indicator(self._client(), request):
                 wrapped_response_stream = self._stream_in_tool_context(
                     tool_dispatch=runtime.tool_dispatch,
