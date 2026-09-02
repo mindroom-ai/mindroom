@@ -819,10 +819,10 @@ def test_google_drive_search_includes_shared_drive_parameters(tmp_path: Path) ->
         "q": "('folder-id' in parents) and trashed=false",
         "pageSize": 3,
         "orderBy": "modifiedTime desc",
-        "fields": f"incompleteSearch, {tool.SEARCH_FIELDS}",
-        "includeItemsFromAllDrives": True,
-        "supportsAllDrives": True,
+        "fields": tool.SEARCH_FIELDS,
         "corpora": "allDrives",
+        "supportsAllDrives": True,
+        "includeItemsFromAllDrives": True,
         "pageToken": cursor,
     }
 
