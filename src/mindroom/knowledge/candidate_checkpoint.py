@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 #: Bumped whenever the persisted candidate layout changes incompatibly. An
 #: unknown version is treated as "no resumable candidate" rather than an error.
-_CANDIDATE_CHECKPOINT_SCHEMA_VERSION = 1
+_CANDIDATE_CHECKPOINT_SCHEMA_VERSION = 2
 
 _CANDIDATE_CHECKPOINT_FILENAME = "candidate_index.json"
 _CANDIDATE_JOURNAL_FILENAME = "candidate_index.jsonl"

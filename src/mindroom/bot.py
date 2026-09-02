@@ -1318,7 +1318,8 @@ class AgentBot:
             return
         orchestrator = self.orchestrator
         if orchestrator is None:
-            self._router_reply_membership_sync.invalidate(self.config, reason=reason)
+            if self._router_reply_membership_sync.invalidate(self.config, reason=reason):
+                self.schedule_reply_authorized_call_revocation()
         else:
             orchestrator.invalidate_agent_reply_memberships(reason=reason)
 
@@ -1361,6 +1362,16 @@ class AgentBot:
             owner=self._runtime_view,
         )
 
+    def schedule_reply_authorized_call_revocation(self) -> None:
+        """Schedule this bot's fail-closed active-call revocation."""
+        if self._call_manager is None:
+            return
+        create_background_task(
+            self.revoke_reply_authorized_calls(),
+            name=f"matrix_rtc_reply_authorization_revoke_{self.agent_name}",
+            owner=self._runtime_view,
+        )
+
     def _schedule_reply_authorized_call_revocation(self) -> None:
         """Revoke calls after a synchronous pre-admission policy change."""
         create_background_task(
@@ -1395,8 +1406,11 @@ class AgentBot:
             if client is None:
                 return
             await self._runtime_view.agent_reply_memberships.refresh(self.config, self.runtime_paths, client)
+            self._router_reply_membership_sync.record_authoritative_refresh(self.config)
             await self.reconcile_pending_invites()
             await self.revoke_reply_authorized_calls()
+            if self._runtime_view.agent_reply_memberships.needs_refresh(self.config):
+                return
             self.schedule_reply_authorized_call_reconciliation()
 
         await self._router_reply_membership_sync.refresh_if_needed(self.config, refresh)

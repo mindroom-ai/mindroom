@@ -13,6 +13,7 @@ import pytest
 from agno.models.message import Message
 
 import mindroom.ai as ai_module
+import mindroom.knowledge.utils as knowledge_utils
 import mindroom.memory._file_backend as file_backend_module
 import mindroom.pre_model_preparation as pre_model_preparation_module
 from mindroom.config.agent import AgentConfig
@@ -36,6 +37,154 @@ async def _assert_loop_heartbeats_while_pending(task: asyncio.Task) -> None:
         await asyncio.sleep(0)
         heartbeats += 1
     assert not task.done()
+
+
+@pytest.mark.asyncio
+async def test_agent_knowledge_lookup_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow published-index lookup must not stall other event-loop work."""
+    gate = threading.Event()
+    lookup_started = threading.Event()
+    loop_thread_id = threading.get_ident()
+    schedule_thread_ids: list[int] = []
+
+    def gated_lookup(*_args: object, **_kwargs: object) -> None:
+        lookup_started.set()
+        assert threading.get_ident() != loop_thread_id
+        if not gate.wait(5.0):
+            msg = "timed out waiting to release published-index lookup"
+            raise TimeoutError(msg)
+
+    def record_refresh_schedule(
+        *_args: object,
+        availability: knowledge_utils.KnowledgeAvailability,
+        **_kwargs: object,
+    ) -> knowledge_utils.KnowledgeAvailability:
+        schedule_thread_ids.append(threading.get_ident())
+        return availability
+
+    monkeypatch.setattr(knowledge_utils, "_lookup_knowledge_for_base", gated_lookup)
+    monkeypatch.setattr(knowledge_utils, "_schedule_refresh_for_availability", record_refresh_schedule)
+    config = Config.model_validate(
+        {
+            "agents": {
+                "general": {
+                    "display_name": "General",
+                    "role": "test",
+                    "knowledge_bases": ["docs"],
+                },
+            },
+            "knowledge_bases": {"docs": {"path": str(tmp_path / "docs")}},
+        },
+    )
+    resolve_task = asyncio.create_task(
+        knowledge_utils.resolve_agent_knowledge_access_async(
+            "general",
+            config,
+            test_runtime_paths(tmp_path),
+            refresh_scheduler=MagicMock(),
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(lookup_started.wait, 5.0)
+        await _assert_loop_heartbeats_while_pending(resolve_task)
+    finally:
+        gate.set()
+
+    resolution = await resolve_task
+    assert resolution.knowledge is None
+    assert resolution.unavailable["docs"].availability is knowledge_utils.KnowledgeAvailability.INITIALIZING
+    assert resolution.unavailable["docs"].search_available is False
+    assert schedule_thread_ids == [loop_thread_id]
+
+
+@pytest.mark.asyncio
+async def test_agent_file_memory_resolution_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """File-memory workspace resolution must not stall other event-loop work."""
+    gate = threading.Event()
+    resolution_started = threading.Event()
+    loop_thread_id = threading.get_ident()
+
+    def gated_file_memory_resolution(*_args: object, **_kwargs: object) -> None:
+        resolution_started.set()
+        assert threading.get_ident() != loop_thread_id
+        if not gate.wait(5.0):
+            msg = "timed out waiting to release file-memory resolution"
+            raise TimeoutError(msg)
+
+    monkeypatch.setattr(
+        knowledge_utils,
+        "resolve_agent_file_memory_knowledge",
+        gated_file_memory_resolution,
+    )
+    config = Config.model_validate(
+        {
+            "agents": {"general": {"display_name": "General", "role": "test", "memory_backend": "file"}},
+            "memory": {"search": {"mode": "semantic"}},
+        },
+    )
+    resolve_task = asyncio.create_task(
+        knowledge_utils.resolve_agent_knowledge_access_async(
+            "general",
+            config,
+            test_runtime_paths(tmp_path),
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(resolution_started.wait, 5.0)
+        await _assert_loop_heartbeats_while_pending(resolve_task)
+    finally:
+        gate.set()
+
+    resolution = await resolve_task
+    assert resolution.knowledge is None
+    assert resolution.unavailable == {}
+
+
+@pytest.mark.asyncio
+async def test_knowledge_base_lookup_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct published-index lookup must not stall other event-loop work."""
+    gate = threading.Event()
+    lookup_started = threading.Event()
+    loop_thread_id = threading.get_ident()
+
+    def gated_lookup(*_args: object, **_kwargs: object) -> None:
+        lookup_started.set()
+        assert threading.get_ident() != loop_thread_id
+        if not gate.wait(5.0):
+            msg = "timed out waiting to release direct published-index lookup"
+            raise TimeoutError(msg)
+
+    monkeypatch.setattr(knowledge_utils, "_lookup_knowledge_for_base", gated_lookup)
+    config = Config.model_validate(
+        {
+            "knowledge_bases": {"docs": {"path": str(tmp_path / "docs")}},
+        },
+    )
+    resolve_task = asyncio.create_task(
+        knowledge_utils.resolve_knowledge_base_access_async(
+            "docs",
+            config,
+            test_runtime_paths(tmp_path),
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(lookup_started.wait, 5.0)
+        await _assert_loop_heartbeats_while_pending(resolve_task)
+    finally:
+        gate.set()
+
+    resolution = await resolve_task
+    assert resolution.knowledge is None
+    assert resolution.availability is knowledge_utils.KnowledgeAvailability.INITIALIZING
 
 
 def _prompt_preparation_config(memory_backend: str = "mem0") -> Config:

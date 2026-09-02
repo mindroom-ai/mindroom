@@ -4230,7 +4230,9 @@ expose = [
     "PerBindingKnowledgeRefreshScheduler",
     "reconcile_knowledge_mode_transition_states",
     "resolve_agent_knowledge_access",
+    "resolve_agent_knowledge_access_async",
     "resolve_knowledge_base_access",
+    "resolve_knowledge_base_access_async",
     "StandaloneKnowledgeRefreshScheduler",
 ]
 from = ["mindroom.knowledge"]

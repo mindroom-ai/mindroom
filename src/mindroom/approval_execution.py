@@ -151,10 +151,12 @@ class AgentApprovalExecution:
         if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
             raise RuntimeError(msg)
-        knowledge = self.knowledge_access.for_agent(
-            continuation.entity_name,
-            execution_identity=execution_identity,
-        )
+        knowledge = (
+            await self.knowledge_access.resolve_for_agent_async(
+                continuation.entity_name,
+                execution_identity=execution_identity,
+            )
+        ).knowledge
         history_storage = await asyncio.to_thread(
             create_session_storage,
             continuation.entity_name,

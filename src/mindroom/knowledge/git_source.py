@@ -417,7 +417,6 @@ class GitKnowledgeSource:
         init=False,
         repr=False,
     )
-    _last_synced_head: str | None = field(default=None, init=False)
     _lfs_checked: bool = field(default=False, init=False)
     _lfs_repository_ready: bool = field(default=False, init=False)
     _tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
@@ -425,11 +424,6 @@ class GitKnowledgeSource:
     def is_configured(self) -> bool:
         """Return whether this knowledge base is backed by a Git repository."""
         return self._git_config() is not None
-
-    @property
-    def last_synced_head(self) -> str | None:
-        """Return the revision this process last synchronized, or None."""
-        return self._last_synced_head
 
     def cached_tracked_relative_paths(self) -> set[str] | None:
         """Return tracked paths already listed in this process, without listing any.
@@ -459,6 +453,33 @@ class GitKnowledgeSource:
         """Return the checkout's current revision, or None when it cannot be read."""
         return await self._rev_parse("HEAD")
 
+    async def changed_files_between(
+        self,
+        before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str] | None:
+        """Return a filtered Git delta, or None when callers must inspect everything."""
+        if before_head is None or after_head is None:
+            return None
+        if before_head == after_head:
+            return frozenset()
+        try:
+            output = await self._run_git(
+                ["diff", "--name-only", "--no-renames", "-z", f"{before_head}..{after_head}"],
+            )
+        except RuntimeError:
+            logger.warning(
+                "Could not compute knowledge Git delta; falling back to a full scan",
+                base_id=self.base_id,
+                exc_info=True,
+            )
+            return None
+        changed_paths = frozenset(path for path in output.split("\0") if path)
+        # Attributes can alter checkout bytes without changing a managed blob.
+        if any(path.rsplit("/", 1)[-1] == ".gitattributes" for path in changed_paths):
+            return None
+        return frozenset(path for path in changed_paths if self._include_relative_path(path))
+
     async def sync(self) -> GitSyncResult:
         """Fetch and force-align one configured Git repository checkout.
 
@@ -475,7 +496,6 @@ class GitKnowledgeSource:
             self._clear_orphaned_index_lock()
             changed_files, removed_files, updated = await self._sync_once(git_config)
             current_head = await self._rev_parse("HEAD")
-            self._last_synced_head = current_head
 
         if updated:
             logger.info(
@@ -806,8 +826,9 @@ class GitKnowledgeSource:
         if before_head is None:
             changed_paths = after_files
         else:
-            diff_output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
-            changed_paths = {path for path in diff_output.splitlines() if self._include_relative_path(path)}
+            changed_paths = await self.changed_files_between(before_head, "HEAD")
+            if changed_paths is None:
+                changed_paths = after_files
 
         removed_files = before_files - after_files
         changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)

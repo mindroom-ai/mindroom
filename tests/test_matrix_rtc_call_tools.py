@@ -809,11 +809,14 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         fake_create_agent,
     )
 
-    def fake_resolve_knowledge(*_args: object, **kwargs: object) -> SimpleNamespace:
+    async def fake_resolve_knowledge(*_args: object, **kwargs: object) -> SimpleNamespace:
         knowledge_calls.append(kwargs)
         return SimpleNamespace(knowledge=knowledge)
 
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access", fake_resolve_knowledge)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        fake_resolve_knowledge,
+    )
     seen_targets: list[MessageTarget] = []
 
     class StrictToolSupport:
@@ -966,8 +969,8 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
-        lambda *_args, **_kwargs: SimpleNamespace(knowledge=knowledge, unavailable=()),
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=knowledge, unavailable=())),
     )
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     monkeypatch.setattr(
@@ -1224,8 +1227,8 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         lambda **_kwargs: nullcontext(None),
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
-        lambda *_args, **_kwargs: SimpleNamespace(knowledge=None, unavailable=()),
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable=())),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
@@ -1309,6 +1312,79 @@ async def test_cascaded_close_releases_agent_when_settlement_wait_is_cancelled()
         await _close_cascaded_call_resources(tracker, cache)  # type: ignore[arg-type]
 
     cache.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_cancellation_during_knowledge_resolution_persists_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during knowledge lookup must persist the admitted transcript."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    execution_identity = build_tool_execution_identity(
+        channel="matrix",
+        agent_name=AGENT,
+        runtime_paths=runtime_paths,
+        requester_id=REQUESTER,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="call-session",
+    )
+    resolution_started = asyncio.Event()
+
+    async def blocked_resolution(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        resolution_started.set()
+        await asyncio.Event().wait()
+        msg = "blocked resolution unexpectedly resumed"
+        raise AssertionError(msg)
+
+    persisted_interruptions: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        blocked_resolution,
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
+        lambda **_kwargs: nullcontext(SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
+        lambda **kwargs: persisted_interruptions.append(kwargs),
+    )
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=SimpleNamespace(
+            build_context=lambda target, **_kwargs: _runtime_context(
+                config=config,
+                runtime_paths=runtime_paths,
+                target=target,
+            ),
+            build_execution_identity=lambda **_kwargs: execution_identity,
+        ),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        session_id="call-session",
+        enable_responder=True,
+    )
+    assert tooling.responder is not None
+
+    response_task = asyncio.create_task(tooling.responder("Never speak this", None))
+    await asyncio.wait_for(resolution_started.wait(), timeout=5)
+    response_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await response_task
+
+    assert len(persisted_interruptions) == 1
+    persisted = persisted_interruptions[0]
+    assert persisted["session_id"] == "call-session"
+    assert persisted["user_message"] == "Never speak this"
+    assert persisted["partial_text"] == ""
+    assert persisted["original_status"] is RunStatus.cancelled
 
 
 @pytest.mark.asyncio
@@ -1410,7 +1486,7 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
             assert tool_context.tool_function_filter is not None
             return await operation()
 
-    def resolve_knowledge(*_args: object, **kwargs: object) -> SimpleNamespace:
+    async def resolve_knowledge(*_args: object, **kwargs: object) -> SimpleNamespace:
         resolver_calls.append(kwargs)
         return next(resolutions)
 
@@ -1422,7 +1498,10 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     second_agent = SimpleNamespace(additional_context="second base", model=None)
     create_agent_mock = MagicMock(side_effect=(first_agent, second_agent))
     close_agent_mock = MagicMock()
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access", resolve_knowledge)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        resolve_knowledge,
+    )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
@@ -1510,8 +1589,8 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
         persisted.append(cast("str", kwargs["run_id"]))
 
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
-        lambda *_args, **_kwargs: SimpleNamespace(knowledge=None, unavailable={}),
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable={})),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
@@ -1609,8 +1688,8 @@ async def test_build_call_tools_includes_agno_added_knowledge_and_skill_function
         lambda *_args, **_kwargs: FakeAgnoAgent(functions),
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
-        lambda *_args, **_kwargs: SimpleNamespace(knowledge=None),
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None)),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools._wrap_agno_function",
@@ -1660,8 +1739,8 @@ async def test_build_call_tools_hides_agno_added_knowledge_function_needing_appr
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_knowledge_agent)
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
-        lambda *_args, **_kwargs: SimpleNamespace(knowledge=knowledge),
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=knowledge)),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools._wrap_agno_function",
@@ -1717,8 +1796,8 @@ async def test_build_call_tools_hides_functions_needing_text_chat(
         lambda *_a, **_k: FakeAgnoAgent(list(functions.values())),
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
-        lambda *_a, **_k: SimpleNamespace(knowledge=None),
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None)),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools._wrap_agno_function",
@@ -1761,8 +1840,8 @@ async def test_build_call_tools_keeps_builtin_invite_router_under_approval_polic
         lambda *_a, **_k: FakeAgnoAgent([invite_router]),
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access",
-        lambda *_a, **_k: SimpleNamespace(knowledge=None),
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None)),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools._wrap_agno_function",

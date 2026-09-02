@@ -218,6 +218,8 @@ class _CandidateRun:
     knowledge: Knowledge
     vector_db: ChromaDb
     embedder: BatchPrefetchEmbedder | None
+    #: Revision the candidate's file signatures describe, when known.
+    baseline_revision: str | None = None
     completed: dict[str, FileSignature] = field(default_factory=dict)
     failed: dict[str, CandidateFailure] = field(default_factory=dict)
     vanished: set[str] = field(default_factory=set)
@@ -745,13 +747,14 @@ class KnowledgeManager:
         candidate_vector_db: ChromaDb,
         indexed_count: int,
         source_signature: str,
+        published_revision: str | None,
     ) -> bool:
         state = state_for_publication(
             settings=self._indexing_settings,
             collection=candidate_vector_db.collection_name,
             indexed_count=indexed_count,
             source_signature=source_signature,
-            published_revision=self.git_source.last_synced_head,
+            published_revision=published_revision,
         )
         save_task = asyncio.create_task(
             asyncio.to_thread(save_published_index_state, self._indexing_settings_path, state),
@@ -772,12 +775,14 @@ class KnowledgeManager:
         candidate_vector_db: ChromaDb,
         indexed_count: int,
         source_signature: str,
+        published_revision: str | None,
         publish_state: _CandidatePublishState,
     ) -> None:
         publish_cancelled = await self._save_candidate_publish_metadata(
             candidate_vector_db=candidate_vector_db,
             indexed_count=indexed_count,
             source_signature=source_signature,
+            published_revision=published_revision,
         )
         publish_state.index_published = True
         # Adopt the candidate as this manager's live vector database:
@@ -1550,13 +1555,22 @@ class KnowledgeManager:
             rebuild = True
 
         if rebuild:
+            reusable_published_collection = (
+                None if force_reindex else self._reusable_published_collection(persisted_state)
+            )
             opened = await self._rebuild_candidate_collection(
                 checkpoint,
                 embedder=embedder,
-                published_collection=None if force_reindex else self._reusable_published_collection(persisted_state),
+                published_collection=reusable_published_collection,
+            )
+            baseline_revision = (
+                persisted_state.published_revision
+                if reusable_published_collection is not None and persisted_state is not None
+                else None
             )
         else:
             opened = await self._resume_candidate_collection(checkpoint, embedder=embedder)
+            baseline_revision = checkpoint.target_revision
         checkpoint = opened.checkpoint
 
         run = _CandidateRun(
@@ -1564,6 +1578,7 @@ class KnowledgeManager:
             knowledge=opened.knowledge,
             vector_db=opened.vector_db,
             embedder=embedder,
+            baseline_revision=baseline_revision,
             completed=dict(checkpoint.completed),
             failed=dict(checkpoint.failed),
             # Rows this process just copied need no vector-existence probe: the
@@ -1696,12 +1711,35 @@ class KnowledgeManager:
         self,
         run: _CandidateRun,
         files: Sequence[Path],
+        *,
+        changed_files: frozenset[str] | None = None,
     ) -> _CandidateReconciliation:
         """Align the durable candidate with the current source listing."""
         # ``vanished`` describes files lost during one indexing pass, so it must
         # not outlive the pass and permanently exclude a path that came back.
         run.vanished.clear()
-        signatures = await self._file_signatures_for(files)
+        if changed_files is None:
+            signatures = await self._file_signatures_for(files)
+        else:
+            files_by_relative_path = {self._relative_path(file_path): file_path for file_path in files}
+            files_to_scan = [
+                file_path
+                for relative_path, file_path in files_by_relative_path.items()
+                if relative_path in changed_files or relative_path not in run.completed
+            ]
+            signatures = {
+                relative_path: (run.completed[relative_path], file_path)
+                for relative_path, file_path in files_by_relative_path.items()
+                if relative_path not in changed_files and relative_path in run.completed
+            }
+            signatures.update(await self._file_signatures_for(files_to_scan))
+            logger.info(
+                "Used knowledge Git delta for candidate reconciliation",
+                base_id=self.base_id,
+                changed_count=len(changed_files),
+                scanned_count=len(files_to_scan),
+                managed_count=len(files),
+            )
         present = set(signatures)
 
         # Vectors are dropped for paths that left the corpus and for paths whose
@@ -1789,9 +1827,9 @@ class KnowledgeManager:
                 status="failed" if run.failed else "building",
                 completed=dict(run.completed),
                 failed=dict(run.failed),
-                # The target revision advances only once the reconciled state
-                # it describes is about to be durable.
-                target_revision=self.git_source.last_synced_head,
+                # The baseline advances only after reconciliation returns, so
+                # this revision describes the durable candidate exactly.
+                target_revision=run.baseline_revision,
                 # The corpus this candidate targets, not a high-water mark of
                 # completed files: status subtracts completed from this to
                 # report how much work is still outstanding.
@@ -1912,8 +1950,17 @@ class KnowledgeManager:
         """Reconcile, index and publish until the candidate matches the live source."""
         for _round in range(_MAX_CANDIDATE_RECONCILE_ROUNDS):
             round_revision = await self._source_revision()
+            changed_files = (
+                await self.git_source.changed_files_between(
+                    run.baseline_revision,
+                    round_revision,
+                )
+                if _round == 0 and self.git_source.is_configured()
+                else None
+            )
             files = await asyncio.to_thread(self.list_files)
-            plan = await self._reconcile_candidate(run, files)
+            plan = await self._reconcile_candidate(run, files, changed_files=changed_files)
+            run.baseline_revision = round_revision
             progress.total = len(plan.expected)
             progress.completed = len(run.completed)
             if run.checkpoint.total_files != run.total_files:
@@ -2000,6 +2047,7 @@ class KnowledgeManager:
                 candidate_vector_db=run.vector_db,
                 indexed_count=len(run.completed),
                 source_signature=source_signature,
+                published_revision=run.baseline_revision,
                 publish_state=publish_state,
             )
         finally:

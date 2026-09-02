@@ -52,7 +52,7 @@ from mindroom.history.runtime import (
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
-from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access
+from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.pre_model_preparation import prewarm_agent_model_client
@@ -471,7 +471,7 @@ async def build_call_tools(
         )
 
     refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
-    knowledge_resolution = resolve_agent_knowledge_access(
+    knowledge_resolution = await resolve_agent_knowledge_access_async(
         agent_name,
         config,
         runtime_paths,
@@ -617,66 +617,68 @@ async def _run_authorized_call_agent(
     """Run one admitted call transcript through the normal MindRoom agent."""
     from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
 
-    refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
-    knowledge_resolution = resolve_agent_knowledge_access(
-        agent_name,
-        config,
-        runtime_paths,
-        refresh_scheduler=refresh_scheduler,
-        execution_identity=execution_identity,
-    )
-    transient_enrichment_items = append_knowledge_availability_enrichment(
-        (),
-        knowledge_resolution.unavailable,
-    )
     recorder = TurnRecorder(user_message=transcript)
     fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
-    turn = ResponseTurnContext(
-        entity_label=agent_name,
-        session_id=session_id,
-        run_id=None,
-        correlation_id=uuid4().hex,
-        reply_to_event_id=None,
-        room_id=room_id,
-        thread_id=None,
-        requester_id=requester_id,
-        matrix_run_metadata=None,
-        active_model_name=active_model_name,
-        transient_enrichment_items=transient_enrichment_items,
-        system_enrichment_items=voice_enrichment_items,
-    )
-    run_metadata: dict[str, Any] = {}
-
-    async def _respond(agent: AgnoAgent) -> str:
-        try:
-            return await ai_response(
-                turn,
-                prompt=transcript,
-                runtime_paths=runtime_paths,
-                config=config,
-                knowledge=knowledge_resolution.knowledge,
-                run_id_callback=recorder.set_run_id,
-                include_interactive_questions=False,
-                tool_function_filter=context.tool_function_filter,
-                show_tool_calls=False,
-                run_metadata_collector=run_metadata,
-                execution_identity=execution_identity,
-                refresh_scheduler=refresh_scheduler,
-                turn_recorder=recorder,
-                eager_deferred_tools=True,
-                reusable_agent=agent,
-                attempt_model_runtime=tool_support,
-            )
-        finally:
-            recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})
-
-    async def _run_with_agent(agent: AgnoAgent) -> str:
-        return await tool_support.run_in_context(
-            tool_context=context,
-            operation=functools.partial(_respond, agent),
-        )
-
     try:
+        refresh_scheduler = (
+            context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
+        )
+        knowledge_resolution = await resolve_agent_knowledge_access_async(
+            agent_name,
+            config,
+            runtime_paths,
+            refresh_scheduler=refresh_scheduler,
+            execution_identity=execution_identity,
+        )
+        transient_enrichment_items = append_knowledge_availability_enrichment(
+            (),
+            knowledge_resolution.unavailable,
+        )
+        turn = ResponseTurnContext(
+            entity_label=agent_name,
+            session_id=session_id,
+            run_id=None,
+            correlation_id=uuid4().hex,
+            reply_to_event_id=None,
+            room_id=room_id,
+            thread_id=None,
+            requester_id=requester_id,
+            matrix_run_metadata=None,
+            active_model_name=active_model_name,
+            transient_enrichment_items=transient_enrichment_items,
+            system_enrichment_items=voice_enrichment_items,
+        )
+        run_metadata: dict[str, Any] = {}
+
+        async def _respond(agent: AgnoAgent) -> str:
+            try:
+                return await ai_response(
+                    turn,
+                    prompt=transcript,
+                    runtime_paths=runtime_paths,
+                    config=config,
+                    knowledge=knowledge_resolution.knowledge,
+                    run_id_callback=recorder.set_run_id,
+                    include_interactive_questions=False,
+                    tool_function_filter=context.tool_function_filter,
+                    show_tool_calls=False,
+                    run_metadata_collector=run_metadata,
+                    execution_identity=execution_identity,
+                    refresh_scheduler=refresh_scheduler,
+                    turn_recorder=recorder,
+                    eager_deferred_tools=True,
+                    reusable_agent=agent,
+                    attempt_model_runtime=tool_support,
+                )
+            finally:
+                recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})
+
+        async def _run_with_agent(agent: AgnoAgent) -> str:
+            return await tool_support.run_in_context(
+                tool_context=context,
+                operation=functools.partial(_respond, agent),
+            )
+
         response = await agent_cache.run(
             knowledge=knowledge_resolution.knowledge,
             knowledge_identity=knowledge_runtime_identity(knowledge_resolution.knowledge),
