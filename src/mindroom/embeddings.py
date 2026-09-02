@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 _SENTENCE_TRANSFORMERS_DEPENDENCIES = ["sentence-transformers"]
 _SENTENCE_TRANSFORMERS_EXTRA = "sentence_transformers"
+_SENTENCE_TRANSFORMER_CLIENTS: dict[str, Any] = {}
 
 #: One torch model per process is shared by every indexing thread, and torch's
 #: Metal shader-library caches (``libMap``, ``cplMap``, ``kernelCache`` in
@@ -112,6 +113,14 @@ def create_sentence_transformers_embedder(
     """Create a local sentence-transformers embedder after ensuring its optional extra exists."""
     ensure_sentence_transformers_dependencies(runtime_paths)
     embedder_class = _serialized_sentence_transformers_class()
-    if dimensions is None:
-        return embedder_class(id=model)
-    return embedder_class(id=model, dimensions=dimensions)
+    kwargs: dict[str, Any] = {"id": model}
+    if dimensions is not None:
+        kwargs["dimensions"] = dimensions
+
+    with _LOCAL_EMBEDDING_LOCK:
+        client = _SENTENCE_TRANSFORMER_CLIENTS.get(model)
+        if client is None:
+            embedder = cast("Any", embedder_class(**kwargs))
+            _SENTENCE_TRANSFORMER_CLIENTS[model] = embedder.sentence_transformer_client
+            return cast("Embedder", embedder)
+        return embedder_class(**kwargs, sentence_transformer_client=client)

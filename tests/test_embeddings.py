@@ -131,6 +131,7 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
     class DummyEmbedder:
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
+            self.sentence_transformer_client = kwargs.get("sentence_transformer_client", object())
 
     def _ensure(runtime_paths: object) -> None:
         captured["installed"] = runtime_paths
@@ -155,6 +156,51 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
     }
 
 
+def test_sentence_transformers_embedder_reuses_one_model_client_across_concurrent_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent index handles should share one expensive local model client."""
+    construction_lock = threading.Lock()
+    model_constructions = 0
+
+    class DummyEmbedder:
+        def __init__(
+            self,
+            *,
+            sentence_transformer_client: object | None = None,
+            **kwargs: object,
+        ) -> None:
+            nonlocal model_constructions
+            self.id = kwargs["id"]
+            if sentence_transformer_client is None:
+                with construction_lock:
+                    model_constructions += 1
+                time.sleep(0.02)
+                sentence_transformer_client = object()
+            self.sentence_transformer_client = sentence_transformer_client
+
+    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", lambda _paths: None)
+    monkeypatch.setattr(
+        "mindroom.embeddings.importlib.import_module",
+        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
+    )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        embedders = list(
+            pool.map(
+                lambda _index: create_sentence_transformers_embedder(
+                    TEST_RUNTIME_PATHS,
+                    "sentence-transformers/cache-regression-test",
+                ),
+                range(8),
+            ),
+        )
+
+    assert model_constructions == 1
+    assert len({id(embedder) for embedder in embedders}) == 8
+    assert len({id(embedder.sentence_transformer_client) for embedder in embedders}) == 1
+
+
 class _ConcurrencyProbe:
     """Record the highest number of callers inside the embedder at once."""
 
@@ -177,6 +223,7 @@ def _probed_local_embedder(monkeypatch: pytest.MonkeyPatch, probe: _ConcurrencyP
     class DummyEmbedder:
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
+            self.sentence_transformer_client = kwargs.get("sentence_transformer_client", object())
 
         def get_embedding(self, text: str) -> list[float]:
             probe.observe()
@@ -201,8 +248,8 @@ def test_sentence_transformers_usage_delegation_does_not_deadlock(
     """Agno's usage method may delegate back through the serialized embedding entry point."""
 
     class DelegatingEmbedder:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
+        def __init__(self, **kwargs: object) -> None:
+            self.sentence_transformer_client = kwargs.get("sentence_transformer_client", object())
 
         def get_embedding(self, text: str) -> list[float]:
             return [float(len(text))]
