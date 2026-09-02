@@ -160,7 +160,7 @@ def _get_changed_agents(
     new_config: Config,
     agent_bots: Mapping[str, AgentBot | TeamBot],
 ) -> set[str]:
-    """Return agent names whose config or culture changed."""
+    """Return agent names whose config changed."""
     if not config:
         return set()
 
@@ -172,16 +172,10 @@ def _get_changed_agents(
         new_agent = new_config.agents.get(agent_name)
 
         agents_differ = _config_entries_differ(old_agent, new_agent, exclude={"rooms"})
-        old_culture = _culture_signature_for_agent(agent_name, config) if old_agent else None
-        new_culture = _culture_signature_for_agent(agent_name, new_config) if new_agent else None
-        culture_differ = old_culture != new_culture
 
-        if (agents_differ or culture_differ) and (agent_name in agent_bots or new_agent is not None):
+        if agents_differ and (agent_name in agent_bots or new_agent is not None):
             if old_agent and new_agent:
-                if agents_differ:
-                    logger.debug("agent_configuration_changed_restart_required", agent=agent_name)
-                else:
-                    logger.debug("agent_culture_changed_restart_required", agent=agent_name)
+                logger.debug("agent_configuration_changed_restart_required", agent=agent_name)
             elif new_agent:
                 logger.info("new_agent_will_start", agent=agent_name)
             else:
@@ -189,15 +183,6 @@ def _get_changed_agents(
             changed.add(agent_name)
 
     return changed
-
-
-def _culture_signature_for_agent(agent_name: str, config: Config) -> tuple[str, str, str] | None:
-    """Return the relevant culture tuple used for restart decisions."""
-    assignment = config.resolve_entity(agent_name).culture
-    if assignment is None:
-        return None
-    culture_name, culture_config = assignment
-    return (culture_name, culture_config.mode, culture_config.description)
 
 
 def _get_changed_teams(

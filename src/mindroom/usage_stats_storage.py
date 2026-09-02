@@ -52,8 +52,12 @@ TOKEN_FIELDS = (
     "audio_total_tokens",
 )
 _REQUIRED_COLUMNS = frozenset(
-    {"session_id", "session_type", "agent_id", "team_id", "user_id", "runs", "session_data"},
+    {"session_id", "session_type", "agent_id", "team_id", "user_id", "session_data"},
 )
+# Agno 3 keeps one row per run in ``<session table>_runs``; the legacy ``runs``
+# blob on the session row only survives on databases whose migration could not
+# be verified.
+_RUNS_TABLE_REQUIRED_COLUMNS = frozenset({"run_id", "session_id", "run_index", "run_data"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,37 +339,32 @@ def iter_usage_storage_rows(
         return
     try:
         with _open_read_only_database(source) as connection:
-            schema_error = _validate_schema(connection, source)
-            if schema_error is not None:
-                yield schema_error
+            schema = _validate_schema(connection, source)
+            if isinstance(schema, UsageStorageDiagnostic):
+                yield schema
                 return
             table = _quote_identifier(source.expected_session_table)
-            if mode == "both":
-                query = (
-                    "SELECT session_id, session_type, agent_id, team_id, user_id, "  # noqa: S608
-                    "runs AS runs_payload, "
-                    "length(CAST(runs AS BLOB)) AS runs_payload_bytes, "
-                    "session_data AS session_payload, "
-                    "length(CAST(session_data AS BLOB)) AS session_payload_bytes "
-                    f"FROM {table}"
+            payload_columns = (
+                "session_data AS session_payload, length(CAST(session_data AS BLOB)) AS session_payload_bytes"
+            )
+            if schema.legacy_runs_column:
+                payload_columns += (
+                    ", runs AS legacy_runs_payload, length(CAST(runs AS BLOB)) AS legacy_runs_payload_bytes"
                 )
-            else:
-                payload_column = "runs" if mode == "runs" else "session_data"
-                query = (
-                    "SELECT session_id, session_type, agent_id, team_id, user_id, "  # noqa: S608
-                    f"{payload_column} AS payload, "
-                    f"length(CAST({payload_column} AS BLOB)) AS payload_bytes "
-                    f"FROM {table}"
-                )
+            query = (
+                "SELECT session_id, session_type, agent_id, team_id, user_id, "  # noqa: S608
+                f"{payload_columns} FROM {table}"
+            )
+            persisted_runs = (
+                _persisted_runs_by_session(connection, _runs_table(source.expected_session_table))
+                if mode != "session_metrics"
+                else {}
+            )
             for row in connection.execute(query):
-                payload_sizes = (
-                    (row["runs_payload_bytes"], row["session_payload_bytes"])
-                    if mode == "both"
-                    else (row["payload_bytes"],)
-                )
-                if any(
-                    isinstance(size, bool) or (size is not None and (not isinstance(size, int) or size < 0))
-                    for size in payload_sizes
+                session_payload_bytes = row["session_payload_bytes"]
+                legacy_payload_bytes = row["legacy_runs_payload_bytes"] if schema.legacy_runs_column else None
+                if not _is_valid_payload_size(session_payload_bytes) or not _is_valid_payload_size(
+                    legacy_payload_bytes,
                 ):
                     yield _source_diagnostic(source, "partial", "malformed retained session")
                     continue
@@ -374,7 +373,10 @@ def iter_usage_storage_rows(
                         source,
                         row,
                         mode=mode,
-                        payload_bytes=sum(size or 0 for size in payload_sizes),
+                        persisted_runs=persisted_runs.get(row["session_id"], _PersistedRuns()),
+                        legacy_runs_payload=row["legacy_runs_payload"] if schema.legacy_runs_column else None,
+                        legacy_payload_bytes=legacy_payload_bytes or 0,
+                        session_payload_bytes=session_payload_bytes or 0,
                     )
                 except (RecursionError, TypeError, ValueError, json.JSONDecodeError):
                     yield _source_diagnostic(source, "partial", "malformed retained session")
@@ -384,23 +386,84 @@ def iter_usage_storage_rows(
         yield _source_diagnostic(source, "partial", "database unavailable")
 
 
+def _is_valid_payload_size(value: object) -> bool:
+    if value is None:
+        return True
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionSchema:
+    """Which optional run storage shapes one retained session database carries."""
+
+    legacy_runs_column: bool
+
+
+@dataclass(slots=True)
+class _PersistedRuns:
+    """Raw run payloads for one session, in run-table order."""
+
+    payloads: list[object] = field(default_factory=list)
+    payload_bytes: int = 0
+
+
 def _validate_schema(
     connection: sqlite3.Connection,
     source: UsageStorageSource,
-) -> UsageStorageDiagnostic | None:
+) -> _SessionSchema | UsageStorageDiagnostic:
     table = source.expected_session_table
     if _IDENTIFIER.fullmatch(table) is None:
         return _source_diagnostic(source, "unsupported_schema", "session table unavailable")
-    exists = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table,),
-    ).fetchone()
-    if exists is None:
+    if not _table_exists(connection, table):
         return _source_diagnostic(source, "unsupported_schema", "session table unavailable")
-    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({_quote_identifier(table)})")}
+    columns = _table_columns(connection, table)
     if not _REQUIRED_COLUMNS.issubset(columns):
         return _source_diagnostic(source, "unsupported_schema", "session schema unsupported")
-    return None
+    runs_table = _runs_table(table)
+    if _table_exists(connection, runs_table) and not _RUNS_TABLE_REQUIRED_COLUMNS.issubset(
+        _table_columns(connection, runs_table),
+    ):
+        return _source_diagnostic(source, "unsupported_schema", "runs schema unsupported")
+    return _SessionSchema(legacy_runs_column="runs" in columns)
+
+
+def _runs_table(session_table: str) -> str:
+    return f"{session_table}_runs"
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in connection.execute(f"PRAGMA table_info({_quote_identifier(table)})")}
+
+
+def _persisted_runs_by_session(connection: sqlite3.Connection, runs_table: str) -> dict[str, _PersistedRuns]:
+    """Read every run row once, grouped by session in run order."""
+    if not _table_exists(connection, runs_table):
+        return {}
+    runs_by_session: dict[str, _PersistedRuns] = {}
+    query = (
+        "SELECT session_id, run_data AS run_payload, length(CAST(run_data AS BLOB)) AS run_payload_bytes "  # noqa: S608
+        f"FROM {_quote_identifier(runs_table)} ORDER BY run_index ASC, created_at ASC, run_id ASC"
+    )
+    for row in connection.execute(query):
+        session_id = row["session_id"]
+        if not isinstance(session_id, str):
+            continue
+        payload_bytes = row["run_payload_bytes"]
+        persisted = runs_by_session.setdefault(session_id, _PersistedRuns())
+        persisted.payloads.append(row["run_payload"])
+        if isinstance(payload_bytes, int) and not isinstance(payload_bytes, bool) and payload_bytes > 0:
+            persisted.payload_bytes += payload_bytes
+    return runs_by_session
 
 
 def _extract_row(
@@ -408,7 +471,10 @@ def _extract_row(
     row: sqlite3.Row,
     *,
     mode: _UsageReadMode,
-    payload_bytes: int,
+    persisted_runs: _PersistedRuns,
+    legacy_runs_payload: object,
+    legacy_payload_bytes: int,
+    session_payload_bytes: int,
 ) -> UsageSessionRow:
     entity_kind = row["session_type"]
     if entity_kind not in {"agent", "team"}:
@@ -420,15 +486,18 @@ def _extract_row(
         raise ValueError
     runs_available = mode != "session_metrics"
     session_metrics_available = mode != "runs"
+    payload_bytes = session_payload_bytes if mode != "runs" else 0
+    if mode != "session_metrics":
+        payload_bytes += persisted_runs.payload_bytes + legacy_payload_bytes
     if mode == "runs":
-        runs = _extract_runs(row["payload"], row_requester=row_requester)
+        runs = _extract_runs(persisted_runs.payloads, legacy_runs_payload, row_requester=row_requester)
         session_metrics = MappingProxyType({})
     elif mode == "session_metrics":
         runs = ()
-        session_metrics = _decode_session_metrics(row["payload"])
+        session_metrics = _decode_session_metrics(row["session_payload"])
     else:
         try:
-            runs = _extract_runs(row["runs_payload"], row_requester=row_requester)
+            runs = _extract_runs(persisted_runs.payloads, legacy_runs_payload, row_requester=row_requester)
         except (RecursionError, TypeError, ValueError, json.JSONDecodeError):
             runs = ()
             runs_available = False
@@ -450,13 +519,36 @@ def _extract_row(
     )
 
 
-def _extract_runs(raw_value: object, *, row_requester: str | None) -> tuple[UsageRunNode, ...]:
+def _extract_runs(
+    run_payloads: list[object],
+    legacy_runs_payload: object,
+    *,
+    row_requester: str | None,
+) -> tuple[UsageRunNode, ...]:
+    """Merge run-table rows with any legacy blob runs the run table does not hold yet.
+
+    Mirrors Agno's own read merge: the run table wins on ``run_id`` conflicts and
+    legacy-only runs are appended after it.
+    """
+    raw_runs = [_decode_agno_json(payload) for payload in run_payloads]
+    seen_run_ids = {run_id for run_id in map(_raw_run_id, raw_runs) if run_id is not None}
+    for legacy_run in _decode_runs(legacy_runs_payload):
+        if _raw_run_id(legacy_run) in seen_run_ids:
+            continue
+        raw_runs.append(legacy_run)
     runs: list[UsageRunNode] = []
-    for raw_run in _decode_runs(raw_value):
+    for raw_run in raw_runs:
         extracted = _extract_run(raw_run, row_requester=row_requester)
         if extracted is not None:
             runs.append(extracted)
     return tuple(runs)
+
+
+def _raw_run_id(raw_run: object) -> str | None:
+    if not isinstance(raw_run, dict):
+        return None
+    run_id = cast("dict[str, object]", raw_run).get("run_id")
+    return run_id if isinstance(run_id, str) else None
 
 
 def _decode_runs(raw_value: object) -> list[object]:

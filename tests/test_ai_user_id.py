@@ -12,8 +12,8 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.db.sqlite import SqliteDb
 from agno.media import File
+from agno.metrics import RunMetrics
 from agno.models.message import Message
-from agno.models.metrics import Metrics
 from agno.models.response import ModelResponse, ToolExecution
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
@@ -142,8 +142,8 @@ def _model_runtime_context(
 
 
 def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
-    """Metrics serialization should preserve only the provider payload Agno exposes."""
-    payload = _serialize_metrics(Metrics(input_tokens=6, output_tokens=0, cache_read_tokens=46449))
+    """RunMetrics serialization should preserve only the provider payload Agno exposes."""
+    payload = _serialize_metrics(RunMetrics(input_tokens=6, output_tokens=0, cache_read_tokens=46449))
 
     assert payload == {
         "input_tokens": 6,
@@ -2519,7 +2519,7 @@ class TestUserIdPassthrough:
         mock_run_output.status = RunStatus.completed
         mock_run_output.model = "test-model"
         mock_run_output.model_provider = "openai"
-        mock_run_output.metrics = Metrics(
+        mock_run_output.metrics = RunMetrics(
             input_tokens=800,
             output_tokens=120,
             total_tokens=920,
@@ -2582,7 +2582,7 @@ class TestUserIdPassthrough:
         mock_run_output.status = RunStatus.completed
         mock_run_output.model = "test-model"
         mock_run_output.model_provider = "openai"
-        mock_run_output.metrics = Metrics(input_tokens=800, output_tokens=120, total_tokens=920)
+        mock_run_output.metrics = RunMetrics(input_tokens=800, output_tokens=120, total_tokens=920)
         recorder = TurnRecorder(user_message="test")
 
         with (
@@ -2630,7 +2630,7 @@ class TestUserIdPassthrough:
         mock_run_output.status = RunStatus.completed
         mock_run_output.model = "claude-sonnet-4-6"
         mock_run_output.model_provider = "Anthropic"
-        mock_run_output.metrics = Metrics(
+        mock_run_output.metrics = RunMetrics(
             input_tokens=3000,
             output_tokens=120,
             total_tokens=3120,
@@ -2746,7 +2746,7 @@ class TestUserIdPassthrough:
             yield RunCompletedEvent(
                 run_id="run-2",
                 session_id="session1",
-                metrics=Metrics(
+                metrics=RunMetrics(
                     input_tokens=500,
                     output_tokens=60,
                     total_tokens=560,
@@ -2916,7 +2916,7 @@ class TestUserIdPassthrough:
         mock_run_output.status = RunStatus.completed
         mock_run_output.model = "large-model"
         mock_run_output.model_provider = "openai"
-        mock_run_output.metrics = Metrics(input_tokens=800, output_tokens=50, total_tokens=850, duration=1.2)
+        mock_run_output.metrics = RunMetrics(input_tokens=800, output_tokens=50, total_tokens=850, duration=1.2)
         mock_run_output.tools = None
         mock_run_output.content = "Response"
 
@@ -2975,7 +2975,7 @@ class TestUserIdPassthrough:
             yield RunCompletedEvent(
                 run_id="run-room-stream",
                 session_id="session1",
-                metrics=Metrics(
+                metrics=RunMetrics(
                     input_tokens=500,
                     output_tokens=60,
                     total_tokens=560,
@@ -3828,7 +3828,7 @@ class TestUserIdPassthrough:
             yield RunCompletedEvent(
                 run_id="run-2",
                 session_id="session1",
-                metrics=Metrics(
+                metrics=RunMetrics(
                     input_tokens=120,
                     output_tokens=20,
                     total_tokens=140,

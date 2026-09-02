@@ -337,7 +337,7 @@ Expected outcome: The synthetic voice-derived message preserves original sender 
 - [ ] `MEDIA-013` Repeat a voice flow that emits visible router echo, retry the same event, hand off to the final responder, and repeat with reply permissions denied.
 Expected outcome: Router echo is emitted at most once per voice event, reused across retries or handoff when appropriate, and fully suppressed when reply permissions deny the sender.
 
-## 10. Memory, Knowledge, Workspaces, Private Roots, And Cultures
+## 10. Memory, Knowledge, Workspaces, And Private Roots
 
 Source anchors: `src/mindroom/agents.py`, `src/mindroom/memory/`, `src/mindroom/memory/auto_flush.py`, `src/mindroom/memory/config.py`, `src/mindroom/workspaces.py`, `src/mindroom/knowledge/manager.py`, `src/mindroom/knowledge/file_listing.py`, `src/mindroom/knowledge/utils.py`, `src/mindroom/api/knowledge.py`.
 
@@ -370,15 +370,6 @@ Expected outcome: Requester-local roots are created from the template without ov
 
 - [ ] `MEM-010` Configure `private.knowledge` for a private agent and compare chat behavior between the normal runtime and `/v1`.
 Expected outcome: Requester-private knowledge remains isolated to the private runtime path and is not exposed through the shared `/v1` API surface.
-
-- [ ] `MEM-011` Configure cultures in `automatic`, `agentic`, and `manual` modes and run agent conversations that should update shared practice knowledge.
-Expected outcome: Automatic cultures capture and update shared knowledge, agentic cultures expose culture-aware runtime behavior without automatic writes, and manual cultures stay read-only while still injecting the culture description into context.
-
-- [ ] `MEM-012` Assign multiple shared agents to the same culture and use them in separate conversations.
-Expected outcome: The agents share one persisted culture state so later runs observe the same evolving cultural context instead of diverging per agent.
-
-- [ ] `MEM-013` Exercise a private agent that belongs to a culture across two requester scopes.
-Expected outcome: Culture state for private agents is isolated by requester scope and does not leak across different private-instance roots.
 
 - [ ] `MEM-014` Configure `defaults.learning`, override one agent with `learning: false`, and compare runtime behavior plus persisted `learning/` state.
 Expected outcome: Agents inherit learning from defaults unless explicitly disabled, disabled agents do not create or update learning state, and enabled agents persist learning data in their state roots.
@@ -542,9 +533,6 @@ Expected outcome: Agent CRUD supports private settings, delegation, learning and
 
 - [ ] `UI-007` Perform create, edit, and delete flows on the Teams tab.
 Expected outcome: Team mode, room assignment, model override, and member selection persist correctly.
-
-- [ ] `UI-008` Perform create, edit, and delete flows on the Culture tab.
-Expected outcome: Culture assignment enforces one-culture-per-agent behavior and persists the chosen mode and description.
 
 - [ ] `UI-009` Perform create, edit, and delete flows on the Rooms tab.
 Expected outcome: Room membership, descriptions, and room-model overrides persist correctly and stay aligned with backend config.

@@ -12,7 +12,7 @@ from agno.tools.google.gmail import GmailTools as AgnoGmailTools
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
+from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
@@ -67,14 +67,11 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
         super().__init__(creds=creds, **kwargs)
 
         # Store original auth method for fallback
-        self._set_original_auth(AgnoGmailTools._auth)
+        self._set_original_auth(AgnoGmailTools._resolve_creds)
         self._wrap_oauth_function_entrypoints()
 
-    def _should_fallback_to_original_auth(self) -> bool:
-        return google_service_account_configured(self.service_account_path, self._runtime_paths)
-
-    def _build_service(self) -> Any:  # noqa: ANN401
-        return build("gmail", "v1", http=self._google_authorized_http(self.creds))
+    def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
+        return build("gmail", "v1", http=self._google_authorized_http(creds))
 
     def _batch_get(
         self,

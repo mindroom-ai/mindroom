@@ -8,7 +8,6 @@ import {
   RoomConfig,
   ModelConfig,
   KnowledgeBaseConfig,
-  Culture,
   getDefaultPrivateConfig,
   normalizeAgentUpdates,
   normalizeTeamUpdates,
@@ -211,7 +210,7 @@ function deriveRooms(
 
 function deriveConfigCollections(
   config: Config,
-): Pick<ConfigState, "agents" | "teams" | "cultures" | "rooms"> {
+): Pick<ConfigState, "agents" | "teams" | "rooms"> {
   const defaultLearning = config.defaults?.learning ?? true;
   const defaultLearningMode = config.defaults?.learning_mode ?? "always";
   const agents = Object.entries(config.agents).map(([id, agent]) => ({
@@ -231,36 +230,9 @@ function deriveConfigCollections(
         rooms: team.rooms ?? [],
       }))
     : [];
-  const cultures = config.cultures
-    ? Object.entries(config.cultures).map(([id, culture]) => ({
-        id,
-        ...culture,
-        agents: culture.agents ?? [],
-        mode: culture.mode ?? "automatic",
-        description: culture.description ?? "",
-      }))
-    : [];
-
   const rooms = deriveRooms(config, agents, teams);
 
-  return { agents, teams, cultures, rooms };
-}
-
-function unassignAgentsFromOtherCultures(
-  cultures: Culture[],
-  targetCultureId: string,
-  targetCultureAgents: string[],
-): Culture[] {
-  const assignedAgents = new Set(targetCultureAgents);
-  return cultures.map((culture) => {
-    if (culture.id === targetCultureId) {
-      return culture;
-    }
-    return {
-      ...culture,
-      agents: culture.agents.filter((agentId) => !assignedAgents.has(agentId)),
-    };
-  });
+  return { agents, teams, rooms };
 }
 
 function removeMissingTeamMembers(teams: Team[], agents: Agent[]): Team[] {
@@ -577,7 +549,6 @@ interface ConfigState {
   draftVersion: number;
   agents: Agent[];
   teams: Team[];
-  cultures: Culture[];
   rooms: Room[];
   agentPoliciesByAgent: AgentPoliciesByAgent;
   agentPoliciesStale: boolean;
@@ -586,7 +557,6 @@ interface ConfigState {
   saveConfigRequestId: number;
   selectedAgentId: string | null;
   selectedTeamId: string | null;
-  selectedCultureId: string | null;
   selectedRoomId: string | null;
   isDirty: boolean;
   dirtyRoots: string[];
@@ -619,10 +589,6 @@ interface ConfigState {
   updateTeam: (teamId: string, updates: Partial<Team>) => void;
   createTeam: (team: Omit<Team, "id">) => void;
   deleteTeam: (teamId: string) => void;
-  selectCulture: (cultureId: string | null) => void;
-  updateCulture: (cultureId: string, updates: Partial<Culture>) => void;
-  createCulture: (culture: Omit<Culture, "id">) => void;
-  deleteCulture: (cultureId: string) => void;
   selectRoom: (roomId: string | null) => void;
   updateRoom: (roomId: string, updates: Partial<Room>) => void;
   createRoom: (room: Omit<Room, "id">) => void;
@@ -671,14 +637,12 @@ function clearedLoadedConfigState(
   | "draftVersion"
   | "agents"
   | "teams"
-  | "cultures"
   | "rooms"
   | "agentPoliciesByAgent"
   | "agentPoliciesStale"
   | "agentPoliciesRequestId"
   | "selectedAgentId"
   | "selectedTeamId"
-  | "selectedCultureId"
   | "selectedRoomId"
   | "isDirty"
   | "dirtyRoots"
@@ -696,14 +660,12 @@ function clearedLoadedConfigState(
     draftVersion,
     agents: [],
     teams: [],
-    cultures: [],
     rooms: [],
     agentPoliciesByAgent: {},
     agentPoliciesStale: false,
     agentPoliciesRequestId,
     selectedAgentId: null,
     selectedTeamId: null,
-    selectedCultureId: null,
     selectedRoomId: null,
     isDirty: false,
     dirtyRoots: [],
@@ -724,7 +686,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   draftVersion: 0,
   agents: [],
   teams: [],
-  cultures: [],
   rooms: [],
   agentPoliciesByAgent: {},
   agentPoliciesStale: false,
@@ -733,7 +694,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   saveConfigRequestId: 0,
   selectedAgentId: null,
   selectedTeamId: null,
-  selectedCultureId: null,
   selectedRoomId: null,
   isDirty: false,
   dirtyRoots: [],
@@ -772,14 +732,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...loadedConfig,
         rooms: normalizedRoomConfigs(loadedConfig.rooms),
         knowledge_bases: loadedConfig.knowledge_bases || {},
-        cultures: loadedConfig.cultures || {},
       };
       rememberRawToolEntries(
         normalizedConfig,
         rawEntriesByAgent,
         rawDefaultToolEntries,
       );
-      const { agents, teams, cultures, rooms } =
+      const { agents, teams, rooms } =
         deriveConfigCollections(normalizedConfig);
       let agentPoliciesByAgent: AgentPoliciesByAgent = {};
       let diagnostics: ConfigDiagnostic[] = [];
@@ -830,7 +789,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         draftVersion: nextDraft,
         agents,
         teams,
-        cultures,
         rooms,
         agentPoliciesByAgent,
         agentPoliciesStale,
@@ -980,7 +938,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       config,
       agents,
       teams,
-      cultures,
       committedGeneration,
       agentPoliciesStale,
       loadedConfig,
@@ -1067,14 +1024,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         },
         {} as Record<string, Omit<Team, "id">>,
       );
-      const currentCulturesObject = cultures.reduce(
-        (acc, culture) => {
-          const { id, ...rest } = culture;
-          acc[id] = rest;
-          return acc;
-        },
-        {} as Record<string, Omit<Culture, "id">>,
-      );
 
       const roomModels = config.room_models ?? {};
       const roomsObject = config.rooms ?? {};
@@ -1094,9 +1043,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           : {}),
         ...(dirtyRootSet.has("agents") ? { agents: currentAgentsObject } : {}),
         ...(dirtyRootSet.has("teams") ? { teams: currentTeamsObject } : {}),
-        ...(dirtyRootSet.has("cultures")
-          ? { cultures: currentCulturesObject }
-          : {}),
         ...(dirtyRootSet.has("rooms") ? { rooms: roomsObject } : {}),
         ...(dirtyRootSet.has("room_models")
           ? {
@@ -1181,7 +1127,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         config: updatedConfig,
         agents: syncedCollections.agents,
         teams: syncedCollections.teams,
-        cultures: syncedCollections.cultures,
         rooms: syncedCollections.rooms,
         isLoading: false,
         syncStatus: "synced",
@@ -1581,16 +1526,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set({
       agents: nextAgents,
       teams: nextTeams,
-      cultures: state.cultures.map((culture) => ({
-        ...culture,
-        agents: culture.agents.filter((id) => id !== agentId),
-      })),
       rooms: roomsFromDraft(state.config, state.rooms, nextAgents, nextTeams),
       agentPoliciesByAgent: nextAgentPoliciesByAgent,
       privateWorkerScopeBackups: remainingBackups,
       selectedAgentId:
         state.selectedAgentId === agentId ? null : state.selectedAgentId,
-      ...markDraftDirty(state, {}, [["agents"], ["teams"], ["cultures"]]),
+      ...markDraftDirty(state, {}, [["agents"], ["teams"]]),
     });
     if (get().config != null && deletedAgent != null) {
       void get().refreshAgentPolicies(nextAgents);
@@ -1665,94 +1606,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...markDraftDirty(state, {}, [["teams"]]),
       };
     });
-  },
-
-  // Select a culture for editing
-  selectCulture: (cultureId) => {
-    set({ selectedCultureId: cultureId });
-  },
-
-  // Update an existing culture
-  updateCulture: (cultureId, updates) => {
-    set((state) => {
-      const updatedCultures = state.cultures.map((culture) =>
-        culture.id === cultureId ? { ...culture, ...updates } : culture,
-      );
-
-      if (updates.agents) {
-        const targetCulture = updatedCultures.find(
-          (culture) => culture.id === cultureId,
-        );
-        if (!targetCulture) {
-          return {
-            cultures: updatedCultures,
-            ...markDraftDirty(state, {}, [["cultures", cultureId]]),
-          };
-        }
-        return {
-          cultures: unassignAgentsFromOtherCultures(
-            updatedCultures,
-            cultureId,
-            targetCulture.agents,
-          ),
-          ...markDraftDirty(state, {}, [["cultures", cultureId, "agents"]]),
-        };
-      }
-
-      return {
-        cultures: updatedCultures,
-        ...markDraftDirty(
-          state,
-          {},
-          Object.keys(updates).map(
-            (key) => ["cultures", cultureId, key] as ConfigDiagnosticPath,
-          ),
-        ),
-      };
-    });
-  },
-
-  // Create a new culture
-  createCulture: (cultureData) => {
-    set((state) => {
-      const baseId = (cultureData.description || "new_culture")
-        .toLowerCase()
-        .replace(/\s+/g, "_");
-      let id = baseId;
-      let counter = 1;
-      while (state.cultures.some((culture) => culture.id === id)) {
-        id = `${baseId}_${counter}`;
-        counter += 1;
-      }
-
-      const newCulture: Culture = {
-        id,
-        ...cultureData,
-        description: cultureData.description || "",
-        mode: cultureData.mode || "automatic",
-        agents: cultureData.agents || [],
-      };
-      const nextCultures = unassignAgentsFromOtherCultures(
-        [...state.cultures, newCulture],
-        id,
-        newCulture.agents,
-      );
-      return {
-        cultures: nextCultures,
-        selectedCultureId: id,
-        ...markDraftDirty(state, {}, [["cultures"]]),
-      };
-    });
-  },
-
-  // Delete a culture
-  deleteCulture: (cultureId) => {
-    set((state) => ({
-      cultures: state.cultures.filter((culture) => culture.id !== cultureId),
-      selectedCultureId:
-        state.selectedCultureId === cultureId ? null : state.selectedCultureId,
-      ...markDraftDirty(state, {}, [["cultures"]]),
-    }));
   },
 
   // Select a room for editing

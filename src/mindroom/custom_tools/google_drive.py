@@ -18,7 +18,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
+from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.credential_lifecycle import oauth_credentials_have_scopes
@@ -156,14 +156,14 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         super().__init__(creds=creds, **kwargs)
         if write:
             self._register_write_tools()
-        self._set_original_auth(AgnoGoogleDriveTools._auth)
+        self._set_original_auth(AgnoGoogleDriveTools._resolve_creds)
         self._wrap_oauth_function_entrypoints()
         self._wrap_write_scope_entrypoints()
         apply_toolkit_function_aliases(self, _MODEL_FUNCTION_NAME_ALIASES)
 
-    def _build_service(self) -> Any:  # noqa: ANN401
+    def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
         """Build Drive without cloning MindRoom's tracked OAuth credential."""
-        credentials = self.creds
+        credentials = creds
         if credentials is None:
             msg = "Google Drive credentials are missing"
             raise RuntimeError(msg)
@@ -248,9 +248,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         except ValueError as exc:
             msg = "Google Drive max_read_size must be a number"
             raise ValueError(msg) from exc
-
-    def _should_fallback_to_original_auth(self) -> bool:
-        return google_service_account_configured(self.service_account_path, self._runtime_paths)
 
     def _resolve_upload_path(self, local_path: str) -> Path:
         if self._workspace_root is None:

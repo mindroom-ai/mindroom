@@ -161,7 +161,6 @@ mindroom run
 | **Images** | Pass user-sent images to vision-capable AI models |
 | **Matrix Desktop Bridge** | Observe or locally lease control of a computer over pinned Matrix E2EE without opening inbound ports |
 | **File & Video Attachments** | Context-scoped file and video handling with attachment IDs |
-| **Cultures** | Shared evolving principles across groups of agents |
 | **Interactive Q&A** | Clickable multiple-choice questions via Matrix reactions |
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
@@ -189,7 +188,6 @@ mindroom run
 - [Getting Started](https://docs.mindroom.chat/getting-started/) - Installation and first steps
 - [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) - Run only `uvx mindroom` locally against hosted Matrix
 - [Configuration](https://docs.mindroom.chat/configuration/) - All configuration options
-- [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
 - [Dashboard](https://docs.mindroom.chat/dashboard/) - Web UI for configuration
 - [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/) - Use agents from any OpenAI-compatible client
 - [Tools](https://docs.mindroom.chat/tools/) - Available tool integrations

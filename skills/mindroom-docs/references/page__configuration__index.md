@@ -369,13 +369,6 @@ teams:
       timeout_seconds: 600
     rooms: []                      # Optional: Rooms to auto-join
 
-# Culture configurations (optional)
-cultures:
-  engineering:
-    description: Follow clean code principles and write tests  # Shared principles
-    agents: [developer, reviewer]  # Agents assigned (each agent can belong to at most one culture)
-    mode: automatic                # automatic, agentic, or manual
-
 # Router configuration (optional)
 router:
   model: default                   # Optional: Model for routing (default: "default")
@@ -780,7 +773,6 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - [Agents](https://docs.mindroom.chat/configuration/agents/) - Configure individual AI agents
 - [Models](https://docs.mindroom.chat/configuration/models/) - Configure AI model providers
 - [Teams](https://docs.mindroom.chat/configuration/teams/) - Configure multi-agent collaboration
-- [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
 - [Router](https://docs.mindroom.chat/configuration/router/) - Configure message routing
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Configure optional tools that agents load on demand
 - [Memory](https://docs.mindroom.chat/memory/) - Configure memory providers and behavior

@@ -316,6 +316,18 @@
         },
         {
           "authored_override": true,
+          "default": null,
+          "description": "User token (xoxp-) used for search_messages, which bot tokens cannot call",
+          "label": "User Token",
+          "name": "user_token",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Markdown",
@@ -1102,6 +1114,18 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": "Per-request HTTP timeout in seconds",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -1413,6 +1437,18 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -1552,6 +1588,18 @@
           "placeholder": null,
           "required": false,
           "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
           "validation": null
         }
       ],
@@ -2666,6 +2714,18 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -3189,6 +3249,18 @@
         },
         {
           "authored_override": true,
+          "default": true,
+          "description": null,
+          "label": "Enable Search Content",
+          "name": "enable_search_content",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Expose Base Directory",
@@ -3378,6 +3450,18 @@
         },
         {
           "authored_override": true,
+          "default": true,
+          "description": null,
+          "label": "Enable Code Generation",
+          "name": "enable_code_generation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "Save Files",
@@ -3441,6 +3525,18 @@
           "placeholder": null,
           "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
           "validation": null
         }
       ],
@@ -5190,6 +5286,18 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -6381,6 +6489,18 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -6952,6 +7072,18 @@
           "placeholder": null,
           "required": false,
           "type": "string[]",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
           "validation": null
         }
       ],
@@ -7600,6 +7732,18 @@
           "placeholder": "ClickUp space ID",
           "required": true,
           "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": "Per-request HTTP timeout in seconds",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
           "validation": null
         }
       ],
@@ -9725,18 +9869,6 @@
           "required": false,
           "type": "boolean",
           "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": null,
-          "label": "Async Tools (Deprecated)",
-          "name": "async_tools",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -11159,6 +11291,18 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -11504,6 +11648,18 @@
           "required": false,
           "type": "password",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Return scraped website content as Markdown instead of parsed HTML",
+          "label": "Markdown",
+          "name": "markdown",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -11591,6 +11747,18 @@
           "placeholder": null,
           "required": false,
           "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
           "validation": null
         }
       ],
@@ -11797,6 +11965,18 @@
           "description": null,
           "label": "Fixed Max Results",
           "name": "fixed_max_results",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -12025,6 +12205,18 @@
           "placeholder": null,
           "required": false,
           "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
           "validation": null
         }
       ],
@@ -12340,6 +12532,138 @@
           "description": null,
           "label": "Format",
           "name": "format",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Search category: general, news, or finance",
+          "label": "Topic",
+          "name": "topic",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Time window for results: day, week, month, year (or d/w/m/y)",
+          "label": "Time Range",
+          "name": "time_range",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Only include results published after this date (YYYY-MM-DD)",
+          "label": "Start Date",
+          "name": "start_date",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Only include results published before this date (YYYY-MM-DD)",
+          "label": "End Date",
+          "name": "end_date",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Number of days back to include results (news topic only)",
+          "label": "Days",
+          "name": "days",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Restrict results to these domains",
+          "label": "Include Domains",
+          "name": "include_domains",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Exclude these domains from results",
+          "label": "Exclude Domains",
+          "name": "exclude_domains",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Boost results from this country (e.g. united states)",
+          "label": "Country",
+          "name": "country",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Let Tavily auto-tune search parameters; explicitly set parameters take precedence",
+          "label": "Auto Parameters",
+          "name": "auto_parameters",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Number of content chunks per source (1-3), advanced search only",
+          "label": "Chunks Per Source",
+          "name": "chunks_per_source",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Additional parameters merged into every search request (JSON object)",
+          "label": "Search Params",
+          "name": "search_params",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -12713,6 +13037,18 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": null,
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -12983,6 +13319,18 @@
           "required": false,
           "type": "password",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Restrict tool calls to these subreddits (case-insensitive)",
+          "label": "Allowed Subreddits",
+          "name": "allowed_subreddits",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -13164,6 +13512,18 @@
           "placeholder": "your_client_secret",
           "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": "Per-request HTTP timeout in seconds",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
           "validation": null
         }
       ],

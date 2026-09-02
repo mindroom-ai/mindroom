@@ -8,7 +8,7 @@ from agno.db.sqlite import SqliteDb
 from agno.workflow import Step, Workflow, WorkflowFactory
 from agno.workflow.types import StepInput, StepOutput
 
-from mindroom.dynamic_workflows.runner import execute_workflow_step
+from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, execute_workflow_step
 from mindroom.dynamic_workflows.validation import validate_workflow_spec
 
 if TYPE_CHECKING:
@@ -94,19 +94,33 @@ def _build_step(
     def executor(step_input: StepInput) -> StepOutput:
         input_data = step_input.input if isinstance(step_input.input, dict) else {}
         previous_outputs = _previous_step_outputs(step_input.previous_step_outputs)
-        result = execute_workflow_step(
-            step,
-            input_data=input_data,
-            step_outputs=previous_outputs,
-            participant_executor=participant_executor,
-            participants_by_id=participants_by_id,
-        )
+        # Agno 3 turns an executor exception into a failed step and runs the
+        # next one anyway; ``stop`` is the only way to end the run at the
+        # failed step, so failures are reported as a stopping StepOutput.
+        try:
+            result = execute_workflow_step(
+                step,
+                input_data=input_data,
+                step_outputs=previous_outputs,
+                participant_executor=participant_executor,
+                participants_by_id=participants_by_id,
+            )
+        except DynamicWorkflowExecutionError as exc:
+            return StepOutput(
+                step_name=step_id,
+                step_id=step_id,
+                content=str(exc),
+                success=False,
+                error=str(exc),
+                stop=True,
+            )
         return StepOutput(
             step_name=step_id,
             step_id=step_id,
             content=result.content,
             success=result.status == "completed",
             error=result.error,
+            stop=result.status != "completed",
         )
 
     return Step(
@@ -115,7 +129,6 @@ def _build_step(
         description=description,
         executor=executor,
         max_retries=0,
-        on_error="fail",
     )
 
 

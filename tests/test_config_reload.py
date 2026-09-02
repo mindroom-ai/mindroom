@@ -18,7 +18,7 @@ import yaml
 import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -1694,41 +1694,6 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
             cleanup_task.cancel()
         await asyncio.gather(*bot.stop_manager.cleanup_tasks, return_exceptions=True)
         await orchestrator.config_reload.cancel()
-
-
-def test_get_changed_agents_detects_culture_config_updates() -> None:
-    """Agent restarts should trigger when their culture mode/assignment changes."""
-    old_config = _runtime_bound_config(
-        Config(
-            agents={
-                "agent1": AgentConfig(display_name="Agent 1"),
-            },
-            cultures={
-                "engineering": CultureConfig(
-                    description="Engineering standards",
-                    agents=["agent1"],
-                    mode="automatic",
-                ),
-            },
-        ),
-    )
-    new_config = _runtime_bound_config(
-        Config(
-            agents={
-                "agent1": AgentConfig(display_name="Agent 1"),
-            },
-            cultures={
-                "engineering": CultureConfig(
-                    description="Engineering standards",
-                    agents=["agent1"],
-                    mode="agentic",
-                ),
-            },
-        ),
-    )
-
-    changed = _get_changed_agents(old_config, new_config, agent_bots={"agent1": AsyncMock()})
-    assert changed == {"agent1"}
 
 
 def test_get_changed_agents_detects_tool_override_updates() -> None:

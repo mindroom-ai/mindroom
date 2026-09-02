@@ -336,3 +336,10 @@ FINAL  # unused variable (src/mindroom/event_journal/models.py)
 # Named only inside a `cast("_RoomIdEvent", event)` string literal, which
 # vulture does not resolve.
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
+
+# Agno 3 adapter overrides: agno reads the run-object cache attribute and calls drop_session itself.
+_._run_object_cache  # agno SqliteDb attribute replaced by the adapter (src/mindroom/agent_storage.py)
+_.drop_session  # agno SqliteDb calls it on the run-object cache (src/mindroom/agent_storage.py)
+_.ns_resolver  # pydantic ValidateCallWrapper attribute reset by the patch (src/mindroom/agno_tool_wrapper_patch.py)
+_.runs_from_rows  # agno SqliteDb calls it on the run-object cache (src/mindroom/agent_storage.py)
+_enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/agent_storage.py)

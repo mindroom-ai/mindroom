@@ -1403,7 +1403,7 @@ def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
 
     tools[0].creds.refresh(object())
     tools[1].creds.refresh(object())
-    tools[0]._build_service()
+    tools[0]._build_service(tools[0].creds)
 
     assert provider_calls == 1
     assert tools[0].creds.token == rotated_access
@@ -2366,8 +2366,8 @@ def test_google_wrapper_applies_env_file_service_account_to_upstream_auth(
     )
 
     assert tool.creds is None
-    assert tool.service_account_path == str(service_account_path)
-    assert tool.delegated_user == "alice@example.com"
+    assert tool._get_service_account_path() == str(service_account_path)
+    assert tool._get_delegated_user() == "alice@example.com"
     assert tool._should_fallback_to_original_auth() is True
 
 

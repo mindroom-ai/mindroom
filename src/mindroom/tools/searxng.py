@@ -40,6 +40,13 @@ if TYPE_CHECKING:
             required=False,
             default=None,
         ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+        ),
     ],
     dependencies=[],  # httpx already included in main dependencies
     docs_url="https://docs.agno.com/tools/toolkits/search/searxng",

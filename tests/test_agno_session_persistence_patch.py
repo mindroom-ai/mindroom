@@ -135,11 +135,21 @@ def test_installation_is_exact_version_guarded_and_idempotent() -> None:
     """Only the pinned dependency version may install, and repeat installs are inert."""
     assert persistence_patch.version("agno") == persistence_patch._SUPPORTED_AGNO_VERSION
     persistence_patch.install_patch()
-    installed = (agent_session_module.asave_session, team_session_module.asave_session)
+    installed = (
+        agent_session_module.asave_session,
+        agent_session_module.asave_run,
+        team_session_module.asave_session,
+        team_session_module.asave_run,
+    )
 
     persistence_patch.install_patch()
 
-    assert (agent_session_module.asave_session, team_session_module.asave_session) == installed
+    assert (
+        agent_session_module.asave_session,
+        agent_session_module.asave_run,
+        team_session_module.asave_session,
+        team_session_module.asave_run,
+    ) == installed
     code = """
 from importlib import import_module
 
@@ -956,3 +966,44 @@ async def test_accepted_real_sqlite_save_survives_close_and_keeps_its_lane_alive
         assert get_agent_session(fresh_storage, "close-reconnect") is not None
     finally:
         fresh_storage.close()
+
+
+@pytest.mark.parametrize("surface", ["agent", "team"])
+@pytest.mark.asyncio
+async def test_registered_run_saves_run_on_a_dedicated_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: _Surface,
+) -> None:
+    """Agno 3's per-run saves take the same off-loop lane and prompt stripping as session saves."""
+    storage = _storage(tmp_path, f"{surface}-run-thread")
+    owner, session = _owner_and_session(surface, storage, f"{surface}-run")
+    event_loop_thread = threading.get_ident()
+    observed_threads: list[int] = []
+    original_upsert_run = storage.upsert_run
+
+    def probe(
+        run: RunOutput | TeamRunOutput,
+        session_id: str,
+        user_id: str | None = None,
+        run_index: int | None = None,
+    ) -> None:
+        observed_threads.append(threading.get_ident())
+        original_upsert_run(run=run, session_id=session_id, user_id=user_id, run_index=run_index)
+
+    monkeypatch.setattr(storage, "upsert_run", probe)
+    save_run = agent_session_module.asave_run if surface == "agent" else team_session_module.asave_run
+    try:
+        await owner.asave_session(session)
+        assert session.runs is not None
+        await save_run(owner, session.runs[0], session.session_id, "before", 0)
+        persisted = _persisted(storage, surface, session.session_id)
+    finally:
+        storage.close()
+
+    assert observed_threads
+    assert all(thread != event_loop_thread for thread in observed_threads)
+    assert persisted is not None
+    assert persisted.runs is not None
+    assert [message.role for message in persisted.runs[0].messages or []] == ["user"]
+    assert [message.role for message in session.runs[0].messages or []] == ["system", "user"]

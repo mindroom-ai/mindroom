@@ -107,7 +107,6 @@ export interface AgentPrivateConfig {
 }
 
 export type LearningMode = "always" | "agentic";
-export type CultureMode = "automatic" | "agentic" | "manual";
 
 export type ThreadMode = "thread" | "room";
 
@@ -265,13 +264,6 @@ export type TeamConfig = Omit<Team, "id" | "rooms"> & {
   rooms?: string[];
 };
 
-export interface Culture {
-  id: string; // The key in the cultures object
-  description: string;
-  agents: string[]; // List of agent IDs
-  mode: CultureMode;
-}
-
 export interface Room {
   id: string; // Room identifier
   display_name: string;
@@ -321,7 +313,6 @@ export interface Config {
   administrators?: string[];
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
-  cultures?: Record<string, Omit<Culture, "id">>; // Culture configurations
   models: Record<string, ModelConfig>;
   agents: Record<string, Omit<Agent, "id">>;
   defaults: {

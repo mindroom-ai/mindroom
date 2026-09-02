@@ -130,7 +130,7 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
 
     def _docs_service(self) -> Any:  # noqa: ANN401
         """Return the per-thread authenticated Google Docs service."""
-        self._auth()
+        self._authenticate()
         if self.service is None:
             self.service = build(
                 "docs",

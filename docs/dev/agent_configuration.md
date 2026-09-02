@@ -15,22 +15,21 @@ The configuration file has these common top-level sections; see the exhaustive [
 
 1. **agents** - Configure individual agents and their capabilities
 2. **teams** - Multi-agent collaboration groups
-3. **cultures** - Shared principles and practices applied to groups of agents
-4. **models** - Define available AI models and their providers
-5. **defaults** - Default settings inherited by all agents
-6. **memory** - Memory system configuration (mem0, file-backed, or disabled)
-7. **knowledge_bases** - File-backed RAG knowledge bases
-8. **router** - Agent routing system configuration
-9. **voice** - Voice message processing with STT, mention normalization, and light ASR cleanup
-10. **administrators** and **authorization** - Platform authority and identity aliases
-11. **room_defaults** and **rooms** - Managed room state, invitations, and Matrix power
-12. **matrix_space** - Optional root Matrix Space for grouping rooms
-13. **mindroom_user** - Internal MindRoom user account settings
-14. **timezone** - Timezone for scheduled tasks (default: `UTC`)
-15. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
-16. **rooms** - Managed Matrix room metadata for standalone rooms and dashboard-created rooms
-17. **room_models** - Per-room model overrides
-18. **plugins** - Plugin paths for tool/skill extensions
+3. **models** - Define available AI models and their providers
+4. **defaults** - Default settings inherited by all agents
+5. **memory** - Memory system configuration (mem0, file-backed, or disabled)
+6. **knowledge_bases** - File-backed RAG knowledge bases
+7. **router** - Agent routing system configuration
+8. **voice** - Voice message processing with STT, mention normalization, and light ASR cleanup
+9. **administrators** and **authorization** - Platform authority and identity aliases
+10. **room_defaults** and **rooms** - Managed room state, invitations, and Matrix power
+11. **matrix_space** - Optional root Matrix Space for grouping rooms
+12. **mindroom_user** - Internal MindRoom user account settings
+13. **timezone** - Timezone for scheduled tasks (default: `UTC`)
+14. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
+15. **rooms** - Managed Matrix room metadata for standalone rooms and dashboard-created rooms
+16. **room_models** - Per-room model overrides
+17. **plugins** - Plugin paths for tool/skill extensions
 
 ## Model Configuration
 
@@ -249,18 +248,6 @@ teams:
 
 Named teams use these explicit team settings for replay and compaction when provided.
 Dynamic teams have no named config block, so they inherit replay and compaction settings from `defaults`.
-
-## Cultures Configuration
-
-Cultures define shared principles applied to groups of agents:
-
-```yaml
-cultures:
-  engineering:
-    description: "Follow clean code principles and write tests"
-    agents: [code, data_analyst]
-    mode: automatic  # "automatic", "agentic", or "manual"
-```
 
 ## Knowledge Bases Configuration
 

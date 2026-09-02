@@ -527,6 +527,11 @@ depends_on = ["mindroom.background_tasks"]
 visibility = ["mindroom.agent_storage"]
 
 [[modules]]
+path = "mindroom.agno_tool_wrapper_patch"
+depends_on = []
+visibility = ["mindroom.tool_system.tool_hooks"]
+
+[[modules]]
 path = "mindroom.agent_run_context"
 depends_on = [
     "mindroom.hooks",
@@ -3505,6 +3510,7 @@ depends_on = ["mindroom.constants"]
 [[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
+    "mindroom.agno_tool_wrapper_patch",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
     "mindroom.tool_system.runtime_context",

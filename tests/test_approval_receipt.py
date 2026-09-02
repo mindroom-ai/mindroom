@@ -253,8 +253,10 @@ async def test_approval_receipt_reaches_fallback_model_after_primary_failure() -
 
     assert response.content == "ok"
     assert fallback.seen_messages[0].content == "base rules\n\ntrusted approval receipt"
+    # Agno keeps the fallback reply in history; the receipt itself must not land there.
     assert [(message.role, message.content) for message in messages] == [
         ("system", "base rules"),
+        ("assistant", "ok"),
     ]
 
 

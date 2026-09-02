@@ -532,3 +532,35 @@ def test_admin_discovery_reports_directory_read_failure(
         and source.detail == "source discovery unavailable"
         for source in sources
     )
+
+
+def test_reader_merges_legacy_blob_with_runs_table(tmp_path: Path) -> None:
+    """Run-table rows win on run_id; legacy-only runs are appended, matching Agno's read merge."""
+    database = tmp_path / "code.db"
+    legacy_only = {**_run(), "run_id": "legacy-only", "metrics": {"total_tokens": 5}}
+    _create_database(database, runs=[_run(), legacy_only])
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "CREATE TABLE code_sessions_runs (run_id TEXT PRIMARY KEY, session_id TEXT, run_type TEXT, "
+            "agent_id TEXT, team_id TEXT, workflow_id TEXT, user_id TEXT, parent_run_id TEXT, status TEXT, "
+            "run_index INTEGER, run_data TEXT, created_at INTEGER NOT NULL, updated_at INTEGER)",
+        )
+        connection.execute(
+            "INSERT INTO code_sessions_runs (run_id, session_id, run_type, run_index, run_data, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("run-1", "session-1", "agent", 0, json.dumps({**_run(), "metrics": {"total_tokens": 99}}), 1),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = list(iter_usage_storage_rows(_source(database)))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert [run.run_id for run in row.runs] == ["run-1", "legacy-only"]
+    assert row.runs[0].metrics == {"total_tokens": 99}
+    assert row.runs[1].metrics == {"total_tokens": 5}
+    assert row.payload_bytes > 0

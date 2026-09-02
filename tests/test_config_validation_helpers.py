@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.models import DefaultsConfig, ToolConfigEntry
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
@@ -42,10 +42,6 @@ def test_history_limit_choice_rejects_both_limits_with_existing_message() -> Non
                 agents=["code", "research", "code", "research"],
             ),
             "Duplicate agents are not allowed in a team: code, research",
-        ),
-        (
-            lambda: CultureConfig(agents=["code", "research", "code", "research"]),
-            "Duplicate agents are not allowed in a culture: code, research",
         ),
         (
             lambda: AuthorizationConfig(

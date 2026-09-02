@@ -7,7 +7,7 @@ from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constr
 from typing import Any, cast
 
 from agno.tools.file import FileTools as AgnoFileTools
-from agno.tools.file import log_debug, log_error
+from agno.utils.log import log_debug, log_error
 
 from mindroom.tool_system.declarations import (
     ConfigField,
@@ -39,6 +39,7 @@ class _MindRoomFileTools(AgnoFileTools):
         enable_search_files: bool = True,
         enable_read_file_chunk: bool = True,
         enable_replace_file_chunk: bool = True,
+        enable_search_content: bool = True,
         expose_base_directory: bool = False,
         max_file_length: int = 10000000,
         max_file_lines: int = 100000,
@@ -58,6 +59,7 @@ class _MindRoomFileTools(AgnoFileTools):
             enable_search_files=enable_search_files,
             enable_read_file_chunk=enable_read_file_chunk,
             enable_replace_file_chunk=enable_replace_file_chunk,
+            enable_search_content=enable_search_content,
             expose_base_directory=expose_base_directory,
             max_file_length=max_file_length,
             max_file_lines=max_file_lines,
@@ -67,13 +69,22 @@ class _MindRoomFileTools(AgnoFileTools):
             **cast("dict[str, Any]", kwargs),
         )
 
+    def _check_path(self, file_name: str, base_dir: Path, restrict_to_base_dir: bool = True) -> tuple[bool, Path]:
+        """Resolve a path against base_dir, honoring this toolkit's restriction setting.
+
+        Overrides Agno's Toolkit helper so the upstream methods this class does not
+        override (``search_content``) follow the same ``restrict_to_base_dir`` rule.
+        """
+        del restrict_to_base_dir
+        try:
+            return True, resolve_base_dir_path(base_dir, file_name, self.restrict_to_base_dir)
+        except ValueError:
+            log_error(f"Path escapes base directory: {file_name}")
+            return False, base_dir
+
     def check_escape(self, relative_path: str) -> tuple[bool, Path]:
         """Check whether a path stays within base_dir when restriction is enabled."""
-        try:
-            return True, resolve_base_dir_path(self.base_dir, relative_path, self.restrict_to_base_dir)
-        except ValueError:
-            log_error(f"Path escapes base directory: {relative_path}")
-            return False, self.base_dir
+        return self._check_path(relative_path, self.base_dir)
 
     def save_file(self, contents: str, file_name: str, overwrite: bool = True, encoding: str = "utf-8") -> str:
         """Save content to a file, with clear blocked-path errors."""
@@ -171,9 +182,8 @@ class _MindRoomFileTools(AgnoFileTools):
             log_error(f"Error removing {file_name}: {e}")
             return f"Error removing file: {e}"
 
-    def list_files(self, **kwargs: object) -> str:
+    def list_files(self, directory: str = ".") -> str:
         """List files in a directory, falling back to absolute paths outside base_dir."""
-        directory = kwargs.get("directory", ".")
         try:
             log_debug(f"Reading files in : {self.base_dir}/{directory}")
             safe, resolved_directory = self.check_escape(str(directory))
@@ -299,6 +309,13 @@ class _MindRoomFileTools(AgnoFileTools):
         ConfigField(
             name="enable_replace_file_chunk",
             label="Enable Replace File Chunk",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
+            name="enable_search_content",
+            label="Enable Search Content",
             type="boolean",
             required=False,
             default=True,

@@ -539,7 +539,7 @@ class TestDelegateKnowledge:
             assert result == "Found relevant docs"
 
     @pytest.mark.asyncio
-    @patch("mindroom.agent_storage.SqliteDb")
+    @patch("mindroom.agent_storage._ConversationSqliteDb")
     async def test_delegation_schedules_initial_load_for_unready_shared_base(
         self,
         mock_storage: MagicMock,
@@ -969,7 +969,7 @@ class TestDelegateConfigValidation:
 class TestDelegateAutoInjection:
     """Test that DelegateTools is auto-injected when delegate_to is configured."""
 
-    @patch("mindroom.agent_storage.SqliteDb")
+    @patch("mindroom.agent_storage._ConversationSqliteDb")
     def test_auto_inject_delegate_tool(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """Agent with delegate_to should automatically get the delegate tool."""
         config = _make_config(
@@ -993,7 +993,7 @@ class TestDelegateAutoInjection:
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" in tool_names
 
-    @patch("mindroom.agent_storage.SqliteDb")
+    @patch("mindroom.agent_storage._ConversationSqliteDb")
     def test_no_delegate_tool_without_config(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """Agent without delegate_to should not get the delegate tool."""
         config = _make_config(
@@ -1012,7 +1012,7 @@ class TestDelegateAutoInjection:
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.agent_storage.SqliteDb")
+    @patch("mindroom.agent_storage._ConversationSqliteDb")
     def test_depth_limit_prevents_injection(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """At max depth, delegate tool should not be auto-injected."""
         config = _make_config(
@@ -1037,7 +1037,7 @@ class TestDelegateAutoInjection:
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.agent_storage.SqliteDb")
+    @patch("mindroom.agent_storage._ConversationSqliteDb")
     def test_explicit_delegate_skipped_when_delegate_to_empty(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """Explicit 'delegate' in tools list should be skipped when delegate_to is empty."""
         config = _make_config(
@@ -1060,7 +1060,7 @@ class TestDelegateAutoInjection:
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.agent_storage.SqliteDb")
+    @patch("mindroom.agent_storage._ConversationSqliteDb")
     def test_depth_limit_prevents_explicit_delegate_tool(
         self,
         mock_storage: MagicMock,
@@ -1091,7 +1091,7 @@ class TestDelegateAutoInjection:
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" not in tool_names
 
-    @patch("mindroom.agent_storage.SqliteDb")
+    @patch("mindroom.agent_storage._ConversationSqliteDb")
     def test_depth_limit_prevents_default_tools_delegate(
         self,
         mock_storage: MagicMock,

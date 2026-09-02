@@ -38,7 +38,7 @@ from mindroom.config.access_migration import (
     persist_access_migration,
     validate_access_migration_source,
 )
-from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
+from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile
@@ -156,7 +156,6 @@ def _persisted_entity_account_usernames(runtime_paths: RuntimePaths) -> dict[str
 
 _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
-    "cultures",
     "rooms",
     "room_models",
     "room_thread_summary_models",
@@ -419,7 +418,6 @@ class Config(BaseModel):
     )
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
-    cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
     rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
     room_thread_summary_models: dict[str, str] = Field(
@@ -976,45 +974,6 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_culture_assignments(self) -> Config:
-        """Ensure culture assignments reference known agents and remain one-to-one."""
-        unknown_assignments = [
-            (culture_name, agent_name)
-            for culture_name, culture_config in self.cultures.items()
-            for agent_name in culture_config.agents
-            if agent_name not in self.agents
-        ]
-        if unknown_assignments:
-            formatted = ", ".join(
-                f"{culture_name} -> {agent_name}"
-                for culture_name, agent_name in sorted(unknown_assignments, key=lambda item: (item[0], item[1]))
-            )
-            msg = f"Cultures reference unknown agents: {formatted}"
-            raise ValueError(msg)
-
-        agent_to_culture: dict[str, str] = {}
-        duplicate_assignments: list[tuple[str, str, str]] = []
-        for culture_name, culture_config in self.cultures.items():
-            for agent_name in culture_config.agents:
-                existing_culture = agent_to_culture.get(agent_name)
-                if existing_culture is not None and existing_culture != culture_name:
-                    duplicate_assignments.append((agent_name, existing_culture, culture_name))
-                    continue
-                agent_to_culture[agent_name] = culture_name
-
-        if duplicate_assignments:
-            formatted = ", ".join(
-                f"{agent_name} -> {culture_a}, {culture_b}"
-                for agent_name, culture_a, culture_b in sorted(
-                    duplicate_assignments,
-                    key=lambda item: (item[0], item[1], item[2]),
-                )
-            )
-            msg = f"Agents cannot belong to multiple cultures: {formatted}"
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
     def validate_internal_user_username_not_reserved(self, info: ValidationInfo) -> Config:
         """Ensure the internal user localpart does not collide with bot accounts."""
         if self.mindroom_user is None:
@@ -1150,13 +1109,6 @@ class Config(BaseModel):
     def runtime_knowledge_base_overlay(self, base_id: str) -> KnowledgeBaseConfig | None:
         """Return one runtime-only knowledge base overlay, when present."""
         return self._runtime_knowledge_base_overlays.get(base_id)
-
-    def _agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
-        """Get the configured culture assignment for an agent, if any."""
-        for culture_name, culture_config in self.cultures.items():
-            if agent_name in culture_config.agents:
-                return culture_name, culture_config
-        return None
 
     def get_agent(self, agent_name: str) -> AgentConfig:
         """Get an agent configuration by name.

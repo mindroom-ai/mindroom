@@ -7,10 +7,8 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from weakref import WeakValueDictionary
 from zoneinfo import ZoneInfo
 
-from agno.culture.manager import CultureManager
 from agno.db.base import BaseDb, SessionType
 from agno.knowledge.knowledge import Knowledge
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
@@ -33,7 +31,6 @@ from mindroom.prompt_templates import build_agent_identity_context, render_promp
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
-    resolve_private_requester_scope_root,
 )
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
@@ -82,7 +79,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.agent_knowledge_descriptions import KnowledgeSourceDescription
-    from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
+    from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
     from mindroom.credentials import CredentialsManager
@@ -105,23 +102,6 @@ _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
     "./.mindroom-worker-assets/",
     ".mindroom-worker-assets/",
 )
-
-
-@dataclass
-class _CachedCultureManager:
-    """Cached culture manager with a signature for invalidation on config changes."""
-
-    signature: tuple[str, str]
-    manager: CultureManager
-
-
-@dataclass(frozen=True)
-class _CultureAgentSettings:
-    """Culture feature flags to apply to the Agent constructor."""
-
-    add_culture_to_context: bool
-    update_cultural_knowledge: bool
-    enable_agentic_culture: bool
 
 
 @dataclass
@@ -188,23 +168,6 @@ class _AgentRoleContext:
 
     model_name: str
     role: str
-
-
-@dataclass(frozen=True)
-class _AgentCultureState:
-    """Culture manager and Agent constructor culture flags for one agent instance."""
-
-    manager: CultureManager | None
-    add_culture_to_context: bool | None
-    update_cultural_knowledge: bool
-    enable_agentic_culture: bool
-
-
-_CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
-_PRIVATE_CULTURE_MANAGER_CACHE: WeakValueDictionary[
-    tuple[str, str, tuple[str, str]],
-    CultureManager,
-] = WeakValueDictionary()
 
 
 def show_tool_calls_for_agent(config: Config, agent_name: str) -> bool:
@@ -1217,81 +1180,6 @@ def remove_run_by_event_id(
     return True
 
 
-def _resolve_culture_settings(mode: CultureMode) -> _CultureAgentSettings:
-    """Map a culture mode to Agno culture feature flags."""
-    if mode == "automatic":
-        return _CultureAgentSettings(
-            add_culture_to_context=True,
-            update_cultural_knowledge=True,
-            enable_agentic_culture=False,
-        )
-    if mode == "agentic":
-        return _CultureAgentSettings(
-            add_culture_to_context=True,
-            update_cultural_knowledge=False,
-            enable_agentic_culture=True,
-        )
-    return _CultureAgentSettings(
-        add_culture_to_context=True,
-        update_cultural_knowledge=False,
-        enable_agentic_culture=False,
-    )
-
-
-def _culture_signature(culture_config: CultureConfig) -> tuple[str, str]:
-    return (culture_config.mode, culture_config.description)
-
-
-@timed("system_prompt_assembly.agent_create.culture_manager")
-def _resolve_agent_culture(
-    agent_name: str,
-    config: Config,
-    storage_path: Path,
-    model: Model,
-    *,
-    cache_private: bool = False,
-) -> tuple[CultureManager | None, _CultureAgentSettings | None]:
-    """Resolve shared culture manager and feature flags for an agent."""
-    culture_assignment = config.resolve_entity(agent_name).culture
-    if culture_assignment is None:
-        return None, None
-
-    culture_name, culture_config = culture_assignment
-    settings = _resolve_culture_settings(culture_config.mode)
-    cache_key = (str(storage_path.resolve()), culture_name)
-    signature = _culture_signature(culture_config)
-    if cache_private:
-        private_cache_key = (*cache_key, signature)
-        cached_private_manager = _PRIVATE_CULTURE_MANAGER_CACHE.get(private_cache_key)
-        if cached_private_manager is not None:
-            cached_private_manager.model = model
-            return cached_private_manager, settings
-    else:
-        cached_manager = _CULTURE_MANAGER_CACHE.get(cache_key)
-        if cached_manager is not None and cached_manager.signature == signature:
-            cached_manager.manager.model = model
-            return cached_manager.manager, settings
-
-    culture_scope = culture_config.description.strip() or "Shared best practices and principles."
-    culture_manager = CultureManager(
-        model=model,
-        db=agent_storage.create_culture_storage(culture_name, storage_path),
-        culture_capture_instructions=f"Culture '{culture_name}': {culture_scope}",
-        add_knowledge=culture_config.mode != "manual",
-        update_knowledge=culture_config.mode != "manual",
-        delete_knowledge=False,
-        clear_knowledge=False,
-    )
-    if cache_private:
-        _PRIVATE_CULTURE_MANAGER_CACHE[private_cache_key] = culture_manager
-    else:
-        _CULTURE_MANAGER_CACHE[cache_key] = _CachedCultureManager(
-            signature=signature,
-            manager=culture_manager,
-        )
-    return culture_manager, settings
-
-
 @timed("system_prompt_assembly.agent_create.load_plugins")
 def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -> list[HookRegistryPlugin]:
     return cast("list[HookRegistryPlugin]", load_plugins(config, runtime_paths))
@@ -1810,66 +1698,6 @@ def _build_agent_instructions(
     return instructions
 
 
-def _resolve_agent_culture_state(
-    agent_name: str,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    agent_runtime: ResolvedAgentRuntime,
-    model: Model,
-    *,
-    persist_runtime_state: bool,
-) -> _AgentCultureState:
-    """Resolve the culture manager and Agent culture flags for one agent instance."""
-    if not persist_runtime_state:
-        return _AgentCultureState(
-            manager=None,
-            add_culture_to_context=None,
-            update_cultural_knowledge=False,
-            enable_agentic_culture=False,
-        )
-
-    culture_storage_root = runtime_paths.storage_root
-    cache_private_culture = False
-    if agent_runtime.execution.is_private:
-        worker_key = agent_runtime.execution.worker_key
-        if worker_key is None:
-            msg = f"Private agent '{agent_name}' requires a worker key to resolve culture state"
-            raise ValueError(msg)
-        execution_scope = agent_runtime.execution.execution_scope
-        execution_identity = agent_runtime.execution.execution_identity
-        if execution_scope is None or execution_identity is None:
-            msg = f"Private agent '{agent_name}' requires an execution scope and identity to resolve culture state"
-            raise ValueError(msg)
-        culture_storage_root = resolve_private_requester_scope_root(
-            runtime_paths=runtime_paths,
-            execution_scope=execution_scope,
-            execution_identity=execution_identity,
-            worker_key=worker_key,
-        )
-        cache_private_culture = True
-
-    culture_manager, culture_settings = _resolve_agent_culture(
-        agent_name,
-        config,
-        culture_storage_root,
-        model,
-        cache_private=cache_private_culture,
-    )
-    add_culture_to_context: bool | None = None
-    update_cultural_knowledge = False
-    enable_agentic_culture = False
-    if culture_settings is not None:
-        add_culture_to_context = culture_settings.add_culture_to_context
-        update_cultural_knowledge = culture_settings.update_cultural_knowledge
-        enable_agentic_culture = culture_settings.enable_agentic_culture
-    return _AgentCultureState(
-        manager=culture_manager,
-        add_culture_to_context=add_culture_to_context,
-        update_cultural_knowledge=update_cultural_knowledge,
-        enable_agentic_culture=enable_agentic_culture,
-    )
-
-
 @timed("system_prompt_assembly.agent_create")
 def create_agent(
     agent_name: str,
@@ -1915,7 +1743,7 @@ def create_agent(
         include_openai_compat_guidance: Whether to include OpenAI-compatible
             history-format guidance in the shared identity prompt.
         persist_runtime_state: Whether this agent instance should write durable
-            Agno history, learning, and culture state.
+            Agno history and learning state.
         disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
             and preloaded context files for a restricted in-process agent run.
         disabled_tool_names: Resolved tool names to omit from this instance.
@@ -2072,14 +1900,6 @@ def create_agent(
     knowledge_sources = (
         knowledge_source_descriptions(knowledge) if knowledge_enabled and isinstance(knowledge, Knowledge) else ()
     )
-    culture = _resolve_agent_culture_state(
-        agent_name,
-        config,
-        runtime_paths,
-        agent_runtime,
-        model,
-        persist_runtime_state=persist_runtime_state,
-    )
 
     # Shared history-policy source of truth with the team replay path.
     history_settings = entity_view.history_settings
@@ -2112,10 +1932,6 @@ def create_agent(
         num_history_messages=history_policy.num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
         store_history_messages=False,
-        culture_manager=culture.manager,
-        add_culture_to_context=culture.add_culture_to_context,
-        update_cultural_knowledge=culture.update_cultural_knowledge,
-        enable_agentic_culture=culture.enable_agentic_culture,
         compress_tool_results=compress_tool_results,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
         telemetry=False,

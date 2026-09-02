@@ -16,7 +16,6 @@ import {
   Plug,
   Puzzle,
   Settings2,
-  Sparkles,
   type LucideIcon,
   Users,
 } from "lucide-react";
@@ -25,8 +24,6 @@ import { AgentList } from "@/components/AgentList/AgentList";
 import { AgentEditor } from "@/components/AgentEditor/AgentEditor";
 import { TeamList } from "@/components/TeamList/TeamList";
 import { TeamEditor } from "@/components/TeamEditor/TeamEditor";
-import { CultureList } from "@/components/CultureList/CultureList";
-import { CultureEditor } from "@/components/CultureEditor/CultureEditor";
 import { RoomList } from "@/components/RoomList/RoomList";
 import { RoomEditor } from "@/components/RoomEditor/RoomEditor";
 import { RoomAdmins } from "@/components/RoomAdmins/RoomAdmins";
@@ -80,7 +77,6 @@ const NAV_ITEMS: NavItem[] = [
   },
   { value: "agents", label: "Agents", icon: Bot, group: "Workspace" },
   { value: "teams", label: "Teams", icon: Users, group: "Workspace" },
-  { value: "cultures", label: "Culture", icon: Sparkles, group: "Workspace" },
   { value: "rooms", label: "Rooms", icon: Home, group: "Workspace" },
   {
     value: "schedules",
@@ -171,7 +167,6 @@ function AppContent() {
     isLoading,
     selectedAgentId,
     selectedTeamId,
-    selectedCultureId,
     selectedRoomId,
   } = useConfigStore();
   const navigate = useNavigate();
@@ -700,28 +695,6 @@ function AppContent() {
                   }`}
                 >
                   <TeamEditor />
-                </div>
-              </div>
-            </TabsContent>
-
-            <TabsContent
-              value="cultures"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
-                <div
-                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                    selectedCultureId ? "hidden lg:block" : "block"
-                  }`}
-                >
-                  <CultureList />
-                </div>
-                <div
-                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                    selectedCultureId ? "block" : "hidden lg:block"
-                  }`}
-                >
-                  <CultureEditor />
                 </div>
               </div>
             </TabsContent>

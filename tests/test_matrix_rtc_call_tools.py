@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.knowledge.knowledge import Knowledge
+from agno.metrics import RunMetrics
 from agno.models.anthropic import Claude
-from agno.models.metrics import Metrics
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
@@ -1202,7 +1202,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     mock_run_output.status = RunStatus.completed
     mock_run_output.model = expected_model_id
     mock_run_output.model_provider = "openai"
-    mock_run_output.metrics = Metrics(input_tokens=100, output_tokens=20, total_tokens=120)
+    mock_run_output.metrics = RunMetrics(input_tokens=100, output_tokens=20, total_tokens=120)
     mock_run_output.tools = None
     mock_run_output.content = "It is sunny."
 

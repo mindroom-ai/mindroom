@@ -71,6 +71,13 @@ if TYPE_CHECKING:
             default=True,
         ),
         ConfigField(
+            name="enable_code_generation",
+            label="Enable Code Generation",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
             name="save_files",
             label="Save Files",
             type="boolean",

@@ -10,8 +10,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.db.base import SessionType
+from agno.metrics import RunMetrics
 from agno.models.message import Message
-from agno.models.metrics import Metrics
 from agno.run.agent import (
     ModelRequestCompletedEvent,
     RunCancelledEvent,
@@ -804,16 +804,16 @@ def _stream_completed_without_visible_output(state: _StreamingAttemptState) -> b
     return state.completed_run_event is not None and not visible_text and state.observed_tool_calls == 0
 
 
-def _metrics_comparison_payload(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
+def _metrics_comparison_payload(metrics: RunMetrics | dict[str, Any] | None) -> dict[str, Any] | None:
     if metrics is None:
         return None
-    if isinstance(metrics, Metrics):
+    if isinstance(metrics, RunMetrics):
         metrics_dict = metrics.to_dict()
         return metrics_dict if isinstance(metrics_dict, dict) else None
     return metrics
 
 
-def _usage_metric_int(metrics: Metrics | dict[str, Any] | None, key: str) -> int | None:
+def _usage_metric_int(metrics: RunMetrics | dict[str, Any] | None, key: str) -> int | None:
     payload = _metrics_comparison_payload(metrics)
     if payload is None:
         return None
@@ -822,7 +822,7 @@ def _usage_metric_int(metrics: Metrics | dict[str, Any] | None, key: str) -> int
 
 
 def _request_metrics_are_more_complete(
-    completed_metrics: Metrics | dict[str, Any] | None,
+    completed_metrics: RunMetrics | dict[str, Any] | None,
     request_metrics: dict[str, Any] | None,
 ) -> bool:
     if request_metrics is None:
@@ -836,9 +836,9 @@ def _request_metrics_are_more_complete(
 
 
 def _select_streaming_usage_metrics(
-    completed_metrics: Metrics | None,
+    completed_metrics: RunMetrics | None,
     request_metrics: dict[str, Any] | None,
-) -> tuple[Metrics | dict[str, Any] | None, dict[str, Any] | None]:
+) -> tuple[RunMetrics | dict[str, Any] | None, dict[str, Any] | None]:
     if completed_metrics is None:
         return request_metrics, None
     if _request_metrics_are_more_complete(completed_metrics, request_metrics):
