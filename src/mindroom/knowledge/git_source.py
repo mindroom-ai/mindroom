@@ -829,19 +829,9 @@ class GitKnowledgeSource:
         if before_head is None:
             changed_paths = after_files
         else:
-            try:
-                diff_output = await self._run_git(
-                    ["diff", "--name-only", "--no-renames", "-z", f"{before_head}..HEAD"],
-                )
-            except RuntimeError:
-                logger.warning(
-                    "Could not compute knowledge Git delta; falling back to a full scan",
-                    base_id=self.base_id,
-                    exc_info=True,
-                )
+            changed_paths = await self.changed_files_between(before_head, "HEAD")
+            if changed_paths is None:
                 changed_paths = after_files
-            else:
-                changed_paths = {path for path in diff_output.split("\0") if path and self._include_relative_path(path)}
 
         removed_files = before_files - after_files
         changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)
