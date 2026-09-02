@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.authorization import (
     is_platform_administrator,
-    responder_candidate_entities_from_cached_room,
     responder_candidate_entities_with_membership_refresh,
 )
 from mindroom.commands import config_confirmation
@@ -207,7 +206,7 @@ def _format_welcome_message(
 
 
 async def generate_welcome_message_for_room(
-    client: nio.AsyncClient | None,
+    client: nio.AsyncClient,
     room: nio.MatrixRoom,
     sender_id: str | None,
     config: Config,
@@ -217,14 +216,6 @@ async def generate_welcome_message_for_room(
     """Generate a welcome message for callers without a live turn-policy candidate source."""
     if sender_id is None:
         candidate_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
-    elif client is None:
-        candidate_entities = responder_candidate_entities_from_cached_room(
-            room,
-            sender_id,
-            config,
-            runtime_paths,
-            agent_reply_memberships,
-        )
     else:
         candidate_entities = await responder_candidate_entities_with_membership_refresh(
             client,

@@ -329,6 +329,13 @@ def test_compact_command_entries_characterize_welcome_subset() -> None:
     )
 
 
+def _synced_client() -> AsyncMock:
+    """A Matrix client whose member lookup reports an empty, already-synced room."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_members = AsyncMock(return_value=nio.JoinedMembersResponse(members=[], room_id="!room:localhost"))
+    return client
+
+
 @pytest.mark.asyncio
 async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None:
     """The welcome quick commands should match the parser-owned compact docs."""
@@ -337,7 +344,7 @@ async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None
     config = Config()
     persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router_oldns"})
     welcome_message = await generate_welcome_message_for_room(
-        None,
+        _synced_client(),
         room,
         "@alice:localhost",
         config,
@@ -377,7 +384,7 @@ async def test_welcome_message_lists_configured_teams(tmp_path: Path) -> None:
         },
     )
     welcome_message = await generate_welcome_message_for_room(
-        None,
+        _synced_client(),
         room,
         "@alice:localhost",
         config,
@@ -429,7 +436,7 @@ async def test_senderless_welcome_lists_configured_room_responders(tmp_path: Pat
     )
 
     welcome_message = await generate_welcome_message_for_room(
-        None,
+        _synced_client(),
         room,
         None,
         config,

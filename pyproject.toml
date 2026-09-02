@@ -384,6 +384,7 @@ tavily = [
 ]
 telegram = [
   "httpx>=0.27",
+  "pytelegrambotapi>=4.32",
 ]
 thread_model = []
 thread_resolution = []

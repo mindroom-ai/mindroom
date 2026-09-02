@@ -202,7 +202,10 @@ def _reply_event(body: str = "a reply") -> nio.RoomMessageText:
 
 
 def _room() -> nio.MatrixRoom:
-    return nio.MatrixRoom(_ROOM_ID, "@mindroom_general:localhost")
+    room = nio.MatrixRoom(_ROOM_ID, "@mindroom_general:localhost")
+    # A synced cache is what makes an absent mention mean absent rather than "not fetched yet".
+    room.members_synced = True
+    return room
 
 
 @pytest.mark.asyncio

@@ -7528,6 +7528,8 @@ async def test_router_early_skip_only_honors_joined_non_agent_mentions(
     room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
     room.add_member(bot.matrix_id.full_id, "Router", None)
     room.add_member("@user:localhost", "User", None)
+    # A synced cache is what makes "absent" mean absent rather than "not fetched yet".
+    room.members_synced = True
     mentioned_user_id = "@human:localhost"
     if membership != "absent":
         room.add_member(

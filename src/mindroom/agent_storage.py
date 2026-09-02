@@ -159,14 +159,18 @@ def _migrate_legacy_runs(database: _ConversationSqliteDb) -> None:
         legacy_rows = sess.execute(
             text(f"SELECT session_id, user_id, runs FROM {session_table} WHERE runs IS NOT NULL"),  # noqa: S608
         ).fetchall()
+        logger.info("agno_legacy_runs_migration_started", db_file=database.db_file, sessions=len(legacy_rows))
         expected_by_session: dict[str, int] = {}
         rows: list[dict[str, Any]] = []
         for session_id, user_id, raw_runs in legacy_rows:
-            legacy_runs = json.loads(raw_runs) if isinstance(raw_runs, str) else raw_runs
-            if not isinstance(legacy_runs, list):
-                continue
+            legacy_runs = _decode_legacy_runs_blob(raw_runs)
+            if legacy_runs is None:
+                logger.warning("agno_legacy_runs_column_kept", db_file=database.db_file, session_id=session_id)
+                return
             run_payloads = [
-                cast("dict[str, Any]", run) for run in legacy_runs if isinstance(run, dict) and run.get("run_id")
+                payload
+                for payload in (cast("dict[str, Any]", run) for run in legacy_runs if isinstance(run, dict))
+                if payload.get("run_id")
             ]
             expected_by_session[session_id] = len(run_payloads)
             rows.extend(
@@ -196,6 +200,18 @@ def _migrate_legacy_runs(database: _ConversationSqliteDb) -> None:
         sess.execute(text(f"ALTER TABLE {session_table} DROP COLUMN runs"))
     database._invalidate_table_cache(database.session_table_name)
     logger.info("agno_legacy_runs_column_migrated", db_file=database.db_file, sessions=len(legacy_rows))
+
+
+def _decode_legacy_runs_blob(raw_runs: object) -> list[object] | None:
+    """Decode a 2.x ``runs`` column value.
+
+    Agno 2.x serialized the run list to a JSON string and then stored that
+    string in a JSON column, so the blob is usually JSON-encoded twice.
+    """
+    decoded = raw_runs
+    while isinstance(decoded, str):
+        decoded = json.loads(decoded)
+    return cast("list[object]", decoded) if isinstance(decoded, list) else None
 
 
 def _quote_identifier(name: str) -> str:

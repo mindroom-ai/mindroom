@@ -4363,6 +4363,7 @@ tavily = [
 ]
 telegram = [
     { name = "httpx" },
+    { name = "pytelegrambotapi" },
 ]
 todoist = [
     { name = "todoist-api-python" },
@@ -4563,6 +4564,7 @@ requires-dist = [
     { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
     { name = "pypdf", marker = "extra == 'arxiv'" },
+    { name = "pytelegrambotapi", marker = "extra == 'telegram'", specifier = ">=4.32" },
     { name = "python-docx", marker = "extra == 'file-generation'", specifier = ">=1.2" },
     { name = "python-dotenv", specifier = ">=1" },
     { name = "pytz", marker = "extra == 'cal-com'" },
@@ -7445,6 +7447,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/bd/11/293dd436aea955d45fc4e8a35b6ae7270f5b8e00b53cf6c024c83b657a11/PySocks-1.7.1.tar.gz", hash = "sha256:3f8804571ebe159c380ac6de37643bb4685970655d3bba243530d6558b799aa0", size = 284429, upload-time = "2019-09-20T02:07:35.714Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8d/59/b4572118e098ac8e46e399a1dd0f2d85403ce8bbaad9ec79373ed6badaf9/PySocks-1.7.1-py3-none-any.whl", hash = "sha256:2725bd0a9925919b9b51739eea5f9e2bae91e83288108a9ad338b2e3a4435ee5", size = 16725, upload-time = "2019-09-20T02:06:22.938Z" },
+]
+
+[[package]]
+name = "pytelegrambotapi"
+version = "4.36.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b6/61/a342a1e13206e99b4cf9fd7ecf109c589bd2ad4b4d0ea7b8859750a7c3c6/pytelegrambotapi-4.36.1.tar.gz", hash = "sha256:1baa4154452cf93e654e74f3cb2800d5a2e8b11018c2fff45b247b7e6a7fb027", size = 1407140, upload-time = "2026-08-13T17:27:57.99Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/aa/8a/f119aff83a7dd4570f6d6e9fa85bde75388d1574f43b8f656cee0d7ddcaf/pytelegrambotapi-4.36.1-py3-none-any.whl", hash = "sha256:2a3524c553ea7363d1b6d9ab4557f9cd9adb037642287687cdf05e158d670767", size = 334956, upload-time = "2026-08-13T17:27:56.302Z" },
 ]
 
 [[package]]

@@ -139,7 +139,8 @@ def test_legacy_runs_blob_moves_into_the_runs_table(tmp_path: Path) -> None:
         connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
         connection.execute(
             "INSERT INTO code_sessions (session_id, session_type, agent_id, user_id, runs, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ("s1", "agent", "code", "@alice:example.test", json.dumps(legacy_runs), 1),
+            # Agno 2.x encoded the run list to a string and then stored that string as JSON.
+            ("s1", "agent", "code", "@alice:example.test", json.dumps(json.dumps(legacy_runs)), 1),
         )
         connection.commit()
     finally:
@@ -228,3 +229,29 @@ def test_team_session_reconciles_member_runs(tmp_path: Path) -> None:
 
     assert loaded is not None
     assert [(run.run_id, run.parent_run_id) for run in loaded.runs or []] == [("team1", None), ("m1", "team1")]
+
+
+def test_undecodable_legacy_runs_blob_keeps_the_column(tmp_path: Path) -> None:
+    """A blob that is not a run list must never be dropped."""
+    db_path = tmp_path / "sessions" / "code.db"
+    db_path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
+        connection.execute(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("s1", "agent", "code", json.dumps({"unexpected": "shape"}), 1),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _storage(tmp_path)
+    storage.close()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
+    finally:
+        connection.close()
+    assert "runs" in columns

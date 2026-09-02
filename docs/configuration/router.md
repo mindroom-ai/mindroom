@@ -154,7 +154,8 @@ The rules are:
 4. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
 5. **Mentioning another joined room participant** — if a message tags only joined users who are neither managed entities nor configured bot accounts, agents and teams stay silent.
 
-Mentions of absent or merely invited user IDs do not suppress normal routing or automatic responses.
+Mentions of unmanaged user IDs that are absent from the room or merely invited do not suppress normal routing or automatic responses.
+Mentioning a configured agent that is not joined to the room still counts as an explicit mention for the other agents.
 
 #### Bot accounts
 

@@ -270,6 +270,8 @@ uv run --python 3.13 matty thread "Lobby" t1 -u "$username" -p "$password" --for
 
 Agents usually reply in threads and may stream by editing the same event.
 If you see partial output, wait and read the thread again.
+When reading threads through the raw `/messages` API, the streamed edits are `m.replace` events whose `m.relates_to.event_id` is the placeholder reply, not the thread root, so collect the thread events first and then apply every `m.replace` whose target is one of them; filtering on the root alone leaves the reply stuck at `Thinking...`.
+A deterministic stub on 9292 can also emit an OpenAI `tool_calls` delta when the user text contains a marker, which exercises MindRoom's tool hook chain end to end without a provider key.
 If `matty threads` looks empty or flaky, use `matty messages --format json` to discover the thread handle and then read it directly with `matty thread`.
 
 ## Live API Checks
