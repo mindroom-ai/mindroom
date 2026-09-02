@@ -633,10 +633,61 @@ class TestAgentBot(AgentBotTestBase):
                 )
 
         assert generation.delivery.event_id == "$response"
-        bot._knowledge_access_support.resolve_for_agent.assert_called_once()
-        args, kwargs = bot._knowledge_access_support.resolve_for_agent.call_args
+        bot._knowledge_access_support.resolve_for_agent_async.assert_awaited_once()
+        args, kwargs = bot._knowledge_access_support.resolve_for_agent_async.call_args
         assert args == ("calculator",)
         assert kwargs["execution_identity"] is not None
+
+    @pytest.mark.asyncio
+    async def test_streaming_cancellation_during_knowledge_resolution_persists_turn(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Cancellation during async knowledge lookup must preserve the interrupted turn."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        bot._knowledge_access_support.resolve_for_agent_async = AsyncMock(
+            side_effect=asyncio.CancelledError("cancelled"),
+        )
+        persist_interrupted = AsyncMock()
+
+        with (
+            patch.object(
+                bot._response_runner,
+                "_persist_interrupted_recorder_off_loop",
+                new=persist_interrupted,
+            ),
+            pytest.raises(asyncio.CancelledError, match="cancelled"),
+        ):
+            await bot._response_runner._process_and_respond_streaming(
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="Hello",
+                    reply_to_event_id="$event456",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event456",
+                        prompt="Hello",
+                        user_id="@user:localhost",
+                    ),
+                ),
+            )
+
+        persist_interrupted.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_process_and_respond_includes_attachment_ids_in_response_metadata(
@@ -2696,7 +2747,9 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        bot._knowledge_access_support.resolve_for_agent = MagicMock(return_value=_KnowledgeResolution(knowledge=None))
+        bot._knowledge_access_support.resolve_for_agent_async = AsyncMock(
+            return_value=_KnowledgeResolution(knowledge=None),
+        )
         thread_history = [
             _visible_message(
                 sender=f"@user{i}:localhost",
@@ -2819,7 +2872,9 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.thread_summary_first_threshold = 1
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        bot._knowledge_access_support.resolve_for_agent = MagicMock(return_value=_KnowledgeResolution(knowledge=None))
+        bot._knowledge_access_support.resolve_for_agent_async = AsyncMock(
+            return_value=_KnowledgeResolution(knowledge=None),
+        )
         root_event_id = "$root_event"
         resolved_target = MessageTarget.resolve(
             room_id="!test:localhost",

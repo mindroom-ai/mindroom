@@ -12,7 +12,9 @@ from mindroom.knowledge.utils import (
     KnowledgeBaseAccessResolution,
     format_knowledge_availability_notice,
     resolve_agent_knowledge_access,
+    resolve_agent_knowledge_access_async,
     resolve_knowledge_base_access,
+    resolve_knowledge_base_access_async,
 )
 
 __all__ = [
@@ -25,5 +27,7 @@ __all__ = [
     "list_knowledge_files",
     "reconcile_knowledge_mode_transition_states",
     "resolve_agent_knowledge_access",
+    "resolve_agent_knowledge_access_async",
     "resolve_knowledge_base_access",
+    "resolve_knowledge_base_access_async",
 ]

@@ -513,7 +513,8 @@ class TestDelegateKnowledge:
         with (
             tool_runtime_context(_delegate_runtime_context(config, runtime_paths)),
             patch(
-                "mindroom.custom_tools.delegate.resolve_agent_knowledge_access",
+                "mindroom.custom_tools.delegate.resolve_agent_knowledge_access_async",
+                new_callable=AsyncMock,
                 return_value=_KnowledgeResolution(knowledge=mock_knowledge),
             ) as mock_get,
             patch(
@@ -524,8 +525,8 @@ class TestDelegateKnowledge:
         ):
             result = await tools.delegate_task("researcher", "Find info about X")
 
-            mock_get.assert_called_once()
-            args, kwargs = mock_get.call_args
+            mock_get.assert_awaited_once()
+            args, kwargs = mock_get.await_args
             assert args == ("researcher", config, runtime_paths)
             assert kwargs["execution_identity"] is None
             ai_kwargs = mock_ai_response.await_args.kwargs
