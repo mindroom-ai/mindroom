@@ -1592,7 +1592,7 @@ async def test_sync_git_source_once_controls_lfs_hydration_after_reset(
         git_calls.append(args)
         git_envs.append((args, env))
         if args[:3] == ["diff", "--name-only", "--no-renames"]:
-            return "doc.md\n"
+            return "doc.md\0"
         return ""
 
     monkeypatch.setattr(manager.git_source, "_ensure_repository", _fake_ensure_git_repository)
@@ -1658,6 +1658,26 @@ async def test_sync_git_source_once_falls_back_when_diff_is_unavailable(
     assert removed_files == {"removed.md"}
     assert updated is True
     assert await manager.git_source.changed_files_between("before", "after") is None
+
+
+@pytest.mark.asyncio
+async def test_changed_files_between_preserves_special_character_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git deltas must use an unambiguous delimiter for every valid pathname."""
+    manager = _git_manager(tmp_path)
+    newline_path = "line\nbreak.md"
+
+    async def _fake_run_git(args: list[str], **_: object) -> str:
+        assert "-z" in args
+        return f"{newline_path}\0unicodé.md\0"
+
+    monkeypatch.setattr(manager.git_source, "_run_git", _fake_run_git)
+
+    changed = await manager.git_source.changed_files_between("before", "after")
+
+    assert changed == frozenset({newline_path, "unicodé.md"})
 
 
 @pytest.mark.asyncio

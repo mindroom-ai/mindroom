@@ -470,7 +470,9 @@ class GitKnowledgeSource:
         if before_head == after_head:
             return frozenset()
         try:
-            output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..{after_head}"])
+            output = await self._run_git(
+                ["diff", "--name-only", "--no-renames", "-z", f"{before_head}..{after_head}"],
+            )
         except RuntimeError:
             logger.warning(
                 "Could not compute knowledge Git delta; falling back to a full scan",
@@ -478,7 +480,7 @@ class GitKnowledgeSource:
                 exc_info=True,
             )
             return None
-        return frozenset(path for path in output.splitlines() if self._include_relative_path(path))
+        return frozenset(path for path in output.split("\0") if path and self._include_relative_path(path))
 
     async def sync(self) -> GitSyncResult:
         """Fetch and force-align one configured Git repository checkout.
@@ -828,7 +830,9 @@ class GitKnowledgeSource:
             changed_paths = after_files
         else:
             try:
-                diff_output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
+                diff_output = await self._run_git(
+                    ["diff", "--name-only", "--no-renames", "-z", f"{before_head}..HEAD"],
+                )
             except RuntimeError:
                 logger.warning(
                     "Could not compute knowledge Git delta; falling back to a full scan",
@@ -837,7 +841,7 @@ class GitKnowledgeSource:
                 )
                 changed_paths = after_files
             else:
-                changed_paths = {path for path in diff_output.splitlines() if self._include_relative_path(path)}
+                changed_paths = {path for path in diff_output.split("\0") if path and self._include_relative_path(path)}
 
         removed_files = before_files - after_files
         changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)
