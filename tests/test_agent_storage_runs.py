@@ -359,3 +359,88 @@ def test_bulk_upsert_preserves_updated_at_when_asked(tmp_path: Path) -> None:
     assert stamped[0].updated_at != 123
     assert isinstance(preserved[0], AgentSession)
     assert preserved[0].updated_at == 123
+
+
+def test_fresh_state_database_gets_no_session_tables(tmp_path: Path) -> None:
+    """Opening a state database with no legacy column must not create sessions or runs tables."""
+    storage = create_state_storage("code", tmp_path, subdir="learning", session_table="code_learning_sessions")
+    storage.close()
+
+    connection = sqlite3.connect(tmp_path / "learning" / "code.db")
+    try:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        connection.close()
+    assert tables == set()
+
+
+def test_legacy_run_that_lands_under_another_session_refuses_migration(tmp_path: Path) -> None:
+    """A run id conflict must be caught by identity, not by a row count another row can satisfy."""
+    db_path = tmp_path / "sessions" / "code.db"
+    db_path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
+        connection.execute(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("s1", "agent", "code", json.dumps(json.dumps([{"run_id": "shared", "agent_id": "code"}])), 1),
+        )
+        connection.execute(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("s2", "agent", "code", json.dumps(json.dumps([{"run_id": "shared", "agent_id": "code"}])), 1),
+        )
+        # A partially migrated runs table already holds an unrelated row for s2, so a
+        # per-session count of 1 would look complete even though "shared" lands under s1.
+        connection.execute(
+            "CREATE TABLE code_sessions_runs (run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_type TEXT, "
+            "agent_id TEXT, team_id TEXT, workflow_id TEXT, user_id TEXT, parent_run_id TEXT, status TEXT, "
+            "run_index INTEGER, run_data JSON NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER)",
+        )
+        connection.execute(
+            "INSERT INTO code_sessions_runs (run_id, session_id, run_type, run_index, run_data, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("unrelated", "s2", "agent", 0, json.dumps({"run_id": "unrelated", "agent_id": "code"}), 1),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _storage(tmp_path)
+    storage.close()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
+        run_ids = {row[0] for row in connection.execute("SELECT run_id FROM code_sessions_runs")}
+    finally:
+        connection.close()
+    assert "runs" in columns
+    assert run_ids == {"unrelated"}
+
+
+def test_legacy_run_without_run_id_refuses_migration(tmp_path: Path) -> None:
+    """An entry the runs table cannot represent keeps the blob authoritative."""
+    db_path = tmp_path / "sessions" / "code.db"
+    db_path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
+        connection.execute(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("s1", "agent", "code", json.dumps(json.dumps([{"run_id": "r0"}, {"agent_id": "code"}])), 1),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _storage(tmp_path)
+    storage.close()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
+        copied = connection.execute("SELECT count(*) FROM code_sessions_runs").fetchone()[0]
+    finally:
+        connection.close()
+    assert "runs" in columns
+    assert copied == 0

@@ -37,7 +37,7 @@ def _release_frame_namespace(wrapped: Callable[..., Any]) -> None:
             contents = cell.cell_contents
         except ValueError:
             continue
-        validator = getattr(contents, "__self__", contents)
+        validator = contents.__self__ if isinstance(contents, types.MethodType) else contents
         if isinstance(validator, ValidateCallWrapper):
             validator.ns_resolver = NsResolver()
         elif isinstance(contents, types.FunctionType):
