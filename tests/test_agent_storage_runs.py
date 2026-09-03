@@ -20,6 +20,7 @@ from mindroom.agent_storage import (
     get_agent_session,
     get_team_session,
     replace_runs,
+    runs_without,
     save_runs,
 )
 from tests.conftest import create_agno_2_sessions_db, seed_session
@@ -369,3 +370,64 @@ def test_save_runs_refuses_a_run_object_loaded_from_the_session() -> None:
     with pytest.raises(ValueError, match="edit a copy"):
         save_runs(storage, session, [loaded_run])
     storage.upsert_run.assert_not_called()
+
+
+def test_deleting_a_team_run_takes_its_member_rows_along(tmp_path: Path) -> None:
+    """Member runs are rows whose parent_run_id is the team run; deleting the parent must not orphan them."""
+    storage = create_state_storage("eng", tmp_path, subdir="sessions", session_table="eng_sessions")
+    member = RunOutput(run_id="m1", agent_id="code", session_id="t1", parent_run_id="team1")
+    grandchild = RunOutput(run_id="m1-child", agent_id="code", session_id="t1", parent_run_id="m1")
+    team_run = TeamRunOutput(run_id="team1", team_id="eng", session_id="t1")
+    other = TeamRunOutput(run_id="team2", team_id="eng", session_id="t1")
+    try:
+        session = seed_session(
+            storage,
+            TeamSession(session_id="t1", team_id="eng", runs=[team_run, member, grandchild, other]),
+        )
+        kept = runs_without(session.runs or [], ["team1"])
+        removed = replace_runs(storage, session, kept)
+        reloaded = get_team_session(storage, "t1")
+        storage.delete_runs(["team2"])
+        after_direct_delete = get_team_session(storage, "t1")
+    finally:
+        storage.close()
+
+    assert [run.run_id for run in kept] == ["team2"]
+    assert sorted(removed) == ["m1", "m1-child", "team1"]
+    assert reloaded is not None
+    assert [run.run_id for run in reloaded.runs or []] == ["team2"]
+    assert after_direct_delete is not None
+    assert after_direct_delete.runs == []
+
+
+def test_delete_runs_scrubs_legacy_blob_descendants_too(tmp_path: Path) -> None:
+    """A 2.x blob can hold member entries under a team run; scrubbing the parent scrubs them."""
+    db_path = tmp_path / "sessions" / "code.db"
+    db_path.parent.mkdir(parents=True)
+    legacy_runs = [
+        {"run_id": "team1", "session_id": "s1"},
+        {"run_id": "m1", "session_id": "s1", "parent_run_id": "team1"},
+        {"run_id": "team2", "session_id": "s1"},
+    ]
+    connection = sqlite3.connect(create_agno_2_sessions_db(db_path))
+    try:
+        connection.execute(
+            "UPDATE code_sessions SET runs = ? WHERE session_id = 'session-1'",
+            (json.dumps(json.dumps(legacy_runs)),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _storage(tmp_path)
+    try:
+        storage.delete_runs(["team1"])
+    finally:
+        storage.close()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
+    finally:
+        connection.close()
+    assert [run["run_id"] for run in json.loads(json.loads(blob))] == ["team2"]

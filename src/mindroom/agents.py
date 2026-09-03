@@ -1136,14 +1136,13 @@ def remove_run_by_event_id(
     )
     if session is None or not session.runs:
         return False
-    original_len = len(session.runs)
-    filtered_runs: list[Any] = []
+    removed_runs: list[RunOutput | TeamRunOutput] = []
     matched_run = False
     for run in session.runs:
-        if matched_run and remove_following_runs:
-            continue
         if not isinstance(run, (RunOutput, TeamRunOutput)) or not run.metadata:
-            filtered_runs.append(run)
+            continue
+        if matched_run and remove_following_runs:
+            removed_runs.append(run)
             continue
         raw_source_event_ids = run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
         raw_discovery_event_ids = run.metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)
@@ -1171,11 +1170,12 @@ def remove_run_by_event_id(
             or event_id in seen_event_ids
         ):
             matched_run = True
-            continue
-        filtered_runs.append(run)
-    if len(filtered_runs) == original_len:
+            removed_runs.append(run)
+    if not removed_runs:
         return False
-    agent_storage.replace_runs(storage, session, filtered_runs)
+    # Team member runs hang off the team run through parent_run_id and go with it.
+    kept = agent_storage.runs_without(session.runs, [run.run_id for run in removed_runs if run.run_id])
+    agent_storage.replace_runs(storage, session, [run for run in kept if not any(run is gone for gone in removed_runs)])
     return True
 
 

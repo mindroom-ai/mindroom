@@ -227,6 +227,7 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
             runs=[
                 _completed_team_run_output("run-good", "First response"),
                 _completed_team_run_output("run-empty", None),
+                RunOutput(run_id="member-of-empty", agent_id="general", parent_run_id="run-empty"),
             ],
             metadata={},
             created_at=1,

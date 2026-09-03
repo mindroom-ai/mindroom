@@ -1255,6 +1255,42 @@ class TestFileToolRestrictToBaseDir:
         assert "outside base_dir" in result
         assert "searching files" in result
 
+    def test_file_tool_search_content_blocks_parent_traversal_when_restricted(self, tmp_path: Path) -> None:
+        """Restricted search_content refuses a ../ directory instead of searching it."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("needle here\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        result = tool.search_content("needle", "../outside")
+
+        assert "outside base_dir" in result
+        assert "searching content" in result
+
+    def test_file_tool_search_content_searches_outside_when_unrestricted(self, tmp_path: Path) -> None:
+        """Unrestricted search_content returns matches from absolute and ../ directories with absolute paths."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("the needle is here\n")
+        (base_dir / "inside.txt").write_text("needle inside\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
+
+        by_absolute = json.loads(tool.search_content("needle", str(outside_dir)))
+        by_relative = json.loads(tool.search_content("needle", "../outside"))
+        inside = json.loads(tool.search_content("needle"))
+
+        assert [match["file"] for match in by_absolute["files"]] == [str(outside_dir / "secret.txt")]
+        assert "the needle is here" in by_absolute["files"][0]["snippet"]
+        assert [match["file"] for match in by_relative["files"]] == [str(outside_dir / "secret.txt")]
+        assert [match["file"] for match in inside["files"]] == ["inside.txt"]
+
     def test_file_tool_restrict_to_base_dir_false_allows_outside_and_relative_paths(self, tmp_path: Path) -> None:
         """File tools should allow outside absolute paths while keeping relative paths anchored."""
         base_dir = tmp_path / "base"

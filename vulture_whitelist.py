@@ -294,6 +294,7 @@ get_plugin_state_root  # unused function (src/mindroom/tool_system/runtime_conte
 emit_custom_event  # unused function (src/mindroom/tool_system/runtime_context.py)
 config_edit  # unused function (src/mindroom/cli/config.py)
 _.search_files  # unused method (src/mindroom/tools/file.py)
+_.search_content  # unused method (src/mindroom/tools/file.py)
 config_validate  # unused function (src/mindroom/cli/config.py)
 config_resolve  # unused function (src/mindroom/cli/config.py)
 update_schedule  # unused function (src/mindroom/api/schedules.py)

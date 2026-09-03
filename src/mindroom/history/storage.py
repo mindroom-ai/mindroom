@@ -36,7 +36,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import replace_runs, save_runs
+from mindroom.agent_storage import replace_runs, runs_without, save_runs
 from mindroom.constants import (
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
@@ -387,34 +387,7 @@ def remove_runs_by_id(
     compacted_run_ids: Iterable[str],
 ) -> list[RunOutput | TeamRunOutput]:
     """Return runs with the compacted run ids, and all their descendants, removed."""
-    remove_ids = {run_id for run_id in compacted_run_ids if run_id}
-    if not remove_ids:
-        return list(runs)
-
-    run_list = list(runs)
-    children_by_parent: dict[str, list[str]] = {}
-    for run in run_list:
-        parent_run_id = run.parent_run_id
-        run_id = run.run_id
-        if isinstance(parent_run_id, str) and parent_run_id and isinstance(run_id, str) and run_id:
-            children_by_parent.setdefault(parent_run_id, []).append(run_id)
-
-    stack = list(remove_ids)
-    while stack:
-        run_id = stack.pop()
-        for child_run_id in children_by_parent.get(run_id, []):
-            if child_run_id not in remove_ids:
-                remove_ids.add(child_run_id)
-                stack.append(child_run_id)
-
-    return [
-        run
-        for run in run_list
-        if not (
-            (isinstance(run.run_id, str) and run.run_id in remove_ids)
-            or (isinstance(run.parent_run_id, str) and run.parent_run_id in remove_ids)
-        )
-    ]
+    return runs_without(runs, compacted_run_ids)
 
 
 def prune_reintroduced_runs(

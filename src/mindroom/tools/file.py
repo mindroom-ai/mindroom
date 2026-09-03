@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
-from typing import Any, cast
+import os
+from itertools import islice
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools.file import FileTools as AgnoFileTools
+from agno.tools.file.file import TEXT_EXTENSIONS
 from agno.utils.log import log_debug, log_error
 
 from mindroom.tool_system.declarations import (
@@ -24,6 +27,9 @@ from mindroom.tools.path_safety import (
     resolve_base_dir_path,
     split_search_pattern,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 class _MindRoomFileTools(AgnoFileTools):
@@ -73,8 +79,6 @@ class _MindRoomFileTools(AgnoFileTools):
         """Resolve a path against base_dir, honoring this toolkit's restriction setting.
 
         Replaces Agno's Toolkit helper so every method here shares one rule.
-        Upstream ``search_content`` still confines itself to base_dir because it
-        relativizes each hit against it.
         """
         del restrict_to_base_dir
         try:
@@ -231,6 +235,69 @@ class _MindRoomFileTools(AgnoFileTools):
             error_msg = f"Error searching files with pattern '{pattern}': {e}"
             log_error(error_msg)
             return error_msg
+
+    def search_content(self, query: str, directory: str | None = None, limit: int = 10) -> str:
+        """Search file contents for a case-insensitive query, honoring the base-dir restriction.
+
+        Agno's version relativizes every hit against ``base_dir`` and so fails
+        on any directory outside it even when the restriction is off.
+        """
+        try:
+            if not query or not query.strip():
+                return "Error: Query cannot be empty"
+            search_dir = self.base_dir
+            if directory:
+                safe, search_dir = self._check_path(directory, self.base_dir)
+                if not safe:
+                    return blocked_file_action_message("searching content", directory, self.base_dir)
+            if not search_dir.is_dir():
+                return f"Error: '{directory}' is not a directory"
+
+            log_debug(f"Searching file contents in {search_dir} for '{query}'")
+            matches = [
+                {
+                    "file": format_path_for_output(file_path, self.base_dir),
+                    "size": f"{file_path.stat().st_size} bytes",
+                    "snippet": _content_snippet(content, query.lower()),
+                }
+                for file_path, content in islice(self._content_matches(search_dir, query.lower()), limit)
+            ]
+            log_debug(f"Found {len(matches)} files containing '{query}'")
+            return json.dumps({"query": query, "matches_found": len(matches), "files": matches}, indent=2)
+        except Exception as e:
+            error_msg = f"Error searching content for '{query}': {e}"
+            log_error(error_msg)
+            return error_msg
+
+    def _content_matches(self, search_dir: Path, lower_query: str) -> Iterator[tuple[Path, str]]:
+        """Yield (path, content) for searchable text files under ``search_dir`` containing the query."""
+        for dirpath, dirnames, filenames in os.walk(search_dir):
+            dirnames[:] = [name for name in dirnames if not self._is_excluded(Path(dirpath) / name)]
+            for filename in filenames:
+                file_path = Path(dirpath) / filename
+                if self._is_excluded(file_path) or file_path.suffix.lower() not in TEXT_EXTENSIONS:
+                    continue
+                if self.restrict_to_base_dir and not is_within_base_dir(file_path, self.base_dir):
+                    continue
+                try:
+                    if file_path.stat().st_size > _MAX_CONTENT_SEARCH_BYTES:
+                        continue
+                    content = file_path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                if lower_query in content.lower():
+                    yield file_path, content
+
+
+_MAX_CONTENT_SEARCH_BYTES = 500 * 1024
+
+
+def _content_snippet(content: str, lower_query: str, context_chars: int = 200) -> str:
+    """Return the text around the first match, trimmed to ``context_chars`` on each side."""
+    index = content.lower().find(lower_query)
+    start = max(0, index - context_chars)
+    end = min(len(content), index + len(lower_query) + context_chars)
+    return content[start:end].strip()
 
 
 @register_tool_with_metadata(

@@ -19,7 +19,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import save_runs
+from mindroom.agent_storage import runs_without, save_runs
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
@@ -687,10 +687,6 @@ def is_empty_completed_run(response: RunOutput | TeamRunOutput) -> bool:
     return isinstance(content, str) and not content.strip()
 
 
-def _runs_without(runs: Sequence[Any], *, run_id: str) -> list[Any]:
-    return [run for run in runs if not (isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id == run_id)]
-
-
 def discard_empty_completed_run(
     *,
     scope_context: ScopeSessionContext | None,
@@ -720,7 +716,7 @@ def discard_empty_completed_run(
     try:
         scope_context.storage.delete_runs([run_id])
         if scope_context.session is not None:
-            scope_context.session.runs = _runs_without(scope_context.session.runs or [], run_id=run_id)
+            scope_context.session.runs = runs_without(_session_run_outputs(scope_context.session), [run_id])
     except Exception:
         logger.exception(
             "Failed to remove empty run from session history",

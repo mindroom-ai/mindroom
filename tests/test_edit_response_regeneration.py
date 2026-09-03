@@ -856,6 +856,7 @@ def test_remove_run_by_event_id_removes_team_runs() -> None:
                 session_id="session-1",
                 metadata={"matrix_event_id": "$original:example.com"},
             ),
+            RunOutput(run_id="member", session_id="session-1", parent_run_id="original"),
             TeamRunOutput(
                 run_id="other",
                 session_id="session-1",
@@ -874,7 +875,7 @@ def test_remove_run_by_event_id_removes_team_runs() -> None:
     )
 
     assert removed is True
-    assert storage.deleted_run_ids == [original_run_id]
+    assert sorted(storage.deleted_run_ids) == sorted([original_run_id, "member"])
     assert len(session.runs or []) == 1
     assert session.runs[0].metadata["matrix_event_id"] == "$other:example.com"
 

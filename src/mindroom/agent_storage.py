@@ -47,6 +47,7 @@ __all__ = [
     "get_team_session",
     "replace_runs",
     "run_session_storage_operation",
+    "runs_without",
     "save_runs",
 ]
 
@@ -281,12 +282,22 @@ class _ConversationSqliteDb(SqliteDb):
         """
         if not run_ids:
             return
-        wanted = set(run_ids)
+        wanted = {run_id for run_id in run_ids if run_id}
         runs_table = self._get_table(table_type="runs")
         sessions_table = self._get_table(table_type="sessions")
         with self.Session() as sess, sess.begin():
             if runs_table is not None:
-                sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(run_ids)))
+                # Team member runs are rows whose parent_run_id is the team run; a
+                # deleted run takes its whole subtree along, as agno's own
+                # session-level delete cascades do.
+                frontier = list(wanted)
+                while frontier:
+                    children = sess.execute(
+                        select(runs_table.c.run_id).where(runs_table.c.parent_run_id.in_(frontier)),
+                    ).scalars()
+                    frontier = [child for child in children if child not in wanted]
+                    wanted.update(frontier)
+                sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
             if sessions_table is None or "runs" not in sessions_table.c:
                 return
             rows = sess.execute(
@@ -294,7 +305,7 @@ class _ConversationSqliteDb(SqliteDb):
             ).fetchall()
             for session_id, blob in rows:
                 legacy_runs = _decode_legacy_runs(blob)
-                kept = [run for run in legacy_runs if not (isinstance(run, dict) and run.get("run_id") in wanted)]
+                kept = _dicts_without(legacy_runs, wanted)
                 if len(kept) == len(legacy_runs):
                     continue
                 sess.execute(
@@ -339,6 +350,44 @@ class _ConversationSqliteDb(SqliteDb):
             sess.execute(
                 sessions_table.update().where(sessions_table.c.session_id == session_id).values(updated_at=updated_at),
             )
+
+
+def _dicts_without(runs: list[Any], run_ids: set[str]) -> list[Any]:
+    """Legacy blob entries minus ``run_ids`` and every entry descending from them."""
+    removed = set(run_ids)
+    while True:
+        children = {
+            run["run_id"]
+            for run in runs
+            if isinstance(run, dict) and run.get("parent_run_id") in removed and run.get("run_id") not in removed
+        }
+        if not children:
+            break
+        removed |= children
+    return [run for run in runs if not (isinstance(run, dict) and run.get("run_id") in removed)]
+
+
+def runs_without(
+    runs: Iterable[RunOutput | TeamRunOutput],
+    run_ids: Iterable[str],
+) -> list[RunOutput | TeamRunOutput]:
+    """Return ``runs`` minus ``run_ids`` and every run descending from them through ``parent_run_id``."""
+    run_list = list(runs)
+    removed = {run_id for run_id in run_ids if run_id}
+    if not removed:
+        return run_list
+    children_by_parent: dict[str, list[str]] = {}
+    for run in run_list:
+        if isinstance(run.parent_run_id, str) and run.parent_run_id and isinstance(run.run_id, str) and run.run_id:
+            children_by_parent.setdefault(run.parent_run_id, []).append(run.run_id)
+    frontier = list(removed)
+    while frontier:
+        parent = frontier.pop()
+        for child in children_by_parent.get(parent, []):
+            if child not in removed:
+                removed.add(child)
+                frontier.append(child)
+    return [run for run in run_list if run.run_id not in removed]
 
 
 def _decode_legacy_runs(blob: object) -> list[Any]:
