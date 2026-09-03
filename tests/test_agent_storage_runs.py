@@ -217,7 +217,7 @@ def test_team_session_keeps_member_runs(tmp_path: Path) -> None:
 
 
 def test_rejected_owner_mismatch_write_is_reported(tmp_path: Path) -> None:
-    """Agno refuses a session write from another user."""
+    """Agno refuses a session write from another user, on the single and the bulk path."""
     storage = _storage(tmp_path)
     try:
         alice_session = _session("s1", [])
@@ -228,12 +228,38 @@ def test_rejected_owner_mismatch_write_is_reported(tmp_path: Path) -> None:
         other_users_session.created_at = 1_700_000_100
 
         assert storage.upsert_session(other_users_session) is None
+        assert storage.upsert_sessions([other_users_session]) == []
         stored = get_agent_session(storage, "s1")
     finally:
         storage.close()
 
     assert stored is not None
     assert stored.user_id == "@alice:example.test"
+
+
+def test_bulk_upsert_preserves_updated_at_when_asked(tmp_path: Path) -> None:
+    """The per-row path stamps updated_at with now; preserve_updated_at must undo that."""
+    storage = _storage(tmp_path)
+    db_path = tmp_path / "sessions" / "code.db"
+    try:
+        session = _session("s1", [])
+        session.created_at = 100
+        session.updated_at = 123
+        stamped = storage.upsert_sessions([session])
+        preserved = storage.upsert_sessions([session], preserve_updated_at=True)
+    finally:
+        storage.close()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        created_at, updated_at = connection.execute("SELECT created_at, updated_at FROM code_sessions").fetchone()
+    finally:
+        connection.close()
+    assert (created_at, updated_at) == (100, 123)
+    assert isinstance(stamped[0], AgentSession)
+    assert stamped[0].updated_at != 123
+    assert isinstance(preserved[0], AgentSession)
+    assert preserved[0].updated_at == 123
 
 
 def test_fresh_state_database_gets_no_session_tables(tmp_path: Path) -> None:
