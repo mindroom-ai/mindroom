@@ -22,20 +22,12 @@ from mindroom.agent_storage import (
     replace_runs,
     save_runs,
 )
-from tests.conftest import seed_session
+from tests.conftest import create_agno_2_sessions_db, seed_session
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.db.base import BaseDb
-
-_LEGACY_SESSION_COLUMNS = (
-    # Agno 2.x declared its blob columns as JSON; SQLAlchemy decodes those once on read,
-    # which is what lets agno 3 find the list inside the double-encoded ``runs`` value.
-    "session_id TEXT PRIMARY KEY, session_type TEXT NOT NULL, agent_id TEXT, team_id TEXT, workflow_id TEXT, "
-    "user_id TEXT, session_data JSON, agent_data JSON, team_data JSON, workflow_data JSON, metadata JSON, "
-    "runs JSON, summary JSON, created_at INTEGER NOT NULL, updated_at INTEGER"
-)
 
 
 def _storage(tmp_path: Path) -> BaseDb:
@@ -276,61 +268,39 @@ def test_fresh_state_database_gets_no_session_tables(tmp_path: Path) -> None:
 
 
 def test_legacy_runs_blob_is_merged_into_reads_and_deletions_stick(tmp_path: Path) -> None:
-    """A 2.x database is read as-is; deleting a legacy run scrubs it from the blob, saves append rows."""
-    db_path = tmp_path / "sessions" / "code.db"
-    db_path.parent.mkdir(parents=True)
-    legacy_runs = [
-        RunOutput(
-            run_id=f"r{index}",
-            agent_id="code",
-            session_id="s1",
-            messages=[Message(role="user", content=str(index))],
-        ).to_dict()
-        for index in range(3)
-    ]
-    connection = sqlite3.connect(db_path)
-    try:
-        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
-        connection.execute(
-            "INSERT INTO code_sessions (session_id, session_type, agent_id, user_id, runs, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            # Agno 2.x stored the JSON text of the list inside the JSON column.
-            ("s1", "agent", "code", "@alice:example.test", json.dumps(json.dumps(legacy_runs)), 1),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    """A real 2.6.12 database is read as-is; deleting a legacy run scrubs it from the blob, saves append rows."""
+    db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
 
     storage = _storage(tmp_path)
     try:
-        loaded = get_agent_session(storage, "s1")
+        loaded = get_agent_session(storage, "session-1")
         assert loaded is not None
-        assert [run.run_id for run in loaded.runs or []] == ["r0", "r1", "r2"]
-        replace_runs(storage, loaded, [run for run in loaded.runs or [] if run.run_id != "r1"])
-        after_delete = _loaded_run_ids(storage, "s1")
-        save_runs(storage, loaded, [_run("s1", "r3")])
-        after_save = _loaded_run_ids(storage, "s1")
+        assert [run.run_id for run in loaded.runs or []] == ["run-1", "run-2", "run-3"]
+        replace_runs(storage, loaded, [run for run in loaded.runs or [] if run.run_id != "run-2"])
+        after_delete = _loaded_run_ids(storage, "session-1")
+        save_runs(storage, loaded, [_run("session-1", "run-4")])
+        after_save = _loaded_run_ids(storage, "session-1")
     finally:
         storage.close()
 
     # A restart must not resurrect the deleted legacy run through the blob merge.
     storage = _storage(tmp_path)
     try:
-        after_restart = _loaded_run_ids(storage, "s1")
+        after_restart = _loaded_run_ids(storage, "session-1")
     finally:
         storage.close()
 
-    assert after_delete == ["r0", "r2"]
-    assert after_save == ["r0", "r2", "r3"]
-    assert after_restart == ["r0", "r2", "r3"]
-    assert _run_rows(db_path) == [("r3", 0)]
+    assert after_delete == ["run-1", "run-3"]
+    assert after_save == ["run-1", "run-3", "run-4"]
+    assert after_restart == ["run-1", "run-3", "run-4"]
+    assert _run_rows(db_path) == [("run-4", 0)]
     connection = sqlite3.connect(db_path)
     try:
-        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 's1'").fetchone()
+        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
     finally:
         connection.close()
-    assert [run["run_id"] for run in json.loads(json.loads(blob))] == ["r0", "r2"]
+    assert [run["run_id"] for run in json.loads(json.loads(blob))] == ["run-1", "run-3"]
     # Opening a pre-existing file must not let agno's connect listener switch it to WAL.
     assert journal_mode == ("delete",)
 
@@ -353,25 +323,13 @@ def test_failed_run_writes_leave_the_session_as_loaded() -> None:
 
 def test_delete_runs_scrubs_the_legacy_blob_in_the_same_transaction(tmp_path: Path) -> None:
     """A refused blob rewrite must roll back the row deletion; both land or neither does."""
-    db_path = tmp_path / "sessions" / "code.db"
-    db_path.parent.mkdir(parents=True)
-    legacy_runs = [RunOutput(run_id=f"r{index}", agent_id="code", session_id="s1").to_dict() for index in range(2)]
-    connection = sqlite3.connect(db_path)
-    try:
-        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
-        connection.execute(
-            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("s1", "agent", "code", json.dumps(json.dumps(legacy_runs)), 1),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
 
     storage = _storage(tmp_path)
     try:
-        loaded = get_agent_session(storage, "s1")
+        loaded = get_agent_session(storage, "session-1")
         assert loaded is not None
-        save_runs(storage, loaded, [_run("s1", "r2")])
+        save_runs(storage, loaded, [_run("session-1", "run-4")])
         # A trigger stands in for any failure of the blob rewrite.
         connection = sqlite3.connect(db_path)
         try:
@@ -383,21 +341,21 @@ def test_delete_runs_scrubs_the_legacy_blob_in_the_same_transaction(tmp_path: Pa
         finally:
             connection.close()
         with pytest.raises(Exception, match="blob rewrite refused"):
-            storage.delete_runs(["r0", "r2"])
-        after_refusal = _loaded_run_ids(storage, "s1")
+            storage.delete_runs(["run-1", "run-4"])
+        after_refusal = _loaded_run_ids(storage, "session-1")
         connection = sqlite3.connect(db_path)
         try:
             connection.execute("DROP TRIGGER refuse_blob_rewrite")
             connection.commit()
         finally:
             connection.close()
-        storage.delete_runs(["r0", "r2"])
-        after_delete = _loaded_run_ids(storage, "s1")
+        storage.delete_runs(["run-1", "run-4"])
+        after_delete = _loaded_run_ids(storage, "session-1")
     finally:
         storage.close()
 
-    assert after_refusal == ["r0", "r1", "r2"]
-    assert after_delete == ["r1"]
+    assert after_refusal == ["run-1", "run-2", "run-3", "run-4"]
+    assert after_delete == ["run-2", "run-3"]
     assert _run_rows(db_path) == []
 
 

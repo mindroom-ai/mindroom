@@ -2921,3 +2921,17 @@ def seed_session[SessionT: "AgentSession | TeamSession"](storage: "BaseDb", sess
     for run in session.runs or []:
         storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
     return session
+
+
+def create_agno_2_sessions_db(path: "Path") -> "Path":
+    """Write the agno 2.6.12 ``code_sessions`` fixture database to ``path`` and return it."""
+    import sqlite3  # noqa: PLC0415
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fixture = Path(__file__).parent / "fixtures" / "agno_2_6_12_code_sessions.sql"
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(fixture.read_text(encoding="utf-8"))
+    finally:
+        connection.close()
+    return path

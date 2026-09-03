@@ -29,7 +29,7 @@ from mindroom.usage_stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
-from tests.conftest import seed_session
+from tests.conftest import create_agno_2_sessions_db, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -538,9 +538,7 @@ def test_admin_discovery_reports_directory_read_failure(
 
 def test_reader_merges_legacy_blob_with_runs_table(tmp_path: Path) -> None:
     """Run-table rows win on run_id; legacy-only runs are appended, matching Agno's read merge."""
-    database = tmp_path / "code.db"
-    legacy_only = {**_run(), "run_id": "legacy-only", "metrics": {"total_tokens": 5}}
-    _create_database(database, runs=[_run(), legacy_only])
+    database = create_agno_2_sessions_db(tmp_path / "code.db")
     connection = sqlite3.connect(database)
     try:
         connection.execute(
@@ -562,7 +560,7 @@ def test_reader_merges_legacy_blob_with_runs_table(tmp_path: Path) -> None:
     assert len(result) == 1
     row = result[0]
     assert isinstance(row, UsageSessionRow)
-    assert [run.run_id for run in row.runs] == ["run-1", "legacy-only"]
+    assert [run.run_id for run in row.runs] == ["run-1", "run-2", "run-3"]
     assert row.runs[0].metrics == {"total_tokens": 99}
-    assert row.runs[1].metrics == {"total_tokens": 5}
+    assert row.runs[1].metrics == {"input_tokens": 2, "output_tokens": 2, "total_tokens": 4}
     assert row.payload_bytes > 0
