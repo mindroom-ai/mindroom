@@ -272,19 +272,22 @@ class _MindRoomFileTools(AgnoFileTools):
     def _content_matches(self, search_dir: Path, lower_query: str) -> Iterator[tuple[Path, str]]:
         """Yield (path, content) for searchable text files under ``search_dir`` containing the query.
 
-        Exclusions are matched against the path relative to ``search_dir``, not
-        ``base_dir``: agno's matcher relativizes against ``base_dir`` and so
-        excludes nothing once the search root lies outside it.
+        Exclusions are matched against ``base_dir`` as agno does while the
+        search stays inside it, and against the searched directory's parent
+        otherwise: agno's matcher excludes nothing once the search root lies
+        outside ``base_dir``, and anchoring at the searched directory itself
+        would drop its own name (searching ``.git`` must still find nothing).
         """
+        anchor = self.base_dir if is_within_base_dir(search_dir, self.base_dir) else search_dir.parent
         for dirpath, dirnames, filenames in os.walk(search_dir):
             dirnames[:] = [
                 name
                 for name in dirnames
-                if not path_matches_exclude(Path(dirpath) / name, search_dir, self.exclude_patterns)
+                if not path_matches_exclude(Path(dirpath) / name, anchor, self.exclude_patterns)
             ]
             for filename in filenames:
                 file_path = Path(dirpath) / filename
-                if path_matches_exclude(file_path, search_dir, self.exclude_patterns):
+                if path_matches_exclude(file_path, anchor, self.exclude_patterns):
                     continue
                 if file_path.suffix.lower() not in TEXT_EXTENSIONS:
                     continue

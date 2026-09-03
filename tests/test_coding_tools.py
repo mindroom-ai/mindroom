@@ -1307,6 +1307,22 @@ class TestFileToolRestrictToBaseDir:
 
         assert [match["file"] for match in result["files"]] == [str(outside_dir / "notes.txt")]
 
+    def test_file_tool_search_content_keeps_excluding_an_explicitly_searched_directory(self, tmp_path: Path) -> None:
+        """Naming an excluded directory as the search root must not make its contents visible."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        (base_dir / ".git").mkdir(parents=True)
+        (outside_dir / ".git").mkdir(parents=True)
+        (base_dir / ".git" / "config.txt").write_text("needle inside git\n")
+        (outside_dir / ".git" / "config.txt").write_text("needle outside git\n")
+
+        cls = file_tools()
+        restricted = cls(base_dir=base_dir)
+        unrestricted = cls(base_dir=base_dir, restrict_to_base_dir=False)
+
+        assert json.loads(restricted.search_content("needle", ".git"))["files"] == []
+        assert json.loads(unrestricted.search_content("needle", str(outside_dir / ".git")))["files"] == []
+
     def test_file_tool_search_content_honors_exclusion_exemptions(self, tmp_path: Path) -> None:
         """A ``!pattern`` entry exempts a file from an earlier deny pattern, as in agno's matcher."""
         base_dir = tmp_path / "base"
