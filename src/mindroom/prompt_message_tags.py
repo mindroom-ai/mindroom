@@ -58,7 +58,7 @@ def _enrich_msg_open_tags(
 
         rendered_display_name = f"display_name={xml_quoteattr(display_name)}"
         if _DISPLAY_NAME_ATTR_RE.search(tag):
-            return _DISPLAY_NAME_ATTR_RE.sub(rendered_display_name, tag, count=1)
+            return _DISPLAY_NAME_ATTR_RE.sub(lambda _: rendered_display_name, tag, count=1)
         return f"{tag[:-1]} {rendered_display_name}>"
 
     return _MSG_OPEN_TAG_RE.sub(_enrich_tag, text)
