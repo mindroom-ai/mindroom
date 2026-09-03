@@ -308,11 +308,14 @@ async def test_ai_response_closes_spent_agent_state_dbs_before_empty_retry(tmp_p
 
 @pytest.mark.asyncio
 async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_path: Path) -> None:
-    """Two consecutive empty responses should surface a visible notice, never a blank reply."""
+    """Two consecutive empty responses surface a visible notice, and neither empty run is kept."""
     first_agent = _mock_agent(_completed_run("run-empty-1", None))
     second_agent = _mock_agent(_completed_run("run-empty-2", ""))
 
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+    with (
+        patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.ai.ai_runtime.discard_empty_completed_run") as mock_discard,
+    ):
         mock_prepare.side_effect = [
             _prepared_prompt_result(first_agent),
             _prepared_prompt_result(second_agent),
@@ -328,6 +331,8 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_
     assert result == EMPTY_RESPONSE_NOTICE
     first_agent.arun.assert_called_once()
     second_agent.arun.assert_called_once()
+    # The retry's empty run is discarded too; the notice is delivery-only.
+    assert [call.kwargs["run_id"] for call in mock_discard.call_args_list] == ["run-empty-1", "run-empty-2"]
 
 
 @pytest.mark.asyncio

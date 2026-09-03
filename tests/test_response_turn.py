@@ -1039,7 +1039,8 @@ def test_blocking_empty_run_grants_one_retry_then_notice() -> None:
 
     assert result == EMPTY_RESPONSE_NOTICE
     assert attempts == 2
-    assert [discard.run_id for discard in log.discards] == ["run-1"]
+    # Both empty runs are discarded; the notice is delivery-only.
+    assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
     assert log.released == 1
     assert recorder.completed_calls == [
         {"run_metadata": None, "assistant_text": "", "completed_tools": []},
@@ -1455,7 +1456,8 @@ def test_streaming_empty_run_retries_then_yields_notice_and_records() -> None:
 
     assert chunks == [f"notice:{EMPTY_RESPONSE_NOTICE}"]
     assert attempts == 2
-    assert [discard.run_id for discard in log.discards] == ["run-1"]
+    # Both empty runs are discarded; the notice is delivery-only.
+    assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
     # The notice-only turn still records an empty completion.
     assert recorder.completed_calls[-1]["assistant_text"] == ""
 
