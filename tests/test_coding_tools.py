@@ -1291,6 +1291,22 @@ class TestFileToolRestrictToBaseDir:
         assert [match["file"] for match in by_relative["files"]] == [str(outside_dir / "secret.txt")]
         assert [match["file"] for match in inside["files"]] == ["inside.txt"]
 
+    def test_file_tool_search_content_applies_exclusions_outside_base_dir(self, tmp_path: Path) -> None:
+        """The default exclusion list still applies when the search root lies outside base_dir."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        (outside_dir / ".git").mkdir(parents=True)
+        (outside_dir / "credentials.json").write_text('{"token": "needle"}\n')
+        (outside_dir / ".git" / "config.txt").write_text("needle in git metadata\n")
+        (outside_dir / "notes.txt").write_text("needle in notes\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
+        result = json.loads(tool.search_content("needle", str(outside_dir)))
+
+        assert [match["file"] for match in result["files"]] == [str(outside_dir / "notes.txt")]
+
     def test_file_tool_restrict_to_base_dir_false_allows_outside_and_relative_paths(self, tmp_path: Path) -> None:
         """File tools should allow outside absolute paths while keeping relative paths anchored."""
         base_dir = tmp_path / "base"

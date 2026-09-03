@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from fnmatch import fnmatch
 from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -270,12 +271,17 @@ class _MindRoomFileTools(AgnoFileTools):
             return error_msg
 
     def _content_matches(self, search_dir: Path, lower_query: str) -> Iterator[tuple[Path, str]]:
-        """Yield (path, content) for searchable text files under ``search_dir`` containing the query."""
+        """Yield (path, content) for searchable text files under ``search_dir`` containing the query.
+
+        Exclusions are matched against the path relative to ``search_dir``, not
+        ``base_dir``: agno's matcher relativizes against ``base_dir`` and so
+        excludes nothing once the search root lies outside it.
+        """
         for dirpath, dirnames, filenames in os.walk(search_dir):
-            dirnames[:] = [name for name in dirnames if not self._is_excluded(Path(dirpath) / name)]
+            dirnames[:] = [name for name in dirnames if not self._excluded_under(Path(dirpath) / name, search_dir)]
             for filename in filenames:
                 file_path = Path(dirpath) / filename
-                if self._is_excluded(file_path) or file_path.suffix.lower() not in TEXT_EXTENSIONS:
+                if self._excluded_under(file_path, search_dir) or file_path.suffix.lower() not in TEXT_EXTENSIONS:
                     continue
                 if self.restrict_to_base_dir and not is_within_base_dir(file_path, self.base_dir):
                     continue
@@ -287,6 +293,11 @@ class _MindRoomFileTools(AgnoFileTools):
                     continue
                 if lower_query in content.lower():
                     yield file_path, content
+
+    def _excluded_under(self, path: Path, root: Path) -> bool:
+        """Whether any component of ``path`` below ``root`` matches an exclude pattern."""
+        parts = path.relative_to(root).parts
+        return any(fnmatch(part, pattern) for part in parts for pattern in self.exclude_patterns)
 
 
 _MAX_CONTENT_SEARCH_BYTES = 500 * 1024

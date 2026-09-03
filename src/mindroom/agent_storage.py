@@ -352,19 +352,34 @@ class _ConversationSqliteDb(SqliteDb):
             )
 
 
+def _string_field(entry: object, key: str) -> str | None:
+    value = cast("dict[str, Any]", entry).get(key) if isinstance(entry, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
 def _dicts_without(runs: list[Any], run_ids: set[str]) -> list[Any]:
-    """Legacy blob entries minus ``run_ids`` and every entry descending from them."""
+    """Legacy blob entries minus ``run_ids`` and every entry descending from them.
+
+    Entries are whatever the 2.x blob holds; ids that are missing or not
+    strings never match anything and are simply carried along.
+    """
     removed = set(run_ids)
     while True:
         children = {
-            run["run_id"]
+            run_id
             for run in runs
-            if isinstance(run, dict) and run.get("parent_run_id") in removed and run.get("run_id") not in removed
+            if _string_field(run, "parent_run_id") in removed
+            and (run_id := _string_field(run, "run_id")) is not None
+            and run_id not in removed
         }
         if not children:
             break
         removed |= children
-    return [run for run in runs if not (isinstance(run, dict) and run.get("run_id") in removed)]
+    return [
+        run
+        for run in runs
+        if _string_field(run, "run_id") not in removed and _string_field(run, "parent_run_id") not in removed
+    ]
 
 
 def runs_without(
@@ -387,7 +402,9 @@ def runs_without(
             if child not in removed:
                 removed.add(child)
                 frontier.append(child)
-    return [run for run in run_list if run.run_id not in removed]
+    # A child without its own run_id cannot be reached through the id map but is
+    # still a descendant; its parent_run_id says so.
+    return [run for run in run_list if run.run_id not in removed and run.parent_run_id not in removed]
 
 
 def _decode_legacy_runs(blob: object) -> list[Any]:

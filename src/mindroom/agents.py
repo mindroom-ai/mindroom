@@ -1139,10 +1139,12 @@ def remove_run_by_event_id(
     removed_runs: list[RunOutput | TeamRunOutput] = []
     matched_run = False
     for run in session.runs:
-        if not isinstance(run, (RunOutput, TeamRunOutput)) or not run.metadata:
+        if not isinstance(run, (RunOutput, TeamRunOutput)):
             continue
         if matched_run and remove_following_runs:
             removed_runs.append(run)
+            continue
+        if not run.metadata:
             continue
         raw_source_event_ids = run.metadata.get(constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
         raw_discovery_event_ids = run.metadata.get(constants.MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY)

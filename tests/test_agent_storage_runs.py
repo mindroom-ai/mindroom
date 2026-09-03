@@ -431,3 +431,48 @@ def test_delete_runs_scrubs_legacy_blob_descendants_too(tmp_path: Path) -> None:
     finally:
         connection.close()
     assert [run["run_id"] for run in json.loads(json.loads(blob))] == ["team2"]
+
+
+def test_runs_without_drops_a_child_that_has_no_run_id() -> None:
+    """A descendant is identified by its parent_run_id even when it never got a run_id of its own."""
+    root = TeamRunOutput(run_id="root", team_id="eng", session_id="t1")
+    orphan_child = RunOutput(agent_id="code", session_id="t1", parent_run_id="root")
+    other = RunOutput(run_id="other", agent_id="code", session_id="t1")
+
+    assert runs_without([root, orphan_child, other], ["root"]) == [other]
+
+
+def test_delete_runs_tolerates_malformed_legacy_blob_entries(tmp_path: Path) -> None:
+    """Entries with missing or non-string ids never match; they are carried along, not crashed on."""
+    db_path = tmp_path / "sessions" / "code.db"
+    db_path.parent.mkdir(parents=True)
+    legacy_runs = [
+        {"run_id": "team1", "session_id": "s1"},
+        {"session_id": "s1", "parent_run_id": "team1"},
+        {"run_id": 7, "parent_run_id": ["team1"]},
+        {"run_id": None, "parent_run_id": None},
+        "not a dict",
+        {"run_id": "keep", "parent_run_id": {"nested": True}},
+    ]
+    connection = sqlite3.connect(create_agno_2_sessions_db(db_path))
+    try:
+        connection.execute(
+            "UPDATE code_sessions SET runs = ? WHERE session_id = 'session-1'",
+            (json.dumps(json.dumps(legacy_runs)),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _storage(tmp_path)
+    try:
+        storage.delete_runs(["team1"])
+    finally:
+        storage.close()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
+    finally:
+        connection.close()
+    assert json.loads(json.loads(blob)) == legacy_runs[2:]

@@ -845,6 +845,33 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     assert response_target == stored_target
 
 
+def test_remove_run_by_event_id_removes_following_runs_even_without_metadata() -> None:
+    """Everything after the matched run goes, including runs that carry no metadata at all."""
+    session = AgentSession(
+        session_id="session-1",
+        agent_id="test_agent",
+        runs=[
+            RunOutput(run_id="before", session_id="session-1", metadata={"matrix_event_id": "$before:example.com"}),
+            RunOutput(run_id="matched", session_id="session-1", metadata={"matrix_event_id": "$target:example.com"}),
+            RunOutput(run_id="bare-after", session_id="session-1"),
+            RunOutput(run_id="after", session_id="session-1", metadata={"matrix_event_id": "$after:example.com"}),
+        ],
+    )
+    storage = _FakeAgentStorage(session)
+
+    removed = remove_run_by_event_id(
+        storage,
+        "session-1",
+        "$target:example.com",
+        session_type=SessionType.AGENT,
+        remove_following_runs=True,
+    )
+
+    assert removed is True
+    assert [run.run_id for run in session.runs or []] == ["before"]
+    assert sorted(storage.deleted_run_ids) == ["after", "bare-after", "matched"]
+
+
 def test_remove_run_by_event_id_removes_team_runs() -> None:
     """Team edit regeneration should be able to delete stale runs from TeamSession storage."""
     session = TeamSession(
