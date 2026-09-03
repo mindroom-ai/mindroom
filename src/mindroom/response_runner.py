@@ -628,6 +628,7 @@ class _PreparedResponseRuntime:
     active_model_name: str
     show_tool_calls: bool
     tool_dispatch: ToolDispatchContext
+    member_display_names: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -2610,6 +2611,7 @@ class ResponseRunner:
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            member_display_names=runtime.member_display_names,
             active_model_name=runtime.active_model_name,
             active_event_ids=frozenset(active_event_ids),
             transient_enrichment_items=_with_matrix_message_target(
@@ -3844,6 +3846,30 @@ class ResponseRunner:
                 thread_id=response_thread_id,
                 runtime_paths=self.deps.runtime_paths,
             ).model_name
+        member_display_names: dict[str, str] = {}
+        try:
+            member_response = await self._client().joined_members(resolved_target.room_id)
+            members = getattr(member_response, "members", None)
+            if members is not None:
+                member_display_names = {
+                    member.user_id: member.display_name
+                    for member in members
+                    if member.display_name
+                }
+            else:
+                self.deps.logger.warning(
+                    "response_member_display_names_lookup_failed",
+                    room_id=resolved_target.room_id,
+                    error=str(member_response),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.deps.logger.warning(
+                "response_member_display_names_lookup_failed",
+                room_id=resolved_target.room_id,
+                error=str(exc),
+            )
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=request.user_id,
@@ -3861,6 +3887,7 @@ class ResponseRunner:
             active_model_name=active_model_name,
             show_tool_calls=self._show_tool_calls(),
             tool_dispatch=tool_dispatch,
+            member_display_names=member_display_names,
         )
 
     @timed("non_streaming_response_generation")
