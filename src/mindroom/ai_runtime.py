@@ -691,40 +691,6 @@ def _runs_without(runs: Sequence[Any], *, run_id: str) -> list[Any]:
     return [run for run in runs if not (isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id == run_id)]
 
 
-def _remove_run_from_session(session: AgentSession | TeamSession, *, run_id: str) -> bool:
-    """Remove one run from a loaded session's run list by run id, without touching storage."""
-    runs = session.runs or []
-    kept = _runs_without(runs, run_id=run_id)
-    if len(kept) == len(runs):
-        return False
-    session.runs = kept
-    return True
-
-
-def _remove_run_from_session_storage(
-    storage: BaseDb,
-    session_id: str,
-    *,
-    run_id: str,
-    session_type: SessionType,
-) -> bool:
-    """Remove one run from a persisted Agno session."""
-    raw_session = storage.get_session(session_id, session_type)
-    if raw_session is None:
-        return False
-    session = _load_queued_notice_session(
-        cast("AgentSession | TeamSession | dict[str, object]", raw_session),
-        session_type=session_type,
-    )
-    if session is None:
-        return False
-    kept = _runs_without(session.runs or [], run_id=run_id)
-    if len(kept) == len(session.runs or []):
-        return False
-    replace_runs(storage, session, kept)
-    return True
-
-
 def discard_empty_completed_run(
     *,
     scope_context: ScopeSessionContext | None,
@@ -750,14 +716,20 @@ def discard_empty_completed_run(
     if scope_context is None or not run_id:
         return
     try:
-        if scope_context.session is not None:
-            _remove_run_from_session(scope_context.session, run_id=run_id)
-        _remove_run_from_session_storage(
-            scope_context.storage,
-            session_id,
-            run_id=run_id,
-            session_type=session_type,
-        )
+        session = scope_context.session
+        if session is None:
+            raw_session = scope_context.storage.get_session(session_id, session_type)
+            if raw_session is None:
+                return
+            session = _load_queued_notice_session(
+                cast("AgentSession | TeamSession | dict[str, object]", raw_session),
+                session_type=session_type,
+            )
+        if session is None:
+            return
+        kept = _runs_without(session.runs or [], run_id=run_id)
+        if len(kept) != len(session.runs or []):
+            replace_runs(scope_context.storage, session, kept)
     except Exception:
         logger.exception(
             "Failed to remove empty run from session history",

@@ -205,8 +205,7 @@ class _ConversationSqliteDb(SqliteDb):
     :func:`replace_runs` are the two module-level helpers callers use when they
     edit or drop runs of a loaded session. The overrides here only adjust what
     agno already does: prompt-role stripping and append-only indexing in
-    ``upsert_run``, a full read in ``get_session``, and an owner guard on bulk
-    session writes.
+    ``upsert_run`` and a full read in ``get_session``.
 
     A 2.x database keeps its ``runs`` blob column. Agno merges that blob into
     every read and scrubs deleted run ids out of it (``delete_runs`` below only
@@ -280,43 +279,6 @@ class _ConversationSqliteDb(SqliteDb):
         self._get_table(table_type="runs", create_table_if_not_found=True)
         super().delete_runs(run_ids)
 
-    def upsert_sessions(
-        self,
-        sessions: list[Session],
-        deserialize: bool | None = True,
-        preserve_updated_at: bool = False,
-    ) -> list[Session | dict[str, Any]]:
-        """Write sessions one at a time so every row keeps the owner guard.
-
-        Agno's bulk statement updates on conflict without checking the stored
-        ``user_id``, so a batch could hand another user's session to a new
-        owner. Nothing in MindRoom or Agno's runtime calls this in bulk, so the
-        per-row path costs nothing.
-        """
-        accepted: list[Session | dict[str, Any]] = []
-        for session in sessions:
-            result = self.upsert_session(session, deserialize=deserialize)
-            if result is None:
-                continue
-            if preserve_updated_at and session.updated_at is not None:
-                self._restore_updated_at(session.session_id, session.updated_at)
-                if isinstance(result, dict):
-                    cast("dict[str, Any]", result)["updated_at"] = session.updated_at
-                else:
-                    result.updated_at = session.updated_at
-            accepted.append(result)
-        return accepted
-
-    def _restore_updated_at(self, session_id: str, updated_at: int) -> None:
-        """Put back the caller's ``updated_at`` that the single-row upsert stamps with now."""
-        sessions_table = self._get_table(table_type="sessions")
-        if sessions_table is None:
-            return
-        with self.Session() as sess, sess.begin():
-            sess.execute(
-                sessions_table.update().where(sessions_table.c.session_id == session_id).values(updated_at=updated_at),
-            )
-
 
 def save_runs(
     storage: BaseDb,
@@ -385,24 +347,12 @@ def _run_without_prompt_messages(run: _PersistedRun, prompt_roles: frozenset[str
 
 
 def get_agent_session(storage: BaseDb, session_id: str) -> AgentSession | None:
-    """Retrieve and deserialize an AgentSession from storage."""
-    raw = storage.get_session(session_id, SessionType.AGENT)
-    if raw is None:
-        return None
-    if isinstance(raw, AgentSession):
-        return raw
-    if isinstance(raw, dict):
-        return AgentSession.from_dict(cast("dict[str, Any]", raw))
-    return None
+    """Load one agent session, or None when the row is missing or not an agent session."""
+    session = storage.get_session(session_id, SessionType.AGENT)
+    return session if isinstance(session, AgentSession) else None
 
 
 def get_team_session(storage: BaseDb, session_id: str) -> TeamSession | None:
-    """Retrieve and deserialize a TeamSession from storage."""
-    raw = storage.get_session(session_id, SessionType.TEAM)
-    if raw is None:
-        return None
-    if isinstance(raw, TeamSession):
-        return raw
-    if isinstance(raw, dict):
-        return TeamSession.from_dict(cast("dict[str, Any]", raw))
-    return None
+    """Load one team session, or None when the row is missing or not a team session."""
+    session = storage.get_session(session_id, SessionType.TEAM)
+    return session if isinstance(session, TeamSession) else None
