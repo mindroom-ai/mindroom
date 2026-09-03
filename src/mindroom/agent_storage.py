@@ -262,6 +262,10 @@ class _ConversationSqliteDb(SqliteDb):
         redaction), after which that position collides with the indexes stored
         rows keep, so new rows take ``MAX(run_index) + 1`` instead and existing
         rows keep their index either way.
+
+        Upstream: agno-agi/agno#9936, fixed by agno-agi/agno#9938 (or the wider
+        agno-agi/agno#9342). Once the pinned agno includes either, drop this
+        override and pass ``run_index`` through.
         """
         del run_index
         super().upsert_run(
@@ -279,6 +283,10 @@ class _ConversationSqliteDb(SqliteDb):
         table does not exist yet (the state of a 2.x database nothing has
         appended to). A legacy run that survives the scrub comes back on the
         next read, so a redaction must either remove it everywhere or fail.
+
+        Upstream: agno-agi/agno#9934, fixed by agno-agi/agno#9939. Once the
+        pinned agno includes it, the blob scrub below can go; the descendant
+        expansion over the runs table stays (agno deletes only the given ids).
         """
         if not run_ids:
             return
@@ -329,6 +337,9 @@ class _ConversationSqliteDb(SqliteDb):
         ``user_id``, so a batch could hand another user's session to a new
         owner. Nothing in MindRoom or Agno's runtime calls this in bulk, so the
         per-row path costs nothing.
+
+        Upstream: agno-agi/agno#9935, fixed by agno-agi/agno#9937. Once the
+        pinned agno includes it, delete this override and ``_restore_updated_at``.
         """
         accepted: list[Session | dict[str, Any]] = []
         for session in sessions:

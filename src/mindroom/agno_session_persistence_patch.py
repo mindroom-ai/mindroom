@@ -37,6 +37,12 @@ type _PersistenceTarget = tuple[str, str]
 # Agno 3.0 splits one session save into a session-row write (``asave_session``) and
 # per-run writes (``asave_run``); both call the synchronous SQLite adapter directly,
 # so both are offloaded through the same FIFO lane to keep their order.
+# When bumping this pin, check whether these upstream fixes are included and delete
+# the matching MindRoom override (each is linked from its own docstring):
+#   agno-agi/agno#9939  delete_runs scrubs the 2.x blob atomically  -> agent_storage delete_runs blob part
+#   agno-agi/agno#9937  bulk upsert owner check                     -> agent_storage upsert_sessions
+#   agno-agi/agno#9938  run_index never below MAX+1 (or #9342)      -> agent_storage upsert_run
+#   agno-agi/agno#9941  validate_call wrappers drop the caller frame -> agno_tool_wrapper_patch
 _SUPPORTED_AGNO_VERSION = "3.0.5"
 _ORIGINAL_AGENT_ASAVE_SESSION = agent_session.asave_session
 _ORIGINAL_AGENT_SAVE_SESSION = agent_session.save_session

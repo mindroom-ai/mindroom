@@ -10,6 +10,10 @@ was first wrapped, for as long as the cache entry lived.
 
 The validators are built eagerly, so the namespace is dead weight once the
 wrapper exists and is replaced with an empty resolver.
+
+Upstream: agno-agi/agno#9940, fixed by agno-agi/agno#9941. Once the pinned agno
+includes it, delete this module, its test, and the ``apply_patch()`` call in
+``tool_system/tool_hooks.py``.
 """
 
 from __future__ import annotations
