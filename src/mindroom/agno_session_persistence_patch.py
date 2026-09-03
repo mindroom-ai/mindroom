@@ -43,6 +43,8 @@ type _PersistenceTarget = tuple[str, str]
 #   agno-agi/agno#9937  bulk upsert owner check                     -> agent_storage upsert_sessions
 #   agno-agi/agno#9938  run_index never below MAX+1 (or #9342)      -> agent_storage upsert_run
 #   agno-agi/agno#9941  validate_call wrappers drop the caller frame -> agno_tool_wrapper_patch
+#   agno-agi/agno#9943  Team keeps list[Message] input roleful       -> history/agno_team_patch (Team half)
+#   agno-agi/agno#8970  empty Anthropic tool input keeps arguments   -> openai_models._messages_with_openai_tool_arguments
 _SUPPORTED_AGNO_VERSION = "3.0.5"
 _ORIGINAL_AGENT_ASAVE_SESSION = agent_session.asave_session
 _ORIGINAL_AGENT_SAVE_SESSION = agent_session.save_session

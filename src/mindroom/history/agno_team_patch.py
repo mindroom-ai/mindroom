@@ -3,7 +3,10 @@
 Agno Agent preserves ``list[Message]`` input as roleful provider messages, while
 Agno Team currently flattens that same shape through ``get_text_from_message``.
 This throwaway monkey-patch mirrors the Agent message-builder path until Agno
-Team has the same upstream behavior.
+Team has the same upstream behavior: agno-agi/agno#9942, fixed by
+agno-agi/agno#9943. Once the pinned agno includes it, delete the Team half of
+this module (the inline-media stripping of persisted history is MindRoom's own
+and stays).
 Both builders also remove inline payloads from persisted history while keeping
 current-turn media available to the provider.
 """
