@@ -255,3 +255,46 @@ def test_undecodable_legacy_runs_blob_keeps_the_column(tmp_path: Path) -> None:
     finally:
         connection.close()
     assert "runs" in columns
+
+
+def test_rejected_owner_mismatch_write_leaves_runs_untouched(tmp_path: Path) -> None:
+    """Agno refuses a session write from another user; the runs table must not change either."""
+    storage = _storage(tmp_path)
+    db_path = tmp_path / "sessions" / "code.db"
+    try:
+        storage.upsert_session(_session("s1", ["r1"]))
+        other_users_session = _session("s1", ["r2"])
+        other_users_session.user_id = "@bob:example.test"
+
+        assert storage.upsert_session(other_users_session) is None
+        assert storage.upsert_sessions([other_users_session]) == []
+    finally:
+        storage.close()
+
+    assert _run_rows(db_path) == [("r1", 0)]
+
+
+def test_malformed_legacy_runs_blob_keeps_the_column(tmp_path: Path) -> None:
+    """A truncated 2.x blob must neither abort storage open nor lose the backup column."""
+    db_path = tmp_path / "sessions" / "code.db"
+    db_path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
+        connection.execute(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("s1", "agent", "code", '"[{"run_id": "r0"', 1),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _storage(tmp_path)
+    storage.close()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
+    finally:
+        connection.close()
+    assert "runs" in columns

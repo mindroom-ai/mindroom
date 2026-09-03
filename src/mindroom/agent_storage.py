@@ -209,8 +209,11 @@ def _decode_legacy_runs_blob(raw_runs: object) -> list[object] | None:
     string in a JSON column, so the blob is usually JSON-encoded twice.
     """
     decoded = raw_runs
-    while isinstance(decoded, str):
-        decoded = json.loads(decoded)
+    try:
+        while isinstance(decoded, str):
+            decoded = json.loads(decoded)
+    except json.JSONDecodeError:
+        return None
     return cast("list[object]", decoded) if isinstance(decoded, list) else None
 
 
@@ -388,7 +391,10 @@ class _ConversationSqliteDb(SqliteDb):
     ) -> Session | dict[str, Any] | None:
         sanitized_session = _session_without_prompt_messages(session, self._prompt_roles)
         result = super().upsert_session(sanitized_session, deserialize=deserialize)
-        self._reconcile_runs(sanitized_session)
+        # Agno returns None when the stored row belongs to another user; the runs
+        # must then stay with that owner too.
+        if result is not None:
+            self._reconcile_runs(sanitized_session)
         return result
 
     def upsert_sessions(
@@ -403,8 +409,13 @@ class _ConversationSqliteDb(SqliteDb):
             deserialize=deserialize,
             preserve_updated_at=preserve_updated_at,
         )
+        upserted_session_ids = {
+            cast("dict[str, Any]", upserted)["session_id"] if isinstance(upserted, dict) else upserted.session_id
+            for upserted in result
+        }
         for session in sanitized_sessions:
-            self._reconcile_runs(session)
+            if session.session_id in upserted_session_ids:
+                self._reconcile_runs(session)
         return result
 
     def _reconcile_runs(self, session: Session) -> None:
