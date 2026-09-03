@@ -38,7 +38,7 @@ from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import ResolvedReplayPlan
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
-from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.prompt_message_tags import enrich_msg_tags_with_display_names, render_msg_tag
 from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply, strip_visible_tool_markers
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
@@ -411,9 +411,14 @@ def _messages_with_current_prompt(
     """Return canonical live request messages with the current user turn last."""
     messages = [message.model_copy(deep=True) for message in context_messages]
     current_ts = format_timestamp_ms(current_timestamp_ms, timezone=config.timezone)
+    model_prompt = (
+        enrich_msg_tags_with_display_names(prompt, member_display_names)
+        if current_prompt_is_structured
+        else prompt
+    )
     current_prompt = (
         _build_matrix_prompt_with_history(
-            prompt,
+            model_prompt,
             [],
             header=config.get_prompt("PREVIOUS_CONVERSATION_THREAD_HEADER"),
             prompt_intro=config.get_prompt("CURRENT_MESSAGE_PROMPT_INTRO"),
@@ -1138,6 +1143,7 @@ async def prepare_bound_team_run_context(
         active_context_window=active_context_window,
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
+        member_display_names=ctx.member_display_names,
         current_timestamp_ms=current_timestamp_ms,
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
