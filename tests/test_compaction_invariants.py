@@ -50,6 +50,7 @@ from mindroom.history.storage import (
     compacted_run_ids_with,
     prune_reintroduced_runs,
     read_scope_state,
+    record_compaction_chunk,
     remove_runs_by_id,
     update_scope_state_on_latest,
     write_scope_state,
@@ -2098,3 +2099,35 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
     assert persisted.summary is not None
     assert persisted.summary.summary == "recovered summary"
     storage.close()
+
+
+def test_compaction_chunk_interrupted_after_tombstones_is_repaired_by_the_next_prune(tmp_path: Path) -> None:
+    """Tombstones land before the run deletes; if the deletes never happen, the next run prunes instead of replaying."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = seed_session(storage, _session([_completed_run("old"), _completed_run("kept")]))
+    working_session = deepcopy(session)
+    working_session.runs = [_completed_run("kept")]
+
+    with (
+        patch.object(storage, "delete_runs", side_effect=RuntimeError("process stopped")),
+        pytest.raises(RuntimeError, match="process stopped"),
+    ):
+        record_compaction_chunk(
+            storage=storage,
+            persisted_session=session,
+            working_session=working_session,
+            scope=_SCOPE,
+            compacted_run_ids=("old",),
+        )
+
+    reloaded = get_agent_session(storage, "session-1")
+    assert reloaded is not None
+    assert [run.run_id for run in reloaded.runs or []] == ["old", "kept"]
+    assert read_scope_state(reloaded, _SCOPE).compacted_run_ids == ("old",)
+
+    assert prune_reintroduced_runs(storage, reloaded, read_scope_state(reloaded, _SCOPE)) is True
+    repaired = get_agent_session(storage, "session-1")
+    storage.close()
+    assert repaired is not None
+    assert [run.run_id for run in repaired.runs or []] == ["kept"]

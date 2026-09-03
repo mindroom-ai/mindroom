@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
+import pytest
 from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.run.agent import RunOutput
@@ -305,3 +307,81 @@ def test_legacy_runs_blob_is_merged_into_reads_and_deletions_stick(tmp_path: Pat
     assert [run["run_id"] for run in json.loads(json.loads(blob))] == ["r0", "r2"]
     # Opening a pre-existing file must not let agno's connect listener switch it to WAL.
     assert journal_mode == ("delete",)
+
+
+def test_failed_run_writes_leave_the_session_as_loaded() -> None:
+    """The store is written first; when it refuses, ``session.runs`` must not claim the change landed."""
+    session = _session("s1", ["r1", "r2"])
+    original_runs = list(session.runs or [])
+    storage = MagicMock()
+    storage.upsert_run.side_effect = RuntimeError("disk full")
+    storage.delete_runs.side_effect = RuntimeError("disk full")
+
+    with pytest.raises(RuntimeError):
+        save_runs(storage, session, [_run("s1", "r3")])
+    with pytest.raises(RuntimeError):
+        replace_runs(storage, session, original_runs[:1])
+
+    assert session.runs == original_runs
+
+
+def test_delete_runs_scrubs_the_legacy_blob_in_the_same_transaction(tmp_path: Path) -> None:
+    """A refused blob rewrite must roll back the row deletion; both land or neither does."""
+    db_path = tmp_path / "sessions" / "code.db"
+    db_path.parent.mkdir(parents=True)
+    legacy_runs = [RunOutput(run_id=f"r{index}", agent_id="code", session_id="s1").to_dict() for index in range(2)]
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
+        connection.execute(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("s1", "agent", "code", json.dumps(json.dumps(legacy_runs)), 1),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _storage(tmp_path)
+    try:
+        loaded = get_agent_session(storage, "s1")
+        assert loaded is not None
+        save_runs(storage, loaded, [_run("s1", "r2")])
+        # A trigger stands in for any failure of the blob rewrite.
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(
+                "CREATE TRIGGER refuse_blob_rewrite BEFORE UPDATE OF runs ON code_sessions "
+                "BEGIN SELECT RAISE(ABORT, 'blob rewrite refused'); END",
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with pytest.raises(Exception, match="blob rewrite refused"):
+            storage.delete_runs(["r0", "r2"])
+        after_refusal = _loaded_run_ids(storage, "s1")
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute("DROP TRIGGER refuse_blob_rewrite")
+            connection.commit()
+        finally:
+            connection.close()
+        storage.delete_runs(["r0", "r2"])
+        after_delete = _loaded_run_ids(storage, "s1")
+    finally:
+        storage.close()
+
+    assert after_refusal == ["r0", "r1", "r2"]
+    assert after_delete == ["r1"]
+    assert _run_rows(db_path) == []
+
+
+def test_save_runs_refuses_a_run_object_loaded_from_the_session() -> None:
+    """Loaded runs are shared and immutable; only a copy may be edited and written back."""
+    session = _session("s1", ["r1"])
+    storage = MagicMock()
+    loaded_run = (session.runs or [])[0]
+    loaded_run.metadata = {"edited": "in place"}
+
+    with pytest.raises(ValueError, match="edit a copy"):
+        save_runs(storage, session, [loaded_run])
+    storage.upsert_run.assert_not_called()

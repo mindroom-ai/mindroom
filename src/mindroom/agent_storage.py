@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
@@ -13,7 +14,7 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, select
 
 from mindroom import agno_session_persistence_patch
 from mindroom.constants import prompt_roles_for_history_storage
@@ -269,15 +270,47 @@ class _ConversationSqliteDb(SqliteDb):
         )
 
     def delete_runs(self, run_ids: list[str]) -> None:
-        """Delete runs and scrub them from a 2.x ``runs`` blob even before any run row was written.
+        """Delete run rows and scrub the same ids from any 2.x ``runs`` blob, in one transaction.
 
-        Agno returns before the blob scrub when the runs table does not exist
-        yet, which is exactly the state of a 2.x database nothing has appended
-        to since the upgrade; a redacted legacy run would then come back on the
-        next read.
+        Agno deletes the rows, then scrubs the blob in a second best-effort
+        transaction whose failures it swallows, and skips both when the runs
+        table does not exist yet (the state of a 2.x database nothing has
+        appended to). A legacy run that survives the scrub comes back on the
+        next read, so a redaction must either remove it everywhere or fail.
         """
-        self._get_table(table_type="runs", create_table_if_not_found=True)
-        super().delete_runs(run_ids)
+        if not run_ids:
+            return
+        wanted = set(run_ids)
+        runs_table = self._get_table(table_type="runs")
+        sessions_table = self._get_table(table_type="sessions")
+        with self.Session() as sess, sess.begin():
+            if runs_table is not None:
+                sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(run_ids)))
+            if sessions_table is None or "runs" not in sessions_table.c:
+                return
+            rows = sess.execute(
+                select(sessions_table.c.session_id, sessions_table.c.runs).where(sessions_table.c.runs.isnot(None)),
+            ).fetchall()
+            for session_id, blob in rows:
+                legacy_runs = _decode_legacy_runs(blob)
+                kept = [run for run in legacy_runs if not (isinstance(run, dict) and run.get("run_id") in wanted)]
+                if len(kept) == len(legacy_runs):
+                    continue
+                sess.execute(
+                    sessions_table.update()
+                    .where(sessions_table.c.session_id == session_id)
+                    .values(runs=json.dumps(kept)),
+                )
+
+
+def _decode_legacy_runs(blob: object) -> list[Any]:
+    """The run dicts inside a 2.x ``runs`` value, or nothing when agno's read merge would ignore it too."""
+    if isinstance(blob, str):
+        try:
+            blob = json.loads(blob)
+        except json.JSONDecodeError:
+            return []
+    return blob if isinstance(blob, list) else []
 
 
 def save_runs(
@@ -290,11 +323,19 @@ def save_runs(
     The session row must already exist (the runs table references it). A run
     already in ``session.runs`` under the same ``run_id`` is replaced by the
     given object, so callers edit a copy and hand the copy here: agno shares
-    loaded run objects across reads and treats them as immutable.
+    loaded run objects across reads and treats them as immutable. The rows
+    are written first; a failed write leaves ``session.runs`` untouched so a
+    retry does not believe the change already landed.
     """
     runs = list(runs)
     if not runs:
         return
+    loaded = {id(existing) for existing in session.runs or []}
+    if any(id(run) in loaded for run in runs):
+        msg = "save_runs received a run object loaded from the session; edit a copy instead"
+        raise ValueError(msg)
+    for run in runs:
+        storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
     replacements: dict[str, RunOutput | TeamRunOutput] = {run.run_id: run for run in runs if run.run_id}
     merged: list[Any] = []
     for existing in session.runs or []:
@@ -302,8 +343,6 @@ def save_runs(
         merged.append(replacements.pop(run_id, existing) if run_id else existing)
     merged.extend(replacements.values())
     session.runs = merged
-    for run in runs:
-        storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
 
 
 def replace_runs(
@@ -313,8 +352,9 @@ def replace_runs(
 ) -> list[str]:
     """Make ``runs`` the session's run list and delete the rows of the runs it dropped.
 
-    Surviving runs are not rewritten; only removal is persisted. Returns the
-    removed run ids.
+    Surviving runs are not rewritten; only removal is persisted, and it is
+    persisted before ``session.runs`` changes so a failed delete leaves the
+    session as loaded. Returns the removed run ids.
     """
     kept = list(runs)
     kept_ids = {run.run_id for run in kept}
@@ -323,9 +363,9 @@ def replace_runs(
         for run in session.runs or []
         if isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id and run.run_id not in kept_ids
     ]
-    session.runs = kept
     if removed:
         storage.delete_runs(removed)
+    session.runs = kept
     return removed
 
 
