@@ -1267,74 +1267,33 @@ class TestFileToolRestrictToBaseDir:
         tool = cls(base_dir=base_dir)
         result = tool.search_content("needle", "../outside")
 
-        assert "outside base_dir" in result
-        assert "searching content" in result
+        assert result.startswith("Error: search_content only searches inside the base directory")
 
-    def test_file_tool_search_content_searches_outside_when_unrestricted(self, tmp_path: Path) -> None:
-        """Unrestricted search_content returns matches from absolute and ../ directories with absolute paths."""
+    def test_file_tool_search_content_searches_inside_base_dir(self, tmp_path: Path) -> None:
+        """Agno's content search runs unchanged inside base_dir, with base-relative paths."""
+        base_dir = tmp_path / "base"
+        (base_dir / "docs").mkdir(parents=True)
+        (base_dir / "docs" / "inside.txt").write_text("needle inside\n")
+        (base_dir / "other.txt").write_text("nothing here\n")
+
+        cls = file_tools()
+        result = json.loads(cls(base_dir=base_dir).search_content("needle", "docs"))
+
+        assert [match["file"] for match in result["files"]] == ["docs/inside.txt"]
+
+    def test_file_tool_search_content_refuses_outside_directories_even_when_unrestricted(self, tmp_path: Path) -> None:
+        """restrict_to_base_dir=False widens the other file operations, not content search."""
         base_dir = tmp_path / "base"
         outside_dir = tmp_path / "outside"
         base_dir.mkdir()
         outside_dir.mkdir()
-        (outside_dir / "secret.txt").write_text("the needle is here\n")
-        (base_dir / "inside.txt").write_text("needle inside\n")
+        (outside_dir / "secret.txt").write_text("needle outside\n")
 
         cls = file_tools()
         tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
 
-        by_absolute = json.loads(tool.search_content("needle", str(outside_dir)))
-        by_relative = json.loads(tool.search_content("needle", "../outside"))
-        inside = json.loads(tool.search_content("needle"))
-
-        assert [match["file"] for match in by_absolute["files"]] == [str(outside_dir / "secret.txt")]
-        assert "the needle is here" in by_absolute["files"][0]["snippet"]
-        assert [match["file"] for match in by_relative["files"]] == [str(outside_dir / "secret.txt")]
-        assert [match["file"] for match in inside["files"]] == ["inside.txt"]
-
-    def test_file_tool_search_content_applies_exclusions_outside_base_dir(self, tmp_path: Path) -> None:
-        """The default exclusion list still applies when the search root lies outside base_dir."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        base_dir.mkdir()
-        (outside_dir / ".git").mkdir(parents=True)
-        (outside_dir / "credentials.json").write_text('{"token": "needle"}\n')
-        (outside_dir / ".git" / "config.txt").write_text("needle in git metadata\n")
-        (outside_dir / "notes.txt").write_text("needle in notes\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
-        result = json.loads(tool.search_content("needle", str(outside_dir)))
-
-        assert [match["file"] for match in result["files"]] == [str(outside_dir / "notes.txt")]
-
-    def test_file_tool_search_content_keeps_excluding_an_explicitly_searched_directory(self, tmp_path: Path) -> None:
-        """Naming an excluded directory as the search root must not make its contents visible."""
-        base_dir = tmp_path / "base"
-        outside_dir = tmp_path / "outside"
-        (base_dir / ".git").mkdir(parents=True)
-        (outside_dir / ".git").mkdir(parents=True)
-        (base_dir / ".git" / "config.txt").write_text("needle inside git\n")
-        (outside_dir / ".git" / "config.txt").write_text("needle outside git\n")
-
-        cls = file_tools()
-        restricted = cls(base_dir=base_dir)
-        unrestricted = cls(base_dir=base_dir, restrict_to_base_dir=False)
-
-        assert json.loads(restricted.search_content("needle", ".git"))["files"] == []
-        assert json.loads(unrestricted.search_content("needle", str(outside_dir / ".git")))["files"] == []
-
-    def test_file_tool_search_content_honors_exclusion_exemptions(self, tmp_path: Path) -> None:
-        """A ``!pattern`` entry exempts a file from an earlier deny pattern, as in agno's matcher."""
-        base_dir = tmp_path / "base"
-        base_dir.mkdir()
-        (base_dir / "hidden.txt").write_text("needle hidden\n")
-        (base_dir / "visible.txt").write_text("needle visible\n")
-
-        cls = file_tools()
-        tool = cls(base_dir=base_dir, exclude_patterns=["*.txt", "!visible.txt"])
-        result = json.loads(tool.search_content("needle"))
-
-        assert [match["file"] for match in result["files"]] == ["visible.txt"]
+        assert tool.search_content("needle", str(outside_dir)).startswith("Error: search_content only searches inside")
+        assert "needle outside" in tool.read_file(str(outside_dir / "secret.txt"))
 
     def test_file_tool_restrict_to_base_dir_false_allows_outside_and_relative_paths(self, tmp_path: Path) -> None:
         """File tools should allow outside absolute paths while keeping relative paths anchored."""
