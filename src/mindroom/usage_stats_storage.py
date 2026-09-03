@@ -54,9 +54,10 @@ TOKEN_FIELDS = (
 _REQUIRED_COLUMNS = frozenset(
     {"session_id", "session_type", "agent_id", "team_id", "user_id", "session_data"},
 )
-# Agno 3 keeps one row per run in ``<session table>_runs``; the legacy ``runs``
-# blob on the session row only survives on databases whose migration could not
-# be verified.
+# Agno 3 keeps one row per run in ``<session table>_runs``. A database written by
+# agno 2.x still carries the ``runs`` blob on the session row (MindRoom does not
+# migrate it; agno merges blob and rows on read), so this reader merges the same
+# way. The blob branch goes away with the refuse-and-migrate gate (#1947).
 _RUNS_TABLE_REQUIRED_COLUMNS = frozenset({"run_id", "session_id", "run_index", "run_data", "created_at"})
 
 

@@ -298,6 +298,9 @@ class _ConversationSqliteDb(SqliteDb):
                     frontier = [child for child in children if child not in wanted]
                     wanted.update(frontier)
                 sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
+            # --- 2.x legacy only: a sessions table that still has the ``runs`` blob column.
+            # Agno merges that blob into every read, so ids deleted above must leave it too.
+            # Goes away with the refuse-and-migrate gate (#1947).
             if sessions_table is None or "runs" not in sessions_table.c:
                 return
             rows = sess.execute(
@@ -350,6 +353,9 @@ class _ConversationSqliteDb(SqliteDb):
             sess.execute(
                 sessions_table.update().where(sessions_table.c.session_id == session_id).values(updated_at=updated_at),
             )
+
+
+# --- 2.x legacy blob helpers. Only ``delete_runs`` above uses them; delete with #1947.
 
 
 def _string_field(entry: object, key: str) -> str | None:
