@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import threading
 from copy import deepcopy
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.db.base import BaseDb, SessionType
@@ -17,7 +15,7 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
-from sqlalchemy import Engine, Table, Text, create_engine, event, select, text
+from sqlalchemy import Engine, Text, create_engine, event, inspect, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mindroom import agno_session_persistence_patch
@@ -27,11 +25,11 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from pathlib import Path
 
     from agno.agent import Agent
     from agno.run.workflow import WorkflowRunOutput
     from agno.session import Session
-    from sqlalchemy.orm import Session as OrmSession
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -39,8 +37,6 @@ if TYPE_CHECKING:
 
 
 _BUSY_TIMEOUT_SECONDS = 30.0
-_MIGRATED_DB_FILES: set[str] = set()
-_MIGRATION_LOCK = threading.Lock()
 logger = get_logger(__name__)
 
 agno_session_persistence_patch.install_patch()
@@ -121,130 +117,12 @@ def _create_sqlite_state_storage(
         db_file=db_file,
         db_engine=_state_engine(db_file),
     )
-    _ensure_current_schema(database, db_file)
     agno_session_persistence_patch._register_sync_session_storage(
         database,
         db_file=db_file,
         session_table=session_table,
     )
     return database
-
-
-def _ensure_current_schema(database: _ConversationSqliteDb, db_file: str) -> None:
-    """Move a 2.x session database onto the Agno 3 runs table, once per process.
-
-    Agno 3.0 stores each run as its own row instead of a JSON blob on the
-    session row. Agno's own migration is keyed on the adapter class name and
-    would skip this subclass, and its reads keep merging the legacy blob on
-    every load while it exists, so the move happens here and the blob is
-    dropped once every run it held is accounted for.
-    """
-    resolved = str(Path(db_file).resolve())
-    with _MIGRATION_LOCK:
-        if resolved in _MIGRATED_DB_FILES:
-            return
-        _migrate_legacy_runs(database)
-        _MIGRATED_DB_FILES.add(resolved)
-
-
-class _LegacyRunsMigrationRefusedError(Exception):
-    """Raised inside the migration transaction so nothing it wrote is kept."""
-
-    def __init__(self, session_id: str, **details: object) -> None:
-        super().__init__(session_id)
-        self.session_id = session_id
-        self.details = details
-
-
-def _migrate_legacy_runs(database: _ConversationSqliteDb) -> None:
-    """Copy every 2.x ``runs`` blob into the runs table and drop the column, in one transaction.
-
-    A blob that does not decode, an entry without a ``run_id``, or a run that
-    did not land under its own session rolls the whole transaction back: the
-    file is left exactly as it was and the blob stays authoritative.
-    """
-    if not _has_legacy_runs_column(database):
-        # Creating the runs table also creates the sessions table it references,
-        # so a state database that never held sessions must not reach that point.
-        return
-    runs_table = database._get_table(table_type="runs", create_table_if_not_found=True)
-    if runs_table is None:
-        return
-    try:
-        with database.Session() as sess, sess.begin():
-            migrated_sessions = _copy_legacy_runs(database, sess, runs_table)
-    except _LegacyRunsMigrationRefusedError as refused:
-        logger.warning(
-            "agno_legacy_runs_column_kept",
-            db_file=database.db_file,
-            session_id=refused.session_id,
-            **refused.details,
-        )
-        return
-    database._invalidate_table_cache(database.session_table_name)
-    logger.info("agno_legacy_runs_column_migrated", db_file=database.db_file, sessions=migrated_sessions)
-
-
-def _has_legacy_runs_column(database: _ConversationSqliteDb) -> bool:
-    session_table = _quote_identifier(database.session_table_name)
-    with database.Session() as sess:
-        return "runs" in {row[1] for row in sess.execute(text(f"PRAGMA table_info({session_table})"))}
-
-
-def _copy_legacy_runs(database: _ConversationSqliteDb, sess: OrmSession, runs_table: Table) -> int:
-    """Move the blobs into ``runs_table`` and drop the column; returns the number of migrated sessions."""
-    session_table = _quote_identifier(database.session_table_name)
-    legacy_rows = sess.execute(
-        text(f"SELECT session_id, user_id, runs FROM {session_table} WHERE runs IS NOT NULL"),  # noqa: S608
-    ).fetchall()
-    logger.info("agno_legacy_runs_migration_started", db_file=database.db_file, sessions=len(legacy_rows))
-    expected_run_ids: dict[str, set[str]] = {}
-    rows: list[dict[str, Any]] = []
-    for session_id, user_id, raw_runs in legacy_rows:
-        legacy_runs = _decode_legacy_runs_blob(raw_runs)
-        if legacy_runs is None:
-            raise _LegacyRunsMigrationRefusedError(session_id, reason="undecodable_runs_blob")
-        run_payloads = [cast("dict[str, Any]", run) for run in legacy_runs if isinstance(run, dict)]
-        run_ids = [payload.get("run_id") for payload in run_payloads]
-        if len(run_payloads) != len(legacy_runs) or not all(isinstance(run_id, str) and run_id for run_id in run_ids):
-            raise _LegacyRunsMigrationRefusedError(session_id, reason="legacy_run_without_run_id")
-        expected_run_ids[session_id] = set(cast("list[str]", run_ids))
-        rows.extend(
-            build_single_run_row(run_payload, session_id=session_id, user_id=user_id, run_index=run_index)
-            for run_index, run_payload in enumerate(run_payloads)
-        )
-    if rows:
-        sess.execute(sqlite_insert(runs_table).on_conflict_do_nothing(index_elements=["run_id"]), rows)
-    stored_run_ids: dict[str, set[str]] = {}
-    for session_id, run_id in sess.execute(
-        select(runs_table.c.session_id, runs_table.c.run_id).where(runs_table.c.session_id.in_(list(expected_run_ids))),
-    ):
-        stored_run_ids.setdefault(session_id, set()).add(run_id)
-    for session_id, expected in expected_run_ids.items():
-        missing = expected - stored_run_ids.get(session_id, set())
-        if missing:
-            raise _LegacyRunsMigrationRefusedError(session_id, missing_run_ids=sorted(missing))
-    sess.execute(text(f"ALTER TABLE {session_table} DROP COLUMN runs"))
-    return len(legacy_rows)
-
-
-def _decode_legacy_runs_blob(raw_runs: object) -> list[object] | None:
-    """Decode a 2.x ``runs`` column value.
-
-    Agno 2.x serialized the run list to a JSON string and then stored that
-    string in a JSON column, so the blob is usually JSON-encoded twice.
-    """
-    decoded = raw_runs
-    try:
-        while isinstance(decoded, str):
-            decoded = json.loads(decoded)
-    except json.JSONDecodeError:
-        return None
-    return cast("list[object]", decoded) if isinstance(decoded, list) else None
-
-
-def _quote_identifier(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
 
 
 _AGNO_CONNECT_LISTENER_NAME = "_set_sqlite_pragmas"
@@ -316,6 +194,18 @@ def _create_agent_session_db(
     )
 
 
+def _has_legacy_runs_column(engine: Engine, session_table: str) -> bool:
+    """Whether ``session_table`` still carries the agno 2.x ``runs`` blob column."""
+    inspector = inspect(engine)
+    if not inspector.has_table(session_table):
+        return False
+    return any(column["name"] == "runs" for column in inspector.get_columns(session_table))
+
+
+def _quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
 class _UncachedRunObjects:
     """Stand-in for Agno's shared run-object cache that rebuilds runs on every read.
 
@@ -348,6 +238,11 @@ class _ConversationSqliteDb(SqliteDb):
     or new runs are written, and every row's ``run_index`` is set to the run's
     position in ``session.runs``. Reads always load the full run history for
     the same reason.
+
+    A 2.x database keeps its ``runs`` blob column. Agno merges that blob into
+    every read, so ``session.runs`` already carries the legacy runs; once a
+    save has written them as rows the blob is cleared for that session and the
+    table alone is authoritative from then on.
     """
 
     def __init__(
@@ -361,7 +256,10 @@ class _ConversationSqliteDb(SqliteDb):
         super().__init__(session_table=session_table, db_file=db_file, db_engine=db_engine)
         self._prompt_roles = prompt_roles
         self._run_object_cache = cast("Any", _UncachedRunObjects())
+        # Before any connection is opened: agno's listener would otherwise switch
+        # the file to WAL on the first connect, and inspecting the schema connects.
         _replace_agno_connection_pragmas(db_engine)
+        self._has_legacy_runs_column = _has_legacy_runs_column(db_engine, session_table)
 
     def get_session(
         self,
@@ -463,7 +361,9 @@ class _ConversationSqliteDb(SqliteDb):
 
         Unchanged rows are left alone so a steady-state save costs one
         transaction with no run writes; agno's own ``upsert_run`` would commit
-        once per run and keep stale indexes.
+        once per run and keep stale indexes. On a 2.x database the session's
+        legacy ``runs`` blob is cleared in the same transaction, because the
+        rows written here already hold everything the blob contributed.
         """
         if not isinstance(session, (AgentSession, TeamSession)):
             return
@@ -511,8 +411,12 @@ class _ConversationSqliteDb(SqliteDb):
                         updated_at=row["updated_at"],
                     ),
                 )
-        if stale_run_ids:
-            self._scrub_run_ids_from_legacy_blob(stale_run_ids)
+            if self._has_legacy_runs_column:
+                sessions_table = _quote_identifier(self.session_table_name)
+                sess.execute(
+                    text(f"UPDATE {sessions_table} SET runs = NULL WHERE session_id = :id"),  # noqa: S608
+                    {"id": session.session_id},
+                )
 
 
 def _session_without_prompt_messages(session: Session, prompt_roles: frozenset[str]) -> Session:

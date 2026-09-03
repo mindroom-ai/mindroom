@@ -21,9 +21,11 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
 
 _LEGACY_SESSION_COLUMNS = (
+    # Agno 2.x declared its blob columns as JSON; SQLAlchemy decodes those once on read,
+    # which is what lets agno 3 find the list inside the double-encoded ``runs`` value.
     "session_id TEXT PRIMARY KEY, session_type TEXT NOT NULL, agent_id TEXT, team_id TEXT, workflow_id TEXT, "
-    "user_id TEXT, session_data TEXT, agent_data TEXT, team_data TEXT, workflow_data TEXT, metadata TEXT, "
-    "runs TEXT, summary TEXT, created_at INTEGER NOT NULL, updated_at INTEGER"
+    "user_id TEXT, session_data JSON, agent_data JSON, team_data JSON, workflow_data JSON, metadata JSON, "
+    "runs JSON, summary JSON, created_at INTEGER NOT NULL, updated_at INTEGER"
 )
 
 
@@ -121,48 +123,6 @@ def test_get_session_ignores_runs_limit_and_hands_out_fresh_run_objects(tmp_path
     assert (first.runs or [])[0] is not (second.runs or [])[0]
 
 
-def test_legacy_runs_blob_moves_into_the_runs_table(tmp_path: Path) -> None:
-    """Opening a 2.x database copies its embedded runs out and drops the blob column."""
-    db_path = tmp_path / "sessions" / "code.db"
-    db_path.parent.mkdir(parents=True)
-    legacy_runs = [
-        RunOutput(
-            run_id=f"r{index}",
-            agent_id="code",
-            session_id="s1",
-            messages=[Message(role="user", content=str(index))],
-        ).to_dict()
-        for index in range(3)
-    ]
-    connection = sqlite3.connect(db_path)
-    try:
-        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
-        connection.execute(
-            "INSERT INTO code_sessions (session_id, session_type, agent_id, user_id, runs, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            # Agno 2.x encoded the run list to a string and then stored that string as JSON.
-            ("s1", "agent", "code", "@alice:example.test", json.dumps(json.dumps(legacy_runs)), 1),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    storage = _storage(tmp_path)
-    try:
-        loaded = get_agent_session(storage, "s1")
-    finally:
-        storage.close()
-
-    assert loaded is not None
-    assert [run.run_id for run in loaded.runs or []] == ["r0", "r1", "r2"]
-    assert _run_rows(db_path) == [("r0", 0), ("r1", 1), ("r2", 2)]
-    connection = sqlite3.connect(db_path)
-    try:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
-    finally:
-        connection.close()
-    assert "runs" not in columns
-
-
 def test_runs_appended_after_removal_load_in_session_order(tmp_path: Path) -> None:
     """Compaction removes leading runs; later per-run saves must still sort after the survivors."""
     storage = _storage(tmp_path)
@@ -231,32 +191,6 @@ def test_team_session_reconciles_member_runs(tmp_path: Path) -> None:
     assert [(run.run_id, run.parent_run_id) for run in loaded.runs or []] == [("team1", None), ("m1", "team1")]
 
 
-def test_wrong_shape_legacy_runs_blob_keeps_the_column(tmp_path: Path) -> None:
-    """A blob that is not a run list must never be dropped."""
-    db_path = tmp_path / "sessions" / "code.db"
-    db_path.parent.mkdir(parents=True)
-    connection = sqlite3.connect(db_path)
-    try:
-        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
-        connection.execute(
-            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("s1", "agent", "code", json.dumps({"unexpected": "shape"}), 1),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    storage = _storage(tmp_path)
-    storage.close()
-
-    connection = sqlite3.connect(db_path)
-    try:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
-    finally:
-        connection.close()
-    assert "runs" in columns
-
-
 def test_rejected_owner_mismatch_write_leaves_runs_untouched(tmp_path: Path) -> None:
     """Agno refuses a session write from another user; the runs table must not change either."""
     storage = _storage(tmp_path)
@@ -278,62 +212,6 @@ def test_rejected_owner_mismatch_write_leaves_runs_untouched(tmp_path: Path) -> 
     assert stored is not None
     assert stored.user_id == "@alice:example.test"
     assert _run_rows(db_path) == [("r1", 0)]
-
-
-def test_malformed_legacy_runs_blob_keeps_the_column(tmp_path: Path) -> None:
-    """A truncated 2.x blob must neither abort storage open nor lose the backup column."""
-    db_path = tmp_path / "sessions" / "code.db"
-    db_path.parent.mkdir(parents=True)
-    connection = sqlite3.connect(db_path)
-    try:
-        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
-        connection.execute(
-            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("s1", "agent", "code", '"[{"run_id": "r0"', 1),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    storage = _storage(tmp_path)
-    storage.close()
-
-    connection = sqlite3.connect(db_path)
-    try:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
-    finally:
-        connection.close()
-    assert "runs" in columns
-
-
-def test_refused_legacy_runs_migration_leaves_the_file_untouched(tmp_path: Path) -> None:
-    """A session whose runs cannot all land rolls the whole migration back, copied rows included."""
-    db_path = tmp_path / "sessions" / "code.db"
-    db_path.parent.mkdir(parents=True)
-    shared_run = json.dumps(json.dumps([{"run_id": "shared", "agent_id": "code", "messages": []}]))
-    connection = sqlite3.connect(db_path)
-    try:
-        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
-        for session_id in ("s1", "s2"):  # the same run_id in two sessions cannot both be inserted
-            connection.execute(
-                "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
-                (session_id, "agent", "code", shared_run, 1),
-            )
-        connection.commit()
-    finally:
-        connection.close()
-
-    storage = _storage(tmp_path)
-    storage.close()
-
-    connection = sqlite3.connect(db_path)
-    try:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
-        copied = connection.execute("SELECT count(*) FROM code_sessions_runs").fetchone()[0]
-    finally:
-        connection.close()
-    assert "runs" in columns
-    assert copied == 0
 
 
 def test_bulk_upsert_preserves_updated_at_when_asked(tmp_path: Path) -> None:
@@ -374,73 +252,53 @@ def test_fresh_state_database_gets_no_session_tables(tmp_path: Path) -> None:
     assert tables == set()
 
 
-def test_legacy_run_that_lands_under_another_session_refuses_migration(tmp_path: Path) -> None:
-    """A run id conflict must be caught by identity, not by a row count another row can satisfy."""
+def test_legacy_runs_blob_is_read_then_retired_on_first_save(tmp_path: Path) -> None:
+    """A 2.x database is readable as-is; the first save moves that session's blob into rows."""
     db_path = tmp_path / "sessions" / "code.db"
     db_path.parent.mkdir(parents=True)
+    legacy_runs = [
+        RunOutput(
+            run_id=f"r{index}",
+            agent_id="code",
+            session_id="s1",
+            messages=[Message(role="user", content=str(index))],
+        ).to_dict()
+        for index in range(3)
+    ]
     connection = sqlite3.connect(db_path)
     try:
         connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
-        connection.execute(
-            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("s1", "agent", "code", json.dumps(json.dumps([{"run_id": "shared", "agent_id": "code"}])), 1),
-        )
-        connection.execute(
-            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("s2", "agent", "code", json.dumps(json.dumps([{"run_id": "shared", "agent_id": "code"}])), 1),
-        )
-        # A partially migrated runs table already holds an unrelated row for s2, so a
-        # per-session count of 1 would look complete even though "shared" lands under s1.
-        connection.execute(
-            "CREATE TABLE code_sessions_runs (run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_type TEXT, "
-            "agent_id TEXT, team_id TEXT, workflow_id TEXT, user_id TEXT, parent_run_id TEXT, status TEXT, "
-            "run_index INTEGER, run_data JSON NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER)",
-        )
-        connection.execute(
-            "INSERT INTO code_sessions_runs (run_id, session_id, run_type, run_index, run_data, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("unrelated", "s2", "agent", 0, json.dumps({"run_id": "unrelated", "agent_id": "code"}), 1),
-        )
+        for session_id in ("s1", "untouched"):
+            connection.execute(
+                "INSERT INTO code_sessions (session_id, session_type, agent_id, user_id, runs, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                # Agno 2.x stored the JSON text of the list inside the JSON column.
+                (session_id, "agent", "code", "@alice:example.test", json.dumps(json.dumps(legacy_runs)), 1),
+            )
         connection.commit()
     finally:
         connection.close()
 
     storage = _storage(tmp_path)
-    storage.close()
+    try:
+        loaded = get_agent_session(storage, "s1")
+        assert loaded is not None
+        assert [run.run_id for run in loaded.runs or []] == ["r0", "r1", "r2"]
+        (loaded.runs or []).append(RunOutput(run_id="r3", agent_id="code", session_id="s1"))
+        storage.upsert_session(loaded)
+        reloaded = get_agent_session(storage, "s1")
+    finally:
+        storage.close()
 
+    assert reloaded is not None
+    assert [run.run_id for run in reloaded.runs or []] == ["r0", "r1", "r2", "r3"]
+    assert _run_rows(db_path) == [("r0", 0), ("r1", 1), ("r2", 2), ("r3", 3)]
     connection = sqlite3.connect(db_path)
     try:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
-        run_ids = {row[0] for row in connection.execute("SELECT run_id FROM code_sessions_runs")}
+        blobs = dict(connection.execute("SELECT session_id, runs IS NULL FROM code_sessions").fetchall())
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
     finally:
         connection.close()
-    assert "runs" in columns
-    assert run_ids == {"unrelated"}
-
-
-def test_legacy_run_without_run_id_refuses_migration(tmp_path: Path) -> None:
-    """An entry the runs table cannot represent keeps the blob authoritative."""
-    db_path = tmp_path / "sessions" / "code.db"
-    db_path.parent.mkdir(parents=True)
-    connection = sqlite3.connect(db_path)
-    try:
-        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
-        connection.execute(
-            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
-            ("s1", "agent", "code", json.dumps(json.dumps([{"run_id": "r0"}, {"agent_id": "code"}])), 1),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    storage = _storage(tmp_path)
-    storage.close()
-
-    connection = sqlite3.connect(db_path)
-    try:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
-        copied = connection.execute("SELECT count(*) FROM code_sessions_runs").fetchone()[0]
-    finally:
-        connection.close()
-    assert "runs" in columns
-    assert copied == 0
+    assert blobs == {"s1": 1, "untouched": 0}
+    # Opening a pre-existing file must not let agno's connect listener switch it to WAL.
+    assert journal_mode == ("delete",)
