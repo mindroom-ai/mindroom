@@ -1640,9 +1640,16 @@ def _persist_bound_seen_event_ids(
     session_id: str | None,
     event_ids: list[str],
 ) -> None:
+    """Record the Matrix events this team turn consumed on the stored session row.
+
+    Runs after the team executed, so the scope session loaded before the run
+    is a snapshot: agno saved newer ``session_data`` through its own object.
+    The row is re-read and only then written, so the seen ids land without
+    putting the snapshot's fields back over agno's.
+    """
     if not event_ids or scope_context is None or session_id is None:
         return
-    session = scope_context.session or get_team_session(scope_context.storage, session_id)
+    session = get_team_session(scope_context.storage, session_id)
     if session is None:
         created_at = int(datetime.now(UTC).timestamp())
         session = TeamSession(
