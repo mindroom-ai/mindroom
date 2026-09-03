@@ -644,10 +644,8 @@ matrix_sync:
 timezone: America/Los_Angeles      # Default: UTC
 ```
 
-Retired access fields in a monolithic configuration are migrated automatically when the file loads.
-MindRoom validates the result, saves the original file once as `config.yaml.pre-membership-access`, and atomically writes the new schema.
-For a single-file Docker bind mount, run the directed `mindroom config migrate --path <host-config.yaml>` command on the host before startup.
-Access migration fails without changing files or creating a backup when any `!include` is present.
+Configurations must use the current membership access schema.
+Retired access fields fail validation, and configuration loading never rewrites source files.
 See [Authorization](../authorization.md) for the current access model.
 
 The root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
@@ -820,7 +818,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - Responder access and room membership never grant dashboard credential or OAuth management
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](../authorization.md))
 - `room_defaults` and `rooms.<key>` own join policy, directory visibility, invitations, encryption, and Matrix admins
-- Monolithic configurations with retired access fields migrate automatically; configurations using `!include` must be migrated manually
+- Retired access fields fail validation instead of being migrated
 - Room reconciliation also updates managed room power levels so `com.mindroom.thread.tags` can be written at PL0
 - Publishing to the room directory requires the managing service account (typically router) to have moderator/admin power in each room
 - Thread-tag power-level reconciliation also requires the managing service account to be joined and able to update `m.room.power_levels`

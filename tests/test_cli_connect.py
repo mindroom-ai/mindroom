@@ -92,12 +92,11 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
     """Placeholder replacement should quote MXIDs so '@' doesn't break YAML."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "authorization:\n"
-        "  global_users:\n"
-        f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
-        "  agent_reply_permissions:\n"
-        '    "*":\n'
-        "      - __PLACEHOLDER__\n",
+        "administrators:\n"
+        f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+        "room_defaults:\n"
+        "  invite_users:\n"
+        "    - __PLACEHOLDER__\n",
     )
 
     replaced = cli_connect.replace_owner_placeholders_in_config(
@@ -114,17 +113,17 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
 
     # Verify the result is valid YAML
     parsed = yaml.safe_load(updated)
-    assert parsed["authorization"]["global_users"] == ["@alice:mindroom.chat:8448"]
-    assert parsed["authorization"]["agent_reply_permissions"]["*"] == ["@alice:mindroom.chat:8448"]
+    assert parsed["administrators"] == ["@alice:mindroom.chat:8448"]
+    assert parsed["room_defaults"]["invite_users"] == ["@alice:mindroom.chat:8448"]
 
 
 def test_replace_owner_placeholders_reaches_included_files(tmp_path: Path) -> None:
     """Placeholders living in !include files are replaced too."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("authorization: !include auth.yaml\n", encoding="utf-8")
-    auth_path = tmp_path / "auth.yaml"
-    auth_path.write_text(
-        f"global_users:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+    config_path.write_text("administrators: !include administrators.yaml\n", encoding="utf-8")
+    administrators_path = tmp_path / "administrators.yaml"
+    administrators_path.write_text(
+        f"- {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         encoding="utf-8",
     )
 
@@ -134,10 +133,10 @@ def test_replace_owner_placeholders_reaches_included_files(tmp_path: Path) -> No
     )
 
     assert replaced is True
-    assert config_path.read_text(encoding="utf-8") == "authorization: !include auth.yaml\n"
-    updated = auth_path.read_text(encoding="utf-8")
+    assert config_path.read_text(encoding="utf-8") == "administrators: !include administrators.yaml\n"
+    updated = administrators_path.read_text(encoding="utf-8")
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated
-    assert yaml.safe_load(updated)["global_users"] == ["@alice:mindroom.chat"]
+    assert yaml.safe_load(updated) == ["@alice:mindroom.chat"]
 
 
 def test_complete_local_pairing_rejects_non_json_response() -> None:

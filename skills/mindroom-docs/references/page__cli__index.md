@@ -989,7 +989,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ validate   Validate config.yaml and check for common issues.                           │
 │ resolve    Print the fully merged config YAML with all !include tags resolved.         │
 │ path       Show the resolved config file path and search locations.                    │
-│ migrate    Apply supported migrations to config.yaml.                                  │
+│ migrate    Apply safe, text-preserving migrations to config.yaml.                      │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

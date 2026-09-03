@@ -13,41 +13,7 @@ if TYPE_CHECKING:
     import pytest
 
 
-def test_migrate_stack_config_persists_legacy_access_before_compose(tmp_path: Path) -> None:
-    """The host-side smoke preflight must migrate the bind-mounted config."""
-    stack_dir = tmp_path / "mindroom-stack"
-    stack_dir.mkdir()
-    config_path = stack_dir / "config.yaml"
-    original = b"""agents:
-  assistant:
-    display_name: Assistant
-authorization:
-  default_room_access: true
-"""
-    config_path.write_bytes(original)
-
-    smoke_mindroom_stack.migrate_stack_config(stack_dir)
-
-    migrated = config_path.read_text(encoding="utf-8")
-    assert "default_room_access" not in migrated
-    assert "current_room_members: true" in migrated
-    assert config_path.with_name("config.yaml.pre-membership-access").read_bytes() == original
-
-
-def test_migrate_stack_config_accepts_writable_config_directory(tmp_path: Path) -> None:
-    """The smoke preflight must accept the stack's atomic-write-safe layout."""
-    stack_dir = tmp_path / "mindroom-stack"
-    config_dir = stack_dir / "config"
-    config_dir.mkdir(parents=True)
-    config_path = config_dir / "config.yaml"
-    config_path.write_text("agents: {}\n", encoding="utf-8")
-
-    smoke_mindroom_stack.migrate_stack_config(stack_dir)
-
-    assert config_path.read_text(encoding="utf-8") == "agents: {}\n"
-
-
-def test_smoke_mindroom_stack_uses_env_port_overrides(  # noqa: PLR0915
+def test_smoke_mindroom_stack_uses_env_port_overrides(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -58,7 +24,6 @@ def test_smoke_mindroom_stack_uses_env_port_overrides(  # noqa: PLR0915
     compose_file.write_text("services: {}\n", encoding="utf-8")
 
     commands: list[list[str]] = []
-    lifecycle_events: list[str] = []
     wait_match_calls: list[tuple[str, str, str]] = []
     wait_status_calls: list[tuple[str, int, str]] = []
     captured_env_text: str | None = None
@@ -72,8 +37,6 @@ def test_smoke_mindroom_stack_uses_env_port_overrides(  # noqa: PLR0915
         del check, capture_output
         nonlocal captured_env_text
         commands.append(command)
-        if "up" in command:
-            lifecycle_events.append("compose-up")
         env_file = Path(command[command.index("--env-file") + 1])
         if captured_env_text is None and "up" in command:
             captured_env_text = env_file.read_text(encoding="utf-8")
@@ -85,16 +48,7 @@ def test_smoke_mindroom_stack_uses_env_port_overrides(  # noqa: PLR0915
     def fake_wait_for_http_status(url: str, expected_status: int, label: str, **_: object) -> None:
         wait_status_calls.append((url, expected_status, label))
 
-    def fake_migrate_stack_config(_stack_dir: Path) -> None:
-        lifecycle_events.append("config-migration")
-
     monkeypatch.setattr(smoke_mindroom_stack, "run_command", fake_run_command)
-    monkeypatch.setattr(
-        smoke_mindroom_stack,
-        "migrate_stack_config",
-        fake_migrate_stack_config,
-        raising=False,
-    )
     monkeypatch.setattr(smoke_mindroom_stack, "wait_for_http_match", fake_wait_for_http_match)
     monkeypatch.setattr(smoke_mindroom_stack, "wait_for_http_status", fake_wait_for_http_status)
     monkeypatch.setattr(smoke_mindroom_stack.os, "getuid", lambda: 1234)
@@ -102,7 +56,6 @@ def test_smoke_mindroom_stack_uses_env_port_overrides(  # noqa: PLR0915
     monkeypatch.setattr(sys, "argv", ["smoke_mindroom_stack.py", str(stack_dir)])
 
     assert smoke_mindroom_stack.main() == 0
-    assert lifecycle_events[:2] == ["config-migration", "compose-up"]
 
     assert captured_env_text is not None
     assert "HOST_HOMESERVER_PORT=18008" in captured_env_text

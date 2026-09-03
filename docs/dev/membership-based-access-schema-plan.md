@@ -3,9 +3,12 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use baspowers:subagent-driven-development (recommended) or baspowers:executing-plans to implement this plan task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Current outcome:** The temporary access migration described in this historical plan was removed after rollout.
+> Current configuration validation rejects retired access fields and never rewrites source files.
+
 **Goal:** Replace overlapping room, responder, invitation, and credential policies with a membership-based access schema whose fields each have one user-visible purpose.
 
-**Architecture:** Configuration loading converts the retired access fields into the membership schema, validates the result, keeps a one-time backup, and atomically persists the migrated YAML before runtime startup.
+**Architecture:** Configuration loading validates only the membership schema and rejects retired access fields without rewriting source files.
 Rooms own membership and Matrix state, responders own conversation access, and agents own credential managers.
 Runtime resolvers consume only the membership schema, so ingress, room reconciliation, and credential APIs have one interpretation instead of parallel compatibility paths.
 
@@ -16,10 +19,8 @@ Runtime resolvers consume only the membership schema, so ingress, room reconcili
 ## Global Constraints
 
 - Runtime code supports only the membership access model.
-- Loading a configuration with retired access fields automatically validates and persists one deterministic migration before startup.
-- Migration keeps the original root configuration as a one-time backup and never overwrites that backup.
-- Automatic migration is limited to single-file configurations; any `!include` causes a clear error before validation or persistence.
-- Inputs whose room references cannot be resolved to managed room keys fail before any file is written.
+- Retired access fields fail validation instead of being migrated.
+- Configuration loading never rewrites the root file or any included source.
 - Room-specific values replace room defaults; list values are never implicitly combined.
 - `invite_users` controls invitations only and never grants administrative or credential authority.
 - Platform administrators are not automatically invited and do not receive Matrix room power.
@@ -228,30 +229,10 @@ Room membership and responder access do not authorize credential operations.
 Alias resolution remains supported before exact manager matching.
 Credential-manager entries must be concrete Matrix user IDs; wildcard credential administrators are not accepted.
 
-### Automatic migration
+### Retired fields
 
-One pure migration function runs before nested Pydantic validation, so file loading and programmatic configuration construction reach the same authored schema.
-`load_config` validates the migrated data before it writes anything, preserves the original root file as a one-time sibling backup, atomically writes the normalized YAML, and then publishes the validated configuration.
-Normalized YAML does not preserve comments or hand formatting; the exact backup remains the recovery source for both.
-When a single-file Docker bind mount cannot be replaced atomically, migration fails with a command that must be run against the host config path.
-When migration encounters any `!include`, loading fails before validation or persistence with a clear unsupported-migration error.
-
-The deterministic mapping is:
-
-- `authorization.global_users` becomes `administrators` and `room_defaults.invite_users`.
-- `authorization.room_permissions.<room>` becomes `rooms.<room>.invite_users` after resolving the key to one managed room.
-- `authorization.agent_reply_permissions.<entity>.users` becomes `<entity>.access.users`.
-- `authorization.agent_reply_permissions.<entity>.joined_rooms` becomes `<entity>.access.members_of_rooms`.
-- The wildcard responder policy is materialized onto every responder without an entity-specific policy.
-- Concrete static agent users become `agents.<name>.credential_managers`; wildcard and pattern entries do not become credential managers.
-- `matrix_room_access` join, listing, encryption, invite-only, and room-admin settings become `room_defaults` and per-room overrides.
-- `authorization.aliases` and `authorization.config_command_enabled` remain under `authorization` because they are not access grants.
-- The obsolete `access_model` marker is removed.
-
-Existing new-schema values win over migrated scalar defaults, while list-valued grants are combined without duplicates so an authored capability is not silently discarded.
-Unresolvable room IDs or aliases fail closed before validation or persistence.
-The error identifies the retired field and directs the operator to replace the reference with its managed room key before retrying.
-The migration intentionally removes implicit or wildcard credential-management authority because the new field requires concrete identities; platform administrators retain credential authority.
+The root configuration model and nested authorization model reject retired access fields.
+File loading, direct `Config` construction, API config loading, and raw config replacement all use the same current schema without migration or persistence side effects.
 
 ### Non-goals
 
