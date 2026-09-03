@@ -815,6 +815,7 @@ async def _prepare_execution_context_common(
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
             attachment_context=attachment_context,
+            member_display_names=member_display_names,
         )
 
     prepared_scope_history = await prepare_scope_history_fn(render_messages_text_fn(provisional_messages))
@@ -844,6 +845,7 @@ async def _prepare_execution_context_common(
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
             attachment_context=attachment_context,
+            member_display_names=member_display_names,
         )
     else:
         unseen_event_ids = []
@@ -892,6 +894,7 @@ async def _prepare_execution_context_common(
             estimate_static_tokens_fn=estimate_static_tokens_fn,
             render_messages_text_fn=render_messages_text_fn,
             attachment_context=attachment_context,
+            member_display_names=member_display_names,
         )
         final_messages = replay_fallback_messages
         fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
