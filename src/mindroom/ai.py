@@ -409,7 +409,6 @@ def _build_agent_turn_callbacks(
             scope_context=scope_context,
             session_id=discard.session_id or session_id,
             run_id=discard.run_id,
-            session_type=SessionType.AGENT,
             entity_name=agent_name,
             output_tokens=discard.output_tokens,
         )

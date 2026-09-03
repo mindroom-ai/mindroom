@@ -19,7 +19,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import replace_runs, save_runs
+from mindroom.agent_storage import save_runs
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
@@ -696,7 +696,6 @@ def discard_empty_completed_run(
     scope_context: ScopeSessionContext | None,
     session_id: str,
     run_id: str | None,
-    session_type: SessionType,
     entity_name: str,
     output_tokens: int | None,
 ) -> None:
@@ -704,7 +703,10 @@ def discard_empty_completed_run(
 
     A persisted assistant turn with no content teaches the model that ending the
     turn immediately is the expected continuation, so the run is removed from both
-    the loaded session and storage before the next prompt is built.
+    the loaded session and storage before the next prompt is built. The store is
+    told directly: agno persisted the run through its own session object, so the
+    scope session loaded before the run never held it and cannot say whether the
+    row exists.
     """
     logger.warning(
         "model_returned_empty_response",
@@ -716,20 +718,9 @@ def discard_empty_completed_run(
     if scope_context is None or not run_id:
         return
     try:
-        session = scope_context.session
-        if session is None:
-            raw_session = scope_context.storage.get_session(session_id, session_type)
-            if raw_session is None:
-                return
-            session = _load_queued_notice_session(
-                cast("AgentSession | TeamSession | dict[str, object]", raw_session),
-                session_type=session_type,
-            )
-        if session is None:
-            return
-        kept = _runs_without(session.runs or [], run_id=run_id)
-        if len(kept) != len(session.runs or []):
-            replace_runs(scope_context.storage, session, kept)
+        scope_context.storage.delete_runs([run_id])
+        if scope_context.session is not None:
+            scope_context.session.runs = _runs_without(scope_context.session.runs or [], run_id=run_id)
     except Exception:
         logger.exception(
             "Failed to remove empty run from session history",

@@ -1955,7 +1955,6 @@ def _build_team_empty_run_discard(
             scope_context=scope_context,
             session_id=resolved_session_id,
             run_id=discard.run_id,
-            session_type=SessionType.TEAM,
             entity_name=entity_name,
             output_tokens=discard.output_tokens,
         )

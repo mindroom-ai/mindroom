@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.db.base import BaseDb, SessionType
+from agno.db.base import BaseDb
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
@@ -154,7 +154,6 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
             scope_context=scope_context,
             session_id="session-1",
             run_id="run-empty",
-            session_type=SessionType.AGENT,
             entity_name="general",
             output_tokens=2,
         )
@@ -167,6 +166,50 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
         assert [run.run_id for run in persisted.runs] == ["run-good"]
     finally:
         storage.close()
+
+
+def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tmp_path: Path) -> None:
+    """Agno persists the run through its own session object; the scope session loaded before it lacks the run."""
+    storage = create_state_storage(
+        "general",
+        tmp_path,
+        subdir="sessions",
+        session_table="general_sessions",
+    )
+    try:
+        live_session = seed_session(
+            storage,
+            AgentSession(
+                session_id="session-1",
+                agent_id="general",
+                runs=[_completed_run("run-good", "First response")],
+                metadata={},
+                created_at=1,
+                updated_at=1,
+            ),
+        )
+        # What agno's run does behind the live session's back.
+        storage.upsert_run(run=_completed_run("run-empty", None), session_id="session-1")
+
+        discard_empty_completed_run(
+            scope_context=ScopeSessionContext(
+                scope=HistoryScope(kind="agent", scope_id="general"),
+                storage=storage,
+                session=live_session,
+            ),
+            session_id="session-1",
+            run_id="run-empty",
+            entity_name="general",
+            output_tokens=2,
+        )
+
+        assert [run.run_id for run in live_session.runs or []] == ["run-good"]
+        persisted = get_agent_session(storage, "session-1")
+    finally:
+        storage.close()
+
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs or []] == ["run-good"]
 
 
 def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(tmp_path: Path) -> None:
@@ -200,7 +243,6 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
             scope_context=scope_context,
             session_id="session-1",
             run_id="run-empty",
-            session_type=SessionType.TEAM,
             entity_name="team_general",
             output_tokens=2,
         )
