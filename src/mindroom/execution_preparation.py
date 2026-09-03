@@ -127,6 +127,7 @@ def _build_matrix_prompt_with_history(
     current_ts: str | None = None,
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
+    current_display_name: str | None = None,
 ) -> str:
     if current_sender is not None and not current_prompt_is_structured:
         current_block = render_msg_tag(
@@ -134,6 +135,7 @@ def _build_matrix_prompt_with_history(
             body=prompt,
             event_id=current_event_id,
             ts=current_ts,
+            display_name=current_display_name,
         )
     else:
         current_block = prompt
@@ -246,6 +248,7 @@ def _context_message_from_visible_message(
     missing_sender_label: str | None = None,
     body: str | None = None,
     attachment_records: Sequence[AttachmentRecord] = (),
+    member_display_names: dict[str, str] | None = None,
 ) -> Message:
     """Convert one visible Matrix message into a structured Agno message."""
     # Matrix bodies include human-facing tool markers like "🔧 `tool` [1]".
@@ -279,7 +282,17 @@ def _context_message_from_visible_message(
             event_id=event_id,
         )
     else:
-        content = render_msg_tag(sender=speaker_label or "", body=body, event_id=event_id)
+        display_name = (
+            member_display_names.get(speaker_label)
+            if member_display_names is not None and speaker_label is not None
+            else None
+        )
+        content = render_msg_tag(
+            sender=speaker_label or "",
+            body=body,
+            event_id=event_id,
+            display_name=display_name,
+        )
     return Message(role="user", content=content)
 
 
@@ -291,6 +304,7 @@ def _context_messages_from_visible_messages(
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,
     attachment_context: _ThreadAttachmentContext | None = None,
+    member_display_names: dict[str, str] | None = None,
 ) -> tuple[Message, ...]:
     """Convert visible Matrix context into provider-native message objects."""
     visible_messages = messages[-max_messages:] if max_messages is not None else messages
@@ -316,6 +330,7 @@ def _context_messages_from_visible_messages(
                 missing_sender_label=missing_sender_label,
                 body=capped_body,
                 attachment_records=attachment_records,
+                member_display_names=member_display_names,
             ),
         )
     return tuple(context_messages)
@@ -327,6 +342,7 @@ def _messages_with_capped_context(
     context_messages: Sequence[Message],
     transient_context_messages: Sequence[Message] = (),
     current_sender_id: str | None,
+    member_display_names: dict[str, str] | None = None,
     current_timestamp_ms: float | None = None,
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
@@ -345,6 +361,7 @@ def _messages_with_capped_context(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
+        member_display_names=member_display_names,
     )
     current_only_tokens = estimate_static_tokens_fn(render_messages_text_fn(current_only_messages))
     if current_only_tokens > static_token_budget:
@@ -361,6 +378,7 @@ def _messages_with_capped_context(
             current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
+            member_display_names=member_display_names,
         )
         if estimate_static_tokens_fn(render_messages_text_fn(candidate_messages)) > static_token_budget:
             break
@@ -374,6 +392,7 @@ def _messages_with_capped_context(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
+        member_display_names=member_display_names,
     )
 
 
@@ -387,6 +406,7 @@ def _messages_with_current_prompt(
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
+    member_display_names: dict[str, str] | None = None,
 ) -> tuple[Message, ...]:
     """Return canonical live request messages with the current user turn last."""
     messages = [message.model_copy(deep=True) for message in context_messages]
@@ -401,6 +421,11 @@ def _messages_with_current_prompt(
             current_ts=current_ts,
             current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
+            current_display_name=(
+                member_display_names.get(current_sender_id)
+                if member_display_names is not None and current_sender_id is not None
+                else None
+            ),
         )
         if current_sender_id is not None
         else prompt
@@ -436,6 +461,7 @@ def _build_unseen_context_messages(
     active_event_ids: Collection[str],
     response_sender_id: str | None,
     current_sender_id: str | None = None,
+    member_display_names: dict[str, str] | None = None,
     current_timestamp_ms: float | None = None,
     prompt_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
@@ -454,6 +480,7 @@ def _build_unseen_context_messages(
         unseen_messages,
         response_sender_id=response_sender_id,
         attachment_context=attachment_context,
+        member_display_names=member_display_names,
     )
     if partial_reply_kinds:
         context_messages = (
@@ -470,6 +497,7 @@ def _build_unseen_context_messages(
             current_event_id=prompt_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
+            member_display_names=member_display_names,
         ),
         _get_unseen_event_ids_for_metadata(
             unseen_messages,
@@ -485,6 +513,7 @@ def _build_thread_history_messages(
     transient_context_messages: Sequence[Message] = (),
     response_sender_id: str | None,
     current_sender_id: str | None = None,
+    member_display_names: dict[str, str] | None = None,
     current_timestamp_ms: float | None = None,
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
@@ -507,6 +536,7 @@ def _build_thread_history_messages(
             current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
+            member_display_names=member_display_names,
         )
     context_messages = _context_messages_from_visible_messages(
         thread_history,
@@ -515,6 +545,7 @@ def _build_thread_history_messages(
         max_message_length=max_message_length,
         missing_sender_label=missing_sender_label,
         attachment_context=attachment_context,
+        member_display_names=member_display_names,
     )
     if (
         static_token_budget is not None
@@ -533,6 +564,7 @@ def _build_thread_history_messages(
             static_token_budget=static_token_budget,
             estimate_static_tokens_fn=estimate_static_tokens_fn,
             render_messages_text_fn=render_messages_text_fn,
+            member_display_names=member_display_names,
         )
     return _messages_with_current_prompt(
         prompt,
@@ -543,6 +575,7 @@ def _build_thread_history_messages(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
+        member_display_names=member_display_names,
     )
 
 
@@ -731,6 +764,7 @@ async def _prepare_execution_context_common(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     response_sender_id: str | None,
     current_sender_id: str | None,
+    member_display_names: dict[str, str] | None = None,
     current_timestamp_ms: float | None = None,
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
@@ -764,6 +798,7 @@ async def _prepare_execution_context_common(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
+        member_display_names=member_display_names,
     )
     if reply_to_event_id and thread_history:
         provisional_messages, _ = _build_unseen_context_messages(
@@ -792,6 +827,7 @@ async def _prepare_execution_context_common(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
+        member_display_names=member_display_names,
     )
     if reply_to_event_id and thread_history:
         final_messages, unseen_event_ids = _build_unseen_context_messages(
@@ -942,6 +978,7 @@ async def prepare_agent_execution_context(
         thread_history=thread_history,
         response_sender_id=response_sender,
         current_sender_id=current_sender_id,
+        member_display_names=ctx.member_display_names,
         current_timestamp_ms=current_timestamp_ms,
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
