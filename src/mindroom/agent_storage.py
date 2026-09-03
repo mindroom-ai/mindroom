@@ -17,7 +17,7 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
-from sqlalchemy import Engine, Text, create_engine, event, func, select, text
+from sqlalchemy import Engine, Table, Text, create_engine, event, func, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mindroom import agno_session_persistence_patch
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.run.workflow import WorkflowRunOutput
     from agno.session import Session
+    from sqlalchemy.orm import Session as OrmSession
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -182,7 +183,7 @@ def _migrate_legacy_runs(database: _ConversationSqliteDb) -> None:
     logger.info("agno_legacy_runs_column_migrated", db_file=database.db_file, sessions=migrated_sessions)
 
 
-def _copy_legacy_runs(database: _ConversationSqliteDb, sess: Any, runs_table: Any) -> int | None:  # noqa: ANN401
+def _copy_legacy_runs(database: _ConversationSqliteDb, sess: OrmSession, runs_table: Table) -> int | None:
     """Move the blobs into ``runs_table`` and drop the column; None when there is no legacy column."""
     session_table = _quote_identifier(database.session_table_name)
     columns = {row[1] for row in sess.execute(text(f"PRAGMA table_info({session_table})"))}
