@@ -146,60 +146,83 @@ def _ensure_current_schema(database: _ConversationSqliteDb, db_file: str) -> Non
         _MIGRATED_DB_FILES.add(resolved)
 
 
+class _LegacyRunsMigrationRefusedError(Exception):
+    """Raised inside the migration transaction so nothing it wrote is kept."""
+
+    def __init__(self, session_id: str, **details: object) -> None:
+        super().__init__(session_id)
+        self.session_id = session_id
+        self.details = details
+
+
 def _migrate_legacy_runs(database: _ConversationSqliteDb) -> None:
-    """Copy every 2.x ``runs`` blob into the runs table in one transaction, then drop the column."""
-    session_table = _quote_identifier(database.session_table_name)
+    """Copy every 2.x ``runs`` blob into the runs table and drop the column, in one transaction.
+
+    A blob that does not decode, or a session whose runs did not all land,
+    rolls the whole transaction back: the file is left exactly as it was and
+    the blob stays authoritative.
+    """
     runs_table = database._get_table(table_type="runs", create_table_if_not_found=True)
     if runs_table is None:
         return
-    with database.Session() as sess, sess.begin():
-        columns = {row[1] for row in sess.execute(text(f"PRAGMA table_info({session_table})"))}
-        if "runs" not in columns:
-            return
-        legacy_rows = sess.execute(
-            text(f"SELECT session_id, user_id, runs FROM {session_table} WHERE runs IS NOT NULL"),  # noqa: S608
-        ).fetchall()
-        logger.info("agno_legacy_runs_migration_started", db_file=database.db_file, sessions=len(legacy_rows))
-        expected_by_session: dict[str, int] = {}
-        rows: list[dict[str, Any]] = []
-        for session_id, user_id, raw_runs in legacy_rows:
-            legacy_runs = _decode_legacy_runs_blob(raw_runs)
-            if legacy_runs is None:
-                logger.warning("agno_legacy_runs_column_kept", db_file=database.db_file, session_id=session_id)
-                return
-            run_payloads = [
-                payload
-                for payload in (cast("dict[str, Any]", run) for run in legacy_runs if isinstance(run, dict))
-                if payload.get("run_id")
-            ]
-            expected_by_session[session_id] = len(run_payloads)
-            rows.extend(
-                build_single_run_row(run_payload, session_id=session_id, user_id=user_id, run_index=run_index)
-                for run_index, run_payload in enumerate(run_payloads)
-            )
-        if rows:
-            sess.execute(sqlite_insert(runs_table).on_conflict_do_nothing(index_elements=["run_id"]), rows)
-        migrated_by_session = dict(
-            sess.execute(
-                select(runs_table.c.session_id, func.count())
-                .where(runs_table.c.session_id.in_(list(expected_by_session)))
-                .group_by(runs_table.c.session_id),
-            ).fetchall(),
+    try:
+        with database.Session() as sess, sess.begin():
+            migrated_sessions = _copy_legacy_runs(database, sess, runs_table)
+    except _LegacyRunsMigrationRefusedError as refused:
+        logger.warning(
+            "agno_legacy_runs_column_kept",
+            db_file=database.db_file,
+            session_id=refused.session_id,
+            **refused.details,
         )
-        for session_id, expected in expected_by_session.items():
-            migrated = migrated_by_session.get(session_id, 0)
-            if migrated < expected:
-                logger.warning(
-                    "agno_legacy_runs_column_kept",
-                    db_file=database.db_file,
-                    session_id=session_id,
-                    legacy_runs=expected,
-                    migrated_runs=migrated,
-                )
-                return
-        sess.execute(text(f"ALTER TABLE {session_table} DROP COLUMN runs"))
+        return
+    if migrated_sessions is None:
+        return
     database._invalidate_table_cache(database.session_table_name)
-    logger.info("agno_legacy_runs_column_migrated", db_file=database.db_file, sessions=len(legacy_rows))
+    logger.info("agno_legacy_runs_column_migrated", db_file=database.db_file, sessions=migrated_sessions)
+
+
+def _copy_legacy_runs(database: _ConversationSqliteDb, sess: Any, runs_table: Any) -> int | None:  # noqa: ANN401
+    """Move the blobs into ``runs_table`` and drop the column; None when there is no legacy column."""
+    session_table = _quote_identifier(database.session_table_name)
+    columns = {row[1] for row in sess.execute(text(f"PRAGMA table_info({session_table})"))}
+    if "runs" not in columns:
+        return None
+    legacy_rows = sess.execute(
+        text(f"SELECT session_id, user_id, runs FROM {session_table} WHERE runs IS NOT NULL"),  # noqa: S608
+    ).fetchall()
+    logger.info("agno_legacy_runs_migration_started", db_file=database.db_file, sessions=len(legacy_rows))
+    expected_by_session: dict[str, int] = {}
+    rows: list[dict[str, Any]] = []
+    for session_id, user_id, raw_runs in legacy_rows:
+        legacy_runs = _decode_legacy_runs_blob(raw_runs)
+        if legacy_runs is None:
+            raise _LegacyRunsMigrationRefusedError(session_id, reason="undecodable_runs_blob")
+        run_payloads = [
+            payload
+            for payload in (cast("dict[str, Any]", run) for run in legacy_runs if isinstance(run, dict))
+            if payload.get("run_id")
+        ]
+        expected_by_session[session_id] = len(run_payloads)
+        rows.extend(
+            build_single_run_row(run_payload, session_id=session_id, user_id=user_id, run_index=run_index)
+            for run_index, run_payload in enumerate(run_payloads)
+        )
+    if rows:
+        sess.execute(sqlite_insert(runs_table).on_conflict_do_nothing(index_elements=["run_id"]), rows)
+    migrated_by_session = dict(
+        sess.execute(
+            select(runs_table.c.session_id, func.count())
+            .where(runs_table.c.session_id.in_(list(expected_by_session)))
+            .group_by(runs_table.c.session_id),
+        ).fetchall(),
+    )
+    for session_id, expected in expected_by_session.items():
+        migrated = migrated_by_session.get(session_id, 0)
+        if migrated < expected:
+            raise _LegacyRunsMigrationRefusedError(session_id, legacy_runs=expected, migrated_runs=migrated)
+    sess.execute(text(f"ALTER TABLE {session_table} DROP COLUMN runs"))
+    return len(legacy_rows)
 
 
 def _decode_legacy_runs_blob(raw_runs: object) -> list[object] | None:
@@ -235,9 +258,7 @@ def _replace_agno_connection_pragmas(engine: Engine) -> None:
     cascades to its runs.
     """
     connect_listeners = cast("Any", engine.pool.dispatch).connect.listeners
-    listeners = [
-        listener for listener in connect_listeners if getattr(listener, "__name__", None) == _AGNO_CONNECT_LISTENER_NAME
-    ]
+    listeners = [listener for listener in connect_listeners if listener.__name__ == _AGNO_CONNECT_LISTENER_NAME]
     if len(listeners) != 1:
         msg = f"Expected exactly one Agno {_AGNO_CONNECT_LISTENER_NAME} connect listener, found {len(listeners)}"
         raise RuntimeError(msg)

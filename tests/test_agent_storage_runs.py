@@ -231,7 +231,7 @@ def test_team_session_reconciles_member_runs(tmp_path: Path) -> None:
     assert [(run.run_id, run.parent_run_id) for run in loaded.runs or []] == [("team1", None), ("m1", "team1")]
 
 
-def test_undecodable_legacy_runs_blob_keeps_the_column(tmp_path: Path) -> None:
+def test_wrong_shape_legacy_runs_blob_keeps_the_column(tmp_path: Path) -> None:
     """A blob that is not a run list must never be dropped."""
     db_path = tmp_path / "sessions" / "code.db"
     db_path.parent.mkdir(parents=True)
@@ -298,3 +298,33 @@ def test_malformed_legacy_runs_blob_keeps_the_column(tmp_path: Path) -> None:
     finally:
         connection.close()
     assert "runs" in columns
+
+
+def test_refused_legacy_runs_migration_leaves_the_file_untouched(tmp_path: Path) -> None:
+    """A session whose runs cannot all land rolls the whole migration back, copied rows included."""
+    db_path = tmp_path / "sessions" / "code.db"
+    db_path.parent.mkdir(parents=True)
+    shared_run = json.dumps(json.dumps([{"run_id": "shared", "agent_id": "code", "messages": []}]))
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
+        for session_id in ("s1", "s2"):  # the same run_id in two sessions cannot both be inserted
+            connection.execute(
+                "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) VALUES (?, ?, ?, ?, ?)",
+                (session_id, "agent", "code", shared_run, 1),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _storage(tmp_path)
+    storage.close()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
+        copied = connection.execute("SELECT count(*) FROM code_sessions_runs").fetchone()[0]
+    finally:
+        connection.close()
+    assert "runs" in columns
+    assert copied == 0

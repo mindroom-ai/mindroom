@@ -97,7 +97,7 @@ def execute_workflow_spec(
 
     for raw_step in _workflow_steps(spec):
         try:
-            result = execute_workflow_step(
+            result = _execute_workflow_step(
                 raw_step,
                 input_data=input_data,
                 step_outputs=step_outputs,
@@ -168,7 +168,7 @@ async def async_execute_workflow_spec(
     )
 
 
-def execute_workflow_step(
+def _execute_workflow_step(
     step: dict[str, object],
     *,
     input_data: dict[str, object],

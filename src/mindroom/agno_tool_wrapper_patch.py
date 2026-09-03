@@ -30,7 +30,9 @@ _PATCHED = False
 
 def _release_frame_namespace(wrapped: Callable[..., Any]) -> None:
     """Replace the captured caller namespace on every pydantic wrapper ``wrapped`` closes over."""
-    for cell in getattr(wrapped, "__closure__", None) or ():
+    if not isinstance(wrapped, types.FunctionType):
+        return
+    for cell in wrapped.__closure__ or ():
         try:
             contents = cell.cell_contents
         except ValueError:
@@ -55,5 +57,5 @@ def apply_patch() -> None:
     global _PATCHED
     if _PATCHED:
         return
-    type.__setattr__(Function, "_wrap_callable_uncached", staticmethod(_wrap_callable_without_frame_namespace))
+    Function._wrap_callable_uncached = staticmethod(_wrap_callable_without_frame_namespace)  # ty: ignore[invalid-assignment]
     _PATCHED = True
