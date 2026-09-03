@@ -334,3 +334,28 @@ def test_refused_legacy_runs_migration_leaves_the_file_untouched(tmp_path: Path)
         connection.close()
     assert "runs" in columns
     assert copied == 0
+
+
+def test_bulk_upsert_preserves_updated_at_when_asked(tmp_path: Path) -> None:
+    """The per-row path stamps updated_at with now; preserve_updated_at must undo that."""
+    storage = _storage(tmp_path)
+    db_path = tmp_path / "sessions" / "code.db"
+    try:
+        session = _session("s1", ["r1"])
+        session.created_at = 100
+        session.updated_at = 123
+        stamped = storage.upsert_sessions([session])
+        preserved = storage.upsert_sessions([session], preserve_updated_at=True)
+    finally:
+        storage.close()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        created_at, updated_at = connection.execute("SELECT created_at, updated_at FROM code_sessions").fetchone()
+    finally:
+        connection.close()
+    assert (created_at, updated_at) == (100, 123)
+    assert isinstance(stamped[0], AgentSession)
+    assert stamped[0].updated_at != 123
+    assert isinstance(preserved[0], AgentSession)
+    assert preserved[0].updated_at == 123

@@ -433,9 +433,29 @@ class _ConversationSqliteDb(SqliteDb):
         the reconcile, its runs) to a new owner. Nothing in MindRoom or Agno's
         runtime calls this in bulk, so the per-row path costs nothing.
         """
-        del preserve_updated_at
-        results = (self.upsert_session(session, deserialize=deserialize) for session in sessions)
-        return [result for result in results if result is not None]
+        accepted: list[Session | dict[str, Any]] = []
+        for session in sessions:
+            result = self.upsert_session(session, deserialize=deserialize)
+            if result is None:
+                continue
+            if preserve_updated_at and session.updated_at is not None:
+                self._restore_updated_at(session.session_id, session.updated_at)
+                if isinstance(result, dict):
+                    cast("dict[str, Any]", result)["updated_at"] = session.updated_at
+                else:
+                    result.updated_at = session.updated_at
+            accepted.append(result)
+        return accepted
+
+    def _restore_updated_at(self, session_id: str, updated_at: int) -> None:
+        """Put back the caller's ``updated_at`` that the single-row upsert stamps with now."""
+        sessions_table = self._get_table(table_type="sessions")
+        if sessions_table is None:
+            return
+        with self.Session() as sess, sess.begin():
+            sess.execute(
+                sessions_table.update().where(sessions_table.c.session_id == session_id).values(updated_at=updated_at),
+            )
 
     def _reconcile_runs(self, session: Session) -> None:
         """Make the runs table hold exactly ``session.runs``, indexed by session position, in one commit.
