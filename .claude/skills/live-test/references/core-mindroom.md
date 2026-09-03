@@ -288,3 +288,32 @@ curl -sS -X POST 'http://localhost:9876/api/config/agent-policies' \
 ```
 
 Always confirm the port belongs to the same MindRoom instance you launched.
+
+## Upgrade Test: Old Version Then This Branch On One `mindroom_data`
+
+Use this to prove a storage or persistence change against real history written by the previous release.
+
+1. Check out the old version in its own worktree with its own environment, so both versions can run against the same storage root in turn.
+```bash
+git worktree add --detach /tmp/mindroom-main origin/main
+(cd /tmp/mindroom-main && uv sync --all-extras)
+```
+2. Start the old backend detached with an absolute interpreter path; a relative `.venv/bin/mindroom` from another directory fails silently and a plain `nohup ... &` dies with the shell that started it.
+```bash
+setsid nohup /tmp/mindroom-main/.venv/bin/mindroom run --storage-path "$MINDROOM_STORAGE_PATH" --api-port 9877 --log-level INFO >> old.log 2>&1 < /dev/null & disown
+```
+3. Build history, stop it (`kill "$(lsof -ti :9877)"`), copy the session database aside for comparison, then start this branch's `.venv/bin/mindroom` on the same `MINDROOM_STORAGE_PATH`, namespace, and config.
+4. Verify with the database, not the chat: `sqlite3 <root>/agents/<agent>/sessions/<agent>.db` and inspect `<agent>_sessions` (`runs`, `summary`, `metadata`), `<agent>_sessions_runs`, and `PRAGMA journal_mode`.
+
+Compaction knobs that make it fire within a few turns:
+
+- Automatic compaction runs only when history exceeds the *hard* budget, `replay_window_tokens - reserve_tokens - static_prompt_tokens`, not the soft threshold. The static prompt alone is about 1,250 tokens, so set `replay_window_tokens` to roughly `static + 350`, `reserve_tokens: 100`, and `threshold_tokens` to the same value as the replay window.
+- The summary budget comes from the model `context_window`: `context_window - reserve - 2000 - 10%` must exceed 2,000, so keep `context_window` at 64000 or more while capping `replay_window_tokens`.
+- Read the decision from the `History preparation check` log line: `compaction_decision`, `compaction_reason`, `current_tokens`, `hard_budget`, `unavailable_reason`.
+- Hot reload on older versions did not apply model `context_window` or agent `compaction` changes; restart the backend after editing them.
+
+Reading the thread and the model stub:
+
+- Compaction lifecycle notices start with `📦` and count as agent messages; exclude them when waiting for a reply.
+- Redactions are applied when the next reply in that thread is prepared, not when the redaction arrives; send another turn to observe the cleanup.
+- Make the stub log each request (roles, replayed turn markers) to a JSONL file; that is the only way to see what history the model actually received.
