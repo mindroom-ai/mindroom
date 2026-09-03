@@ -67,6 +67,7 @@ from tests.conftest import (
     make_conversation_reader_mock,
     make_relation_lookup,
     prepare_history_for_run_for_test,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
@@ -626,7 +627,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     observed: list[tuple[str, list[str], int, int | None, str | None]] = []
     active_states: list[bool] = []
@@ -748,7 +749,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         ],
     )
     session = _session("session-1", runs=[first_run, second_run])
-    storage.upsert_session(session)
+    seed_session(storage, session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
@@ -849,7 +850,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_for_no_op_
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1")])
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     observed: list[str] = []
 
@@ -1013,7 +1014,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     observed: list[str] = []
 
@@ -1133,7 +1134,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     observed: list[str] = []
 
@@ -1582,7 +1583,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             remaining_run,
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
     summary_text = "merged summary " * 40
     summary_input_budget = next(
         budget
@@ -1662,7 +1663,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         ],
     )
     working_session = _session("session-1", runs=[first_run, second_run])
-    storage.upsert_session(working_session)
+    seed_session(storage, working_session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,

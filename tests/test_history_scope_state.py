@@ -6,7 +6,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent as AgnoAgent
@@ -44,6 +44,7 @@ from mindroom.synthetic_model import SyntheticModel
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _agent,
@@ -116,8 +117,10 @@ def test_invalidate_compacted_replay_clears_summary_and_rebuild_markers(tmp_path
     assert read_scope_state(session, other_scope) == HistoryScopeState(last_summary_model="other-model")
 
     session.runs = [_completed_run("run-1")]
-    assert prune_reintroduced_runs(session, read_scope_state(session, scope)) is True
+    storage = MagicMock()
+    assert prune_reintroduced_runs(storage, session, read_scope_state(session, scope)) is True
     assert session.runs == []
+    storage.delete_runs.assert_called_once_with(["run-1"])
 
 
 def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> None:
@@ -244,7 +247,7 @@ async def test_shared_session_paused_run_preserves_prompt_roles_until_continuati
         return entity, model
 
     first_storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    assert first_storage.upsert_session(_shared_session(is_team=is_team)) is not None
+    seed_session(first_storage, _shared_session(is_team=is_team))
 
     first, _first_model = runtime(first_storage)
     paused = await first.arun(
@@ -393,7 +396,7 @@ def test_compaction_progress_preserves_newer_seen_event_ids(tmp_path: Path) -> N
     latest_session = _session("session-1")
     update_scope_seen_event_ids(working_session, scope, ["compacted-event"])
     update_scope_seen_event_ids(latest_session, scope, ["newer-event"])
-    storage.upsert_session(latest_session)
+    seed_session(storage, latest_session)
 
     record_compaction_chunk(
         storage=storage,
@@ -459,7 +462,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     with (
         patch(

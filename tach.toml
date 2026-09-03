@@ -511,10 +511,12 @@ depends_on = [
 ]
 visibility = [
     "mindroom.agents",
+    "mindroom.ai_runtime",
     "mindroom.approval_execution",
     "mindroom.conversation_state_writer",
     "mindroom.history.interrupted_replay",
     "mindroom.history.runtime",
+    "mindroom.history.storage",
     "mindroom.memory.auto_flush",
     "mindroom.response_lifecycle",
     "mindroom.teams",
@@ -548,6 +550,7 @@ visibility = [
 [[modules]]
 path = "mindroom.ai_runtime"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.history_run_visibility",
     "mindroom.logging_config",
     "mindroom.media_inputs",
@@ -1513,6 +1516,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.history.storage"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.constants",
     "mindroom.history_run_visibility",
     "mindroom.history.types",
@@ -4118,7 +4122,9 @@ expose = [
     "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
+    "replace_runs",
     "run_session_storage_operation",
+    "save_runs",
 ]
 from = ["mindroom.agent_storage"]
 

@@ -99,6 +99,7 @@ from tests.conftest import (
     prepared_dispatch_result,
     request_envelope,
     runtime_paths_for,
+    seed_session,
     serve_conversation_reader,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -433,6 +434,8 @@ class _FakeStorage:
         self.session: AgentSession | TeamSession | None = None
         self.upserted = False
         self.upsert_count = 0
+        self.upserted_runs: list[object] = []
+        self.deleted_run_ids: list[str] = []
         self.closed = False
 
     def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
@@ -445,6 +448,21 @@ class _FakeStorage:
         self.upserted = True
         self.upsert_count += 1
         return session
+
+    def upsert_run(
+        self,
+        run: object,
+        session_id: str,
+        user_id: str | None = None,
+        run_index: int | None = None,
+    ) -> None:
+        del session_id, user_id, run_index
+        self.upserted = True
+        self.upsert_count += 1
+        self.upserted_runs.append(run)
+
+    def delete_runs(self, run_ids: list[str]) -> None:
+        self.deleted_run_ids.extend(run_ids)
 
     def close(self) -> None:
         self.closed = True
@@ -3665,8 +3683,12 @@ async def test_response_finalization_does_not_copy_notice_to_untouched_target() 
         ("assistant", "Delegated answer"),
     ]
     assert noticed_storage.upsert_count == 1
-    assert _notice_count(noticed_run.messages or [], marker=True) == 0
-    assert _notice_count(noticed_run.messages or [], marker="persisted") == 1
+    # The loaded run is left untouched; the finalized copy is what got written.
+    assert _notice_count(noticed_run.messages or [], marker=True) == 1
+    persisted_run = noticed_storage.upserted_runs[0]
+    assert isinstance(persisted_run, RunOutput)
+    assert _notice_count(persisted_run.messages or [], marker=True) == 0
+    assert _notice_count(persisted_run.messages or [], marker="persisted") == 1
 
 
 @pytest.mark.asyncio
@@ -3733,7 +3755,12 @@ async def test_response_finalization_uses_newest_completed_same_turn_run_and_ori
 
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
-    assert storage.upsert_count == 1
+    # Both attempts change: the first loses its notice, the second gets the persisted one.
+    assert storage.upsert_count == 2
+    assert {run.run_id for run in storage.upserted_runs if isinstance(run, RunOutput)} == {
+        "first-completed-run",
+        "second-completed-run",
+    }
     assert storage.session is not None
     stored_first, stored_second = storage.session.runs
     assert _notice_count(stored_first.messages or []) == 0
@@ -4297,7 +4324,8 @@ def test_notice_provider_data_survives_mindroom_sqlite_round_trip(tmp_path: Path
     """MindRoom's prompt-sanitizing SQLite storage should preserve notice ownership metadata."""
     response_turn_id = "response-1"
     storage = _queued_notice_storage(tmp_path)
-    storage.upsert_session(
+    seed_session(
+        storage,
         AgentSession(
             session_id="session-1",
             agent_id="general",
@@ -4367,7 +4395,8 @@ async def _persist_notice_bearing_response(tmp_path: Path) -> str:
         )
         storage = _queued_notice_storage(tmp_path)
         try:
-            storage.upsert_session(
+            seed_session(
+                storage,
                 AgentSession(
                     session_id="session-1",
                     agent_id="general",

@@ -2909,3 +2909,15 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
 @pytest.fixture
 def enforce_turn_authorization() -> None:
     """Keep final TurnPolicy authorization active for tests that exercise it."""
+
+
+def seed_session[SessionT: "AgentSession | TeamSession"](storage: "BaseDb", session: SessionT) -> SessionT:
+    """Persist a session row and every run it holds, in order, and return the session.
+
+    Production code writes runs explicitly (``save_runs``/``replace_runs``);
+    tests seed whole histories with this instead.
+    """
+    storage.upsert_session(session)
+    for run in session.runs or []:
+        storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
+    return session

@@ -104,6 +104,7 @@ from tests.conftest import (
     replace_delivery_gateway_deps,
     request_envelope,
     runtime_paths_for,
+    seed_session,
 )
 
 if TYPE_CHECKING:
@@ -2886,7 +2887,7 @@ class TestAgentBot(AgentBotTestBase):
         try:
             session = AgentSession(session_id=resolved_target.session_id, created_at=1, updated_at=1)
             write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-            storage.upsert_session(session)
+            seed_session(storage, session)
         finally:
             storage.close()
         response_envelope = replace(_hook_envelope(source_event_id=root_event_id), target=resolved_target)

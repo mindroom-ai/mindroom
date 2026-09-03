@@ -46,6 +46,7 @@ from tests.conftest import (
     FakeModel,
     bind_runtime_paths,
     prepare_history_for_run_for_test,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _agent,
@@ -86,7 +87,7 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
             ),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     agent = _agent(db=storage)
     prepared = await prepare_history_for_run_for_test(
@@ -147,7 +148,7 @@ async def test_prepare_history_for_run_without_authored_compaction_and_no_window
             _completed_run("run-2"),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         prepared = await prepare_history_for_run_for_test(
@@ -186,7 +187,7 @@ async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_sk
             _completed_run("run-2"),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         prepared = await prepare_history_for_run_for_test(
@@ -225,7 +226,7 @@ async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_un
             _completed_run("run-2"),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         await prepare_history_for_run_for_test(
@@ -1187,7 +1188,7 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
         agent=_agent(db=storage),
@@ -1224,7 +1225,7 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
             _completed_run("run-2"),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
         agent=_agent(db=storage, num_history_runs=2),
@@ -1284,7 +1285,7 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
             ),
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
         agent=_agent(db=storage, num_history_runs=2),
@@ -1334,7 +1335,7 @@ async def test_prepare_history_for_run_forced_compaction_uses_summary_replay_whe
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     agent = _agent(db=storage)
     with (

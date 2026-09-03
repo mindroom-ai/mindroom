@@ -33,7 +33,7 @@ from mindroom.agent_storage import create_state_storage, get_agent_session, get_
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from tests.conftest import test_runtime_paths
+from tests.conftest import seed_session, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -348,6 +348,8 @@ async def test_response_link_update_follows_pending_save_without_lost_state(
     storage_name = "response-link"
     save_storage = _storage(tmp_path, storage_name)
     owner, session = _owner_and_session("agent", save_storage, "shared")
+    # The run row the link lands on exists before the contended session save starts.
+    seed_session(save_storage, session)
     save_started = threading.Event()
     release_save = threading.Event()
     link_started = threading.Event()
@@ -850,8 +852,10 @@ async def test_persisted_snapshot_is_canonical_without_mutating_the_live_session
         assert isinstance(session.runs[0], TeamRunOutput)
         session.runs[0].member_responses = [member_response]
 
+    save_run = agent_session_module.asave_run if surface == "agent" else team_session_module.asave_run
     try:
         await owner.asave_session(session)
+        await save_run(owner, session.runs[0], session_id=surface, user_id="user")  # type: ignore[arg-type]
         persisted = _persisted(storage, surface, surface)
     finally:
         storage.close()
@@ -889,18 +893,19 @@ async def test_prompt_sanitization_uses_the_snapshot_before_later_live_mutation(
     owner, session = _owner_and_session("agent", storage, "prompt-snapshot")
     sanitizer_started = threading.Event()
     release_sanitizer = threading.Event()
-    original_sanitizer = agent_storage._session_without_prompt_messages
+    original_sanitizer = agent_storage._run_without_prompt_messages
 
-    def blocked_sanitizer(
-        saved: AgentSession | TeamSession,
-        prompt_roles: frozenset[str],
-    ) -> AgentSession | TeamSession:
+    def blocked_sanitizer(saved: object, prompt_roles: frozenset[str]) -> object:
         sanitizer_started.set()
         assert release_sanitizer.wait(timeout=5)
-        return original_sanitizer(saved, prompt_roles)
+        return original_sanitizer(saved, prompt_roles)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(agent_storage, "_session_without_prompt_messages", blocked_sanitizer)
-    save = asyncio.create_task(owner.asave_session(session))
+    monkeypatch.setattr(agent_storage, "_run_without_prompt_messages", blocked_sanitizer)
+    await owner.asave_session(session)
+    assert session.runs is not None
+    save = asyncio.create_task(
+        agent_session_module.asave_run(owner, session.runs[0], session_id="prompt-snapshot", user_id="before"),  # type: ignore[arg-type]
+    )
     try:
         assert await asyncio.to_thread(sanitizer_started.wait, 5)
         session.user_id = "after"

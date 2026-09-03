@@ -95,6 +95,7 @@ from tests.conftest import (
     make_turn_context,
     make_visible_message,
     runtime_paths_for,
+    seed_session,
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids, fixture_entity_matrix_id, persist_entity_accounts
@@ -1342,7 +1343,7 @@ async def test_team_response_preserves_unseen_matrix_thread_context_with_persist
         assert scope_context is not None
         assert scope_context.session is not None
         update_scope_seen_event_ids(scope_context.session, scope_context.scope, ["event-1"])
-        scope_context.storage.upsert_session(scope_context.session)
+        seed_session(scope_context.storage, scope_context.session)
 
     thread_history = [
         make_visible_message(event_id="event-1", sender="user", body="Already seen"),
@@ -1885,7 +1886,7 @@ async def test_team_response_finalizes_notice_from_completed_run_before_exceptio
     ) as scope_context:
         assert scope_context is not None
         assert scope_context.session is not None
-        scope_context.storage.upsert_session(scope_context.session)
+        seed_session(scope_context.storage, scope_context.session)
 
     prepared_scope_context = None
     team_id = "team_general"
@@ -1990,7 +1991,7 @@ async def test_team_response_stream_finalizes_notice_from_completed_run_before_e
     ) as scope_context:
         assert scope_context is not None
         assert scope_context.session is not None
-        scope_context.storage.upsert_session(scope_context.session)
+        seed_session(scope_context.storage, scope_context.session)
 
     prepared_scope_context = None
     team_id = "team_general"
@@ -2118,7 +2119,7 @@ async def test_team_response_stream_event_only_stop_after_finalizes_delivered_no
     ) as scope_context:
         assert scope_context is not None
         assert scope_context.session is not None
-        scope_context.storage.upsert_session(scope_context.session)
+        seed_session(scope_context.storage, scope_context.session)
 
     mock_team = _make_test_team(name="General Team", team_id="super_team")
     model = mock_team.model
@@ -2278,7 +2279,7 @@ async def test_team_response_persists_seen_event_ids_for_matrix_runs() -> None:
     ) as scope_context:
         assert scope_context is not None
         assert scope_context.session is not None
-        scope_context.storage.upsert_session(scope_context.session)
+        seed_session(scope_context.storage, scope_context.session)
 
     with (
         patch("mindroom.teams.create_agent", return_value=fake_agent),
@@ -3999,7 +4000,7 @@ async def test_team_response_stream_preserves_unseen_matrix_thread_context_with_
         assert scope_context is not None
         assert scope_context.session is not None
         update_scope_seen_event_ids(scope_context.session, scope_context.scope, ["event-1"])
-        scope_context.storage.upsert_session(scope_context.session)
+        seed_session(scope_context.storage, scope_context.session)
     mock_team = _make_test_team(name="team")
 
     async def raw_stream() -> AsyncIterator[object]:

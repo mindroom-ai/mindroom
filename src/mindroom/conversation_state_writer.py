@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,7 @@ from mindroom.agent_storage import (
     get_agent_session,
     get_team_session,
     run_session_storage_operation,
+    save_runs,
 )
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
@@ -143,8 +145,9 @@ class ConversationStateWriter:
             if metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
                 return
             metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
-            run.metadata = metadata
-            storage.upsert_session(session)
+            linked_run = copy(run)
+            linked_run.metadata = metadata
+            save_runs(storage, session, [linked_run])
             return
 
     async def apersist_response_event_id_in_session_run(

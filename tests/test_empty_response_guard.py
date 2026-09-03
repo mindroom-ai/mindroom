@@ -29,7 +29,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
-from tests.conftest import make_turn_context
+from tests.conftest import make_turn_context, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -143,7 +143,7 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
             created_at=1,
             updated_at=1,
         )
-        storage.upsert_session(session)
+        seed_session(storage, session)
         scope_context = ScopeSessionContext(
             scope=HistoryScope(kind="agent", scope_id="general"),
             storage=storage,
@@ -189,7 +189,7 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
             created_at=1,
             updated_at=1,
         )
-        storage.upsert_session(session)
+        seed_session(storage, session)
         scope_context = ScopeSessionContext(
             scope=HistoryScope(kind="team", scope_id="team_general"),
             storage=storage,

@@ -2,21 +2,18 @@
 
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
-from agno.db.utils import build_single_run_row, deserialize_history_run
 from agno.learn import LearningMachine
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
-from sqlalchemy import Engine, Text, create_engine, event, inspect, select, text
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import Engine, create_engine, event
 
 from mindroom import agno_session_persistence_patch
 from mindroom.constants import prompt_roles_for_history_storage
@@ -24,7 +21,7 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable
     from pathlib import Path
 
     from agno.agent import Agent
@@ -47,7 +44,9 @@ __all__ = [
     "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
+    "replace_runs",
     "run_session_storage_operation",
+    "save_runs",
 ]
 
 
@@ -194,55 +193,24 @@ def _create_agent_session_db(
     )
 
 
-def _has_legacy_runs_column(engine: Engine, session_table: str) -> bool:
-    """Whether ``session_table`` still carries the agno 2.x ``runs`` blob column."""
-    inspector = inspect(engine)
-    if not inspector.has_table(session_table):
-        return False
-    return any(column["name"] == "runs" for column in inspector.get_columns(session_table))
-
-
-def _quote_identifier(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
-
-
-class _UncachedRunObjects:
-    """Stand-in for Agno's shared run-object cache that rebuilds runs on every read.
-
-    Agno 3.0 shares deserialized run objects across reads and treats them as
-    immutable. MindRoom edits loaded runs in place (redaction, compaction,
-    response-link metadata) before writing them back, so every read must hand
-    out its own objects, as reads did before the cache existed.
-    """
-
-    def runs_from_rows(self, session_id: str, rows: Sequence[tuple[str, str]]) -> list[Any]:
-        del session_id
-        runs = (deserialize_history_run(json.loads(run_text)) for _run_id, run_text in rows)
-        return [run for run in runs if run is not None]
-
-    def drop_session(self, session_id: str) -> None:
-        del session_id
-
-
 type _PersistedRun = RunOutput | TeamRunOutput | WorkflowRunOutput | dict[str, Any]
 
 
 class _ConversationSqliteDb(SqliteDb):
     """SQLite session DB with conversation-specific persistence semantics.
 
-    Agno 3.0 writes only the session row from ``upsert_session`` and expects
-    callers to persist runs one at a time. MindRoom's history, compaction, and
-    redaction paths still rewrite ``session.runs`` and save the whole session,
-    so ``upsert_session`` here also reconciles the runs table with the session
-    in one transaction: runs the session no longer holds are deleted, changed
-    or new runs are written, and every row's ``run_index`` is set to the run's
-    position in ``session.runs``. Reads always load the full run history for
-    the same reason.
+    Agno 3 stores runs as rows of ``<session_table>_runs``: ``upsert_session``
+    writes the session row only, ``upsert_run`` writes one run, ``delete_runs``
+    removes runs. MindRoom follows that model; :func:`save_runs` and
+    :func:`replace_runs` are the two module-level helpers callers use when they
+    edit or drop runs of a loaded session. The overrides here only adjust what
+    agno already does: prompt-role stripping and append-only indexing in
+    ``upsert_run``, a full read in ``get_session``, and an owner guard on bulk
+    session writes.
 
     A 2.x database keeps its ``runs`` blob column. Agno merges that blob into
-    every read, so ``session.runs`` already carries the legacy runs; once a
-    save has written them as rows the blob is cleared for that session and the
-    table alone is authoritative from then on.
+    every read and scrubs deleted run ids out of it (``delete_runs`` below only
+    makes sure that scrub runs); MindRoom never rewrites the blob itself.
     """
 
     def __init__(
@@ -255,11 +223,7 @@ class _ConversationSqliteDb(SqliteDb):
     ) -> None:
         super().__init__(session_table=session_table, db_file=db_file, db_engine=db_engine)
         self._prompt_roles = prompt_roles
-        self._run_object_cache = cast("Any", _UncachedRunObjects())
-        # Before any connection is opened: agno's listener would otherwise switch
-        # the file to WAL on the first connect, and inspecting the schema connects.
         _replace_agno_connection_pragmas(db_engine)
-        self._has_legacy_runs_column = _has_legacy_runs_column(db_engine, session_table)
 
     def get_session(
         self,
@@ -271,9 +235,8 @@ class _ConversationSqliteDb(SqliteDb):
     ) -> Session | dict[str, Any] | None:
         """Read a canonical conversation session without treating its requester as its owner.
 
-        ``runs_limit`` is ignored: MindRoom's history layer works on the full run
-        list and a partially loaded session would be reconciled as if the missing
-        runs had been removed.
+        ``runs_limit`` is ignored: MindRoom's history layer (compaction, replay,
+        redaction) reasons over the whole run list.
         """
         del user_id, runs_limit
         return super().get_session(
@@ -306,18 +269,16 @@ class _ConversationSqliteDb(SqliteDb):
             run_index=None,
         )
 
-    def upsert_session(
-        self,
-        session: Session,
-        deserialize: bool | None = True,
-    ) -> Session | dict[str, Any] | None:
-        sanitized_session = _session_without_prompt_messages(session, self._prompt_roles)
-        result = super().upsert_session(sanitized_session, deserialize=deserialize)
-        # Agno returns None when the stored row belongs to another user; the runs
-        # must then stay with that owner too.
-        if result is not None:
-            self._reconcile_runs(sanitized_session)
-        return result
+    def delete_runs(self, run_ids: list[str]) -> None:
+        """Delete runs and scrub them from a 2.x ``runs`` blob even before any run row was written.
+
+        Agno returns before the blob scrub when the runs table does not exist
+        yet, which is exactly the state of a 2.x database nothing has appended
+        to since the upgrade; a redacted legacy run would then come back on the
+        next read.
+        """
+        self._get_table(table_type="runs", create_table_if_not_found=True)
+        super().delete_runs(run_ids)
 
     def upsert_sessions(
         self,
@@ -328,9 +289,9 @@ class _ConversationSqliteDb(SqliteDb):
         """Write sessions one at a time so every row keeps the owner guard.
 
         Agno's bulk statement updates on conflict without checking the stored
-        ``user_id``, so a batch could hand another user's session (and, through
-        the reconcile, its runs) to a new owner. Nothing in MindRoom or Agno's
-        runtime calls this in bulk, so the per-row path costs nothing.
+        ``user_id``, so a batch could hand another user's session to a new
+        owner. Nothing in MindRoom or Agno's runtime calls this in bulk, so the
+        per-row path costs nothing.
         """
         accepted: list[Session | dict[str, Any]] = []
         for session in sessions:
@@ -356,81 +317,54 @@ class _ConversationSqliteDb(SqliteDb):
                 sessions_table.update().where(sessions_table.c.session_id == session_id).values(updated_at=updated_at),
             )
 
-    def _reconcile_runs(self, session: Session) -> None:
-        """Make the runs table hold exactly ``session.runs``, indexed by session position, in one commit.
 
-        Unchanged rows are left alone so a steady-state save costs one
-        transaction with no run writes; agno's own ``upsert_run`` would commit
-        once per run and keep stale indexes. On a 2.x database the session's
-        legacy ``runs`` blob is cleared in the same transaction, because the
-        rows written here already hold everything the blob contributed.
-        """
-        if not isinstance(session, (AgentSession, TeamSession)):
-            return
-        runs_table = self._get_table(table_type="runs", create_table_if_not_found=True)
-        if runs_table is None:
-            return
-        wanted_rows = [
-            build_single_run_row(run, session_id=session.session_id, user_id=run.user_id, run_index=run_index)
-            for run_index, run in enumerate(
-                run for run in session.runs or [] if isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id
-            )
-        ]
-        with self.Session() as sess, sess.begin():
-            stored_rows = sess.execute(
-                select(runs_table.c.run_id, runs_table.c.run_index, runs_table.c.run_data.cast(Text)).where(
-                    runs_table.c.session_id == session.session_id,
-                ),
-            ).fetchall()
-            stored = {
-                run_id: (run_index, json.loads(run_data) if isinstance(run_data, str) else run_data)
-                for run_id, run_index, run_data in stored_rows
-            }
-            wanted_run_ids = {row["run_id"] for row in wanted_rows}
-            stale_run_ids = [run_id for run_id in stored if run_id not in wanted_run_ids]
-            if stale_run_ids:
-                sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(stale_run_ids)))
-            new_rows = [row for row in wanted_rows if row["run_id"] not in stored]
-            if new_rows:
-                sess.execute(sqlite_insert(runs_table), new_rows)
-            for row in wanted_rows:
-                if row["run_id"] not in stored:
-                    continue
-                stored_index, stored_data = stored[row["run_id"]]
-                if stored_index == row["run_index"] and stored_data == row["run_data"]:
-                    continue
-                sess.execute(
-                    runs_table.update()
-                    .where(runs_table.c.run_id == row["run_id"])
-                    .values(
-                        run_index=row["run_index"],
-                        run_data=row["run_data"],
-                        status=row["status"],
-                        user_id=row["user_id"],
-                        parent_run_id=row["parent_run_id"],
-                        updated_at=row["updated_at"],
-                    ),
-                )
-            if self._has_legacy_runs_column:
-                sessions_table = _quote_identifier(self.session_table_name)
-                sess.execute(
-                    text(f"UPDATE {sessions_table} SET runs = NULL WHERE session_id = :id"),  # noqa: S608
-                    {"id": session.session_id},
-                )
+def save_runs(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    runs: Iterable[RunOutput | TeamRunOutput],
+) -> None:
+    """Write ``runs`` as rows of ``session`` and make them the session's copies of those runs.
+
+    The session row must already exist (the runs table references it). A run
+    already in ``session.runs`` under the same ``run_id`` is replaced by the
+    given object, so callers edit a copy and hand the copy here: agno shares
+    loaded run objects across reads and treats them as immutable.
+    """
+    runs = list(runs)
+    if not runs:
+        return
+    replacements: dict[str, RunOutput | TeamRunOutput] = {run.run_id: run for run in runs if run.run_id}
+    merged: list[Any] = []
+    for existing in session.runs or []:
+        run_id = existing.run_id if isinstance(existing, (RunOutput, TeamRunOutput)) else None
+        merged.append(replacements.pop(run_id, existing) if run_id else existing)
+    merged.extend(replacements.values())
+    session.runs = merged
+    for run in runs:
+        storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
 
 
-def _session_without_prompt_messages(session: Session, prompt_roles: frozenset[str]) -> Session:
-    if not _session_has_prompt_messages(session, prompt_roles):
-        return session
-    sanitized_session = deepcopy(session)
-    _strip_prompt_messages_from_session(sanitized_session, prompt_roles)
-    return sanitized_session
+def replace_runs(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    runs: Iterable[RunOutput | TeamRunOutput],
+) -> list[str]:
+    """Make ``runs`` the session's run list and delete the rows of the runs it dropped.
 
-
-def _session_has_prompt_messages(session: Session, prompt_roles: frozenset[str]) -> bool:
-    if not isinstance(session, (AgentSession, TeamSession)) or not session.runs:
-        return False
-    return any(_run_has_prompt_messages(run, prompt_roles) for run in session.runs)
+    Surviving runs are not rewritten; only removal is persisted. Returns the
+    removed run ids.
+    """
+    kept = list(runs)
+    kept_ids = {run.run_id for run in kept}
+    removed = [
+        run.run_id
+        for run in session.runs or []
+        if isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id and run.run_id not in kept_ids
+    ]
+    session.runs = kept
+    if removed:
+        storage.delete_runs(removed)
+    return removed
 
 
 def _run_has_prompt_messages(run: object, prompt_roles: frozenset[str]) -> bool:
@@ -440,15 +374,6 @@ def _run_has_prompt_messages(run: object, prompt_roles: frozenset[str]) -> bool:
         and run.messages is not None
         and any(message.role in prompt_roles for message in run.messages)
     )
-
-
-def _strip_prompt_messages_from_session(session: Session, prompt_roles: frozenset[str]) -> None:
-    if not isinstance(session, (AgentSession, TeamSession)) or not session.runs:
-        return
-    for run in session.runs:
-        if not isinstance(run, (RunOutput, TeamRunOutput)) or run.status == RunStatus.paused or not run.messages:
-            continue
-        run.messages = [message for message in run.messages if message.role not in prompt_roles]
 
 
 def _run_without_prompt_messages(run: _PersistedRun, prompt_roles: frozenset[str]) -> _PersistedRun:

@@ -13,7 +13,14 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
+from mindroom.agent_storage import (
+    create_state_storage,
+    get_agent_session,
+    get_team_session,
+    replace_runs,
+    save_runs,
+)
+from tests.conftest import seed_session
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,20 +46,21 @@ def _storage(tmp_path: Path) -> BaseDb:
     )
 
 
+def _run(session_id: str, run_id: str) -> RunOutput:
+    return RunOutput(
+        run_id=run_id,
+        agent_id="code",
+        session_id=session_id,
+        messages=[Message(role="system", content="prompt"), Message(role="user", content=run_id)],
+    )
+
+
 def _session(session_id: str, run_ids: list[str]) -> AgentSession:
     return AgentSession(
         session_id=session_id,
         agent_id="code",
         user_id="@alice:example.test",
-        runs=[
-            RunOutput(
-                run_id=run_id,
-                agent_id="code",
-                session_id=session_id,
-                messages=[Message(role="system", content="prompt"), Message(role="user", content=run_id)],
-            )
-            for run_id in run_ids
-        ],
+        runs=[_run(session_id, run_id) for run_id in run_ids],
     )
 
 
@@ -64,37 +72,34 @@ def _run_rows(db_path: Path) -> list[tuple[str, int]]:
         connection.close()
 
 
-def test_upsert_session_reconciles_the_runs_table(tmp_path: Path) -> None:
-    """Saving a whole session writes its runs in order and drops runs it no longer holds."""
+def _loaded_run_ids(storage: BaseDb, session_id: str) -> list[str]:
+    loaded = get_agent_session(storage, session_id)
+    assert loaded is not None
+    return [run.run_id or "" for run in loaded.runs or []]
+
+
+def test_saved_runs_load_in_write_order_without_prompt_messages(tmp_path: Path) -> None:
+    """Runs are rows indexed in write order; prompt-role messages never reach the store."""
     storage = _storage(tmp_path)
     db_path = tmp_path / "sessions" / "code.db"
     try:
-        storage.upsert_session(_session("s1", ["r1", "r2", "r3"]))
-        assert _run_rows(db_path) == [("r1", 0), ("r2", 1), ("r3", 2)]
-
-        storage.upsert_session(_session("s1", ["r1", "r3"]))
-        assert [run_id for run_id, _index in _run_rows(db_path)] == ["r1", "r3"]
-
+        seed_session(storage, _session("s1", ["r1", "r2", "r3"]))
         loaded = get_agent_session(storage, "s1")
     finally:
         storage.close()
 
+    assert _run_rows(db_path) == [("r1", 0), ("r2", 1), ("r3", 2)]
     assert loaded is not None
-    assert [run.run_id for run in loaded.runs or []] == ["r1", "r3"]
-    assert [message.role for run in loaded.runs or [] for message in run.messages or []] == ["user", "user"]
+    assert [run.run_id for run in loaded.runs or []] == ["r1", "r2", "r3"]
+    assert [message.role for run in loaded.runs or [] for message in run.messages or []] == ["user"] * 3
 
 
-def test_upsert_run_strips_prompt_roles(tmp_path: Path) -> None:
-    """Per-run writes get the same prompt-role stripping as whole-session writes."""
+def test_upsert_run_strips_prompt_roles_from_the_row_only(tmp_path: Path) -> None:
+    """The stored row loses prompt-role messages; the caller's run object is untouched."""
     storage = _storage(tmp_path)
     try:
         storage.upsert_session(_session("s1", []))
-        run = RunOutput(
-            run_id="r1",
-            agent_id="code",
-            session_id="s1",
-            messages=[Message(role="system", content="prompt"), Message(role="user", content="hi")],
-        )
+        run = _run("s1", "r1")
         storage.upsert_run(run=run, session_id="s1", user_id="@alice:example.test", run_index=0)
         loaded = get_agent_session(storage, "s1")
     finally:
@@ -105,84 +110,102 @@ def test_upsert_run_strips_prompt_roles(tmp_path: Path) -> None:
     assert [message.role for message in run.messages or []] == ["system", "user"]
 
 
-def test_get_session_ignores_runs_limit_and_hands_out_fresh_run_objects(tmp_path: Path) -> None:
-    """MindRoom's history layer needs the whole run list and may edit it in place."""
+def test_get_session_ignores_runs_limit(tmp_path: Path) -> None:
+    """MindRoom's history layer reasons over the whole run list."""
     storage = _storage(tmp_path)
     try:
-        storage.upsert_session(_session("s1", ["r1", "r2", "r3"]))
+        seed_session(storage, _session("s1", ["r1", "r2", "r3"]))
         limited = storage.get_session("s1", SessionType.AGENT, runs_limit=1)
-        first = get_agent_session(storage, "s1")
-        second = get_agent_session(storage, "s1")
     finally:
         storage.close()
 
     assert isinstance(limited, AgentSession)
     assert [run.run_id for run in limited.runs or []] == ["r1", "r2", "r3"]
-    assert first is not None
-    assert second is not None
-    assert (first.runs or [])[0] is not (second.runs or [])[0]
 
 
-def test_runs_appended_after_removal_load_in_session_order(tmp_path: Path) -> None:
-    """Compaction removes leading runs; later per-run saves must still sort after the survivors."""
+def test_replace_runs_deletes_only_the_dropped_rows(tmp_path: Path) -> None:
+    """Removing runs deletes their rows and leaves the survivors' rows unwritten."""
     storage = _storage(tmp_path)
     db_path = tmp_path / "sessions" / "code.db"
     try:
-        storage.upsert_session(_session("s1", ["r1", "r2", "r3"]))
-        compacted = _session("s1", ["r3"])
-        storage.upsert_session(compacted)
-        appended = _session("s1", ["r3", "r4"])
-        # Agno's per-run save passes the run's position in the shortened session.
-        storage.upsert_run(run=(appended.runs or [])[1], session_id="s1", user_id="@alice:example.test", run_index=1)
-        loaded = get_agent_session(storage, "s1")
-        storage.upsert_session(_session("s1", ["r4", "r3"]))
-        reordered = get_agent_session(storage, "s1")
+        seed_session(storage, _session("s1", ["r1", "r2", "r3"]))
+        connection = sqlite3.connect(db_path)
+        try:
+            before = dict(connection.execute("SELECT run_id, updated_at FROM code_sessions_runs").fetchall())
+        finally:
+            connection.close()
+        session = get_agent_session(storage, "s1")
+        assert session is not None
+        removed = replace_runs(storage, session, [run for run in session.runs or [] if run.run_id != "r2"])
+        connection = sqlite3.connect(db_path)
+        try:
+            after = dict(connection.execute("SELECT run_id, updated_at FROM code_sessions_runs").fetchall())
+        finally:
+            connection.close()
+        reloaded_ids = _loaded_run_ids(storage, "s1")
     finally:
         storage.close()
 
-    assert loaded is not None
-    assert [run.run_id for run in loaded.runs or []] == ["r3", "r4"]
-    assert _run_rows(db_path) == [("r4", 0), ("r3", 1)]
-    assert reordered is not None
-    assert [run.run_id for run in reordered.runs or []] == ["r4", "r3"]
+    assert removed == ["r2"]
+    assert [run.run_id for run in session.runs or []] == ["r1", "r3"]
+    assert reloaded_ids == ["r1", "r3"]
+    assert after == {"r1": before["r1"], "r3": before["r3"]}
 
 
-def test_unchanged_session_save_writes_no_run_rows(tmp_path: Path) -> None:
-    """A steady-state save must not rewrite run rows it does not change."""
+def test_runs_appended_after_deleting_leading_runs_sort_after_the_survivors(tmp_path: Path) -> None:
+    """Agno passes the run's position in the shortened session; the row must still come last."""
     storage = _storage(tmp_path)
     db_path = tmp_path / "sessions" / "code.db"
     try:
-        storage.upsert_session(_session("s1", ["r1", "r2"]))
-        connection = sqlite3.connect(db_path)
-        try:
-            before = connection.execute(
-                "SELECT run_id, updated_at FROM code_sessions_runs ORDER BY run_index",
-            ).fetchall()
-        finally:
-            connection.close()
-        storage.upsert_session(_session("s1", ["r1", "r2"]))
-        connection = sqlite3.connect(db_path)
-        try:
-            after = connection.execute(
-                "SELECT run_id, updated_at FROM code_sessions_runs ORDER BY run_index",
-            ).fetchall()
-        finally:
-            connection.close()
+        seed_session(storage, _session("s1", ["r1", "r2", "r3"]))
+        session = get_agent_session(storage, "s1")
+        assert session is not None
+        replace_runs(storage, session, [run for run in session.runs or [] if run.run_id == "r3"])
+        # Position 1 in ["r3", "r4"] would sort before the surviving r3 (index 2).
+        storage.upsert_run(run=_run("s1", "r4"), session_id="s1", user_id="@alice:example.test", run_index=1)
+        loaded_ids = _loaded_run_ids(storage, "s1")
     finally:
         storage.close()
 
-    assert after == before
+    assert loaded_ids == ["r3", "r4"]
+    assert _run_rows(db_path) == [("r3", 2), ("r4", 3)]
 
 
-def test_team_session_reconciles_member_runs(tmp_path: Path) -> None:
-    """Team sessions keep member rows (parent_run_id) alongside the team run across saves."""
+def test_save_runs_writes_the_copy_and_swaps_it_into_the_session(tmp_path: Path) -> None:
+    """Callers edit a copy of a loaded run; save_runs persists it and the session holds the copy."""
+    storage = _storage(tmp_path)
+    try:
+        seed_session(storage, _session("s1", ["r1", "r2"]))
+        session = get_agent_session(storage, "s1")
+        assert session is not None
+        original = (session.runs or [])[0]
+        edited = _run("s1", "r1")
+        edited.metadata = {"linked": True}
+        save_runs(storage, session, [edited, _run("s1", "r3")])
+        reloaded = get_agent_session(storage, "s1")
+    finally:
+        storage.close()
+
+    assert [run.run_id for run in session.runs or []] == ["r1", "r2", "r3"]
+    assert (session.runs or [])[0] is edited
+    assert original.metadata is None
+    assert reloaded is not None
+    assert [(run.run_id, run.metadata) for run in reloaded.runs or []] == [
+        ("r1", {"linked": True}),
+        ("r2", None),
+        ("r3", None),
+    ]
+
+
+def test_team_session_keeps_member_runs(tmp_path: Path) -> None:
+    """Team sessions keep member rows (parent_run_id) alongside the team run."""
     storage = create_state_storage("eng", tmp_path, subdir="sessions", session_table="eng_sessions")
     member_run = RunOutput(run_id="m1", agent_id="code", session_id="t1", parent_run_id="team1")
     team_run = TeamRunOutput(run_id="team1", team_id="eng", session_id="t1", member_responses=[member_run])
     session = TeamSession(session_id="t1", team_id="eng", runs=[team_run, member_run])
     try:
-        storage.upsert_session(session)
-        storage.upsert_session(session)
+        seed_session(storage, session)
+        seed_session(storage, session)
         loaded = get_team_session(storage, "t1")
     finally:
         storage.close()
@@ -191,15 +214,14 @@ def test_team_session_reconciles_member_runs(tmp_path: Path) -> None:
     assert [(run.run_id, run.parent_run_id) for run in loaded.runs or []] == [("team1", None), ("m1", "team1")]
 
 
-def test_rejected_owner_mismatch_write_leaves_runs_untouched(tmp_path: Path) -> None:
-    """Agno refuses a session write from another user; the runs table must not change either."""
+def test_rejected_owner_mismatch_write_is_reported(tmp_path: Path) -> None:
+    """Agno refuses a session write from another user, on the single and the bulk path."""
     storage = _storage(tmp_path)
-    db_path = tmp_path / "sessions" / "code.db"
     try:
-        alice_session = _session("s1", ["r1"])
+        alice_session = _session("s1", [])
         alice_session.created_at = 1_700_000_000
         storage.upsert_session(alice_session)
-        other_users_session = _session("s1", ["r2"])
+        other_users_session = _session("s1", [])
         other_users_session.user_id = "@bob:example.test"
         other_users_session.created_at = 1_700_000_100
 
@@ -211,7 +233,6 @@ def test_rejected_owner_mismatch_write_leaves_runs_untouched(tmp_path: Path) -> 
 
     assert stored is not None
     assert stored.user_id == "@alice:example.test"
-    assert _run_rows(db_path) == [("r1", 0)]
 
 
 def test_bulk_upsert_preserves_updated_at_when_asked(tmp_path: Path) -> None:
@@ -219,7 +240,7 @@ def test_bulk_upsert_preserves_updated_at_when_asked(tmp_path: Path) -> None:
     storage = _storage(tmp_path)
     db_path = tmp_path / "sessions" / "code.db"
     try:
-        session = _session("s1", ["r1"])
+        session = _session("s1", [])
         session.created_at = 100
         session.updated_at = 123
         stamped = storage.upsert_sessions([session])
@@ -240,7 +261,7 @@ def test_bulk_upsert_preserves_updated_at_when_asked(tmp_path: Path) -> None:
 
 
 def test_fresh_state_database_gets_no_session_tables(tmp_path: Path) -> None:
-    """Opening a state database with no legacy column must not create sessions or runs tables."""
+    """Opening a state database must not create sessions or runs tables."""
     storage = create_state_storage("code", tmp_path, subdir="learning", session_table="code_learning_sessions")
     storage.close()
 
@@ -252,8 +273,8 @@ def test_fresh_state_database_gets_no_session_tables(tmp_path: Path) -> None:
     assert tables == set()
 
 
-def test_legacy_runs_blob_is_read_then_retired_on_first_save(tmp_path: Path) -> None:
-    """A 2.x database is readable as-is; the first save moves that session's blob into rows."""
+def test_legacy_runs_blob_is_merged_into_reads_and_deletions_stick(tmp_path: Path) -> None:
+    """A 2.x database is read as-is; deleting a legacy run scrubs it from the blob, saves append rows."""
     db_path = tmp_path / "sessions" / "code.db"
     db_path.parent.mkdir(parents=True)
     legacy_runs = [
@@ -268,13 +289,12 @@ def test_legacy_runs_blob_is_read_then_retired_on_first_save(tmp_path: Path) -> 
     connection = sqlite3.connect(db_path)
     try:
         connection.execute(f"CREATE TABLE code_sessions ({_LEGACY_SESSION_COLUMNS})")
-        for session_id in ("s1", "untouched"):
-            connection.execute(
-                "INSERT INTO code_sessions (session_id, session_type, agent_id, user_id, runs, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                # Agno 2.x stored the JSON text of the list inside the JSON column.
-                (session_id, "agent", "code", "@alice:example.test", json.dumps(json.dumps(legacy_runs)), 1),
-            )
+        connection.execute(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, user_id, runs, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            # Agno 2.x stored the JSON text of the list inside the JSON column.
+            ("s1", "agent", "code", "@alice:example.test", json.dumps(json.dumps(legacy_runs)), 1),
+        )
         connection.commit()
     finally:
         connection.close()
@@ -284,21 +304,30 @@ def test_legacy_runs_blob_is_read_then_retired_on_first_save(tmp_path: Path) -> 
         loaded = get_agent_session(storage, "s1")
         assert loaded is not None
         assert [run.run_id for run in loaded.runs or []] == ["r0", "r1", "r2"]
-        (loaded.runs or []).append(RunOutput(run_id="r3", agent_id="code", session_id="s1"))
-        storage.upsert_session(loaded)
-        reloaded = get_agent_session(storage, "s1")
+        replace_runs(storage, loaded, [run for run in loaded.runs or [] if run.run_id != "r1"])
+        after_delete = _loaded_run_ids(storage, "s1")
+        save_runs(storage, loaded, [_run("s1", "r3")])
+        after_save = _loaded_run_ids(storage, "s1")
     finally:
         storage.close()
 
-    assert reloaded is not None
-    assert [run.run_id for run in reloaded.runs or []] == ["r0", "r1", "r2", "r3"]
-    assert _run_rows(db_path) == [("r0", 0), ("r1", 1), ("r2", 2), ("r3", 3)]
+    # A restart must not resurrect the deleted legacy run through the blob merge.
+    storage = _storage(tmp_path)
+    try:
+        after_restart = _loaded_run_ids(storage, "s1")
+    finally:
+        storage.close()
+
+    assert after_delete == ["r0", "r2"]
+    assert after_save == ["r0", "r2", "r3"]
+    assert after_restart == ["r0", "r2", "r3"]
+    assert _run_rows(db_path) == [("r3", 0)]
     connection = sqlite3.connect(db_path)
     try:
-        blobs = dict(connection.execute("SELECT session_id, runs IS NULL FROM code_sessions").fetchall())
+        (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 's1'").fetchone()
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
     finally:
         connection.close()
-    assert blobs == {"s1": 1, "untouched": 0}
+    assert [run["run_id"] for run in json.loads(json.loads(blob))] == ["r0", "r2"]
     # Opening a pre-existing file must not let agno's connect listener switch it to WAL.
     assert journal_mode == ("delete",)

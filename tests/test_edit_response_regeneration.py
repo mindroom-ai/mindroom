@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -63,6 +63,7 @@ from tests.conftest import (
     replace_turn_policy_deps,
     request_envelope,
     runtime_paths_for,
+    seed_session,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
@@ -85,6 +86,8 @@ def _room_send_response(event_id: str) -> MagicMock:
 class _FakeTeamStorage:
     session: TeamSession | None
     upserted_session: TeamSession | None = None
+    upserted_runs: list[object] = field(default_factory=list)
+    deleted_run_ids: list[str] = field(default_factory=list)
 
     def get_session(self, session_id: str, _session_type: object) -> TeamSession | None:
         if self.session is None or self.session.session_id != session_id:
@@ -94,6 +97,19 @@ class _FakeTeamStorage:
     def upsert_session(self, session: TeamSession) -> None:
         self.upserted_session = session
 
+    def upsert_run(
+        self,
+        run: object,
+        session_id: str,
+        user_id: str | None = None,
+        run_index: int | None = None,
+    ) -> None:
+        del session_id, user_id, run_index
+        self.upserted_runs.append(run)
+
+    def delete_runs(self, run_ids: list[str]) -> None:
+        self.deleted_run_ids.extend(run_ids)
+
     def close(self) -> None:
         return None
 
@@ -102,6 +118,8 @@ class _FakeTeamStorage:
 class _FakeAgentStorage:
     session: AgentSession | None
     upserted_session: AgentSession | None = None
+    upserted_runs: list[object] = field(default_factory=list)
+    deleted_run_ids: list[str] = field(default_factory=list)
 
     def get_session(self, session_id: str, _session_type: object) -> AgentSession | None:
         if self.session is None or self.session.session_id != session_id:
@@ -110,6 +128,19 @@ class _FakeAgentStorage:
 
     def upsert_session(self, session: AgentSession) -> None:
         self.upserted_session = session
+
+    def upsert_run(
+        self,
+        run: object,
+        session_id: str,
+        user_id: str | None = None,
+        run_index: int | None = None,
+    ) -> None:
+        del session_id, user_id, run_index
+        self.upserted_runs.append(run)
+
+    def delete_runs(self, run_ids: list[str]) -> None:
+        self.deleted_run_ids.extend(run_ids)
 
     def close(self) -> None:
         return None
@@ -821,16 +852,19 @@ def test_remove_run_by_event_id_removes_team_runs() -> None:
         team_id="test_team",
         runs=[
             TeamRunOutput(
+                run_id="original",
                 session_id="session-1",
                 metadata={"matrix_event_id": "$original:example.com"},
             ),
             TeamRunOutput(
+                run_id="other",
                 session_id="session-1",
                 metadata={"matrix_event_id": "$other:example.com"},
             ),
         ],
     )
     storage = _FakeTeamStorage(session)
+    original_run_id = (session.runs or [])[0].run_id
 
     removed = remove_run_by_event_id(
         storage,
@@ -840,7 +874,7 @@ def test_remove_run_by_event_id_removes_team_runs() -> None:
     )
 
     assert removed is True
-    assert storage.upserted_session is session
+    assert storage.deleted_run_ids == [original_run_id]
     assert len(session.runs or []) == 1
     assert session.runs[0].metadata["matrix_event_id"] == "$other:example.com"
 
@@ -3279,8 +3313,8 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
         )
 
     assert _handled_response_event_id(resolution) == "$response:example.com"
-    assert storage.upserted_session is not None
-    persisted_metadata = storage.upserted_session.runs[0].metadata
+    assert storage.upserted_runs
+    persisted_metadata = storage.upserted_runs[-1].metadata
     assert persisted_metadata is not None
     assert persisted_metadata["matrix_response_event_id"] == "$response:example.com"
 
@@ -3695,7 +3729,8 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
     async def process_and_respond(*_args: object, **kwargs: object) -> _ResponseGenerationOutcome:
         storage = bot._conversation_state_writer.create_storage(None)
         try:
-            storage.upsert_session(
+            seed_session(
+                storage,
                 AgentSession(
                     session_id=session_id,
                     agent_id="test_agent",

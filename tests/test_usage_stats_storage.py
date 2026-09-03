@@ -29,6 +29,7 @@ from mindroom.usage_stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
+from tests.conftest import seed_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -222,7 +223,8 @@ def test_reader_extracts_runs_written_by_mindroom_agno_storage(tmp_path: Path) -
         session_table="code_sessions",
     )
     try:
-        storage.upsert_session(
+        seed_session(
+            storage,
             AgentSession(
                 session_id="session-1",
                 agent_id="code",
@@ -288,7 +290,7 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path) ->
         session_table="engineering_sessions",
     )
     try:
-        storage.upsert_session(session)
+        seed_session(storage, session)
     finally:
         storage.close()
 

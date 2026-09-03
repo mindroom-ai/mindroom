@@ -1173,10 +1173,9 @@ def remove_run_by_event_id(
             matched_run = True
             continue
         filtered_runs.append(run)
-    session.runs = filtered_runs
-    if len(session.runs) == original_len:
+    if len(filtered_runs) == original_len:
         return False
-    storage.upsert_session(session)
+    agent_storage.replace_runs(storage, session, filtered_runs)
     return True
 
 

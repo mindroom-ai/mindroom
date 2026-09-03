@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.db.base import BaseDb
+    from agno.session.agent import AgentSession
+    from agno.session.team import TeamSession
 
     from mindroom.bot import AgentBot
 
@@ -109,6 +111,12 @@ class _PersistenceSeamProbe:
         self._create_storage = create_storage
         self._state_lock = threading.Lock()
         self._track_next_storage = False
+
+    def seed(self, storage: BaseDb, session: AgentSession | TeamSession) -> None:
+        """Write the session row and its run rows through the unblocked path before the held save."""
+        self._save_upsert(session)
+        for run in session.runs or []:
+            storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
 
     def blocked_upsert(self, session: object, deserialize: bool | None = True) -> object:
         """Hold the accepted save in its real persistence lane."""
