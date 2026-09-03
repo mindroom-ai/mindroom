@@ -1307,6 +1307,19 @@ class TestFileToolRestrictToBaseDir:
 
         assert [match["file"] for match in result["files"]] == [str(outside_dir / "notes.txt")]
 
+    def test_file_tool_search_content_honors_exclusion_exemptions(self, tmp_path: Path) -> None:
+        """A ``!pattern`` entry exempts a file from an earlier deny pattern, as in agno's matcher."""
+        base_dir = tmp_path / "base"
+        base_dir.mkdir()
+        (base_dir / "hidden.txt").write_text("needle hidden\n")
+        (base_dir / "visible.txt").write_text("needle visible\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, exclude_patterns=["*.txt", "!visible.txt"])
+        result = json.loads(tool.search_content("needle"))
+
+        assert [match["file"] for match in result["files"]] == ["visible.txt"]
+
     def test_file_tool_restrict_to_base_dir_false_allows_outside_and_relative_paths(self, tmp_path: Path) -> None:
         """File tools should allow outside absolute paths while keeping relative paths anchored."""
         base_dir = tmp_path / "base"

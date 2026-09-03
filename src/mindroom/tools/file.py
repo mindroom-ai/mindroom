@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-from fnmatch import fnmatch
 from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from agno.tools.file import TEXT_EXTENSIONS, path_matches_exclude
 from agno.tools.file import FileTools as AgnoFileTools
-from agno.tools.file.file import TEXT_EXTENSIONS
 from agno.utils.log import log_debug, log_error
 
 from mindroom.tool_system.declarations import (
@@ -278,10 +277,16 @@ class _MindRoomFileTools(AgnoFileTools):
         excludes nothing once the search root lies outside it.
         """
         for dirpath, dirnames, filenames in os.walk(search_dir):
-            dirnames[:] = [name for name in dirnames if not self._excluded_under(Path(dirpath) / name, search_dir)]
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if not path_matches_exclude(Path(dirpath) / name, search_dir, self.exclude_patterns)
+            ]
             for filename in filenames:
                 file_path = Path(dirpath) / filename
-                if self._excluded_under(file_path, search_dir) or file_path.suffix.lower() not in TEXT_EXTENSIONS:
+                if path_matches_exclude(file_path, search_dir, self.exclude_patterns):
+                    continue
+                if file_path.suffix.lower() not in TEXT_EXTENSIONS:
                     continue
                 if self.restrict_to_base_dir and not is_within_base_dir(file_path, self.base_dir):
                     continue
@@ -293,11 +298,6 @@ class _MindRoomFileTools(AgnoFileTools):
                     continue
                 if lower_query in content.lower():
                     yield file_path, content
-
-    def _excluded_under(self, path: Path, root: Path) -> bool:
-        """Whether any component of ``path`` below ``root`` matches an exclude pattern."""
-        parts = path.relative_to(root).parts
-        return any(fnmatch(part, pattern) for part in parts for pattern in self.exclude_patterns)
 
 
 _MAX_CONTENT_SEARCH_BYTES = 500 * 1024
