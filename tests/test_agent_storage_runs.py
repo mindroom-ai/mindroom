@@ -262,15 +262,21 @@ def test_rejected_owner_mismatch_write_leaves_runs_untouched(tmp_path: Path) -> 
     storage = _storage(tmp_path)
     db_path = tmp_path / "sessions" / "code.db"
     try:
-        storage.upsert_session(_session("s1", ["r1"]))
+        alice_session = _session("s1", ["r1"])
+        alice_session.created_at = 1_700_000_000
+        storage.upsert_session(alice_session)
         other_users_session = _session("s1", ["r2"])
         other_users_session.user_id = "@bob:example.test"
+        other_users_session.created_at = 1_700_000_100
 
         assert storage.upsert_session(other_users_session) is None
         assert storage.upsert_sessions([other_users_session]) == []
+        stored = get_agent_session(storage, "s1")
     finally:
         storage.close()
 
+    assert stored is not None
+    assert stored.user_id == "@alice:example.test"
     assert _run_rows(db_path) == [("r1", 0)]
 
 

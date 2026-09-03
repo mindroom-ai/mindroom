@@ -211,13 +211,14 @@ def _copy_legacy_runs(database: _ConversationSqliteDb, sess: OrmSession, runs_ta
         )
     if rows:
         sess.execute(sqlite_insert(runs_table).on_conflict_do_nothing(index_elements=["run_id"]), rows)
-    migrated_by_session = dict(
-        sess.execute(
+    migrated_by_session = {
+        session_id: int(count)
+        for session_id, count in sess.execute(
             select(runs_table.c.session_id, func.count())
             .where(runs_table.c.session_id.in_(list(expected_by_session)))
             .group_by(runs_table.c.session_id),
-        ).fetchall(),
-    )
+        )
+    }
     for session_id, expected in expected_by_session.items():
         migrated = migrated_by_session.get(session_id, 0)
         if migrated < expected:
@@ -425,20 +426,16 @@ class _ConversationSqliteDb(SqliteDb):
         deserialize: bool | None = True,
         preserve_updated_at: bool = False,
     ) -> list[Session | dict[str, Any]]:
-        sanitized_sessions = [_session_without_prompt_messages(session, self._prompt_roles) for session in sessions]
-        result = super().upsert_sessions(
-            sanitized_sessions,
-            deserialize=deserialize,
-            preserve_updated_at=preserve_updated_at,
-        )
-        upserted_session_ids = {
-            cast("dict[str, Any]", upserted)["session_id"] if isinstance(upserted, dict) else upserted.session_id
-            for upserted in result
-        }
-        for session in sanitized_sessions:
-            if session.session_id in upserted_session_ids:
-                self._reconcile_runs(session)
-        return result
+        """Write sessions one at a time so every row keeps the owner guard.
+
+        Agno's bulk statement updates on conflict without checking the stored
+        ``user_id``, so a batch could hand another user's session (and, through
+        the reconcile, its runs) to a new owner. Nothing in MindRoom or Agno's
+        runtime calls this in bulk, so the per-row path costs nothing.
+        """
+        del preserve_updated_at
+        results = (self.upsert_session(session, deserialize=deserialize) for session in sessions)
+        return [result for result in results if result is not None]
 
     def _reconcile_runs(self, session: Session) -> None:
         """Make the runs table hold exactly ``session.runs``, indexed by session position, in one commit.
