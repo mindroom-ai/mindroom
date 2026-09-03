@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
@@ -18,6 +19,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+from mindroom.agent_storage import runs_without, save_runs
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
@@ -390,8 +392,12 @@ def _finalize_queued_notice_in_runs(
     runs: Sequence[RunOutput | TeamRunOutput],
     *,
     response_turn_id: str,
-) -> bool:
-    """Leave one exact persisted notice where the newest replayable run saw it."""
+) -> list[RunOutput | TeamRunOutput]:
+    """Leave one exact persisted notice where the newest replayable run saw it.
+
+    Returns copies of the runs that change; the given runs are left untouched
+    because agno shares loaded run objects across reads.
+    """
     destination = next(
         (
             run
@@ -413,7 +419,7 @@ def _finalize_queued_notice_in_runs(
         )
     ]
     if not all_matches and destination is None:
-        return False
+        return []
 
     destination_matches = (
         _top_level_queued_notice_messages(
@@ -433,7 +439,7 @@ def _finalize_queued_notice_in_runs(
         and _queued_notice_marker(destination_matches[0]) == _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
         and destination_matches[0].content == notice_text
     ):
-        return False
+        return []
 
     insertion_index: int | None = None
     if destination is not None and destination.messages:
@@ -449,22 +455,34 @@ def _finalize_queued_notice_in_runs(
             None,
         )
 
+    edited: dict[int, RunOutput | TeamRunOutput] = {}
     for run in runs:
+        if not _run_output_notice_messages(run, response_turn_id=response_turn_id):
+            continue
+        edited_run = deepcopy(run)
         _strip_response_turn_notice_from_run_output(
-            run,
+            edited_run,
             response_turn_id=response_turn_id,
         )
+        edited[id(run)] = edited_run
 
     if destination is None or notice_text is None:
-        return True
-    if destination.messages is None:
-        destination.messages = []
+        return list(edited.values())
+    edited_destination = edited.get(id(destination))
+    if edited_destination is None:
+        edited_destination = deepcopy(destination)
+        edited[id(destination)] = edited_destination
+    if edited_destination.messages is None:
+        edited_destination.messages = []
     persisted_notice = _new_persisted_queued_notice(response_turn_id, notice_text)
     if insertion_index is None:
-        destination.messages.append(persisted_notice)
+        edited_destination.messages.append(persisted_notice)
     else:
-        destination.messages.insert(min(insertion_index, len(destination.messages)), persisted_notice)
-    return True
+        edited_destination.messages.insert(
+            min(insertion_index, len(edited_destination.messages)),
+            persisted_notice,
+        )
+    return list(edited.values())
 
 
 def _finalize_queued_notice_in_new_session_storage(
@@ -483,11 +501,12 @@ def _finalize_queued_notice_in_new_session_storage(
         )
         if session is None:
             return
-        if _finalize_queued_notice_in_runs(
+        changed_runs = _finalize_queued_notice_in_runs(
             _session_run_outputs(session),
             response_turn_id=response_turn_id,
-        ):
-            storage.upsert_session(session)
+        )
+        if changed_runs:
+            save_runs(storage, session, changed_runs)
     finally:
         storage.close()
 
@@ -607,9 +626,10 @@ def _recover_prior_queued_notices(
     session: AgentSession | TeamSession,
     *,
     active_response_turn_id: str | None,
-) -> bool:
+) -> list[RunOutput | TeamRunOutput]:
+    """Return copies of the runs whose crash-left notices from earlier responses are finalized."""
     runs = _session_run_outputs(session)
-    changed = False
+    changed: dict[str | None, RunOutput | TeamRunOutput] = {}
     for response_turn_id in _queued_notice_response_turn_ids(runs):
         if response_turn_id == active_response_turn_id:
             continue
@@ -625,14 +645,11 @@ def _recover_prior_queued_notices(
             marker=_QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
         ):
             continue
-        changed = (
-            _finalize_queued_notice_in_runs(
-                runs,
-                response_turn_id=response_turn_id,
-            )
-            or changed
-        )
-    return changed
+        for edited_run in _finalize_queued_notice_in_runs(runs, response_turn_id=response_turn_id):
+            changed[edited_run.run_id] = edited_run
+            # Later response turns must edit the already-edited copy, not the stored run.
+            runs = [edited_run if run.run_id == edited_run.run_id else run for run in runs]
+    return list(changed.values())
 
 
 def scrub_queued_notice_session_context(
@@ -645,11 +662,12 @@ def scrub_queued_notice_session_context(
         return
     notice_context = _queued_message_notice_context.get()
     try:
-        if _recover_prior_queued_notices(
+        changed_runs = _recover_prior_queued_notices(
             scope_context.session,
             active_response_turn_id=notice_context.response_turn_id if notice_context is not None else None,
-        ):
-            scope_context.storage.upsert_session(scope_context.session)
+        )
+        if changed_runs:
+            save_runs(scope_context.storage, scope_context.session, changed_runs)
     except Exception:
         logger.exception(
             "Failed to recover queued-message notice in loaded session history",
@@ -669,43 +687,11 @@ def is_empty_completed_run(response: RunOutput | TeamRunOutput) -> bool:
     return isinstance(content, str) and not content.strip()
 
 
-def _remove_run_from_session(session: AgentSession | TeamSession, *, run_id: str) -> bool:
-    """Remove one run from a mutable session run list by run id."""
-    runs = session.runs or []
-    kept = [run for run in runs if not (isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id == run_id)]
-    if len(kept) == len(runs):
-        return False
-    session.runs = kept
-    return True
-
-
-def _remove_run_from_session_storage(
-    storage: BaseDb,
-    session_id: str,
-    *,
-    run_id: str,
-    session_type: SessionType,
-) -> bool:
-    """Remove one run from a persisted Agno session."""
-    raw_session = storage.get_session(session_id, session_type)
-    if raw_session is None:
-        return False
-    session = _load_queued_notice_session(
-        cast("AgentSession | TeamSession | dict[str, object]", raw_session),
-        session_type=session_type,
-    )
-    if session is None or not _remove_run_from_session(session, run_id=run_id):
-        return False
-    storage.upsert_session(session)
-    return True
-
-
 def discard_empty_completed_run(
     *,
     scope_context: ScopeSessionContext | None,
     session_id: str,
     run_id: str | None,
-    session_type: SessionType,
     entity_name: str,
     output_tokens: int | None,
 ) -> None:
@@ -713,7 +699,10 @@ def discard_empty_completed_run(
 
     A persisted assistant turn with no content teaches the model that ending the
     turn immediately is the expected continuation, so the run is removed from both
-    the loaded session and storage before the next prompt is built.
+    the loaded session and storage before the next prompt is built. The store is
+    told directly: agno persisted the run through its own session object, so the
+    scope session loaded before the run never held it and cannot say whether the
+    row exists.
     """
     logger.warning(
         "model_returned_empty_response",
@@ -725,14 +714,9 @@ def discard_empty_completed_run(
     if scope_context is None or not run_id:
         return
     try:
+        scope_context.storage.delete_runs([run_id])
         if scope_context.session is not None:
-            _remove_run_from_session(scope_context.session, run_id=run_id)
-        _remove_run_from_session_storage(
-            scope_context.storage,
-            session_id,
-            run_id=run_id,
-            session_type=session_type,
-        )
+            scope_context.session.runs = runs_without(_session_run_outputs(scope_context.session), [run_id])
     except Exception:
         logger.exception(
             "Failed to remove empty run from session history",

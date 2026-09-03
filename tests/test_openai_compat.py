@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.conftest import seed_session
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
@@ -4550,7 +4552,7 @@ class TestTeamCompletion:
                     ],
                 ),
             ]
-            scope_context.storage.upsert_session(scope_context.session)
+            seed_session(scope_context.storage, scope_context.session)
 
         with open_bound_scope_session_context(
             agents=[agent],

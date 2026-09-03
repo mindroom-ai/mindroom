@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -2909,3 +2910,27 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
 @pytest.fixture
 def enforce_turn_authorization() -> None:
     """Keep final TurnPolicy authorization active for tests that exercise it."""
+
+
+def seed_session[SessionT: "AgentSession | TeamSession"](storage: "BaseDb", session: SessionT) -> SessionT:
+    """Persist a session row and every run it holds, in order, and return the session.
+
+    Production code writes runs explicitly (``save_runs``/``replace_runs``);
+    tests seed whole histories with this instead.
+    """
+    storage.upsert_session(session)
+    for run in session.runs or []:
+        storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
+    return session
+
+
+def create_agno_2_sessions_db(path: "Path") -> "Path":
+    """Write the agno 2.6.12 ``code_sessions`` fixture database to ``path`` and return it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fixture = Path(__file__).parent / "fixtures" / "agno_2_6_12_code_sessions.sql"
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(fixture.read_text(encoding="utf-8"))
+    finally:
+        connection.close()
+    return path

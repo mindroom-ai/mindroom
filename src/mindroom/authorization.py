@@ -336,30 +336,13 @@ async def _get_available_responders_for_sender_authoritative(
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
-    """Return sender-visible room responders, refreshing membership while the cache is unsynced."""
-    cached_room_responders = get_available_responders_in_room(room, config, runtime_paths)
-    cached_visible_responders = filter_responders_by_sender_permissions(
-        cached_room_responders,
-        sender_id,
-        config,
-        runtime_paths,
-        membership_index,
-        room.room_id,
-    )
-    if room.members_synced:
-        return cached_visible_responders
+    """Return sender-visible room responders, refreshing membership while the cache is unsynced.
 
-    if not await ensure_room_membership_synced(client, room, sender_id=sender_id):
-        return cached_visible_responders
-
-    return filter_responders_by_sender_permissions(
-        get_available_responders_in_room(room, config, runtime_paths),
-        sender_id,
-        config,
-        runtime_paths,
-        membership_index,
-        room.room_id,
-    )
+    A failed refresh leaves the cached members untouched, so the same
+    cache-backed resolution serves both outcomes.
+    """
+    await ensure_room_membership_synced(client, room, sender_id=sender_id)
+    return _get_available_responders_for_sender(room, sender_id, config, runtime_paths, membership_index)
 
 
 def responder_candidate_entities_from_cached_room(

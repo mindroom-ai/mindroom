@@ -335,11 +335,6 @@ teams:
   helpers:
     agents: [code]
     mode: collaborate
-cultures:
-  engineering:
-    description: Keep things clean
-    agents: [code]
-    mode: automatic
 administrators:
   - "@owner:example.org"
 room_defaults:
@@ -2041,7 +2036,6 @@ def test_docker_backend_redacts_projected_config_secrets_and_support_state(
     assert "api_key" not in projected_config["models"]["default"]
     assert "api_key" not in projected_config["voice"]["stt"]
     assert projected_config["teams"] == {}
-    assert projected_config["cultures"] == {}
     assert projected_config["administrators"] == []
     assert projected_config["room_defaults"] == {}
     assert projected_config["rooms"] == {}

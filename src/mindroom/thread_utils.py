@@ -111,7 +111,9 @@ def check_agent_mentioned(
     Returns (mentioned_agents, am_i_mentioned, has_non_agent_mentions).
     ``has_non_agent_mentions`` is True when the message explicitly tags a
     joined participant who is *not* a configured agent and not in
-    ``config.bot_accounts``.
+    ``config.bot_accounts``. While the member cache is unsynced (the
+    authoritative refresh failed) every such mention counts, so a lost
+    membership fetch degrades to silence rather than an interjection.
     """
     raw_content = event_source.get("content", {})
     content = visible_content_from_content(raw_content) if isinstance(raw_content, dict) else {}
@@ -119,9 +121,9 @@ def check_agent_mentioned(
     mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config, runtime_paths)
     am_i_mentioned = agent_id in mentioned_agents
     non_agent_mentions = [uid for uid in all_mentioned_ids if not _is_bot_or_agent(uid, config, runtime_paths)]
-    has_non_agent_mentions = bool(non_agent_mentions) and not authorization.cached_joined_member_ids(
-        room,
-    ).isdisjoint(non_agent_mentions)
+    has_non_agent_mentions = bool(non_agent_mentions) and (
+        not room.members_synced or not authorization.cached_joined_member_ids(room).isdisjoint(non_agent_mentions)
+    )
 
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
 

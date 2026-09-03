@@ -1744,6 +1744,8 @@ class TestAgentBot(AgentBotTestBase):
         room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         room.add_member(bot.matrix_id.full_id, "Calculator", None)
         room.add_member("@user:localhost", "User", None)
+        # A synced cache is what makes "absent" mean absent rather than "not fetched yet".
+        room.members_synced = True
         if target_kind == "self":
             body = "@calculator could you help with this?"
             mentioned_user_ids = [ids["calculator"].full_id]

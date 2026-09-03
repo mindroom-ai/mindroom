@@ -281,6 +281,7 @@ class CodexResponses(MindRoomOpenAIResponses):
         response_format: dict[Any, Any] | type[BaseModel] | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | None = None,
     ) -> dict[str, Any]:
         """Add the top-level instructions field required by the Codex endpoint."""
         request_params = super().get_request_params(
@@ -288,6 +289,7 @@ class CodexResponses(MindRoomOpenAIResponses):
             response_format=response_format,
             tools=tools,
             tool_choice=tool_choice,
+            run_response=run_response,
         )
         request_params.setdefault("instructions", self._instructions_text())
         prompt_cache_key = self._prompt_cache_key()

@@ -1257,8 +1257,8 @@ def _prepare_scope_state_for_run(
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
     state = read_scope_state(session, scope)
-    if prune_reintroduced_runs(session, state):
-        storage.upsert_session(session)
+    # Persists its own deletes; the session row has nothing new to write.
+    prune_reintroduced_runs(storage, session, state)
     if consume_pending_force_compaction_scope(session, scope):
         state = set_force_compaction_state(session, scope, state, force=True)
         storage.upsert_session(session)

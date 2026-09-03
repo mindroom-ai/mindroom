@@ -6,7 +6,7 @@ import ast
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -89,6 +89,8 @@ async def _load_with_recovery(
 class _FakeAgentStorage:
     session: AgentSession | TeamSession | None
     upserted_session: AgentSession | TeamSession | None = None
+    upserted_runs: list[object] = field(default_factory=list)
+    deleted_run_ids: list[str] = field(default_factory=list)
 
     def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
         if self.session is None or self.session.session_id != session_id:
@@ -97,6 +99,19 @@ class _FakeAgentStorage:
 
     def upsert_session(self, session: AgentSession | TeamSession) -> None:
         self.upserted_session = session
+
+    def upsert_run(
+        self,
+        run: object,
+        session_id: str,
+        user_id: str | None = None,
+        run_index: int | None = None,
+    ) -> None:
+        del session_id, user_id, run_index
+        self.upserted_runs.append(run)
+
+    def delete_runs(self, run_ids: list[str]) -> None:
+        self.deleted_run_ids.extend(run_ids)
 
     def close(self) -> None:
         return None
@@ -547,8 +562,8 @@ async def test_prepare_redaction_removes_causal_run_suffix(journal_store: EventJ
         session_id=target.session_id,
         agent_id="agent",
         runs=[
-            RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"}),
-            RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$other"}),
+            RunOutput(run_id="run-1", session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"}),
+            RunOutput(run_id="run-2", session_id=target.session_id, metadata={"matrix_event_id": "$other"}),
         ],
     )
     storage = _FakeAgentStorage(session)
@@ -558,7 +573,7 @@ async def test_prepare_redaction_removes_causal_run_suffix(journal_store: EventJ
     should_suppress = await _prepare_redaction(store, target)
 
     assert should_suppress is False
-    assert storage.upserted_session is session
+    assert storage.deleted_run_ids == ["run-1", "run-2"]
     assert session.runs == []
 
 

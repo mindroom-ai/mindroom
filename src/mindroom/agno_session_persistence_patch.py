@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.db.base import BaseDb
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
     from agno.session import AgentSession, TeamSession, WorkflowSession
     from agno.team import Team
 
@@ -32,11 +34,18 @@ if TYPE_CHECKING:
 
 type _PersistenceTarget = tuple[str, str]
 
-_SUPPORTED_AGNO_VERSION = "2.6.12"
+# Agno 3.0 splits one session save into a session-row write (``asave_session``) and
+# per-run writes (``asave_run``); both call the synchronous SQLite adapter directly,
+# so both are offloaded through the same FIFO lane to keep their order.
+_SUPPORTED_AGNO_VERSION = "3.0.5"
 _ORIGINAL_AGENT_ASAVE_SESSION = agent_session.asave_session
 _ORIGINAL_AGENT_SAVE_SESSION = agent_session.save_session
+_ORIGINAL_AGENT_ASAVE_RUN = agent_session.asave_run
+_ORIGINAL_AGENT_SAVE_RUN = agent_session.save_run
 _ORIGINAL_TEAM_ASAVE_SESSION = team_session.asave_session
 _ORIGINAL_TEAM_SAVE_SESSION = team_session.save_session
+_ORIGINAL_TEAM_ASAVE_RUN = team_session.asave_run
+_ORIGINAL_TEAM_SAVE_RUN = team_session.save_run
 
 _PATCHED = False
 _PATCH_LOCK = threading.Lock()
@@ -114,18 +123,20 @@ def _run_prepared_operation(operations: SimpleQueue[Callable[[], object] | None]
     return None if operation is None else operation()
 
 
-async def _offload_sync_save[Owner, Session](
+async def _offload_sync_save[Owner, Payload](
     lane: _PersistenceLane,
-    save: Callable[[Owner, Session], object],
+    save: Callable[..., object],
     owner: Owner,
-    session: Session,
+    payload: Payload,
+    *save_args: object,
 ) -> None:
+    """Snapshot ``payload`` and run one synchronous save in the lane, in submission order."""
     operations: SimpleQueue[Callable[[], object] | None] = SimpleQueue()
     worker: Future[object | None] = lane.executor.submit(_run_prepared_operation, operations)
     try:
         context = contextvars.copy_context()
-        snapshot = deepcopy(session)
-        operation = partial(context.run, save, owner, snapshot)
+        snapshot = deepcopy(payload)
+        operation = partial(context.run, save, owner, snapshot, *save_args)
     except BaseException:
         operations.put(None)
         raise
@@ -134,40 +145,74 @@ async def _offload_sync_save[Owner, Session](
     await wait_for_future_until_complete(asyncio.wrap_future(worker))
 
 
-async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
+def _agent_lane(agent: Agent) -> _PersistenceLane | None:
+    """Return the lane for a standalone agent's registered synchronous database."""
     database = agent.db
-    if database is None or agent.team_id is not None or agent.workflow_id is not None or session.session_data is None:
-        await _ORIGINAL_AGENT_ASAVE_SESSION(agent, session)
-        return
+    if database is None or agent.team_id is not None or agent.workflow_id is not None:
+        return None
+    return _registered_lane(cast("BaseDb", database))
 
-    lane = _registered_lane(cast("BaseDb", database))
+
+def _team_lane(team: Team) -> _PersistenceLane | None:
+    """Return the lane for a top-level team's registered synchronous database."""
+    database = team.db
+    if database is None or team.parent_team_id is not None or team.workflow_id is not None:
+        return None
+    return _registered_lane(cast("BaseDb", database))
+
+
+async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
+    lane = _agent_lane(agent) if session.session_data is not None else None
     if lane is None:
         await _ORIGINAL_AGENT_ASAVE_SESSION(agent, session)
         return
-
     await _offload_sync_save(lane, _ORIGINAL_AGENT_SAVE_SESSION, agent, session)
 
 
-async def _team_asave_session(team: Team, session: TeamSession) -> None:
-    database = team.db
-    if database is None or team.parent_team_id is not None or team.workflow_id is not None:
-        await _ORIGINAL_TEAM_ASAVE_SESSION(team, session)
+async def _agent_asave_run(
+    agent: Agent,
+    run: RunOutput,
+    session_id: str,
+    user_id: str | None = None,
+    run_index: int | None = None,
+) -> None:
+    lane = _agent_lane(agent)
+    if lane is None:
+        await _ORIGINAL_AGENT_ASAVE_RUN(agent, run, session_id, user_id, run_index)
         return
+    await _offload_sync_save(lane, _ORIGINAL_AGENT_SAVE_RUN, agent, run, session_id, user_id, run_index)
 
-    lane = _registered_lane(cast("BaseDb", database))
+
+async def _team_asave_session(team: Team, session: TeamSession) -> None:
+    lane = _team_lane(team)
     if lane is None:
         await _ORIGINAL_TEAM_ASAVE_SESSION(team, session)
         return
-
     await _offload_sync_save(lane, _ORIGINAL_TEAM_SAVE_SESSION, team, session)
 
 
+async def _team_asave_run(
+    team: Team,
+    run: TeamRunOutput | RunOutput,
+    session_id: str,
+    user_id: str | None = None,
+    run_index: int | None = None,
+) -> None:
+    lane = _team_lane(team)
+    if lane is None:
+        await _ORIGINAL_TEAM_ASAVE_RUN(team, run, session_id, user_id, run_index)
+        return
+    await _offload_sync_save(lane, _ORIGINAL_TEAM_SAVE_RUN, team, run, session_id, user_id, run_index)
+
+
 def _is_applied() -> bool:
-    """Return whether both guarded async save replacements are installed."""
+    """Return whether every guarded async save replacement is installed."""
     return (
         _PATCHED
         and agent_session.asave_session is _agent_asave_session
+        and agent_session.asave_run is _agent_asave_run
         and team_session.asave_session is _team_asave_session
+        and team_session.asave_run is _team_asave_run
     )
 
 
@@ -183,11 +228,15 @@ def _apply_patch() -> bool:
             _PATCHED
             or version("agno") != _SUPPORTED_AGNO_VERSION
             or agent_session.asave_session is not _ORIGINAL_AGENT_ASAVE_SESSION
+            or agent_session.asave_run is not _ORIGINAL_AGENT_ASAVE_RUN
             or team_session.asave_session is not _ORIGINAL_TEAM_ASAVE_SESSION
+            or team_session.asave_run is not _ORIGINAL_TEAM_ASAVE_RUN
         ):
             return False
         agent_session.asave_session = cast("Any", _agent_asave_session)
+        agent_session.asave_run = cast("Any", _agent_asave_run)
         team_session.asave_session = cast("Any", _team_asave_session)
+        team_session.asave_run = cast("Any", _team_asave_run)
         _PATCHED = True
         return True
 

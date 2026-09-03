@@ -6472,6 +6472,8 @@ async def test_agent_finalization_persists_response_link_behind_pending_save(tmp
                 ),
             ],
         )
+        # The run row the link lands on exists before the contended session save starts.
+        probe.seed(save_storage, session)
         save_task = asyncio.create_task(owner.asave_session(session))
         assert await asyncio.to_thread(probe.save_started.wait, 5)
         probe.arm_link_storage()

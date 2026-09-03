@@ -80,6 +80,15 @@ class ThreadLocalGoogleServiceMixin:
         self._google_service_state().service = value
 
     @property
+    def _service(self) -> Any | None:  # noqa: ANN401
+        """Expose the same per-thread service under the name Agno's auth decorator reads."""
+        return self._google_service_state().service
+
+    @_service.setter
+    def _service(self, value: Any | None) -> None:  # noqa: ANN401
+        self._google_service_state().service = value
+
+    @property
     def _google_credential_key(self) -> object | None:
         """Return canonical scope and revision backing this thread's credentials."""
         return self._google_service_state().credential_key

@@ -228,7 +228,6 @@ Matrix sync callback
 - `credentials/` – JSON secrets synchronized from `.env`
 - `encryption_keys/` – Matrix E2E encryption keys
 - `sync_continuity/` – Crash-atomic Matrix checkpoints and pending join decrypt fences
-- `culture/` – Shared culture state
 - `logs/` – Log files
 - `matrix_state.yaml` – Matrix sync state
 
@@ -314,12 +313,6 @@ teams:
     role: Collaborative engineering assistant
     agents: [code]
     mode: collaborate
-
-cultures:
-  engineering:
-    description: Follow clean code principles and write tests
-    agents: [code]
-    mode: automatic
 
 knowledge_bases:
   engineering_docs:

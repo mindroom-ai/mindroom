@@ -167,7 +167,6 @@ mindroom run
 | **Images** | Pass user-sent images to vision-capable AI models |
 | **Matrix Desktop Bridge** | Observe or locally lease control of a computer over pinned Matrix E2EE without opening inbound ports |
 | **File & Video Attachments** | Context-scoped file and video handling with attachment IDs |
-| **Cultures** | Shared evolving principles across groups of agents |
 | **Interactive Q&A** | Clickable multiple-choice questions via Matrix reactions |
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
@@ -195,7 +194,6 @@ mindroom run
 - [Getting Started](https://docs.mindroom.chat/getting-started/) - Installation and first steps
 - [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) - Run only `uvx mindroom` locally against hosted Matrix
 - [Configuration](https://docs.mindroom.chat/configuration/) - All configuration options
-- [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
 - [Dashboard](https://docs.mindroom.chat/dashboard/) - Web UI for configuration
 - [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/) - Use agents from any OpenAI-compatible client
 - [Tools](https://docs.mindroom.chat/tools/) - Available tool integrations
@@ -698,14 +696,6 @@ Manage service credentials directly from the dashboard:
 - **Delete credential sets** using `/api/credentials/{service}`
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
 - `GITHUB_TOKEN` auto-seeds `github_private` (`username: x-access-token`, `token: <GITHUB_TOKEN>`, `_source: env`) unless the service is UI-managed
-
-### Culture
-
-Configure shared culture rules that apply across agents:
-
-- **Create/edit/delete cultures** with description and mode
-- **Assign agents** to cultures
-- **Mode selection** - `automatic` (always active), `agentic` (agent decides when to update), or `manual` (read-only)
 
 ### Schedules
 
@@ -1257,13 +1247,6 @@ teams:
       timeout_seconds: 600
     rooms: []                      # Optional: Rooms to auto-join
 
-# Culture configurations (optional)
-cultures:
-  engineering:
-    description: Follow clean code principles and write tests  # Shared principles
-    agents: [developer, reviewer]  # Agents assigned (each agent can belong to at most one culture)
-    mode: automatic                # automatic, agentic, or manual
-
 # Router configuration (optional)
 router:
   model: default                   # Optional: Model for routing (default: "default")
@@ -1668,7 +1651,6 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - [Agents](https://docs.mindroom.chat/configuration/agents/) - Configure individual AI agents
 - [Models](https://docs.mindroom.chat/configuration/models/) - Configure AI model providers
 - [Teams](https://docs.mindroom.chat/configuration/teams/) - Configure multi-agent collaboration
-- [Cultures](https://docs.mindroom.chat/configuration/cultures/) - Configure shared agent cultures
 - [Router](https://docs.mindroom.chat/configuration/router/) - Configure message routing
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Configure optional tools that agents load on demand
 - [Memory](https://docs.mindroom.chat/memory/) - Configure memory providers and behavior
@@ -3018,63 +3000,6 @@ The execution layer asks the model to refine that choice; when model selection f
 
 Dynamic teams do not have a named `teams:` entry, so their history replay and compaction policy comes from `defaults`, not from any participating agent's overrides.
 
-# Culture Configuration
-
-Cultures let a group of agents share evolving principles, practices, and conventions. A culture is backed by [Agno's CultureManager](https://docs.agno.com/agents/culture) and persists its knowledge in a SQLite database under `mindroom_data/culture/<culture_name>.db`.
-
-## Basic Culture
-
-```yaml
-cultures:
-  engineering:
-    description: Follow clean code principles and write tests
-    agents: [developer, reviewer]
-```
-
-## Full Configuration
-
-```yaml
-cultures:
-  engineering:
-    # Describes the shared principles this culture captures
-    description: Follow clean code principles, write tests, and review before merging
-
-    # Agents assigned to this culture (must be defined in agents section)
-    agents:
-      - developer
-      - reviewer
-
-    # How the culture is updated: automatic, agentic, or manual (default: automatic)
-    mode: automatic
-```
-
-## Configuration Fields
-
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `description` | No | `""` | Description of the shared principles and practices the culture captures |
-| `agents` | No | `[]` | Agent names assigned to this culture (must exist in the `agents` section). Each agent can belong to at most one culture |
-| `mode` | No | `"automatic"` | How culture knowledge is updated (see modes below) |
-
-## Culture Modes
-
-| Mode | Behavior |
-|------|----------|
-| `automatic` | Culture knowledge is automatically extracted from every agent interaction and added to the shared context |
-| `agentic` | The agent decides when to update culture knowledge via a tool call |
-| `manual` | Culture context is read-only; the description is included in agent context but knowledge is never updated |
-
-All modes include the culture description in the agent's context. The difference is whether and how the culture's knowledge base evolves over time.
-
-## Rules
-
-- Each agent can belong to **at most one** culture. Assigning the same agent to multiple cultures is a validation error.
-- All agents listed in a culture must exist in the top-level `agents` section.
-- Culture state is persisted to `mindroom_data/culture/<culture_name>.db` and survives restarts.
-- Culture managers are cached and shared across agents in the same culture — if two agents belong to the same culture, they share the same `CultureManager` instance.
-- For private agents, culture storage and manager caches are scoped to the resolved requester identity, so different requesters do not share culture state.
-- Changes to a culture's `description` or `mode` in `config.yaml` invalidate the cache, so the manager is recreated on the next hot-reload.
-
 # Router Configuration
 
 The router is a built-in system component that handles intelligent message routing and room management.
@@ -3227,7 +3152,8 @@ The rules are:
 4. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
 5. **Mentioning another joined room participant** — if a message tags only joined users who are neither managed entities nor configured bot accounts, agents and teams stay silent.
 
-Mentions of absent or merely invited user IDs do not suppress normal routing or automatic responses.
+Mentions of unmanaged user IDs that are absent from the room or merely invited do not suppress normal routing or automatic responses.
+Mentioning a configured agent that is not joined to the room still counts as an explicit mention for the other agents.
 
 #### Bot accounts
 
@@ -18367,7 +18293,6 @@ MindRoom stores data in the `mindroom_data` directory by default:
 - `learning/` - Per-agent Agno Learning state (SQLite, persistent across restarts)
 - `chroma/` - ChromaDB vector store for agent/team memories
 - `knowledge_db/` - Knowledge base vector stores
-- `culture/` - Shared culture state
 - `tracking/` - Durable response, callback-obligation, and lifecycle-hook state used to prevent duplicate work across restarts
 - `credentials/` - Synchronized secrets from `.env`
 - `logs/` - Application logs
@@ -18624,7 +18549,7 @@ The Docker backend starts one worker container per worker key and reuses it unti
 This is the simplest way to get one persistent container per agent without running Kubernetes.
 MindRoom builds a projected read-only config snapshot for each worker from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, rewrites config-relative paths into that snapshot, copies only the referenced config-relative assets needed for that worker into the snapshot, and mounts only the snapshot root into the container.
 MindRoom also sanitizes the projected worker `config.yaml`, removing sensitive config keys and authorization headers from the worker-visible snapshot before it is written.
-Control-plane-only sections that a worker never reads are cleared from that snapshot as well, including `teams`, `cultures`, `calls`, `room_models`, `bot_accounts`, `authorization`, and the Matrix room and space settings.
+Control-plane-only sections that a worker never reads are cleared from that snapshot as well, including `teams`, `calls`, `room_models`, `bot_accounts`, `authorization`, and the Matrix room and space settings.
 Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent's projected context files and assigned knowledge bases.
 `worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
 Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.

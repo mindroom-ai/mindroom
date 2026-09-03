@@ -113,8 +113,8 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
     def _should_fallback_to_original_auth(self) -> bool:
         return google_service_account_configured(self.service_account_path, self._runtime_paths)
 
-    def _service_account_auth(self) -> None:
-        """Build Google credentials from the configured service-account file."""
+    def _service_account_auth(self) -> Any:  # noqa: ANN401
+        """Return Google credentials built from the configured service-account file."""
         from google.oauth2 import service_account  # noqa: PLC0415
 
         if not self.service_account_path:
@@ -126,11 +126,11 @@ class GoogleDocsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Too
         )
         if self.delegated_user:
             creds = creds.with_subject(self.delegated_user)
-        self.creds = creds
+        return creds
 
     def _docs_service(self) -> Any:  # noqa: ANN401
         """Return the per-thread authenticated Google Docs service."""
-        self._auth()
+        self._authenticate()
         if self.service is None:
             self.service = build(
                 "docs",

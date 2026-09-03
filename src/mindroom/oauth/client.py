@@ -143,7 +143,7 @@ class _OAuthClientThreadState(threading.local):
 class _AuthDescriptor(Protocol):
     """Descriptor contract for unbound tool auth methods."""
 
-    def __get__(self, instance: object, owner: type[object] | None = None) -> Callable[[], None]:
+    def __get__(self, instance: object, owner: type[object] | None = None) -> Callable[[], Any]:
         """Bind the auth method to one tool instance."""
 
 
@@ -163,7 +163,7 @@ class ScopedOAuthClientMixin:
     _oauth_quota_project_id: str | None
     _defer_to_original_auth: bool
     _original_auth_completed: bool
-    _original_auth: Callable[[], None]
+    _original_auth: Callable[[], Any]
     _oauth_call_state: _OAuthClientThreadState
     creds: Any | None
     service: Any | None
@@ -216,8 +216,18 @@ class ScopedOAuthClientMixin:
         return self._load_stored_credentials()
 
     def _set_original_auth(self, auth_method: _AuthDescriptor) -> None:
-        """Store the bound parent auth callable for fallback."""
+        """Store the bound parent credential resolver used for the service-account fallback."""
         self._original_auth = auth_method.__get__(self, type(self))
+
+    def _resolve_creds(self) -> Any:  # noqa: ANN401
+        """Resolve credentials for Agno's auth decorator through MindRoom's credential policy.
+
+        Agno 3 calls this instead of ``_auth`` whenever a decorated tool sees
+        missing or expired credentials; without this override it would fall
+        back to Agno's own token files, DB lookups, and interactive OAuth.
+        """
+        self._authenticate()
+        return self.creds
 
     def _wrap_oauth_function_entrypoints(self) -> None:
         """Return structured OAuth prompts from every registered toolkit function."""
@@ -739,7 +749,7 @@ class ScopedOAuthClientMixin:
         if self._original_auth_completed and self.creds and self.creds.valid:
             return
         self.creds = None
-        self._original_auth()
+        self.creds = self._original_auth()
         self._original_auth_completed = True
 
     def _auth_with_stored_oauth(self) -> None:
@@ -794,8 +804,12 @@ class ScopedOAuthClientMixin:
             )
             raise self._connection_required() from exc
 
-    def _auth(self) -> None:
-        """Authenticate using the selected MindRoom or wrapped-tool credential source."""
+    def _authenticate(self) -> None:
+        """Authenticate using the selected MindRoom or wrapped-tool credential source.
+
+        Not named ``_auth``: Agno's Google toolkits store their ``AuthConfig`` on
+        ``self._auth``, and an instance attribute would shadow a mixin method.
+        """
         auth_source = self._select_auth_source()
         if auth_source in {_OAuthAuthSource.PROVIDED_CREDENTIALS, _OAuthAuthSource.VALID_CREDENTIALS}:
             return

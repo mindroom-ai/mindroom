@@ -713,14 +713,15 @@ def _settle_empty_run(
     *,
     continuation_count: int,
 ) -> bool:
-    """Discard one empty completed run; return whether one retry is granted.
+    """Discard the empty completed run; return whether one retry is granted.
 
-    The one-shot retry borrows a continuation slot so the outer loop's
-    iteration budget stays authoritative; a granted retry closes the spent
-    entity's runtime state exactly like the continuation handoff.
+    Every empty run is discarded, including the retry's: a persisted assistant
+    turn with no content teaches the model that ending immediately is the
+    expected continuation. The one-shot retry borrows a continuation slot so
+    the outer loop's iteration budget stays authoritative; a granted retry
+    closes the spent entity's runtime state exactly like the continuation
+    handoff.
     """
-    if run.empty_response_retried or continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
-        return False
     discard_empty_run(
         run.scope_context,
         EmptyRunDiscard(
@@ -729,6 +730,8 @@ def _settle_empty_run(
             output_tokens=resolution.output_tokens,
         ),
     )
+    if run.empty_response_retried or continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
+        return False
     run.empty_response_retried = True
     release_attempt_entity(run.scope_context)
     return True

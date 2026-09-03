@@ -294,9 +294,9 @@ get_plugin_state_root  # unused function (src/mindroom/tool_system/runtime_conte
 emit_custom_event  # unused function (src/mindroom/tool_system/runtime_context.py)
 config_edit  # unused function (src/mindroom/cli/config.py)
 _.search_files  # unused method (src/mindroom/tools/file.py)
+_.search_content  # unused method (src/mindroom/tools/file.py)
 config_validate  # unused function (src/mindroom/cli/config.py)
 config_resolve  # unused function (src/mindroom/cli/config.py)
-_.validate_culture_assignments  # unused method (src/mindroom/config/main.py)
 update_schedule  # unused function (src/mindroom/api/schedules.py)
 get_registered_tools  # unused function (src/mindroom/api/tools.py)
 list_knowledge_bases  # unused function (src/mindroom/api/knowledge.py)
@@ -336,3 +336,11 @@ FINAL  # unused variable (src/mindroom/event_journal/models.py)
 # Named only inside a `cast("_RoomIdEvent", event)` string literal, which
 # vulture does not resolve.
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
+
+# Agno 3 adapter overrides: agno reads the run-object cache attribute and calls drop_session itself.
+_._run_object_cache  # agno SqliteDb attribute replaced by the adapter (src/mindroom/agent_storage.py)
+_.drop_session  # agno SqliteDb calls it on the run-object cache (src/mindroom/agent_storage.py)
+_.upsert_sessions  # agno BaseDb interface method, overridden to keep the owner guard (src/mindroom/agent_storage.py)
+_.ns_resolver  # pydantic ValidateCallWrapper attribute reset by the patch (src/mindroom/agno_tool_wrapper_patch.py)
+_.runs_from_rows  # agno SqliteDb calls it on the run-object cache (src/mindroom/agent_storage.py)
+_enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/agent_storage.py)

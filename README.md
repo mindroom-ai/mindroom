@@ -254,7 +254,7 @@ ANTHROPIC_API_KEY=your-key-here
 # MINDROOM_CONFIG_PATH=/path/to/config.yaml
 ```
 
-Teams, cultures, per-room models, context compaction, history controls, and memory backends are covered in the [configuration docs](docs/configuration/index.md) and at [docs.mindroom.chat](https://docs.mindroom.chat).
+Teams, per-room models, context compaction, history controls, and memory backends are covered in the [configuration docs](docs/configuration/index.md) and at [docs.mindroom.chat](https://docs.mindroom.chat).
 
 ## Deployment
 

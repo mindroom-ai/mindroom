@@ -12,10 +12,8 @@ from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 
-from mindroom.agent_storage import get_agent_session, get_team_session
+from mindroom.agent_storage import get_agent_session, get_team_session, save_runs
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.history.storage import new_scope_session
 from mindroom.prompt_message_tags import render_msg_tag
@@ -31,6 +29,8 @@ if TYPE_CHECKING:
 
     from agno.db.base import BaseDb
     from agno.models.response import ToolExecution
+    from agno.session.agent import AgentSession
+    from agno.session.team import TeamSession
 
     from mindroom.history.runtime import ScopeSessionContext
 
@@ -308,15 +308,8 @@ def persist_interrupted_replay_snapshot(
         session_id=session_id,
         is_team=is_team,
     )
-    if is_team:
-        assert isinstance(persisted_session, TeamSession)
-        assert isinstance(persisted_run, TeamRunOutput)
-        persisted_session.upsert_run(persisted_run)
-    else:
-        assert isinstance(persisted_session, AgentSession)
-        assert isinstance(persisted_run, RunOutput)
-        persisted_session.upsert_run(persisted_run)
     storage.upsert_session(persisted_session)
+    save_runs(storage, persisted_session, [persisted_run])
 
 
 def persist_interrupted_replay(

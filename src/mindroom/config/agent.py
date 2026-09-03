@@ -1,4 +1,4 @@
-"""Agent, team, and culture configuration models."""
+"""Agent and team configuration models."""
 
 from __future__ import annotations
 
@@ -34,9 +34,8 @@ from mindroom.config.validation import duplicate_items, validate_history_limit_c
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
-CultureMode = Literal["automatic", "agentic", "manual"]
 _PrivateWorkerScope = Literal["user", "user_agent"]
-_RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset({"sessions", "learning", "knowledge_db", "chroma", "culture"})
+_RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset({"sessions", "learning", "knowledge_db", "chroma"})
 
 
 def _validate_safe_relative_path(
@@ -506,24 +505,3 @@ class RoomConfig(BaseModel):
             if data.get(field_name) is None:
                 data.pop(field_name, None)
         return data
-
-
-class CultureConfig(BaseModel):
-    """Configuration for a shared culture."""
-
-    description: str = Field(default="", description="Description of shared principles and practices")
-    agents: list[str] = Field(default_factory=list, description="List of agent names assigned to this culture")
-    mode: CultureMode = Field(
-        default="automatic",
-        description="Culture update mode: automatic, agentic, or manual",
-    )
-
-    @field_validator("agents")
-    @classmethod
-    def validate_unique_agents(cls, agents: list[str]) -> list[str]:
-        """Ensure each agent is assigned at most once per culture."""
-        duplicates = duplicate_items(agents)
-        if duplicates:
-            msg = f"Duplicate agents are not allowed in a culture: {', '.join(duplicates)}"
-            raise ValueError(msg)
-        return agents

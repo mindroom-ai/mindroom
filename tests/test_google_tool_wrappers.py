@@ -1403,7 +1403,7 @@ def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
 
     tools[0].creds.refresh(object())
     tools[1].creds.refresh(object())
-    tools[0]._build_service()
+    tools[0]._build_service(tools[0].creds)
 
     assert provider_calls == 1
     assert tools[0].creds.token == rotated_access
@@ -2366,8 +2366,8 @@ def test_google_wrapper_applies_env_file_service_account_to_upstream_auth(
     )
 
     assert tool.creds is None
-    assert tool.service_account_path == str(service_account_path)
-    assert tool.delegated_user == "alice@example.com"
+    assert tool._get_service_account_path() == str(service_account_path)
+    assert tool._get_delegated_user() == "alice@example.com"
     assert tool._should_fallback_to_original_auth() is True
 
 
@@ -2403,10 +2403,7 @@ def test_google_drive_forwards_env_file_quota_project_to_service_account_auth(
     assert tool.quota_project_id == "billing-project"
 
 
-def test_google_wrapper_service_account_fallback_wins_over_valid_cached_oauth(
-    runtime_paths: RuntimePaths,
-    tmp_path: Path,
-) -> None:
+def test_google_wrapper_service_account_fallback_wins_over_valid_cached_oauth(runtime_paths: RuntimePaths) -> None:
     """A valid cached OAuth credential must not bypass service-account auth."""
 
     class ValidOAuthCreds:
@@ -2421,13 +2418,12 @@ def test_google_wrapper_service_account_fallback_wins_over_valid_cached_oauth(
     tool._provided_credentials = None
     tool._defer_to_original_auth = True
     tool._original_auth_completed = False
-    tool.service_account_path = str(tmp_path / "service-account.json")
     tool.creds = ValidOAuthCreds()
     calls: list[str] = []
 
-    def original_auth() -> None:
+    def original_auth() -> ValidServiceAccountCreds:
         calls.append("original")
-        tool.creds = ValidServiceAccountCreds()
+        return ValidServiceAccountCreds()
 
     tool._original_auth = original_auth
 
@@ -2437,10 +2433,7 @@ def test_google_wrapper_service_account_fallback_wins_over_valid_cached_oauth(
     assert calls == ["original"]
 
 
-def test_google_wrapper_valid_provided_creds_skip_service_account_fallback(
-    runtime_paths: RuntimePaths,
-    tmp_path: Path,
-) -> None:
+def test_google_wrapper_valid_provided_creds_skip_service_account_fallback(runtime_paths: RuntimePaths) -> None:
     """Explicit valid credentials should keep Agno's no-auth constructor contract."""
     tool = object.__new__(GoogleDriveTools)
     tool._runtime_paths = runtime_paths
@@ -2448,7 +2441,6 @@ def test_google_wrapper_valid_provided_creds_skip_service_account_fallback(
     tool._provided_credentials = _valid_credentials()
     tool._defer_to_original_auth = True
     tool._original_auth_completed = False
-    tool.service_account_path = str(tmp_path / "service-account.json")
     tool.creds = tool._provided_credentials
     calls: list[str] = []
 
@@ -2671,3 +2663,14 @@ def test_google_drive_constructor_rejects_invalid_max_read_size_with_current_err
             creds=_valid_credentials(),
             max_read_size=max_read_size,
         )
+
+
+def test_agno_resolve_creds_routes_through_mindroom_auth(runtime_paths: RuntimePaths, tmp_path: Path) -> None:
+    """Agno's auth decorator resolves credentials via MindRoom's policy, never its own OAuth flow."""
+    tool = GmailTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+    )
+
+    with pytest.raises(OAuthConnectionRequired):
+        tool._resolve_creds()

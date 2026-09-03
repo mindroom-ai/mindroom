@@ -12,7 +12,7 @@ from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
-from mindroom.agent_storage import get_agent_session, get_team_session
+from mindroom.agent_storage import get_agent_session, get_team_session, replace_runs
 from mindroom.agents import remove_run_by_event_id
 from mindroom.handled_turns import (
     HandledTurnLedger,
@@ -823,11 +823,11 @@ class TurnStore:
             )
             if removed_summary_dependents:
                 assert session is not None
-                session.runs = []
+                replace_runs(storage, session, [])
             invalidated_summary = False
             if session is not None and (removed_run or scope_contains_source):
                 invalidated_summary = invalidate_compacted_replay(session, history_scope)
-                if invalidated_summary or removed_summary_dependents:
+                if invalidated_summary:
                     storage.upsert_session(session)
             return removed_run or removed_summary_dependents or invalidated_summary
         finally:

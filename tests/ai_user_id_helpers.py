@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 from agno.db.base import SessionType
 from agno.models.message import Message
+from agno.run.agent import RunOutput
+from agno.run.team import TeamRunOutput
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import (
@@ -217,6 +219,30 @@ class _SessionStorageView:
 
     def upsert_session(self, session: AgentSession | TeamSession) -> None:
         self._store.session = session
+
+    def upsert_run(
+        self,
+        run: object,
+        session_id: str,
+        user_id: str | None = None,
+        run_index: int | None = None,
+    ) -> None:
+        """Store the run as its own row: replace by run_id or append, like agno's runs table."""
+        del user_id, run_index
+        stored = self._store.session
+        if stored is None or stored.session_id != session_id:
+            return
+        assert isinstance(run, RunOutput | TeamRunOutput)
+        runs = [existing for existing in stored.runs or [] if existing.run_id != run.run_id]
+        stored.runs = [*runs, run]
+        self._store.session = stored
+
+    def delete_runs(self, run_ids: list[str]) -> None:
+        stored = self._store.session
+        if stored is None:
+            return
+        stored.runs = [run for run in stored.runs or [] if run.run_id not in run_ids]
+        self._store.session = stored
 
     def close(self) -> None:
         return None

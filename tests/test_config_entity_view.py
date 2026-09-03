@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryConfig, MemorySearchConfig
@@ -81,12 +81,6 @@ def _representative_config() -> Config:
         },
         # Non-default global memory settings so inheritance assertions are non-degenerate.
         memory=MemoryConfig(backend="none", search=MemorySearchConfig(include=["notes/**/*.md"])),
-        cultures={
-            "engineering": CultureConfig(
-                description="Write tests first",
-                agents=["overriding_agent"],
-            ),
-        },
         knowledge_bases={"engineering_docs": KnowledgeBaseConfig(path="./knowledge_docs")},
     )
 
@@ -195,19 +189,8 @@ def test_scope_resolution() -> None:
     assert config.resolve_entity("inheriting_agent").scope_label == "unscoped"
 
 
-def test_culture_and_knowledge_resolution() -> None:
+def test_knowledge_resolution() -> None:
     config = _representative_config()
-
-    culture = config.resolve_entity("overriding_agent").culture
-    assert culture is not None
-    culture_name, culture_config = culture
-    assert culture_name == "engineering"
-    assert culture_config.description == "Write tests first"
-    assert config.resolve_entity("inheriting_agent").culture is None
-    # Culture assignment is a membership scan, so non-agent names resolve to None instead of raising.
-    assert config.resolve_entity("overriding_team").culture is None
-    with pytest.raises(ValueError, match="defaults-only scope has no per-agent config"):
-        _ = config.resolve_entity(None).culture
 
     assert config.resolve_entity("overriding_agent").knowledge_base_ids == ["engineering_docs"]
     assert config.resolve_entity("inheriting_agent").knowledge_base_ids == []

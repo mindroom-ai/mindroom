@@ -134,7 +134,6 @@ class TestGmailTools:
                 runtime_paths=runtime_paths,
                 credentials_manager=CredentialsManager(tmp_path / "credentials"),
             )
-            gmail_tools.service_account_path = None
 
         assert gmail_tools._should_fallback_to_original_auth() is True
 
@@ -193,13 +192,12 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
-            gmail_tools.service_account_path = None
 
             gmail_tools.creds = MagicMock()
             gmail_tools.creds.valid = True
             gmail_tools._provided_creds = True
 
-            gmail_tools._auth()
+            gmail_tools._authenticate()
 
     @patch("google.auth.transport.requests.Request")
     @patch("google.oauth2.credentials.Credentials")
@@ -214,7 +212,6 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
-            gmail_tools.service_account_path = None
 
             gmail_tools.creds = None
 
@@ -229,7 +226,7 @@ class TestGmailTools:
             mock_request = MagicMock()
             mock_request_class.return_value = mock_request
 
-            gmail_tools._auth()
+            gmail_tools._authenticate()
             refresh.assert_called_once()
             bounded_request = refresh.call_args.args[0]
             assert isinstance(bounded_request, partial)
@@ -254,14 +251,13 @@ class TestGmailTools:
             mock_parent_init.return_value = None
 
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_manager)
-            gmail_tools.service_account_path = None
             gmail_tools.creds = None
 
             mock_parent_auth = Mock()
             gmail_tools._original_auth = mock_parent_auth
 
             with pytest.raises(OAuthConnectionRequired):
-                gmail_tools._auth()
+                gmail_tools._authenticate()
 
             # Verify warning was logged
             mock_logger.warning.assert_not_called()
@@ -278,7 +274,6 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
             gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
-            gmail_tools.service_account_path = None
             gmail_tools.creds = None
 
             # Mock Credentials to raise an exception
@@ -286,17 +281,16 @@ class TestGmailTools:
                 mock_creds.side_effect = Exception("Test error")
 
                 with pytest.raises(OAuthConnectionRequired):
-                    gmail_tools._auth()
+                    gmail_tools._authenticate()
 
     def test_inheritance_from_agno_gmail_tools(self) -> None:
         """Test that GmailTools properly inherits from AgnoGmailTools."""
         # Verify inheritance
         assert issubclass(GmailTools, AgnoGmailTools)
 
-        # Verify DEFAULT_SCOPES is accessible
-        assert hasattr(GmailTools, "DEFAULT_SCOPES")
-        assert isinstance(GmailTools.DEFAULT_SCOPES, list)
-        assert len(GmailTools.DEFAULT_SCOPES) > 0
+        # Verify the upstream default scopes are accessible
+        assert isinstance(GmailTools.default_scopes, list)
+        assert len(GmailTools.default_scopes) > 0
 
 
 class _GmailBatch:

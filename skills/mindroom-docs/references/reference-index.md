@@ -19,7 +19,6 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Agents | `configuration/agents.md` | `configuration/agents/index.md` | `page__configuration__agents__index.md` |
 | Models | `configuration/models.md` | `configuration/models/index.md` | `page__configuration__models__index.md` |
 | Teams | `configuration/teams.md` | `configuration/teams/index.md` | `page__configuration__teams__index.md` |
-| Cultures | `configuration/cultures.md` | `configuration/cultures/index.md` | `page__configuration__cultures__index.md` |
 | Router | `configuration/router.md` | `configuration/router/index.md` | `page__configuration__router__index.md` |
 | Overview | `tools/index.md` | `tools/index.md` | `page__tools__index.md` |
 | Dynamic Tools | `tools/dynamic-tools.md` | `tools/dynamic-tools/index.md` | `page__tools__dynamic-tools__index.md` |

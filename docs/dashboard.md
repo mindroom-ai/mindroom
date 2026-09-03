@@ -126,14 +126,6 @@ Manage service credentials directly from the dashboard:
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
 - `GITHUB_TOKEN` auto-seeds `github_private` (`username: x-access-token`, `token: <GITHUB_TOKEN>`, `_source: env`) unless the service is UI-managed
 
-### Culture
-
-Configure shared culture rules that apply across agents:
-
-- **Create/edit/delete cultures** with description and mode
-- **Assign agents** to cultures
-- **Mode selection** - `automatic` (always active), `agentic` (agent decides when to update), or `manual` (read-only)
-
 ### Schedules
 
 View and manage scheduled tasks across rooms:

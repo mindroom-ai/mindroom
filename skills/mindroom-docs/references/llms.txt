@@ -12,7 +12,6 @@
 - [Agents](https://docs.mindroom.chat/configuration/agents/)
 - [Models](https://docs.mindroom.chat/configuration/models/)
 - [Teams](https://docs.mindroom.chat/configuration/teams/)
-- [Cultures](https://docs.mindroom.chat/configuration/cultures/)
 - [Router](https://docs.mindroom.chat/configuration/router/)
 - [Overview](https://docs.mindroom.chat/tools/)
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/)

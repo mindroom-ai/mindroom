@@ -29,13 +29,14 @@ SKIP_CONFIG_FIELD_VALIDATION = {
 # not a contract failure. `apify` is here because `pyproject.toml` declares
 # `apify-client` for `platform_machine != 'aarch64'`, which means every arm64
 # host runs this suite without it.
-OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph", "telegram"})
+OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph"})
 IGNORED_AGNO_PARAMS = {
     # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
     "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
     # Mapping-only inputs have no safe authored ConfigField representation.
     "mem0": {"config"},
     "scrapegraph": {"headers"},
+    "tavily": {"search_params"},
     # Agno accepts an SSLContext for Slack, but MindRoom has no safe serialized UI/config path for it.
     "slack": {"ssl"},
     "youtube": {"proxies"},

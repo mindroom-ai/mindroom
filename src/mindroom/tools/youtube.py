@@ -56,6 +56,13 @@ if TYPE_CHECKING:
             required=False,
             default=None,
         ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+        ),
     ],
     dependencies=["youtube_transcript_api"],
     docs_url="https://docs.agno.com/tools/toolkits/entertainment/youtube",

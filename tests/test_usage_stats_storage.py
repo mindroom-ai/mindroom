@@ -29,6 +29,7 @@ from mindroom.usage_stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
+from tests.conftest import create_agno_2_sessions_db, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -222,7 +223,8 @@ def test_reader_extracts_runs_written_by_mindroom_agno_storage(tmp_path: Path) -
         session_table="code_sessions",
     )
     try:
-        storage.upsert_session(
+        seed_session(
+            storage,
             AgentSession(
                 session_id="session-1",
                 agent_id="code",
@@ -288,7 +290,7 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path) ->
         session_table="engineering_sessions",
     )
     try:
-        storage.upsert_session(session)
+        seed_session(storage, session)
     finally:
         storage.close()
 
@@ -532,3 +534,33 @@ def test_admin_discovery_reports_directory_read_failure(
         and source.detail == "source discovery unavailable"
         for source in sources
     )
+
+
+def test_reader_merges_legacy_blob_with_runs_table(tmp_path: Path) -> None:
+    """Run-table rows win on run_id; legacy-only runs are appended, matching Agno's read merge."""
+    database = create_agno_2_sessions_db(tmp_path / "code.db")
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "CREATE TABLE code_sessions_runs (run_id TEXT PRIMARY KEY, session_id TEXT, run_type TEXT, "
+            "agent_id TEXT, team_id TEXT, workflow_id TEXT, user_id TEXT, parent_run_id TEXT, status TEXT, "
+            "run_index INTEGER, run_data TEXT, created_at INTEGER NOT NULL, updated_at INTEGER)",
+        )
+        connection.execute(
+            "INSERT INTO code_sessions_runs (run_id, session_id, run_type, run_index, run_data, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("run-1", "session-1", "agent", 0, json.dumps({**_run(), "metrics": {"total_tokens": 99}}), 1),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    result = list(iter_usage_storage_rows(_source(database)))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert [run.run_id for run in row.runs] == ["run-1", "run-2", "run-3"]
+    assert row.runs[0].metrics == {"total_tokens": 99}
+    assert row.runs[1].metrics == {"input_tokens": 2, "output_tokens": 2, "total_tokens": 4}
+    assert row.payload_bytes > 0

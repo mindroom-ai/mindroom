@@ -24,7 +24,6 @@ nav = [
     { "Agents" = "configuration/agents.md" },
     { "Models" = "configuration/models.md" },
     { "Teams" = "configuration/teams.md" },
-    { "Cultures" = "configuration/cultures.md" },
     { "Router" = "configuration/router.md" },
   ] },
   { "Tools" = [

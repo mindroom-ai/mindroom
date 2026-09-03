@@ -57,6 +57,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
+    seed_session,
 )
 
 if TYPE_CHECKING:
@@ -358,7 +359,7 @@ def _forced_compaction_context(
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     runtime_context = _hook_runtime_context(
         config=config,
         runtime_paths=runtime_paths,

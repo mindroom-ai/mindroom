@@ -230,30 +230,6 @@ class IndexingSettings:
         )
 
 
-class _CollectionExistenceEmbedder(Embedder):
-    """Minimal embedder for collection probes that must never embed content."""
-
-    def get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    async def async_get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-
 def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
     """Check collection existence without constructing Agno Knowledge."""
     from agno.vectordb.chroma import ChromaDb  # noqa: PLC0415
@@ -262,7 +238,8 @@ def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
         collection=collection_name,
         path=str(storage_path),
         persistent_client=True,
-        embedder=_CollectionExistenceEmbedder(),
+        # The base Embedder raises on every embed call, so a probe can never embed content.
+        embedder=Embedder(),
     )
     return vector_db.exists()
 

@@ -827,13 +827,11 @@ class KnowledgeManager:
                 # Agno/Chroma upsert keys by content hash, so stale chunks from an older
                 # version of the same file can remain unless we clear by source metadata first.
                 await asyncio.to_thread(knowledge.remove_vectors_by_metadata, {SOURCE_PATH_KEY: relative_path})
-            # Knowledge.ainsert is async by name only: it eventually calls into the
-            # vector database's synchronous batch upsert (e.g. ChromaDB's Rust
-            # _upsert) on the running event loop, blocking every other coroutine
-            # for as long as the embed+upsert batch takes. Use the sync insert API
-            # via asyncio.to_thread so embedding + vector database work runs on a
-            # worker thread and the loop stays responsive to Matrix sync, tool
-            # calls, and cache writes.
+            # Knowledge.ainsert still reads and chunks the file synchronously and
+            # embeds chunk by chunk on the running event loop. Use the sync insert
+            # API via asyncio.to_thread so reading, embedding, and the vector
+            # database write all run on a worker thread and the loop stays
+            # responsive to Matrix sync, tool calls, and cache writes.
             await asyncio.to_thread(
                 knowledge.insert,
                 path=str(resolved_path),

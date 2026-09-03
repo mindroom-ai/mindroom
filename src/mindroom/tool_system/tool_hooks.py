@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
-from agno.tools.function import FunctionCall
+from agno.tools.function import FunctionCall, _detached, _record_entrypoint_result, _start_entrypoint_call
 
+from mindroom import agno_tool_wrapper_patch
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -89,7 +90,9 @@ class _ToolApprovalGate(Protocol):
 
 # Agno does not currently expose a hook-chain extension point for unwrapping MindRoom's
 # deferred sync-bridge results. Keep these wrappers covered by tests when bumping Agno
-# in uv.lock, and drop them once upstream supports this as public API.
+# in uv.lock, and drop them once upstream supports this as public API. The chain builders
+# take the result-cache plumbing (``cached_result``, ``raw_results``, ``cache_key``) that
+# ``FunctionCall.execute``/``aexecute`` thread through (verified against agno 3.0.5).
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execution_chain_async
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN = FunctionCall._build_nested_execution_chain
 _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
@@ -437,8 +440,17 @@ def _patch_agno_sync_tool_hook_chain() -> None:
     def _patched_build_nested_execution_chain(
         self: FunctionCall,
         entrypoint_args: dict[str, Any],
+        cached_result: Any | None = None,  # noqa: ANN401
+        raw_results: list[Any] | None = None,
+        cache_key: str | None = None,
     ) -> Callable[..., _ToolHookResult]:
-        execution_chain = _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN(self, entrypoint_args)
+        execution_chain = _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN(
+            self,
+            entrypoint_args,
+            cached_result=cached_result,
+            raw_results=raw_results,
+            cache_key=cache_key,
+        )
 
         def _wrapped_execution_chain(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
             return _resolve_deferred_sync_result(execution_chain(name, func, args))
@@ -453,18 +465,34 @@ def _build_sync_async_execution_chain(
     function_call: FunctionCall,
     entrypoint: Callable[..., _ToolHookResult],
     entrypoint_args: dict[str, Any],
+    *,
+    cached_result: Any | None,  # noqa: ANN401
+    raw_results: list[Any] | None,
+    cache_key: str | None,
 ) -> Callable[..., Awaitable[_ToolHookResult]]:
-    """Build Agno's async hook chain around one offloaded synchronous leaf."""
+    """Build Agno's async hook chain around one offloaded synchronous leaf.
+
+    Mirrors ``FunctionCall._build_nested_execution_chain_async``: a cache hit
+    stands in for the entrypoint call unless a hook rewrote the keyed
+    arguments, and every real entrypoint return is recorded in ``raw_results``
+    so the caller can store it.
+    """
 
     async def execute_sync_entrypoint(
         _name: str,
         _func: Callable[..., Any],
         _args: dict[str, Any],
     ) -> _ToolHookResult:
+        if cached_result is not None and not function_call._moved_its_key(cache_key, entrypoint_args):
+            return _detached(cached_result)
         arguments = entrypoint_args.copy()
         if function_call.arguments is not None:
             arguments.update(function_call.arguments)
-        return await _run_sync_tool_entrypoint(entrypoint, arguments)
+        slot = _start_entrypoint_call(raw_results) if raw_results is not None else -1
+        result = await _run_sync_tool_entrypoint(entrypoint, arguments)
+        if raw_results is not None:
+            _record_entrypoint_result(raw_results, slot, result)
+        return result
 
     def create_hook_wrapper(
         inner_func: Callable[..., Awaitable[_ToolHookResult]],
@@ -503,6 +531,9 @@ def _patch_agno_async_tool_hook_chain() -> None:
     async def _patched_build_nested_execution_chain_async(
         self: FunctionCall,
         entrypoint_args: dict[str, Any],
+        cached_result: Any | None = None,  # noqa: ANN401
+        raw_results: list[Any] | None = None,
+        cache_key: str | None = None,
     ) -> Callable[..., Awaitable[_ToolHookResult]]:
         entrypoint = self.function.entrypoint
         if (
@@ -512,9 +543,22 @@ def _patch_agno_async_tool_hook_chain() -> None:
             or inspect.isasyncgenfunction(entrypoint)
             or inspect.isgeneratorfunction(entrypoint)
         ):
-            execution_chain = await _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC(self, entrypoint_args)
+            execution_chain = await _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC(
+                self,
+                entrypoint_args,
+                cached_result=cached_result,
+                raw_results=raw_results,
+                cache_key=cache_key,
+            )
         else:
-            execution_chain = _build_sync_async_execution_chain(self, entrypoint, entrypoint_args)
+            execution_chain = _build_sync_async_execution_chain(
+                self,
+                entrypoint,
+                entrypoint_args,
+                cached_result=cached_result,
+                raw_results=raw_results,
+                cache_key=cache_key,
+            )
 
         async def _wrapped_execution_chain(
             name: str,
@@ -532,6 +576,7 @@ def _patch_agno_async_tool_hook_chain() -> None:
 
 _patch_agno_sync_tool_hook_chain()
 _patch_agno_async_tool_hook_chain()
+agno_tool_wrapper_patch.apply_patch()
 
 
 async def _run_sync_tool_entrypoint(

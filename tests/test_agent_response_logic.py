@@ -1003,6 +1003,37 @@ class TestAgentResponseLogic:
             is True
         )
 
+    def test_unsynced_member_cache_treats_any_human_mention_as_suppressing(self) -> None:
+        """A failed membership refresh must degrade to silence, not to an interjection."""
+        room = create_mock_room(config=self.config)
+        event_source = {
+            "content": {
+                "body": "@bob can you take this?",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": ["@bob:localhost"]},
+            },
+        }
+
+        room.members_synced = False
+        _, _, unsynced_has_non_agent_mentions = check_agent_mentioned(
+            event_source,
+            self.agent_id("calculator"),
+            self.config,
+            self.runtime_paths,
+            room=room,
+        )
+        room.members_synced = True
+        _, _, synced_has_non_agent_mentions = check_agent_mentioned(
+            event_source,
+            self.agent_id("calculator"),
+            self.config,
+            self.runtime_paths,
+            room=room,
+        )
+
+        assert unsynced_has_non_agent_mentions is True
+        assert synced_has_non_agent_mentions is False
+
     def test_explicit_target_agent_mention_still_works_in_multi_agent_thread(self) -> None:
         """Explicitly mentioning the target agent overrides multi-agent follow-up suppression."""
         thread_history = [
