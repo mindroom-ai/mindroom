@@ -1,0 +1,51 @@
+# Invited-room ownership isolation report
+
+## Root cause
+
+Persisted `invited_rooms.json` files record which managed Matrix accounts must rejoin rooms, but call resolution and thread export also treated those membership records as authoritative ownership.
+An invitation accepted by a second call-enabled agent therefore created two ownership candidates and disabled calls through the existing ambiguity guard.
+Thread export then deduplicated those claims by configuration order and used Matrix membership alone to authorize per-agent output targets, allowing a second agent's workspace to ingest private history it did not own.
+Legacy claim files contain neither inviter provenance nor timestamps, so conflicting historical ownership cannot be reconstructed safely.
+
+## Design
+
+Authored room configuration is now authoritative when it names exactly one calls-enabled owner, while conflicting invite-only ownership remains fail-closed with an actionable configuration remedy.
+Thread-export rooms now carry their configured or invited source entities, and every non-administrative export target must explicitly declare which source entities it accepts.
+Configured multi-entity rooms preserve every authorized source while selecting one deterministic Matrix reader account only for transport.
+Conflicting current or retired invite claims are never resolved by iteration order, and a cleanup pass retracts exporter-owned copies from every target while recording a failure.
+Malformed ownership files, symlinked claim paths, symlinked state directories, and unsafe agent-state roots stop ownership discovery instead of being interpreted as absent evidence.
+The ordinary invite lifecycle retains its existing fail-open state recovery and its dedicated `accept_invites` policy, so this change does not weaken or conflate invitation and responder-access policy.
+
+## Changed files
+
+- `src/mindroom/entity_resolution.py` gives explicit call-room configuration precedence and reports an exact remediation for unsafe ambiguity.
+- `src/mindroom/matrix/invited_rooms_store.py` adds a strict ownership-evidence loader while preserving the lifecycle loader's behavior.
+- `src/mindroom/thread_export/models.py` models source scope and invited-room conflicts with typed dataclasses.
+- `src/mindroom/thread_export/policy.py` enforces source-entity authorization before membership checks or export writes.
+- `src/mindroom/thread_export/selection.py` derives source provenance, discovers retired claims safely, and classifies conflicts deterministically.
+- `src/mindroom/thread_export/service.py` retracts ambiguous legacy exports and makes the administrative export's all-source scope explicit.
+- `tests/test_entity_resolution.py` covers configured precedence and actionable invite-only ambiguity.
+- `tests/test_thread_export_selection.py` covers provenance, raw room IDs, shared configuration, retired state, malformed state, and symlink rejection.
+- `tests/test_thread_export_execution.py` covers mandatory target scope and cross-agent retraction despite Matrix membership.
+- `tests/test_thread_export_service.py` covers deterministic cleanup across all targets for ambiguous legacy claims.
+
+## Verification
+
+- Focused tests were written red before production changes for call ownership, source-scoped export, ambiguous cleanup, raw-ID ownership, retired claims, symlink safety, and malformed claim handling.
+- `uv run pytest -q -n 0 tests/test_entity_resolution.py tests/test_thread_export_selection.py tests/test_thread_export_execution.py tests/test_thread_export_service.py tests/test_room_invites.py tests/test_matrix_rtc_call_manager.py` passed all 273 tests.
+- `uv run pytest -q` completed the full repository suite at 100 percent with exit status zero and only existing dependency, fork, and unawaited-mock warnings.
+- `uv run pre-commit run --all-files` passed every repository hook, including Ruff, ty, Vulture, Tach, frontend formatting, linting, and type checking.
+- The final independent security diff review approved the core change with no blockers after running its focused 74-test suite.
+
+## Residual risks and rollout
+
+The external `mindroom-ai/thread-export-plugin` must be released before or atomically with this core change because each per-agent `ThreadExportTarget` must now pass `source_entity_names=(agent_name,)`, or an explicit tuple for an intentionally shared target.
+No permissive compatibility default was added because that would recreate the privacy boundary failure.
+The first export pass after rollout removes ambiguous room copies from the filesystem, and the corresponding knowledge bases must complete a refresh so already indexed chunks are evicted from retrieval.
+Invite-only rooms with genuinely conflicting legacy claims intentionally remain unavailable for calls until operators configure the room under exactly one calls-enabled agent.
+Malformed or unsafe persisted claim evidence intentionally blocks thread export until an operator validates and repairs that state.
+
+## Consultation and commit
+
+Consulted Claude: invited-room membership vs ownership boundary — unavailable because Claude CLI was not logged in — preserved secondary membership and scoped call/export ownership instead.
+Implementation commit: `a93f47097bf2618c13e94f554e0c0e85d1139261`.
