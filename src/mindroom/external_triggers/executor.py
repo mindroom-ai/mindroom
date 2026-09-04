@@ -51,10 +51,19 @@ async def execute_external_trigger(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_reader: ConversationReader,
+    continue_thread_event_id: str | None = None,
 ) -> str | None:
-    """Post one authenticated external trigger payload to its configured Matrix target."""
+    """Post one authenticated external trigger payload to its configured Matrix target.
+
+    ``continue_thread_event_id`` names the Matrix thread root an earlier delivery
+    with the same ``thread_key`` created; the new message joins that thread
+    instead of opening another per-fire root.
+    """
     room_id = snapshot.resolved_room_id
-    thread_event_id = None if snapshot.target.new_thread else snapshot.target.thread_id
+    if continue_thread_event_id is not None:
+        thread_event_id: str | None = continue_thread_event_id
+    else:
+        thread_event_id = None if snapshot.target.new_thread else snapshot.target.thread_id
     latest_thread_event_id = None
     if thread_event_id is not None:
         latest_thread_event_id = await conversation_reader.latest_thread_event_id(
@@ -75,7 +84,11 @@ async def execute_external_trigger(
         mentioned_user_ids=mentioned_user_ids,
         thread_event_id=thread_event_id,
         latest_thread_event_id=latest_thread_event_id,
-        extra_content=_external_trigger_content_metadata(snapshot, payload),
+        extra_content=_external_trigger_content_metadata(
+            snapshot,
+            payload,
+            per_fire_root=snapshot.target.new_thread and continue_thread_event_id is None,
+        ),
     )
     delivered = await send_matrix_message(client, room_id, content)
     if delivered is None:
@@ -98,6 +111,8 @@ async def is_external_trigger_owner_joined_target_room(
 def _external_trigger_content_metadata(
     snapshot: TriggerDeliverySnapshot,
     payload: ExternalTriggerPayload,
+    *,
+    per_fire_root: bool,
 ) -> dict[str, Any]:
     """Return Matrix content metadata for one external trigger dispatch."""
     metadata: dict[str, Any] = {
@@ -107,6 +122,6 @@ def _external_trigger_content_metadata(
         _EXTERNAL_TRIGGER_KIND_KEY: payload.kind,
         _EXTERNAL_TRIGGER_EVENT_ID_KEY: payload.event_id,
     }
-    if snapshot.target.new_thread:
+    if per_fire_root:
         metadata[PER_FIRE_THREAD_ROOT_KEY] = True
     return metadata

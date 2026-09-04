@@ -26,6 +26,7 @@ from mindroom.api import external_triggers as external_triggers_api
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
 from mindroom.external_triggers.auth import mint_trigger_capability, sign_trigger_request
+from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim, ExternalTriggerReplayStore
 from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget, TriggerDeliverySnapshot
 from mindroom.matrix.state import MatrixState
 from mindroom.response_admission import ResponseAdmissionGate
@@ -160,6 +161,25 @@ def _create_record(runtime_paths: constants.RuntimePaths, config: Config, public
         max_body_bytes=65536,
         config=config,
     )
+
+
+def _create_new_thread_record(trigger_api: TriggerApiContext, *, trigger_id: str = "campground-threads") -> str:
+    """Create a reusable signed trigger that opens a per-fire thread on every delivery."""
+    ExternalTriggerStore(trigger_api.runtime_paths).create_record(
+        trigger_id=trigger_id,
+        owner_user_id=_OWNER,
+        created_by_agent_name="research",
+        created_in_room_id="campground",
+        created_in_thread_id=None,
+        target=ExternalTriggerTarget(room_id="campground", thread_id=None, agent="research", new_thread=True),
+        public_key=_public_key_b64(trigger_api.private_key),
+        key_id="campground-main",
+        allowed_kinds=["campground.availability"],
+        replay_window_seconds=30,
+        max_body_bytes=65536,
+        config=Config.model_validate(_config_payload()),
+    )
+    return trigger_id
 
 
 def _create_capability_record(
@@ -886,3 +906,187 @@ def test_duplicate_event_id_returns_duplicate_response(
     assert first.status_code == 202
     assert second.status_code == 202
     assert second.json()["duplicate"] is True
+
+
+def test_thread_key_groups_new_thread_deliveries_into_one_matrix_thread(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliveries sharing a thread key continue the first delivery's Matrix thread."""
+    continued: list[str | None] = []
+    delivered_event_ids = iter(["$root-a", "$reply-a", "$root-b"])
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str:
+        continued.append(continue_thread_event_id)
+        return next(delivered_event_ids)
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    trigger_id = _create_new_thread_record(trigger_api)
+
+    def post(event_id: str, thread_key: str, nonce: str) -> Response:
+        return _post_signed(
+            trigger_api,
+            body=_body(event_id=event_id, thread_key=thread_key),
+            nonce=nonce,
+            trigger_id=trigger_id,
+        )
+
+    first = post("msg-1", "chat:C1:100", "nonce-1")
+    second = post("msg-2", "chat:C1:100", "nonce-2")
+    other = post("msg-3", "chat:C1:200", "nonce-3")
+
+    assert [response.status_code for response in (first, second, other)] == [202, 202, 202]
+    assert continued == [None, "$root-a", None]
+    assert [response.json()["matrix_event_id"] for response in (first, second, other)] == [
+        "$root-a",
+        "$reply-a",
+        "$root-b",
+    ]
+
+
+def test_thread_key_is_ignored_for_fixed_thread_targets(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fixed target thread already collects every delivery, so no key lookup happens."""
+    continued: list[str | None] = []
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str:
+        continued.append(continue_thread_event_id)
+        return "$matrix-event"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+
+    first = _post_signed(trigger_api, body=_body(event_id="msg-1", thread_key="slack:C1:100"), nonce="nonce-1")
+    second = _post_signed(trigger_api, body=_body(event_id="msg-2", thread_key="slack:C1:100"), nonce="nonce-2")
+
+    assert (first.status_code, second.status_code) == (202, 202)
+    assert continued == [None, None]
+
+
+def _new_thread_replay_store(trigger_api: TriggerApiContext) -> ExternalTriggerReplayStore:
+    control_state_root = trigger_api.runtime_paths.control_state_root
+    assert control_state_root is not None
+    return ExternalTriggerReplayStore(control_state_root)
+
+
+def _post_keyed(trigger_api: TriggerApiContext, trigger_id: str, event_id: str, nonce: str) -> Response:
+    return _post_signed(
+        trigger_api,
+        body=_body(event_id=event_id, thread_key="chat:C1:100"),
+        nonce=nonce,
+        trigger_id=trigger_id,
+    )
+
+
+def test_failed_continuation_keeps_thread_key_bound(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient send failure on a follow-up must not split the conversation into a new root."""
+    continued: list[str | None] = []
+    outcomes = iter(["$root-a", None, "$reply-a"])
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str | None:
+        continued.append(continue_thread_event_id)
+        return next(outcomes)
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    trigger_id = _create_new_thread_record(trigger_api)
+
+    first = _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-1")
+    failed = _post_keyed(trigger_api, trigger_id, "msg-2", "nonce-2")
+    retried = _post_keyed(trigger_api, trigger_id, "msg-2", "nonce-3")
+
+    assert (first.status_code, failed.status_code, retried.status_code) == (202, 502, 202)
+    assert continued == [None, "$root-a", "$root-a"]
+    assert retried.json()["matrix_event_id"] == "$reply-a"
+
+
+def test_failed_first_delivery_releases_thread_key_reservation(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When opening the root fails, the next delivery with the key may open it instead of waiting."""
+    continued: list[str | None] = []
+    outcomes = iter([None, "$root-a", "$reply-a"])
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str | None:
+        continued.append(continue_thread_event_id)
+        return next(outcomes)
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    trigger_id = _create_new_thread_record(trigger_api)
+
+    failed = _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-1")
+    opened = _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-2")
+    followed = _post_keyed(trigger_api, trigger_id, "msg-2", "nonce-3")
+
+    assert (failed.status_code, opened.status_code, followed.status_code) == (502, 202, 202)
+    assert continued == [None, None, "$root-a"]
+
+
+def test_thread_key_being_opened_elsewhere_returns_409_for_retry(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent first delivery holds the key; the loser is told to retry, not given a second root."""
+    executed: list[str | None] = []
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str:
+        executed.append(continue_thread_event_id)
+        return "$never"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    trigger_id = _create_new_thread_record(trigger_api)
+    snapshot = ExternalTriggerStore(trigger_api.runtime_paths).delivery_snapshot(
+        trigger_id,
+        config=Config.model_validate(_config_payload()),
+        config_generation=1,
+    )
+    assert snapshot is not None
+    replay_store = _new_thread_replay_store(trigger_api)
+    replay_store.claim_thread_key(
+        snapshot.replay_scope,
+        "chat:C1:100",
+        room_id=snapshot.resolved_room_id,
+        now=int(time.time()),
+        pending_ttl_seconds=60,
+    )
+
+    response = _post_keyed(trigger_api, trigger_id, "msg-2", "nonce-1")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "External trigger thread is being opened by another delivery"
+    assert executed == []
+    # The event id claim was rolled back, so the same event can be retried once the thread exists.
+    assert (
+        replay_store.claim_event_id(snapshot.replay_scope, "msg-2", now=int(time.time()), ttl_seconds=60)
+        is ExternalTriggerEventClaim.FRESH
+    )
+
+
+def test_exception_during_first_delivery_releases_thread_key_reservation(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception while opening the root releases the key just like a None result does."""
+    continued: list[str | None] = []
+    attempts = iter([RuntimeError("matrix unavailable"), "$root-a"])
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str:
+        continued.append(continue_thread_event_id)
+        outcome = next(attempts)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    trigger_id = _create_new_thread_record(trigger_api)
+
+    with pytest.raises(RuntimeError, match="matrix unavailable"):
+        _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-1")
+    opened = _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-2")
+
+    assert opened.status_code == 202
+    assert continued == [None, None]

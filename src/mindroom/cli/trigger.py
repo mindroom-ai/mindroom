@@ -105,6 +105,11 @@ def send(
     message: str = typer.Option(..., "--message", help="Trigger payload message."),
     event_id: str | None = typer.Option(None, "--event-id", help="Optional idempotency event id."),
     title: str | None = typer.Option(None, "--title", help="Optional trigger title."),
+    thread_key: str | None = typer.Option(
+        None,
+        "--thread-key",
+        help="Optional key; deliveries sharing it land in one Matrix thread on new_thread triggers.",
+    ),
     data_json: str | None = typer.Option(None, "--data-json", help="Optional JSON object for trigger data."),
     timeout: float = typer.Option(_DEFAULT_TIMEOUT, "--timeout", help="HTTP request timeout in seconds."),
     verify_tls: bool = typer.Option(True, "--verify-tls/--no-verify-tls", help="Verify TLS certificates."),
@@ -128,6 +133,7 @@ def send(
         message=message,
         event_id=event_id or secrets.token_hex(16),
         title=title,
+        thread_key=thread_key,
         data=_decode_data_json(data_json),
     )
     timestamp = str(int(time.time()))
@@ -194,12 +200,14 @@ def _trigger_body_bytes(
     event_id: str,
     title: str | None,
     data: dict[str, object],
+    thread_key: str | None = None,
 ) -> bytes:
     payload: dict[str, object | None] = {
         "kind": kind,
         "message": message,
         "event_id": event_id,
         "title": title,
+        "thread_key": thread_key,
         "data": data,
     }
     return json.dumps(
