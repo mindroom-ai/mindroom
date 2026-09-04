@@ -19,6 +19,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, LargeMessageStrategy
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
@@ -34,6 +35,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
     SendTextRequest,
     StreamingDeliveryRequest,
+    _segment_transaction_id,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DepartureSource
@@ -43,7 +45,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDelivery
 from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _calculate_delivery_event_size,
-    _calculate_event_size,
+    calculate_event_size,
 )
 from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome
 from mindroom.message_target import MessageTarget
@@ -86,6 +88,7 @@ pytestmark = pytest.mark.asyncio
 
 _ROOM_ID = "!room:localhost"
 _AGENT_USER_ID = "@agent:localhost"
+_SEGMENT_PAYLOADS_RESULT_KEY = "io.mindroom.matrix_segment_payloads"
 
 
 def _failed_delivery() -> MatrixDeliveryFailure:
@@ -149,10 +152,14 @@ def _gateway(
     sending_device_id: str | None = "CURRENT-DEVICE",
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
     terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None,
+    large_message_strategy: LargeMessageStrategy = "sidecar",
 ) -> DeliveryGateway:
     """Return a delivery gateway whose only real collaborator is the outbox."""
     config = bind_runtime_paths(
-        Config(agents={"agent": AgentConfig(display_name="Agent")}),
+        Config(
+            agents={"agent": AgentConfig(display_name="Agent")},
+            defaults=DefaultsConfig(large_message_strategy=large_message_strategy),
+        ),
         test_runtime_paths(tmp_path),
     )
     client = AsyncMock()
@@ -1118,7 +1125,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """A recoverable final edit must not leave an impossible outbox retry."""
         outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
+        gateway = _gateway(tmp_path, outbox, large_message_strategy="split")
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
@@ -1147,10 +1154,121 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.terminal_status == "completed"
         delivery = outbox.rows["$cause", "final"]
         frozen = delivery.payload
-        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
         assert frozen["m.new_content"][DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
-        assert delivery.result == {"body": answer, "interactive": None}
-        assert client.room_send.await_args.kwargs["content"] == frozen
+        assert delivery.result is not None
+        assert delivery.result["body"] == answer
+        assert delivery.result["interactive"] is None
+        continuations = delivery.result[_SEGMENT_PAYLOADS_RESULT_KEY]
+        assert isinstance(continuations, list)
+        assert continuations
+        parts = [frozen["m.new_content"], *continuations]
+        assert "".join(part["body"] for part in parts) == answer
+        assert all(part["format"] == "org.matrix.custom.html" for part in parts)
+        assert all("formatted_body" in part for part in parts)
+        assert all("file" not in part and "url" not in part for part in parts)
+        sent_contents = [call.kwargs["content"] for call in client.room_send.await_args_list]
+        assert sent_contents == [frozen, *continuations]
+
+    async def test_sidecar_strategy_keeps_oversized_final_on_the_attachment_path(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The default strategy uploads one sidecar instead of segmenting the answer."""
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.upload.return_value = (
+            nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/sidecar-strategy"}),
+            None,
+        )
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$sent", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+
+        outcome = await gateway.deliver_final(
+            replace(self._final_request("x" * 100_000), defer_source_handoff=True),
+        )
+
+        assert outcome.terminal_status == "completed"
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
+        assert frozen["msgtype"] == "m.file"
+        assert calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert client.upload.await_count == 1
+        assert client.room_send.await_count == 1
+        assert delivery.result is not None
+        assert _SEGMENT_PAYLOADS_RESULT_KEY not in delivery.result
+
+    async def test_recovery_from_a_new_device_sends_only_the_missing_continuations(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Adopting the primary event must not strand or duplicate continuations.
+
+        The earlier device crashed between the primary send and the
+        continuations, and one continuation did land. Transaction IDs are
+        scoped to the dead device, so the replacement device cannot resend
+        blindly: each segment is matched by its exact frozen content and only
+        the missing one goes out, under its stable derived transaction ID.
+        """
+        outbox = FakeOutbox()
+        gateway = _gateway(tmp_path, outbox, large_message_strategy="split")
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        answer = "\n\n".join(f"## Part {index}\n\n" + "x" * 500 for index in range(200))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
+            await gateway.deliver_final(replace(self._final_request(answer), defer_source_handoff=True))
+        row = outbox.rows["$cause", "final"]
+        assert row.acknowledged_event_id is None
+        assert row.result is not None
+        continuations = row.result[_SEGMENT_PAYLOADS_RESULT_KEY]
+        assert isinstance(continuations, list)
+        assert len(continuations) >= 2
+
+        async def found_events(
+            _client: object,
+            _room_id: str,
+            *,
+            delivery_content: Mapping[str, object],
+            **_kwargs: object,
+        ) -> str | None:
+            if delivery_content == row.payload:
+                return "$primary"
+            return None
+
+        missing_indices = [index for index in range(len(continuations)) if index != 1]
+        recovered_gateway = _gateway(tmp_path, outbox, sending_device_id="NEW-DEVICE", large_message_strategy="split")
+        delivered = DeliveredMatrixEvent("$continuation", {})
+        with (
+            patch(
+                "mindroom.delivery_gateway.find_outbox_delivery_event_id_via_room_messages",
+                AsyncMock(side_effect=found_events),
+            ),
+            patch(
+                "mindroom.delivery_gateway.missing_outbox_delivery_copy_indices_via_room_messages",
+                AsyncMock(return_value=missing_indices),
+            ),
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                AsyncMock(return_value=delivered),
+            ) as send,
+        ):
+            recovered = await recovered_gateway.recover_deliveries()
+
+        assert recovered.recovered == 1
+        assert [call.args[2] for call in send.await_args_list] == [continuations[i] for i in missing_indices]
+        assert [call.kwargs["transaction_id"] for call in send.await_args_list] == [
+            _segment_transaction_id(row.transaction_id, index + 1) for index in missing_indices
+        ]
+        assert outbox.rows["$cause", "final"].acknowledged_event_id == "$primary"
 
     async def test_delivery_identity_is_included_in_the_validated_event_size(
         self,
@@ -1185,7 +1303,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert outcome.terminal_status == "completed"
         frozen = outbox.rows["$cause", "final"].payload
-        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
         assert client.room_send.await_args.kwargs["content"] == frozen
 
     async def test_uncached_encrypted_room_is_fitted_before_durable_enqueue(
@@ -1194,7 +1312,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Remote encryption state must shape the payload before the outbox freezes it."""
         outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
+        gateway = _gateway(tmp_path, outbox, large_message_strategy="split")
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.rooms = {}
@@ -1212,17 +1330,24 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             outcome = await gateway.deliver_final(self._final_request("x" * 50_000))
 
         assert outcome.event_id == "$sent"
-        frozen = outbox.rows["$cause", "final"].payload
-        assert frozen["msgtype"] == "m.file"
-        assert (
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
+        assert frozen["msgtype"] == "m.text"
+        assert delivery.result is not None
+        continuations = delivery.result[_SEGMENT_PAYLOADS_RESULT_KEY]
+        assert isinstance(continuations, list)
+        assert continuations
+        assert all(
             _calculate_delivery_event_size(
-                frozen,
+                candidate,
                 room_id=_ROOM_ID,
                 room_encrypted=True,
                 device_id="DEVICE",
             )
             <= _MATRIX_EVENT_HARD_LIMIT
+            for candidate in [frozen, *continuations]
         )
+        client.upload.assert_not_awaited()
         client.room_get_state_event.assert_awaited_once_with(_ROOM_ID, "m.room.encryption")
 
     async def test_plaintext_durable_payload_is_fitted_for_a_later_encrypted_send(
@@ -1231,7 +1356,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Persistence must freeze bytes that remain valid if encryption is enabled."""
         outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
+        gateway = _gateway(tmp_path, outbox, large_message_strategy="split")
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
@@ -1256,18 +1381,26 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
 
         assert outcome.terminal_status == "completed"
-        frozen = outbox.rows["$cause", "final"].payload
-        assert frozen["file"]["url"] == "mxc://localhost/transition-sidecar"
+        delivery = outbox.rows["$cause", "final"]
+        frozen = delivery.payload
+        assert frozen["msgtype"] == "m.text"
+        assert "file" not in frozen
         assert "url" not in frozen
-        assert (
+        assert delivery.result is not None
+        continuations = delivery.result[_SEGMENT_PAYLOADS_RESULT_KEY]
+        assert isinstance(continuations, list)
+        assert continuations
+        assert all(
             _calculate_delivery_event_size(
-                frozen,
+                candidate,
                 room_id=_ROOM_ID,
                 room_encrypted=True,
                 device_id="DEVICE",
             )
             <= _MATRIX_EVENT_HARD_LIMIT
+            for candidate in [frozen, *continuations]
         )
+        client.upload.assert_not_awaited()
 
     async def test_unknown_uncached_room_encryption_fails_before_durable_enqueue(
         self,
@@ -3026,6 +3159,89 @@ class TestGenericDeliveryDeviceChangePolicy:
         assert stored is not None
         assert stored.acknowledged_event_id == "$prior"
         gateway.deps.runtime.client.room_messages.assert_awaited_once()
+
+    async def test_identical_continuations_reconcile_by_copy_count(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """One delivered copy must not satisfy two byte-identical continuations.
+
+        Long homogeneous responses can repeat a continuation payload exactly.
+        Existence-based reconciliation would see the first copy in the room and
+        acknowledge the row with the second copy never sent; counting copies
+        leaves exactly the missing positions to resend.
+        """
+        duplicate = {
+            "msgtype": "m.text",
+            "body": "z" * 1_000,
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>zzz</p>\n",
+        }
+        tail = {**duplicate, "body": "the end", "formatted_body": "<p>the end</p>\n"}
+        await alice.enqueue_matrix_delivery(
+            delivery_id="segmented-turn",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": "the start"},
+            result={_SEGMENT_PAYLOADS_RESULT_KEY: [duplicate, duplicate, tail]},
+        )
+        claimed = await alice.claim_matrix_delivery(
+            delivery_id="segmented-turn",
+            stage=DeliveryStage.FINAL,
+            sending_device_id="OLD-DEVICE",
+        )
+        assert claimed is not None
+        assert claimed.result is not None
+        continuations = claimed.result[_SEGMENT_PAYLOADS_RESULT_KEY]
+
+        def room_event(event_id: str, content: Mapping[str, object]) -> nio.Event:
+            event = nio.Event.parse_event(
+                {
+                    "event_id": event_id,
+                    "room_id": _ROOM_ID,
+                    "sender": _AGENT_USER_ID,
+                    "origin_server_ts": 1_000,
+                    "type": "m.room.message",
+                    "content": dict(content),
+                },
+            )
+            assert isinstance(event, nio.Event)
+            return event
+
+        # The earlier device delivered the primary and one copy of the
+        # duplicated continuation before crashing.
+        prior_primary = room_event("$prior-primary", dict(claimed.payload))
+        prior_continuation = room_event("$prior-continuation", dict(continuations[0]))
+        gateway = _gateway(tmp_path, alice, sending_device_id="NEW-DEVICE")
+        gateway.deps.runtime.client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse(
+                room_id=_ROOM_ID,
+                chunk=[prior_continuation, prior_primary],
+                start="start",
+                end=None,
+            ),
+        )
+        sent = AsyncMock(return_value=DeliveredMatrixEvent("$resent", {}))
+
+        async def never_sends(_claimed: MatrixDelivery) -> str:
+            msg = "an adopted primary is never resent"
+            raise AssertionError(msg)
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", sent):
+            outcome = await gateway._response_delivery(never_sends, handoff=None).recover()
+
+        stored = await alice.load_matrix_delivery(delivery_id="segmented-turn", stage=DeliveryStage.FINAL)
+        assert outcome == RecoveryOutcome(recovered=1, failed=0)
+        assert stored is not None
+        assert stored.acknowledged_event_id == "$prior-primary"
+        # The second duplicate and the tail were missing: exactly those go out.
+        assert [call.args[2] for call in sent.await_args_list] == [continuations[1], continuations[2]]
+        assert [call.kwargs["transaction_id"] for call in sent.await_args_list] == [
+            _segment_transaction_id(claimed.transaction_id, 2),
+            _segment_transaction_id(claimed.transaction_id, 3),
+        ]
 
     async def test_final_marker_does_not_adopt_the_initial_placeholder(
         self,

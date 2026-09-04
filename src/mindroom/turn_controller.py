@@ -88,6 +88,7 @@ from mindroom.matrix.media import (
     is_image_message_event,
     is_matrix_media_dispatch_event,
 )
+from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
@@ -1693,6 +1694,7 @@ class TurnController:
                 prompt=selection_payload.prompt,
                 model_prompt=selection_payload.model_prompt,
                 thread_history=thread_history,
+                member_display_names=room_member_display_names(room),
                 existing_event_id=ack_event_id,
                 existing_event_is_placeholder=True,
                 user_id=requester_user_id,
@@ -2028,6 +2030,7 @@ class TurnController:
             try:
                 response_request = ResponseRequest(
                     thread_history=dispatch.context.thread_history,
+                    member_display_names=room_member_display_names(room),
                     prompt=event.body,
                     user_id=dispatch.requester_user_id,
                     existing_event_id=recovered_response_event_id,

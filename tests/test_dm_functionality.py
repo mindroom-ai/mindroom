@@ -61,7 +61,7 @@ class TestDMResponseLogic:
         room.room_id = "!dm:localhost"
         # Use the actual MatrixID from config to ensure domain matches
         agent_matrix_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
-        room.users = {agent_matrix_id: None}
+        room.users = {agent_matrix_id: nio.MatrixUser(agent_matrix_id)}
 
         # In DM mode, agent should respond when no one else has
         should_respond = agent_response_should_respond(
@@ -92,7 +92,7 @@ class TestDMResponseLogic:
         room.room_id = "!dm:localhost"
         # Use the actual MatrixID from config to ensure domain matches
         agent_matrix_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
-        room.users = {agent_matrix_id: None}
+        room.users = {agent_matrix_id: nio.MatrixUser(agent_matrix_id)}
 
         # When mentioned, always respond
         should_respond = agent_response_should_respond(
@@ -125,7 +125,7 @@ class TestDMResponseLogic:
         room.room_id = "!dm:localhost"
         test_agent_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
         other_agent_id = entity_ids(config, runtime_paths_for(config))["other_agent"].full_id
-        room.users = {test_agent_id: None, other_agent_id: None}
+        room.users = {test_agent_id: nio.MatrixUser(test_agent_id), other_agent_id: nio.MatrixUser(other_agent_id)}
 
         # Another agent is mentioned, not this one
         should_respond = agent_response_should_respond(
@@ -161,7 +161,7 @@ class TestDMResponseLogic:
         room.room_id = "!dm:localhost"
         test_agent_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
         other_agent_id = entity_ids(config, runtime_paths_for(config))["other_agent"].full_id
-        room.users = {test_agent_id: None, other_agent_id: None}
+        room.users = {test_agent_id: nio.MatrixUser(test_agent_id), other_agent_id: nio.MatrixUser(other_agent_id)}
 
         # No mentions - agents should not respond individually (team formation happens at a higher level)
         should_respond_test = agent_response_should_respond(
@@ -388,7 +388,7 @@ class TestDMIntegration:
                 if "researcher" in entity_ids(config, runtime_paths_for(config))
                 else "@mindroom_researcher:localhost"
             )
-            room.users = {researcher_id: None}  # Single agent in room
+            room.users = {researcher_id: nio.MatrixUser(researcher_id)}  # Single agent in room
 
             event = MagicMock(spec=nio.RoomMessageText)
             event.body = "Hello researcher, can you help?"
@@ -477,7 +477,7 @@ class TestDMIntegration:
             room.name = "DM Room"
             # Use the correct MatrixID from config
             test_agent_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
-            room.users = {test_agent_id: None}  # Single agent in room
+            room.users = {test_agent_id: nio.MatrixUser(test_agent_id)}  # Single agent in room
 
             event = MagicMock(spec=nio.RoomMessageText)
             event.body = "Hello agent!"

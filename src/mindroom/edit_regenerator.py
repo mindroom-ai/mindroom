@@ -12,6 +12,7 @@ from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
+from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
@@ -312,6 +313,7 @@ class EditRegenerator:
                     prompt_map,
                     dict(record.source_event_metadata),
                     timestamp_formatter=self.deps.timestamp_formatter,
+                    member_display_names=room_member_display_names(room),
                 )
                 if tagged_prompt is not None:
                     prompt, structured = tagged_prompt, True
@@ -345,6 +347,7 @@ class EditRegenerator:
         return (
             ResponseRequest(
                 thread_history=driving_edit.context.thread_history,
+                member_display_names=room_member_display_names(room),
                 prompt=prompt,
                 response_envelope=driving_edit.envelope,
                 existing_event_id=record.response_event_id,

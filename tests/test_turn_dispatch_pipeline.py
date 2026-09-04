@@ -551,8 +551,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!test:localhost"
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = MagicMock(spec=nio.RoomMessageText)
         event.event_id = "$event"
         event.sender = "@user:localhost"
@@ -1875,7 +1874,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
-        room.users = {"@user:localhost": MagicMock()}
+        room.users = {"@user:localhost": nio.MatrixUser("@user:localhost")}
         voice_event = _room_audio_event(sender="@user:localhost", event_id="$voice-followup", room_id=room.room_id)
         voice_event.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$thread_root"}
         prepared_event = PreparedIngress(
@@ -2174,8 +2173,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         event = MagicMock()
         event.event_id = "$event"
         event.body = "hello"
@@ -2274,8 +2272,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         event = MagicMock()
         event.event_id = "$event"
         event.body = "hello"
@@ -2368,8 +2365,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         event = MagicMock()
         event.event_id = "$event"
         event.body = "hello"
@@ -2448,8 +2444,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         event = MagicMock()
         event.event_id = "$event"
         dispatch = PreparedDispatch(
@@ -2526,7 +2521,10 @@ class TestAgentBot(AgentBotTestBase):
         room.room_id = "!test:localhost"
         room.members_synced = True
         room.canonical_alias = None
-        room.users = {"@mindroom_calculator:localhost": MagicMock(), "@user:localhost": MagicMock()}
+        room.users = {
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
+        }
         event = _room_image_event(sender="@user:localhost", event_id="$img_event_fail", body="photo.jpg")
         event.source = {"content": {"body": "photo.jpg"}}
 
@@ -2818,8 +2816,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         event = MagicMock()
         event.event_id = "$event"
         dispatch = PreparedDispatch(
@@ -2892,8 +2889,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         event = MagicMock()
         event.event_id = "$event"
         dispatch = PreparedDispatch(
@@ -2961,8 +2957,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         event = MagicMock()
         event.event_id = "$event"
         dispatch = PreparedDispatch(
@@ -3038,8 +3033,7 @@ class TestAgentBot(AgentBotTestBase):
         delivery_gateway = SimpleNamespace(send_text=AsyncMock(return_value="$error"))
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         event = MagicMock()
         event.event_id = "$event"
         stable_target = MessageTarget.resolve(
@@ -3112,8 +3106,7 @@ class TestAgentBot(AgentBotTestBase):
             response_runner=bot._response_runner,
         )
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         event = MagicMock()
         event.event_id = "$event"
         dispatch = PreparedDispatch(
@@ -3372,8 +3365,7 @@ class TestAgentBot(AgentBotTestBase):
         tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
 
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
+        room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
         event = MagicMock()
         event.event_id = "$event"
         dispatch = PreparedDispatch(

@@ -1257,6 +1257,7 @@ defaults:
     - scheduler                    # Plain string or single-key dict with inline config overrides
   markdown: true                   # Default: true
   enable_streaming: true           # Default: true (stream responses via message edits)
+  large_message_strategy: sidecar  # Default: sidecar (or split: deliver oversized responses as lossless segmented messages)
   streaming:
     update_interval: 5.0           # Default: 5.0 (steady-state seconds between streamed edits)
     min_update_interval: 0.5       # Default: 0.5 (fast-start seconds between early edits)

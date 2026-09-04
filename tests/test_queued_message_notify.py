@@ -533,8 +533,7 @@ def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
 
 def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
     """Target-scoped active follow-up batches should preserve timeline order and senders."""
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!room:localhost"
+    room = nio.MatrixRoom("!room:localhost", "@mindroom_general:localhost")
     pending_events = [
         make_pending_event(
             PreparedIngress(
@@ -2664,8 +2663,7 @@ async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before
 async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path: Path) -> None:
     """A mixed batch should consume the notices for its single coalescing target before dispatch."""
     bot = _bot(tmp_path)
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!room:localhost"
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
     pre_target = MessageTarget.resolve(room.room_id, "$pre_stt_thread", "$typed")
     post_target = MessageTarget.resolve(room.room_id, "$post_stt_thread", "$voice")
     pre_envelope = _envelope(

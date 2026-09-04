@@ -158,6 +158,7 @@ Matrix sync callback
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
+| `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |
 | `matrix/sync_checkpoint_trust.py` | Sync-checkpoint persistence and the journal generation a checkpoint is certified against |
 | `matrix/sync_continuity.py` | Crash-atomic checkpoint and pending join-fence persistence |
 | `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
@@ -171,6 +172,7 @@ Matrix sync callback
 | `matrix/reply_chain.py` | Reply chain context management |
 | `matrix/identity.py` | Matrix ID parsing and utilities |
 | `matrix/mentions.py` | Matrix mention formatting |
+| `matrix/member_display_names.py` | Current member display names snapshotted from the synced nio room cache for model-facing `<msg>` tags |
 | `matrix/typing.py` | Typing indicator utilities |
 | `matrix/avatar.py` | Avatar management |
 | `commands/` | Chat command parsing (`!help`, `!schedule`, `!config`, etc.) |
@@ -287,6 +289,7 @@ defaults:
   tools: [scheduler]
   markdown: true
   enable_streaming: true
+  large_message_strategy: sidecar
 
 memory:
   backend: mem0

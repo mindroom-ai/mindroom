@@ -325,6 +325,7 @@ export interface Config {
     worker_tools?: string[]; // Tool names to route through scoped workers by default for all agents
     tools?: string[];
     enable_streaming?: boolean;
+    large_message_strategy?: "sidecar" | "split"; // Oversized message delivery strategy (defaults to sidecar)
     show_stop_button?: boolean;
     num_history_runs?: number | null;
     num_history_messages?: number | null;
