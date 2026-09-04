@@ -922,21 +922,9 @@ async def test_admitted_empty_root_handles_retraction_and_zero_thread_export_wit
     assert (output_dir / ".mindroom-thread-exports").is_file()
 
 
-@pytest.mark.parametrize(
-    ("invited", "required_member_user_ids"),
-    [
-        pytest.param(True, (), id="excluded-invited-room"),
-        pytest.param(False, ("@alice:localhost",), id="definitive-non-member"),
-    ],
-)
 @pytest.mark.asyncio
-async def test_room_removal_failure_is_scoped_to_the_rejected_target(
-    tmp_path: Path,
-    *,
-    invited: bool,
-    required_member_user_ids: tuple[str, ...],
-) -> None:
-    """A failed retraction should not prevent another target from exporting the room."""
+async def test_membership_removal_failure_is_scoped_to_the_rejected_target(tmp_path: Path) -> None:
+    """A failed membership retraction should not prevent another target from exporting the room."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     room = _ThreadExportRoom(
@@ -944,18 +932,15 @@ async def test_room_removal_failure_is_scoped_to_the_rejected_target(
         room_id="!room:localhost",
         alias="#room:localhost",
         name="Room",
-        invited=invited,
     )
     client = Mock()
-    if required_member_user_ids:
-        client.joined_members = AsyncMock(
-            return_value=nio.JoinedMembersResponse(members=[], room_id=room.room_id),
-        )
+    client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(members=[], room_id=room.room_id),
+    )
     rejected_target = ThreadExportTarget(
         output_dir=tmp_path / "rejected",
         source_entity_names=None,
-        required_member_user_ids=required_member_user_ids,
-        include_invited_rooms=not invited,
+        required_member_user_ids=("@alice:localhost",),
     )
     healthy_target = ThreadExportTarget(output_dir=tmp_path / "healthy", source_entity_names=None)
 
@@ -1070,8 +1055,8 @@ async def test_target_membership_and_invited_room_setting_are_both_enforced(tmp_
 
 
 @pytest.mark.asyncio
-async def test_target_source_scope_retracts_another_agents_private_invited_room(tmp_path: Path) -> None:
-    """Accidental bot membership is not authority to copy another entity's invited-room history."""
+async def test_target_source_scope_skips_another_agents_private_invited_room(tmp_path: Path) -> None:
+    """The executor skips an ineligible target without retracting on partial source knowledge."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     room = _ThreadExportRoom(
@@ -1127,7 +1112,7 @@ async def test_target_source_scope_retracts_another_agents_private_invited_room(
     assert [accumulator.rooms_exported for accumulator in accumulators] == [1, 0]
     assert accumulators[0].retained_room_keys == {room.key}
     assert accumulators[1].retained_room_keys == set()
-    assert not stale_room_dir.exists()
+    assert stale_room_dir.exists()
     enumerate_threads.assert_awaited_once_with(client, room.room_id, max_thread_roots=2000)
 
 

@@ -79,7 +79,6 @@ def _record_group_failure(
         for accumulator in accumulators:
             target = accumulator.target
             if not target_accepts_room(target, room):
-                retract_room_export(accumulator, room)
                 continue
             accumulator.retained_room_keys.add(room.key)
             accumulator.failed_items.append(failure_for_room(room, error))
@@ -115,11 +114,13 @@ def _retract_targets_without_room_source(
 def _requested_invited_groups(
     discovered_groups: Sequence[tuple[str, Sequence[ThreadExportRoom]]],
     accumulators: Sequence[ThreadExportAccumulator],
+    *,
+    preselected_room_keys: frozenset[str],
 ) -> list[tuple[str, list[ThreadExportRoom]]]:
-    """Retract rooms excluded by every target and return groups that need Matrix work."""
+    """Return invited groups that need Matrix work, deduplicating unscoped exports."""
     requested_groups: list[tuple[str, list[ThreadExportRoom]]] = []
-    selected_unscoped_room_keys: set[str] = set()
     targets_are_unscoped = all(accumulator.target.source_entity_names is None for accumulator in accumulators)
+    selected_unscoped_room_keys = set(preselected_room_keys) if targets_are_unscoped else set()
     for entity_name, rooms in discovered_groups:
         accepted_rooms: list[ThreadExportRoom] = []
         for room in rooms:
@@ -129,9 +130,6 @@ def _requested_invited_groups(
                 accepted_rooms.append(room)
                 if targets_are_unscoped:
                     selected_unscoped_room_keys.add(room.key)
-            else:
-                for accumulator in accumulators:
-                    retract_room_export(accumulator, room)
         if accepted_rooms:
             requested_groups.append((entity_name, accepted_rooms))
     return requested_groups
@@ -416,13 +414,19 @@ async def export_threads_to_targets_once(
         config,
         runtime_paths,
         room_filter,
-        known_room_ids={room.room_id for room in state_rooms},
+        state_rooms=state_rooms,
     )
     _retract_ambiguous_invited_rooms(validated_targets, invited_selection.conflicts)
+    await asyncio.to_thread(
+        _retract_targets_without_room_source,
+        validated_targets,
+        (tuple(state_rooms), *(rooms for _entity_name, rooms in invited_selection.groups)),
+    )
     invited_groups = await asyncio.to_thread(
         _requested_invited_groups,
         invited_selection.groups,
         validated_targets,
+        preselected_room_keys=frozenset(room.key for room in state_rooms),
     )
     export_groups = build_export_groups(
         runtime_paths=runtime_paths,

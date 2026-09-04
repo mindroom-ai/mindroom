@@ -125,7 +125,7 @@ def test_invited_room_selection_keeps_multiple_current_claimants(tmp_path: Path)
         config,
         runtime_paths,
         None,
-        known_room_ids=set(),
+        state_rooms=(),
     )
 
     assert selection.conflicts == ()
@@ -137,8 +137,8 @@ def test_invited_room_selection_keeps_multiple_current_claimants(tmp_path: Path)
     ]
 
 
-def test_explicit_room_owner_resolves_ambiguous_invited_room_without_matrix_state(tmp_path: Path) -> None:
-    """A raw room-ID assignment must resolve legacy overlap before Matrix state discovers it."""
+def test_explicit_room_owner_preserves_other_current_claimants_without_matrix_state(tmp_path: Path) -> None:
+    """Call ownership must not revoke another current claimant's export authorization."""
     room_id = "!private:localhost"
     config = thread_export_config(tmp_path)
     config.agents["general"].rooms = [room_id]
@@ -151,15 +151,41 @@ def test_explicit_room_owner_resolves_ambiguous_invited_room_without_matrix_stat
         config,
         runtime_paths,
         None,
-        known_room_ids=set(),
+        state_rooms=(),
     )
 
     assert selection.conflicts == ()
-    assert len(selection.groups) == 1
-    owner_name, rooms = selection.groups[0]
-    assert owner_name == "general"
-    assert rooms[0].room_id == room_id
-    assert rooms[0].source_entity_names == ("general",)
+    assert [
+        (reader_name, rooms[0].room_id, rooms[0].source_entity_names) for reader_name, rooms in selection.groups
+    ] == [
+        ("general", room_id, ("general",)),
+        ("other", room_id, ("other",)),
+    ]
+
+
+def test_state_room_owner_preserves_other_current_claimants(tmp_path: Path) -> None:
+    """Persisted Matrix state must not hide a claimant outside configured authorization."""
+    room_id = "!lobby:localhost"
+    config = thread_export_config(tmp_path)
+    config.agents["general"].rooms = ["lobby"]
+    config.agents["other"] = AgentConfig(display_name="Other Agent")
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path)
+    write_invited_rooms(runtime_paths, "general", [room_id])
+    write_invited_rooms(runtime_paths, "other", [room_id])
+    state_rooms = export_rooms(config, runtime_paths, None)
+
+    selection = invited_export_rooms(
+        config,
+        runtime_paths,
+        None,
+        state_rooms=state_rooms,
+    )
+
+    assert selection.conflicts == ()
+    assert [
+        (reader_name, rooms[0].room_id, rooms[0].source_entity_names) for reader_name, rooms in selection.groups
+    ] == [("other", room_id, ("other",))]
 
 
 def test_shared_explicit_room_keeps_every_source_without_matrix_state(tmp_path: Path) -> None:
@@ -176,7 +202,7 @@ def test_shared_explicit_room_keeps_every_source_without_matrix_state(tmp_path: 
         config,
         runtime_paths,
         None,
-        known_room_ids=set(),
+        state_rooms=(),
     )
 
     assert selection.conflicts == ()
@@ -197,7 +223,7 @@ def test_current_invite_claim_takes_precedence_over_retired_membership(tmp_path:
         config,
         runtime_paths,
         None,
-        known_room_ids=set(),
+        state_rooms=(),
     )
 
     assert selection.conflicts == ()
@@ -221,7 +247,7 @@ def test_retired_non_regular_invite_claim_fails_closed(tmp_path: Path) -> None:
             config,
             runtime_paths,
             None,
-            known_room_ids=set(),
+            state_rooms=(),
         )
 
 
@@ -296,7 +322,7 @@ def test_symlinked_invite_claim_fails_closed(
             config,
             runtime_paths,
             None,
-            known_room_ids=set(),
+            state_rooms=(),
         )
 
 
@@ -314,7 +340,7 @@ def test_broken_invited_room_state_root_symlink_fails_closed(tmp_path: Path) -> 
             config,
             runtime_paths,
             None,
-            known_room_ids=set(),
+            state_rooms=(),
         )
 
 
@@ -337,7 +363,7 @@ def test_invalid_invited_room_claim_fails_closed(tmp_path: Path, claimant_kind: 
             config,
             runtime_paths,
             None,
-            known_room_ids=set(),
+            state_rooms=(),
         )
 
 
@@ -363,7 +389,7 @@ def test_unreadable_invited_room_claim_fails_closed(tmp_path: Path, monkeypatch:
             config,
             runtime_paths,
             None,
-            known_room_ids=set(),
+            state_rooms=(),
         )
 
 
@@ -392,5 +418,5 @@ def test_unreadable_invited_room_state_root_fails_closed(
             config,
             runtime_paths,
             None,
-            known_room_ids=set(),
+            state_rooms=(),
         )

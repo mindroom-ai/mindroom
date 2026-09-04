@@ -207,7 +207,7 @@ def _select_rooms(
         config,
         runtime_paths,
         None,
-        known_room_ids={room.room_id for room in state_rooms},
+        state_rooms=state_rooms,
     )
     return state_rooms, invited_selection
 

@@ -101,16 +101,15 @@ def invited_export_rooms(
     runtime_paths: RuntimePaths,
     room_filter: str | None,
     *,
-    known_room_ids: set[str],
+    state_rooms: Sequence[ThreadExportRoom],
 ) -> InvitedRoomSelection:
-    """Group rooms by a current reader and reject retired-only claims."""
+    """Add current-reader variants not already represented by persisted state."""
     normalized_filter = room_filter.strip().casefold() if isinstance(room_filter, str) and room_filter.strip() else None
     entity_names = invited_room_entity_names(config)
+    state_rooms_by_id = {room.room_id: room for room in state_rooms}
     claimants_by_room: dict[str, list[_PersistedInvitedRoomClaim]] = {}
     for claim in _persisted_invited_room_claims(config, runtime_paths):
         for room_id in claim.room_ids:
-            if room_id in known_room_ids:
-                continue
             if normalized_filter is not None and normalized_filter not in room_id.casefold():
                 continue
             claimants_by_room.setdefault(room_id, []).append(claim)
@@ -118,14 +117,19 @@ def invited_export_rooms(
     rooms_by_entity: dict[str, list[ThreadExportRoom]] = {}
     conflicts: list[InvitedRoomConflict] = []
     for room_id, claims in sorted(claimants_by_room.items()):
-        configured_names = tuple(
-            sorted(
-                configured_routable_entity_names_for_room(
-                    config,
-                    room_id,
-                    runtime_paths,
+        state_room = state_rooms_by_id.get(room_id)
+        configured_names = (
+            state_room.source_entity_names
+            if state_room is not None
+            else tuple(
+                sorted(
+                    configured_routable_entity_names_for_room(
+                        config,
+                        room_id,
+                        runtime_paths,
+                    ),
                 ),
-            ),
+            )
         )
         current_claimants = tuple(sorted(claim.entity_name for claim in claims if claim.entity_name is not None))
         room = ThreadExportRoom(
@@ -136,16 +140,16 @@ def invited_export_rooms(
             invited=True,
             source_entity_names=(),
         )
-        if configured_names:
+        if state_room is None and configured_names:
             rooms_by_entity.setdefault(configured_names[0], []).append(
                 replace(room, source_entity_names=configured_names),
             )
-            continue
-        if current_claimants:
-            for entity_name in current_claimants:
+        for entity_name in current_claimants:
+            if entity_name not in configured_names:
                 rooms_by_entity.setdefault(entity_name, []).append(
-                    replace(room, source_entity_names=(entity_name,)),
+                    replace(state_room or room, invited=True, source_entity_names=(entity_name,)),
                 )
+        if state_room is not None or configured_names or current_claimants:
             continue
         conflicts.append(
             InvitedRoomConflict(

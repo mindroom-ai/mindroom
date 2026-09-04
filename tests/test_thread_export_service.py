@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
@@ -887,6 +888,168 @@ async def test_export_threads_to_sources_keeps_claimant_projections_target_local
         (other_target,),
     ]
     assert not stale_room_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_source_scope_removal_failure_is_scoped_to_the_rejected_target(tmp_path: Path) -> None:
+    """A failed source-scope retraction must not block an authorized target."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    room = ThreadExportRoom(
+        key="!private:localhost",
+        room_id="!private:localhost",
+        alias="",
+        name="",
+        invited=True,
+        source_entity_names=("general",),
+    )
+    rejected_target = ThreadExportTarget(tmp_path / "rejected", source_entity_names=("other",))
+    healthy_target = ThreadExportTarget(tmp_path / "healthy", source_entity_names=("general",))
+
+    with (
+        patch(
+            "mindroom.thread_export.execution.remove_room_export",
+            side_effect=RuntimeError("storage unavailable"),
+        ) as remove_export,
+        patch(
+            "mindroom.thread_export.service.export_threads_for_targets_for_client",
+            new=AsyncMock(side_effect=successful_group_result),
+        ) as export_source,
+    ):
+        stats = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths,
+            sources=(ThreadExportSource(client=Mock(), reader=Mock(), rooms=(room,)),),
+            targets=(rejected_target, healthy_target),
+            full_pass=False,
+        )
+
+    remove_export.assert_called_once_with(rejected_target.output_dir, room, trusted_root=None)
+    assert export_source.await_args.kwargs["targets"] == (healthy_target,)
+    assert stats[0].rooms_exported == 0
+    assert stats[0].failed_items[0].error == "Room removal failed: storage unavailable"
+    assert stats[1].rooms_exported == 1
+    assert stats[1].failed_items == ()
+
+
+@pytest.mark.asyncio
+async def test_readable_variant_cannot_delete_an_unreadable_claimants_export(tmp_path: Path) -> None:
+    """A readable source has only partial knowledge of another claimant's room variant."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    room_id = "!shared:localhost"
+    general_room = ThreadExportRoom(
+        key=room_id,
+        room_id=room_id,
+        alias="",
+        name="",
+        invited=True,
+        source_entity_names=("general",),
+    )
+    other_room = replace(general_room, source_entity_names=("other",))
+    shared_room = ThreadExportRoom(
+        key="shared-configured",
+        room_id="!configured:localhost",
+        alias="",
+        name="",
+        source_entity_names=("general", "other"),
+    )
+    other_output = tmp_path / "other"
+    mark_thread_export_root(other_output)
+    stale_room_dir = other_output / quote(room_id, safe="")
+    stale_room_dir.mkdir()
+    (stale_room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+
+    with patch(
+        "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+        new=AsyncMock(return_value=([], False)),
+    ):
+        stats = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths,
+            sources=(ThreadExportSource(client=Mock(), reader=Mock(), rooms=(general_room, shared_room)),),
+            targets=(ThreadExportTarget(other_output, source_entity_names=("other",)),),
+            unreadable_rooms=(((other_room,), "Bot 'other' is not running"),),
+            full_pass=False,
+        )
+
+    assert stale_room_dir.exists()
+    assert [failure.error for failure in stats[0].failed_items] == ["Bot 'other' is not running"]
+
+
+@pytest.mark.asyncio
+async def test_failed_source_group_cannot_delete_an_unreadable_claimants_export(tmp_path: Path) -> None:
+    """A group failure retains another claimant's variant instead of retracting it."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    room_id = "!shared:localhost"
+    general_room = ThreadExportRoom(
+        key=room_id,
+        room_id=room_id,
+        alias="",
+        name="",
+        invited=True,
+        source_entity_names=("general",),
+    )
+    other_room = replace(general_room, source_entity_names=("other",))
+    shared_room = ThreadExportRoom(
+        key="shared-configured",
+        room_id="!configured:localhost",
+        alias="",
+        name="",
+        source_entity_names=("general", "other"),
+    )
+    other_output = tmp_path / "other"
+    mark_thread_export_root(other_output)
+    stale_room_dir = other_output / quote(room_id, safe="")
+    stale_room_dir.mkdir()
+    (stale_room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+
+    with patch(
+        "mindroom.thread_export.service.export_threads_for_targets_for_client",
+        new=AsyncMock(side_effect=RuntimeError("source failed")),
+    ):
+        stats = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths,
+            sources=(ThreadExportSource(client=Mock(), reader=Mock(), rooms=(general_room, shared_room)),),
+            targets=(ThreadExportTarget(other_output, source_entity_names=("other",)),),
+            unreadable_rooms=(((other_room,), "Bot 'other' is not running"),),
+            full_pass=False,
+        )
+
+    assert stale_room_dir.exists()
+    assert [failure.error for failure in stats[0].failed_items] == [
+        "Bot 'other' is not running",
+        "Export group failed: source failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unrequested_variant_cannot_delete_a_requested_unreadable_variant(tmp_path: Path) -> None:
+    """CLI prefiltering must consider every claimant before retracting one room key."""
+    config = thread_export_config(tmp_path)
+    config.agents["other"] = config.agents["general"].model_copy(update={"display_name": "Other"})
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path, include_rooms=False)
+    room_id = "!shared:localhost"
+    write_invited_rooms(runtime_paths, "general", [room_id])
+    write_invited_rooms(runtime_paths, "other", [room_id])
+    output_dir = tmp_path / "other"
+    mark_thread_export_root(output_dir)
+    stale_room_dir = output_dir / quote(room_id, safe="")
+    stale_room_dir.mkdir()
+    (stale_room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+
+    stats = await export_threads_to_targets_once(
+        config=config,
+        runtime_paths=runtime_paths,
+        targets=(ThreadExportTarget(output_dir, source_entity_names=("other",)),),
+    )
+
+    assert stale_room_dir.exists()
+    assert stats[0].failures == 1
+    assert "No persisted Matrix account for invited-room entity 'other'" in stats[0].failed_items[0].error
 
 
 @pytest.mark.asyncio

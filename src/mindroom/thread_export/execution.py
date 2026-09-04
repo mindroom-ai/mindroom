@@ -87,12 +87,8 @@ async def _authorized_room_accumulators(
     room: ThreadExportRoom,
     accumulators: Sequence[ThreadExportAccumulator],
 ) -> list[ThreadExportAccumulator]:
-    """Return targets authorized for one room, removing exports only on definitive revocation."""
+    """Return targets authorized for one room, retracting only definitive membership revocation."""
     eligible = [accumulator for accumulator in accumulators if target_accepts_room(accumulator.target, room)]
-    for accumulator in accumulators:
-        if not target_accepts_room(accumulator.target, room):
-            await asyncio.to_thread(retract_room_export, accumulator, room)
-
     scoped = [accumulator for accumulator in eligible if accumulator.target.required_member_user_ids]
     authorized = [accumulator for accumulator in eligible if not accumulator.target.required_member_user_ids]
     if not scoped:
