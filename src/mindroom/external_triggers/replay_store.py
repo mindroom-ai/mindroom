@@ -23,6 +23,14 @@ class ExternalTriggerEventClaim(StrEnum):
     DELIVERED = "delivered"
 
 
+class ExternalTriggerThreadKeyClaim(StrEnum):
+    """State returned when claiming an external trigger thread key."""
+
+    FRESH = "fresh"
+    PENDING = "pending"
+    BOUND = "bound"
+
+
 class ExternalTriggerReplayStoreError(RuntimeError):
     """Raised when durable replay state cannot be trusted."""
 
@@ -38,7 +46,7 @@ class _SerializedEvent(TypedDict):
 
 class _SerializedThread(TypedDict):
     room_id: str
-    thread_event_id: str
+    thread_event_id: str | None
     expires_at: int
 
 
@@ -110,21 +118,41 @@ class ExternalTriggerReplayStore:
             }
             self._write_store(store)
 
-    def thread_root(self, replay_scope: str, thread_key: str, *, room_id: str, now: int) -> str | None:
-        """Return the Matrix thread root recorded for one thread key in one room.
+    def claim_thread_key(
+        self,
+        replay_scope: str,
+        thread_key: str,
+        *,
+        room_id: str,
+        now: int,
+        pending_ttl_seconds: int,
+    ) -> tuple[ExternalTriggerThreadKeyClaim, str | None]:
+        """Atomically resolve or reserve one thread key.
 
-        A record bound to another room is a miss: the trigger's configured room
-        may have been re-pointed since the root was recorded.
+        Returns ``BOUND`` with the recorded Matrix root when an earlier delivery
+        already opened the thread in this room, ``PENDING`` when another
+        delivery is opening it right now, and ``FRESH`` after reserving the key
+        for the caller. A record bound to another room counts as absent: the
+        trigger's configured room may have been re-pointed since it was made.
         """
         with advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
-            record = store["threads"].get(replay_scope, {}).get(thread_key)
-            if record is None or record["room_id"] != room_id:
-                return None
-            return record["thread_event_id"]
+            replay_threads = store["threads"].setdefault(replay_scope, {})
+            record = replay_threads.get(thread_key)
+            if record is not None and record["room_id"] == room_id:
+                if record["thread_event_id"] is not None:
+                    return ExternalTriggerThreadKeyClaim.BOUND, record["thread_event_id"]
+                return ExternalTriggerThreadKeyClaim.PENDING, None
+            replay_threads[thread_key] = {
+                "room_id": room_id,
+                "thread_event_id": None,
+                "expires_at": now + pending_ttl_seconds,
+            }
+            self._write_store(store)
+            return ExternalTriggerThreadKeyClaim.FRESH, None
 
-    def remember_thread_root(
+    def bind_thread_root(
         self,
         replay_scope: str,
         thread_key: str,
@@ -134,7 +162,7 @@ class ExternalTriggerReplayStore:
         now: int,
         ttl_seconds: int,
     ) -> None:
-        """Bind one thread key to a Matrix thread root, refreshing its retention."""
+        """Bind one thread key to its Matrix thread root, refreshing retention."""
         with advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
@@ -145,12 +173,15 @@ class ExternalTriggerReplayStore:
             }
             self._write_store(store)
 
-    def forget_thread_root(self, replay_scope: str, thread_key: str) -> None:
-        """Drop a thread key whose recorded root could not be delivered to."""
+    def release_thread_key(self, replay_scope: str, thread_key: str) -> None:
+        """Drop a pending reservation whose first delivery failed; bound keys are kept."""
         with advisory_file_lock(self._lock_path):
             store = self._read_store()
             replay_threads = store["threads"].get(replay_scope)
-            if replay_threads is None or thread_key not in replay_threads:
+            if replay_threads is None:
+                return
+            record = replay_threads.get(thread_key)
+            if record is None or record["thread_event_id"] is not None:
                 return
             replay_threads.pop(thread_key)
             if not replay_threads:
@@ -289,8 +320,7 @@ def _normalize_threads(raw_threads: Mapping[object, object]) -> dict[str, dict[s
             if (
                 not isinstance(room_id, str)
                 or not room_id
-                or not isinstance(thread_event_id, str)
-                or not thread_event_id
+                or not (thread_event_id is None or (isinstance(thread_event_id, str) and thread_event_id))
                 or not _is_json_int(expires_at)
             ):
                 raise _invalid_store_structure()

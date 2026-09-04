@@ -16310,10 +16310,13 @@ mindroom trigger send support-inbox \
 Choose a key that names the upstream conversation, not the message: a ticket ID, an upstream thread timestamp, or a chat channel ID for a direct-message conversation.
 
 Thread key records live in the same replay store as `event_id` records, scoped per trigger and signing key epoch, and are retained for 7 days after the most recent delivery that used them.
-After that, or after `rotate_trigger_key`, or when a recorded thread can no longer be delivered to, the next delivery with the key starts a new thread.
+After that, or after `rotate_trigger_key`, the next delivery with the key starts a new thread.
 
-Two deliveries that arrive at the same moment with a key nobody has used yet may each open a root; the key then follows the one that finished last.
-Senders that need strict ordering should deliver a conversation's first event before its follow-ups.
+Opening a thread is atomic per key.
+While one delivery is posting the first root, a concurrent delivery with the same key receives `409 External trigger thread is being opened by another delivery`; retry it with a fresh signed request and the same `event_id`, and it will join the thread.
+A reservation whose first delivery fails is released immediately; a crashed delivery releases it after 5 minutes.
+
+A follow-up that fails to send keeps the key bound to its thread, so a transient error never splits one conversation across two threads.
 
 `thread_key` has no effect on triggers with a fixed `target_thread_id`; that thread already collects every delivery.
 
@@ -20970,6 +20973,9 @@ Send one signed trigger request to MindRoom.
 │ *  --message                            TEXT   Trigger payload message. [required]     │
 │    --event-id                           TEXT   Optional idempotency event id.          │
 │    --title                              TEXT   Optional trigger title.                 │
+│    --thread-key                         TEXT   Optional key; deliveries sharing it     │
+│                                                land in one Matrix thread on new_thread │
+│                                                triggers.                               │
 │    --data-json                          TEXT   Optional JSON object for trigger data.  │
 │    --timeout                            FLOAT  HTTP request timeout in seconds.        │
 │                                                [default: 10.0]                         │

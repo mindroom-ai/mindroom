@@ -19,6 +19,7 @@ from mindroom.external_triggers.replay_store import (
     ExternalTriggerEventClaim,
     ExternalTriggerReplayStore,
     ExternalTriggerReplayStoreError,
+    ExternalTriggerThreadKeyClaim,
 )
 
 if TYPE_CHECKING:
@@ -450,48 +451,6 @@ def test_payload_rejects_blank_thread_key() -> None:
     )
 
 
-def test_thread_root_is_remembered_per_scope_and_room_until_expiry(tmp_path: Path) -> None:
-    """Thread keys resolve to their recorded Matrix root within one replay scope and room."""
-    store = ExternalTriggerReplayStore(tmp_path)
-    room = "!room:localhost"
-
-    assert store.thread_root("campground", "site-42", room_id=room, now=1_000) is None
-    store.remember_thread_root("campground", "site-42", "$root-1", room_id=room, now=1_000, ttl_seconds=600)
-
-    assert store.thread_root("campground", "site-42", room_id=room, now=1_000) == "$root-1"
-    assert store.thread_root("campground", "site-42", room_id=room, now=1_600) == "$root-1"
-    assert store.thread_root("campground", "site-42", room_id="!other:localhost", now=1_000) is None
-    assert store.thread_root("other-scope", "site-42", room_id=room, now=1_000) is None
-    assert store.thread_root("campground", "site-43", room_id=room, now=1_000) is None
-    assert store.thread_root("campground", "site-42", room_id=room, now=1_601) is None
-
-
-def test_remember_thread_root_refreshes_retention_and_keeps_first_root(tmp_path: Path) -> None:
-    """Re-recording the same key extends retention; callers pass the existing root back."""
-    store = ExternalTriggerReplayStore(tmp_path)
-    room = "!room:localhost"
-    store.remember_thread_root("campground", "site-42", "$root-1", room_id=room, now=1_000, ttl_seconds=600)
-    store.remember_thread_root("campground", "site-42", "$root-1", room_id=room, now=1_500, ttl_seconds=600)
-
-    assert store.thread_root("campground", "site-42", room_id=room, now=2_099) == "$root-1"
-    assert store.thread_root("campground", "site-42", room_id=room, now=2_101) is None
-
-
-def test_forget_thread_root_drops_only_that_key(tmp_path: Path) -> None:
-    """Forgetting a stale root leaves other keys and scopes untouched."""
-    store = ExternalTriggerReplayStore(tmp_path)
-    room = "!room:localhost"
-    store.remember_thread_root("campground", "site-42", "$root-1", room_id=room, now=1_000, ttl_seconds=600)
-    store.remember_thread_root("campground", "site-43", "$root-2", room_id=room, now=1_000, ttl_seconds=600)
-
-    store.forget_thread_root("campground", "site-42")
-    store.forget_thread_root("campground", "missing")
-    store.forget_thread_root("other-scope", "site-42")
-
-    assert store.thread_root("campground", "site-42", room_id=room, now=1_000) is None
-    assert store.thread_root("campground", "site-43", room_id=room, now=1_000) == "$root-2"
-
-
 def test_payload_rejects_oversized_thread_key() -> None:
     """Thread keys live for days in the shared replay store, so their size is bounded."""
     with pytest.raises(ValidationError, match="thread_key must be at most 256 characters"):
@@ -508,15 +467,14 @@ def test_store_without_threads_section_is_accepted(tmp_path: Path) -> None:
     _store_path(tmp_path).write_text(json.dumps({"nonces": {}, "events": {}}), encoding="utf-8")
     store = ExternalTriggerReplayStore(tmp_path)
 
-    assert store.thread_root("campground", "site-42", room_id="!room:localhost", now=1_000) is None
-    store.remember_thread_root(
+    assert store.claim_thread_key(
         "campground",
         "site-42",
-        "$root-1",
         room_id="!room:localhost",
         now=1_000,
-        ttl_seconds=600,
-    )
+        pending_ttl_seconds=60,
+    ) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    store.bind_thread_root("campground", "site-42", "$root-1", room_id="!room:localhost", now=1_000, ttl_seconds=600)
     assert json.loads(_store_path(tmp_path).read_text(encoding="utf-8"))["threads"] == {
         "campground": {
             "site-42": {"room_id": "!room:localhost", "thread_event_id": "$root-1", "expires_at": 1_600},
@@ -543,4 +501,147 @@ def test_invalid_nested_thread_record_fails_closed(tmp_path: Path, threads_paylo
     )
 
     with pytest.raises(ExternalTriggerReplayStoreError, match="invalid external trigger replay store structure"):
-        ExternalTriggerReplayStore(tmp_path).thread_root("campground", "site-42", room_id="!r:x", now=1)
+        ExternalTriggerReplayStore(tmp_path).claim_thread_key(
+            "campground",
+            "site-42",
+            room_id="!r:x",
+            now=1,
+            pending_ttl_seconds=60,
+        )
+
+
+ROOM = "!room:localhost"
+
+
+def _claim(
+    store: ExternalTriggerReplayStore,
+    key: str = "site-42",
+    *,
+    scope: str = "campground",
+    room: str = ROOM,
+    now: int,
+) -> tuple[ExternalTriggerThreadKeyClaim, str | None]:
+    return store.claim_thread_key(scope, key, room_id=room, now=now, pending_ttl_seconds=60)
+
+
+def test_thread_key_claim_reserves_then_binds_then_resolves(tmp_path: Path) -> None:
+    """First claim reserves the key; a bound key resolves to its root within scope and room."""
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    assert _claim(store, now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, now=1_001) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    store.bind_thread_root("campground", "site-42", "$root-1", room_id=ROOM, now=1_002, ttl_seconds=600)
+
+    assert _claim(store, now=1_003) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
+    assert _claim(store, now=1_602) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
+    assert _claim(store, now=1_603) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, "site-43", now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, scope="other-scope", now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+
+
+def test_thread_key_bound_to_another_room_is_reclaimed(tmp_path: Path) -> None:
+    """A re-pointed trigger room must not relate deliveries to a foreign root."""
+    store = ExternalTriggerReplayStore(tmp_path)
+    store.bind_thread_root("campground", "site-42", "$root-1", room_id=ROOM, now=1_000, ttl_seconds=600)
+
+    assert _claim(store, room="!elsewhere:localhost", now=1_001) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, room="!elsewhere:localhost", now=1_002) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+
+
+def test_pending_thread_key_expires_and_release_keeps_bound_keys(tmp_path: Path) -> None:
+    """A crashed first delivery frees the key after the pending TTL; release never drops a bound key."""
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    assert _claim(store, now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, now=1_060) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _claim(store, now=1_061) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+
+    store.release_thread_key("campground", "site-42")
+    assert _claim(store, now=1_062) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+
+    store.bind_thread_root("campground", "site-42", "$root-1", room_id=ROOM, now=1_063, ttl_seconds=600)
+    store.release_thread_key("campground", "site-42")
+    store.release_thread_key("campground", "missing")
+    store.release_thread_key("other-scope", "site-42")
+    assert _claim(store, now=1_064) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
+
+
+def test_bind_thread_root_refreshes_retention(tmp_path: Path) -> None:
+    """Every continued delivery extends how long the key keeps routing to its root."""
+    store = ExternalTriggerReplayStore(tmp_path)
+    store.bind_thread_root("campground", "site-42", "$root-1", room_id=ROOM, now=1_000, ttl_seconds=600)
+    store.bind_thread_root("campground", "site-42", "$root-1", room_id=ROOM, now=1_500, ttl_seconds=600)
+
+    assert _claim(store, now=2_099) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
+    assert _claim(store, now=2_101) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+
+
+def _claim_thread_key_with_slow_read_worker(
+    control_state_root: str,
+    start_event: Event,
+    result_queue: Queue[tuple[str, str]],
+) -> None:
+    """Claim one new thread key after slowing reads enough to expose missing cross-process locking."""
+    original_read_store = cast(
+        "Callable[[ExternalTriggerReplayStore], object]",
+        ExternalTriggerReplayStore._read_store,
+    )
+
+    def slow_read_store(self: ExternalTriggerReplayStore) -> object:
+        store = original_read_store(self)
+        time.sleep(0.1)
+        return store
+
+    ExternalTriggerReplayStore._read_store = slow_read_store
+    try:
+        if not start_event.wait(timeout=5):
+            result_queue.put(("error", "timed out waiting for start signal"))
+            return
+        claim, _root = ExternalTriggerReplayStore(Path(control_state_root)).claim_thread_key(
+            "campground",
+            "site-42",
+            room_id=ROOM,
+            now=1_000,
+            pending_ttl_seconds=60,
+        )
+        result_queue.put(("ok", claim.value))
+    except Exception as exc:
+        result_queue.put(("error", repr(exc)))
+
+
+def test_concurrent_first_deliveries_reserve_one_thread_key(tmp_path: Path) -> None:
+    """Two processes racing on a new key: exactly one may open the root, the other waits."""
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_claim_thread_key_with_slow_read_worker,
+            args=(str(tmp_path), start_event, result_queue),
+        )
+        for _ in range(2)
+    ]
+
+    for process in processes:
+        process.start()
+    start_event.set()
+
+    results: list[str] = []
+    try:
+        for _ in processes:
+            try:
+                status, payload = result_queue.get(timeout=10)
+            except Empty as exc:
+                msg = "timed out waiting for replay-store worker result"
+                raise AssertionError(msg) from exc
+            assert status == "ok", payload
+            results.append(payload)
+    finally:
+        for process in processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    assert [process.exitcode for process in processes] == [0, 0]
+    assert sorted(results) == ["fresh", "pending"]

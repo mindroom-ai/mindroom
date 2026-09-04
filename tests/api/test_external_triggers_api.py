@@ -26,6 +26,7 @@ from mindroom.api import external_triggers as external_triggers_api
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
 from mindroom.external_triggers.auth import mint_trigger_capability, sign_trigger_request
+from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim, ExternalTriggerReplayStore
 from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget, TriggerDeliverySnapshot
 from mindroom.matrix.state import MatrixState
 from mindroom.response_admission import ResponseAdmissionGate
@@ -963,13 +964,28 @@ def test_thread_key_is_ignored_for_fixed_thread_targets(
     assert continued == [None, None]
 
 
-def test_failed_continuation_forgets_thread_key_so_next_delivery_opens_fresh_root(
+def _new_thread_replay_store(trigger_api: TriggerApiContext) -> ExternalTriggerReplayStore:
+    control_state_root = trigger_api.runtime_paths.control_state_root
+    assert control_state_root is not None
+    return ExternalTriggerReplayStore(control_state_root)
+
+
+def _post_keyed(trigger_api: TriggerApiContext, trigger_id: str, event_id: str, nonce: str) -> Response:
+    return _post_signed(
+        trigger_api,
+        body=_body(event_id=event_id, thread_key="chat:C1:100"),
+        nonce=nonce,
+        trigger_id=trigger_id,
+    )
+
+
+def test_failed_continuation_keeps_thread_key_bound(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A root that can no longer be delivered to is dropped instead of retried for a week."""
+    """A transient send failure on a follow-up must not split the conversation into a new root."""
     continued: list[str | None] = []
-    outcomes = iter(["$root-a", None, "$root-b"])
+    outcomes = iter(["$root-a", None, "$reply-a"])
 
     async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str | None:
         continued.append(continue_thread_event_id)
@@ -978,18 +994,73 @@ def test_failed_continuation_forgets_thread_key_so_next_delivery_opens_fresh_roo
     monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
     trigger_id = _create_new_thread_record(trigger_api)
 
-    def post(event_id: str, nonce: str) -> Response:
-        return _post_signed(
-            trigger_api,
-            body=_body(event_id=event_id, thread_key="chat:C1:100"),
-            nonce=nonce,
-            trigger_id=trigger_id,
-        )
+    first = _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-1")
+    failed = _post_keyed(trigger_api, trigger_id, "msg-2", "nonce-2")
+    retried = _post_keyed(trigger_api, trigger_id, "msg-2", "nonce-3")
 
-    first = post("msg-1", "nonce-1")
-    failed = post("msg-2", "nonce-2")
-    recovered = post("msg-3", "nonce-3")
+    assert (first.status_code, failed.status_code, retried.status_code) == (202, 502, 202)
+    assert continued == [None, "$root-a", "$root-a"]
+    assert retried.json()["matrix_event_id"] == "$reply-a"
 
-    assert (first.status_code, failed.status_code, recovered.status_code) == (202, 502, 202)
-    assert continued == [None, "$root-a", None]
-    assert recovered.json()["matrix_event_id"] == "$root-b"
+
+def test_failed_first_delivery_releases_thread_key_reservation(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When opening the root fails, the next delivery with the key may open it instead of waiting."""
+    continued: list[str | None] = []
+    outcomes = iter([None, "$root-a", "$reply-a"])
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str | None:
+        continued.append(continue_thread_event_id)
+        return next(outcomes)
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    trigger_id = _create_new_thread_record(trigger_api)
+
+    failed = _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-1")
+    opened = _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-2")
+    followed = _post_keyed(trigger_api, trigger_id, "msg-2", "nonce-3")
+
+    assert (failed.status_code, opened.status_code, followed.status_code) == (502, 202, 202)
+    assert continued == [None, None, "$root-a"]
+
+
+def test_thread_key_being_opened_elsewhere_returns_409_for_retry(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent first delivery holds the key; the loser is told to retry, not given a second root."""
+    executed: list[str | None] = []
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str:
+        executed.append(continue_thread_event_id)
+        return "$never"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    trigger_id = _create_new_thread_record(trigger_api)
+    snapshot = ExternalTriggerStore(trigger_api.runtime_paths).delivery_snapshot(
+        trigger_id,
+        config=Config.model_validate(_config_payload()),
+        config_generation=1,
+    )
+    assert snapshot is not None
+    replay_store = _new_thread_replay_store(trigger_api)
+    replay_store.claim_thread_key(
+        snapshot.replay_scope,
+        "chat:C1:100",
+        room_id=snapshot.resolved_room_id,
+        now=int(time.time()),
+        pending_ttl_seconds=60,
+    )
+
+    response = _post_keyed(trigger_api, trigger_id, "msg-2", "nonce-1")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "External trigger thread is being opened by another delivery"
+    assert executed == []
+    # The event id claim was rolled back, so the same event can be retried once the thread exists.
+    assert (
+        replay_store.claim_event_id(snapshot.replay_scope, "msg-2", now=int(time.time()), ttl_seconds=60)
+        is ExternalTriggerEventClaim.FRESH
+    )
