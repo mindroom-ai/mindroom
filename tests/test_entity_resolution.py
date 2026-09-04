@@ -150,12 +150,7 @@ def test_configured_call_agent_rejects_ambiguous_invited_room(tmp_path: Path) ->
     """One ad-hoc room cannot silently select between two calls-enabled invitees."""
     config = _call_config(tmp_path, general=True, other=True)
     runtime_paths = runtime_paths_for(config)
-    with pytest.raises(
-        ValueError,
-        match=(
-            r"general, other.*Configure !agent-call:server under exactly one calls-enabled agent to resolve ownership"
-        ),
-    ):
+    with pytest.raises(ValueError, match="general, other"):
         configured_call_agent_name_for_room(
             config,
             "!agent-call:server",
@@ -168,7 +163,7 @@ def test_configured_call_agent_rejects_ambiguous_invited_room(tmp_path: Path) ->
 
 
 def test_explicit_call_room_owner_overrides_ambiguous_invited_membership(tmp_path: Path) -> None:
-    """Explicit room configuration deterministically resolves legacy invited-room overlap."""
+    """Explicit room configuration wins over stale overlapping invite state."""
     config = _call_config(tmp_path, general=True, other=True)
     config.agents["general"].rooms = ["!agent-call:server"]
 

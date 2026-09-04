@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, NoReturn
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import state as matrix_state
@@ -64,39 +64,26 @@ def configured_call_agent_name_for_room(
     room_aliases: Iterable[str] = (),
     invited_rooms_by_agent: Mapping[str, AbstractSet[str]],
 ) -> str | None:
-    """Return the sole calls-enabled owner for a live room, failing on ambiguity."""
+    """Return the sole calls-enabled agent for a live room, failing on ambiguity."""
     routable_names = configured_routable_entity_names_for_room(
         config,
         room_id,
         runtime_paths,
         room_aliases=room_aliases,
     )
-    configured_call_agents = sorted(set(routable_names).intersection(config.calls.agents))
-    if len(configured_call_agents) > 1:
-        _raise_ambiguous_call_room_ownership(room_id, configured_call_agents)
-    if configured_call_agents:
-        return configured_call_agents[0]
-
-    invited_call_agents: list[str] = []
+    call_agents = set(routable_names).intersection(config.calls.agents)
+    if len(call_agents) == 1:
+        return next(iter(call_agents))
     for agent_name in config.calls.agents:
         if not should_persist_invited_rooms(config, agent_name):
             continue
         if room_id in invited_rooms_by_agent.get(agent_name, ()):
-            invited_call_agents.append(agent_name)
-    invited_call_agents.sort()
-    if len(invited_call_agents) > 1:
-        _raise_ambiguous_call_room_ownership(room_id, invited_call_agents)
-    return invited_call_agents[0] if invited_call_agents else None
-
-
-def _raise_ambiguous_call_room_ownership(room_id: str, agent_names: list[str]) -> NoReturn:
-    """Raise an actionable error without selecting an arbitrary call agent."""
-    joined_names = ", ".join(agent_names)
-    msg = (
-        f"calls.agents resolves multiple agents for live room {room_id}: {joined_names}. "
-        f"Configure {room_id} under exactly one calls-enabled agent to resolve ownership"
-    )
-    raise ValueError(msg)
+            call_agents.add(agent_name)
+    call_agents = sorted(call_agents)
+    if len(call_agents) > 1:
+        msg = f"calls.agents resolves multiple agents for live room {room_id}: {', '.join(call_agents)}"
+        raise ValueError(msg)
+    return call_agents[0] if call_agents else None
 
 
 def configured_bot_user_ids_for_room(

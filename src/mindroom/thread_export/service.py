@@ -12,7 +12,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import login_agent_user
 from mindroom.thread_export.execution import export_threads_for_targets_for_client, retract_room_export
 from mindroom.thread_export.models import (
-    InvitedRoomConflict,
     ThreadExportAccumulator,
     ThreadExportGroup,
     ThreadExportGroupFailure,
@@ -79,111 +78,37 @@ def _record_group_failure(
         for accumulator in accumulators:
             target = accumulator.target
             if not target_accepts_room(target, room):
+                retract_room_export(accumulator, room)
                 continue
             accumulator.retained_room_keys.add(room.key)
             accumulator.failed_items.append(failure_for_room(room, error))
 
 
-def _accumulators_accepting_rooms(
-    accumulators: Sequence[ThreadExportAccumulator],
-    rooms: Sequence[ThreadExportRoom],
-) -> tuple[ThreadExportAccumulator, ...]:
-    """Return targets authorized by at least one room in a principal-bound group."""
-    return tuple(
-        accumulator
-        for accumulator in accumulators
-        if any(target_accepts_room(accumulator.target, room) for room in rooms)
-    )
-
-
-def _preferred_unscoped_room_variants(
-    room_groups: Sequence[Sequence[ThreadExportRoom]],
-) -> dict[str, ThreadExportRoom]:
-    """Choose one stable source variant per room for administrative targets."""
-    preferred: dict[str, ThreadExportRoom] = {}
-    for rooms in room_groups:
-        for room in rooms:
-            current = preferred.get(room.key)
-            variant_key = room.invited, room.source_entity_names, room.room_id
-            if current is None or variant_key < (current.invited, current.source_entity_names, current.room_id):
-                preferred[room.key] = room
-    return preferred
-
-
-def _preferred_unscoped_rooms(
-    rooms: Sequence[ThreadExportRoom],
-    preferred_variants: dict[str, ThreadExportRoom],
-) -> tuple[ThreadExportRoom, ...]:
-    """Return the variants selected for unscoped administrative targets."""
-    return tuple(room for room in rooms if preferred_variants.get(room.key) == room)
-
-
-def _retract_targets_without_room_source(
-    accumulators: Sequence[ThreadExportAccumulator],
-    room_groups: Sequence[Sequence[ThreadExportRoom]],
-) -> None:
-    """Retract each selected room from targets matching none of its source variants."""
-    variants_by_key: dict[str, list[ThreadExportRoom]] = {}
-    for rooms in room_groups:
-        for room in rooms:
-            variants_by_key.setdefault(room.key, []).append(room)
-    for variants in variants_by_key.values():
-        for accumulator in accumulators:
-            if not any(target_accepts_room(accumulator.target, room) for room in variants):
-                retract_room_export(accumulator, variants[0])
-
-
 def _requested_invited_groups(
     discovered_groups: Sequence[tuple[str, Sequence[ThreadExportRoom]]],
     accumulators: Sequence[ThreadExportAccumulator],
-    *,
-    preselected_room_keys: frozenset[str],
 ) -> list[tuple[str, list[ThreadExportRoom]]]:
-    """Return invited groups that need Matrix work, deduplicating unscoped exports."""
+    """Retract rooms excluded by every target and return groups that need Matrix work."""
     requested_groups: list[tuple[str, list[ThreadExportRoom]]] = []
-    targets_are_unscoped = all(accumulator.target.source_entity_names is None for accumulator in accumulators)
-    selected_unscoped_room_keys = set(preselected_room_keys) if targets_are_unscoped else set()
     for entity_name, rooms in discovered_groups:
         accepted_rooms: list[ThreadExportRoom] = []
         for room in rooms:
-            if targets_are_unscoped and room.key in selected_unscoped_room_keys:
-                continue
             if any(target_accepts_room(accumulator.target, room) for accumulator in accumulators):
                 accepted_rooms.append(room)
-                if targets_are_unscoped:
-                    selected_unscoped_room_keys.add(room.key)
+            else:
+                for accumulator in accumulators:
+                    retract_room_export(accumulator, room)
         if accepted_rooms:
             requested_groups.append((entity_name, accepted_rooms))
     return requested_groups
 
 
-def _retract_ambiguous_invited_rooms(
-    accumulators: Sequence[ThreadExportAccumulator],
-    conflicts: Sequence[InvitedRoomConflict],
-) -> None:
-    """Retract rooms whose legacy invite claims identify no current source."""
-    for conflict in conflicts:
-        room = conflict.room
-        claimants = ", ".join(conflict.claimant_labels)
-        error = (
-            f"ambiguous invited-room ownership across persisted entity states: {claimants}. "
-            f"Configure {room.room_id} under a current entity to resolve ownership"
-        )
-        for accumulator in accumulators:
-            retract_room_export(accumulator, room)
-            accumulator.failed_items.append(failure_for_room(room, error))
-
-
-def _reconcile_full_pass(
-    accumulators: Sequence[ThreadExportAccumulator],
-    *,
-    allow_empty: bool,
-) -> None:
+def _reconcile_full_pass(accumulators: Sequence[ThreadExportAccumulator]) -> None:
     """Remove room directories that the completed full pass did not retain."""
     for accumulator in accumulators:
         output_dir = accumulator.target.output_dir
         try:
-            if accumulator.rooms_exported == 0 and not allow_empty:
+            if accumulator.rooms_exported == 0:
                 logger.warning(
                     "Skipping thread export directory reconciliation without exported rooms",
                     output_dir=str(output_dir),
@@ -286,43 +211,24 @@ async def _run_export_source(
     config: Config,
     runtime_paths: RuntimePaths,
     accumulators: Sequence[ThreadExportAccumulator],
-    preferred_unscoped_variants: dict[str, ThreadExportRoom],
     max_thread_roots: int,
 ) -> None:
     """Run one source without preventing later sources after a failure."""
-    scoped_accumulators = tuple(
-        accumulator for accumulator in accumulators if accumulator.target.source_entity_names is not None
-    )
-    unscoped_rooms = _preferred_unscoped_rooms(source.rooms, preferred_unscoped_variants)
-    scoped_only_rooms = tuple(room for room in source.rooms if room not in unscoped_rooms)
-    batches = (
-        (unscoped_rooms, accumulators),
-        (scoped_only_rooms, scoped_accumulators),
-    )
-    for rooms, candidate_accumulators in batches:
-        accepted_accumulators = _accumulators_accepting_rooms(candidate_accumulators, rooms)
-        if not accepted_accumulators:
-            continue
-        try:
-            source_updates = await export_threads_for_targets_for_client(
-                client=source.client,
-                reader=source.reader,
-                config=config,
-                runtime_paths=runtime_paths,
-                rooms=rooms,
-                targets=tuple(accumulator.target for accumulator in accepted_accumulators),
-                max_thread_roots=max_thread_roots,
-            )
-        except Exception as exc:
-            await asyncio.to_thread(
-                _record_group_failure,
-                accepted_accumulators,
-                rooms,
-                f"Export group failed: {exc}",
-            )
-            continue
-        for accumulator, source_update in zip(accepted_accumulators, source_updates, strict=True):
-            _merge_accumulator(accumulator, source_update)
+    try:
+        source_accumulators = await export_threads_for_targets_for_client(
+            client=source.client,
+            reader=source.reader,
+            config=config,
+            runtime_paths=runtime_paths,
+            rooms=source.rooms,
+            targets=tuple(accumulator.target for accumulator in accumulators),
+            max_thread_roots=max_thread_roots,
+        )
+    except Exception as exc:
+        await asyncio.to_thread(_record_group_failure, accumulators, source.rooms, f"Export group failed: {exc}")
+        return
+    for accumulator, source_accumulator in zip(accumulators, source_accumulators, strict=True):
+        _merge_accumulator(accumulator, source_accumulator)
 
 
 async def _export_sources(
@@ -333,48 +239,21 @@ async def _export_sources(
     accumulators: Sequence[ThreadExportAccumulator],
     unreadable_rooms: _UnreadableRooms,
     full_pass: bool,
-    reconcile_empty_full_pass: bool,
     max_thread_roots: int,
 ) -> None:
     """Export every source into already-validated targets, then reconcile a full pass."""
-    room_groups = tuple(rooms for rooms, _error in unreadable_rooms) + tuple(source.rooms for source in sources)
-    preferred_unscoped_variants = _preferred_unscoped_room_variants(room_groups)
-    scoped_accumulators = tuple(
-        accumulator for accumulator in accumulators if accumulator.target.source_entity_names is not None
-    )
-    unscoped_accumulators = tuple(
-        accumulator for accumulator in accumulators if accumulator.target.source_entity_names is None
-    )
-    await asyncio.to_thread(_retract_targets_without_room_source, accumulators, room_groups)
     for rooms, error in unreadable_rooms:
-        await asyncio.to_thread(
-            _record_group_failure,
-            _accumulators_accepting_rooms(scoped_accumulators, rooms),
-            rooms,
-            error,
-        )
-        unscoped_rooms = _preferred_unscoped_rooms(rooms, preferred_unscoped_variants)
-        await asyncio.to_thread(
-            _record_group_failure,
-            _accumulators_accepting_rooms(unscoped_accumulators, unscoped_rooms),
-            unscoped_rooms,
-            error,
-        )
+        await asyncio.to_thread(_record_group_failure, accumulators, rooms, error)
     for source in sources:
         await _run_export_source(
             source,
             config=config,
             runtime_paths=runtime_paths,
             accumulators=accumulators,
-            preferred_unscoped_variants=preferred_unscoped_variants,
             max_thread_roots=max_thread_roots,
         )
     if full_pass:
-        await asyncio.to_thread(
-            _reconcile_full_pass,
-            accumulators,
-            allow_empty=reconcile_empty_full_pass,
-        )
+        await asyncio.to_thread(_reconcile_full_pass, accumulators)
 
 
 async def _validated_accumulators(
@@ -392,7 +271,6 @@ async def export_threads_to_sources(
     sources: Sequence[ThreadExportSource],
     targets: Sequence[ThreadExportTarget],
     unreadable_rooms: _UnreadableRooms = (),
-    invited_room_conflicts: Sequence[InvitedRoomConflict] = (),
     full_pass: bool,
     max_thread_roots: int = 2000,
 ) -> tuple[ThreadExportStats, ...]:
@@ -408,11 +286,6 @@ async def export_threads_to_sources(
         return ()
     accumulators, validated_targets = await _validated_accumulators(targets)
     if validated_targets:
-        await asyncio.to_thread(
-            _retract_ambiguous_invited_rooms,
-            validated_targets,
-            invited_room_conflicts,
-        )
         await _export_sources(
             sources,
             config=config,
@@ -420,7 +293,6 @@ async def export_threads_to_sources(
             accumulators=validated_targets,
             unreadable_rooms=unreadable_rooms,
             full_pass=full_pass,
-            reconcile_empty_full_pass=True,
             max_thread_roots=max_thread_roots,
         )
     return tuple(accumulator.stats() for accumulator in accumulators)
@@ -446,7 +318,7 @@ async def export_threads_to_targets_once(
     after that the body costs no Matrix history call at all.
 
     Each source thread is fetched once per room and fanned out to every authorized target.
-    Scoped targets export only rooms owned by an allowed source entity where every required member is joined.
+    Scoped targets export only rooms where every required member is currently joined.
     A failed membership check leaves prior exports untouched, records a failure, and writes nothing new.
     A successful check that proves any required member absent removes the prior room export.
     """
@@ -457,25 +329,14 @@ async def export_threads_to_targets_once(
         return tuple(accumulator.stats() for accumulator in accumulators)
 
     homeserver = runtime_matrix_homeserver(runtime_paths=runtime_paths)
-    state_rooms = export_rooms(config, runtime_paths, room_filter)
-    invited_selection = invited_export_rooms(
+    state_rooms = export_rooms(runtime_paths, room_filter)
+    discovered_invited_groups = invited_export_rooms(
         config,
         runtime_paths,
         room_filter,
-        state_rooms=state_rooms,
+        known_room_ids={room.room_id for room in state_rooms},
     )
-    _retract_ambiguous_invited_rooms(validated_targets, invited_selection.conflicts)
-    await asyncio.to_thread(
-        _retract_targets_without_room_source,
-        validated_targets,
-        (tuple(state_rooms), *(rooms for _entity_name, rooms in invited_selection.groups)),
-    )
-    invited_groups = await asyncio.to_thread(
-        _requested_invited_groups,
-        invited_selection.groups,
-        validated_targets,
-        preselected_room_keys=frozenset(room.key for room in state_rooms),
-    )
+    invited_groups = await asyncio.to_thread(_requested_invited_groups, discovered_invited_groups, validated_targets)
     export_groups = build_export_groups(
         runtime_paths=runtime_paths,
         homeserver=homeserver,
@@ -487,7 +348,7 @@ async def export_threads_to_targets_once(
     if not export_groups:
         select_export_account(runtime_paths, homeserver)
         if full_pass:
-            await asyncio.to_thread(_reconcile_full_pass, validated_targets, allow_empty=False)
+            await asyncio.to_thread(_reconcile_full_pass, validated_targets)
         return tuple(accumulator.stats() for accumulator in accumulators)
 
     unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = [
@@ -539,7 +400,6 @@ async def export_threads_to_targets_once(
             accumulators=validated_targets,
             unreadable_rooms=unreadable_rooms,
             full_pass=full_pass,
-            reconcile_empty_full_pass=False,
             max_thread_roots=max_thread_roots,
         )
     finally:
@@ -567,7 +427,6 @@ async def export_threads_once(
         targets=(
             ThreadExportTarget(
                 output_dir=output_dir or _default_thread_export_dir(runtime_paths),
-                source_entity_names=None,
                 required_member_user_ids=required_member_user_ids,
                 include_invited_rooms=include_invited_rooms,
             ),

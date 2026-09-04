@@ -16,12 +16,7 @@ from typing import TYPE_CHECKING, Protocol
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.private_instance_identity import private_instances_for_agent
-from mindroom.thread_export.models import (
-    InvitedRoomSelection,
-    ThreadExportRoom,
-    ThreadExportSource,
-    ThreadExportTarget,
-)
+from mindroom.thread_export.models import ThreadExportRoom, ThreadExportSource, ThreadExportTarget
 from mindroom.thread_export.projected_history import export_conversation_reader
 from mindroom.thread_export.selection import export_rooms, invited_export_rooms
 from mindroom.thread_export.service import export_threads_to_sources
@@ -162,9 +157,7 @@ class WorkspaceThreadExportRunner:
         targets = await asyncio.to_thread(_build_targets, config, runtime_paths, enabled, agent_user_ids)
         if not targets:
             return
-        state_rooms, invited_selection = await asyncio.to_thread(_select_rooms, config, runtime_paths)
-        invited_groups = list(invited_selection.groups)
-        invited_room_conflicts = invited_selection.conflicts
+        state_rooms, invited_groups = await asyncio.to_thread(_select_rooms, config, runtime_paths)
         if not full_pass:
             state_rooms = [room for room in state_rooms if room.room_id in room_ids]
             invited_groups = [
@@ -172,9 +165,6 @@ class WorkspaceThreadExportRunner:
                 for entity_name, rooms in invited_groups
                 if (selected := [room for room in rooms if room.room_id in room_ids])
             ]
-            invited_room_conflicts = tuple(
-                conflict for conflict in invited_room_conflicts if conflict.room.room_id in room_ids
-            )
         sources: list[ThreadExportSource] = []
         unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = []
         for entity_name, rooms in ((ROUTER_AGENT_NAME, state_rooms), *invited_groups):
@@ -191,7 +181,6 @@ class WorkspaceThreadExportRunner:
             sources=sources,
             targets=targets,
             unreadable_rooms=unreadable_rooms,
-            invited_room_conflicts=invited_room_conflicts,
             full_pass=full_pass,
         )
         _log_pass(stats, room_ids=None if full_pass else sorted(room_ids))
@@ -200,16 +189,16 @@ class WorkspaceThreadExportRunner:
 def _select_rooms(
     config: Config,
     runtime_paths: RuntimePaths,
-) -> tuple[list[ThreadExportRoom], InvitedRoomSelection]:
+) -> tuple[list[ThreadExportRoom], list[tuple[str, list[ThreadExportRoom]]]]:
     """Read the persisted configured and invited rooms, off the event loop."""
-    state_rooms = export_rooms(config, runtime_paths, None)
-    invited_selection = invited_export_rooms(
+    state_rooms = export_rooms(runtime_paths, None)
+    invited_groups = invited_export_rooms(
         config,
         runtime_paths,
         None,
-        state_rooms=state_rooms,
+        known_room_ids={room.room_id for room in state_rooms},
     )
-    return state_rooms, invited_selection
+    return state_rooms, invited_groups
 
 
 def _source_for_bot(bot: _ThreadExportBot, rooms: tuple[ThreadExportRoom, ...], config: Config) -> ThreadExportSource:
@@ -276,7 +265,6 @@ def _shared_target(
     """Return the membership-scoped target for one shared agent."""
     return ThreadExportTarget(
         output_dir=_shared_export_dir(runtime_paths, agent_name),
-        source_entity_names=(agent_name,),
         required_member_user_ids=(agent_user_id,),
         include_invited_rooms=options.invited_rooms,
         trusted_root=runtime_paths.storage_root,
@@ -325,7 +313,6 @@ def _private_targets(
         targets.append(
             ThreadExportTarget(
                 output_dir=output_dir,
-                source_entity_names=(agent_name,),
                 required_member_user_ids=required_member_user_ids,
                 include_invited_rooms=options.invited_rooms,
                 trusted_root=runtime_paths.storage_root,

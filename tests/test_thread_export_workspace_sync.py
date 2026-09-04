@@ -237,7 +237,6 @@ async def test_shared_agent_target_requires_agent_membership(tmp_path: Path) -> 
     assert call.kwargs["targets"] == (
         ThreadExportTarget(
             output_dir=runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME,
-            source_entity_names=("code",),
             required_member_user_ids=("@mindroom_code:localhost",),
             include_invited_rooms=False,
             trusted_root=runtime_paths.storage_root,
@@ -269,49 +268,6 @@ async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path)
     ]
     assert sources[1].reader.reader.hydrator.self_sender == "@mindroom_code:localhost"
     assert call.kwargs["unreadable_rooms"] == []
-
-
-async def test_shared_invited_room_keeps_each_current_projection_target_local(tmp_path: Path) -> None:
-    """Each claimant reads a shared ad-hoc room through its own principal-bound projection."""
-    config = _config(
-        tmp_path,
-        {
-            "code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig()),
-            "other": AgentConfig(display_name="Other", thread_exports=AgentThreadExportConfig()),
-        },
-    )
-    runtime_paths = runtime_paths_for(config)
-    write_thread_export_matrix_state(tmp_path)
-    write_invited_rooms(runtime_paths, "code", ["!private:localhost"])
-    write_invited_rooms(runtime_paths, "other", ["!private:localhost"])
-    runner = _runner(
-        config,
-        _bots(
-            _FakeBot("@mindroom_router:localhost"),
-            _FakeBot("@mindroom_code:localhost"),
-            _FakeBot("@mindroom_other:localhost"),
-        ),
-    )
-    export = _export_mock()
-
-    with patch(EXPORT_PATH, new=export):
-        runner.queue_full_pass()
-        await runner._run_pass_once()
-
-    call = export.await_args
-    assert call is not None
-    assert {target.source_entity_names for target in call.kwargs["targets"]} == {("code",), ("other",)}
-    assert call.kwargs["invited_room_conflicts"] == ()
-    invited_sources = {
-        source.reader.reader.hydrator.self_sender: room.source_entity_names
-        for source in call.kwargs["sources"]
-        for room in source.rooms
-        if room.room_id == "!private:localhost"
-    }
-    assert invited_sources == {
-        "@mindroom_code:localhost": ("code",),
-        "@mindroom_other:localhost": ("other",),
-    }
 
 
 async def test_not_running_router_makes_configured_rooms_unreadable(tmp_path: Path) -> None:
@@ -357,20 +313,6 @@ async def test_not_running_invited_entity_is_reported_unreadable(tmp_path: Path)
     [(rooms, error)] = call.kwargs["unreadable_rooms"]
     assert [room.room_id for room in rooms] == ["!private:localhost"]
     assert error == "Bot 'code' is not running"
-
-
-async def test_full_pass_removes_export_after_room_claim_disappears(tmp_path: Path) -> None:
-    """A completed native selection may remove a stale room even when no room remains."""
-    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
-    runtime_paths = runtime_paths_for(config)
-    output_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
-    stale_thread = _write_owned_export(output_dir)
-    runner = _runner(config, _bots(_FakeBot("@mindroom_code:localhost")))
-
-    runner.queue_full_pass()
-    await runner._run_pass_once()
-
-    assert not stale_thread.exists()
 
 
 async def test_full_pass_clears_exports_of_agents_without_the_setting(tmp_path: Path) -> None:
@@ -450,7 +392,6 @@ async def test_private_agent_gets_one_owner_scoped_target_per_validated_instance
         ("@alice:localhost", "@mindroom_secret:localhost"): alice_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME,
         ("@bob:localhost", "@mindroom_secret:localhost"): bob_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME,
     }
-    assert {target.source_entity_names for target in call.kwargs["targets"]} == {("secret",)}
     assert not ghost_thread.exists()
 
 
@@ -470,7 +411,6 @@ async def test_private_owner_scope_requires_only_the_owner(tmp_path: Path) -> No
     call = export.await_args
     assert call is not None
     assert [target.required_member_user_ids for target in call.kwargs["targets"]] == [("@alice:localhost",)]
-    assert [target.source_entity_names for target in call.kwargs["targets"]] == [("secret",)]
 
 
 async def test_symlinked_private_root_is_ignored(tmp_path: Path) -> None:
@@ -534,5 +474,4 @@ async def test_unreadable_private_identity_clears_that_instance_and_keeps_the_pa
     call = export.await_args
     assert call is not None
     assert [target.required_member_user_ids for target in call.kwargs["targets"]] == [("@mindroom_code:localhost",)]
-    assert [target.source_entity_names for target in call.kwargs["targets"]] == [("code",)]
     assert not existing_thread.exists()

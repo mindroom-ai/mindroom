@@ -560,16 +560,13 @@ Export Matrix threads to local files.
 Export Matrix threads to YAML files for grep/ripgrep search.
 The command reads persisted Matrix accounts and rooms from `matrix_state.yaml`, so run MindRoom once before exporting.
 Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account, unless `--no-invited-rooms` is passed.
-Per-agent workspace targets export a room only when the agent's configuration or persisted invite state authorizes that source, because joined membership is an additional check rather than source authorization.
-Multiple current agents may authorize the same invited room for their own workspaces, and each workspace is populated from that agent's principal-bound history view.
-Claims left only by retired entities are excluded and prior exporter-owned copies are retracted until the room is assigned under a current entity.
 By default it writes to `<storage>/thread_exports`.
 For a continuously updated copy inside an agent's own workspace, set `thread_exports` on the agent instead; see [Thread Exports](configuration/agents.md#thread-exports).
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
 Complete passes normally remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
-The command's zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
+The zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
 A warning is logged when that guard preserves existing target state because the pass has no positive room evidence.
 A complete room enumeration that returns zero threads preserves existing YAML exports for that room and logs a warning because an anomalous empty response cannot be distinguished from deletion of the final thread.
 After either warning, verify the source state and remove the preserved export manually only when the deletion is confirmed; workspace git history remains the recovery path for mistaken cleanup.

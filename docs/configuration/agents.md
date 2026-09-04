@@ -175,7 +175,7 @@ agents:
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
-| `thread_exports` | bool or object | `null` | Continuously export every thread from rooms authorized by this agent's configuration or persisted invite state, subject to current membership checks, as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](#thread-exports)) |
+| `thread_exports` | bool or object | `null` | Continuously export every thread from rooms this agent is joined to as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](#thread-exports)) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 See [Knowledge Bases](../knowledge.md) for `mode: semantic` and `mode: files`.
@@ -190,7 +190,6 @@ Unset `memory_search` fields inherit from top-level `memory.search`.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 Agents use `agents.<name>.accept_invites`, while teams and the router use their own `accept_invites` options with the same durable invite semantics.
 `true` accepts every valid invitation, `false` and `[]` reject every invitation, and a list accepts exact or wildcard Matrix user IDs after human-only alias resolution; non-human accounts retain their exact transport ID.
-With `thread_exports` enabled, a room in an agent's persisted invite state authorizes that agent's workspace export, subject to the configured current membership rules.
 Invite acceptance and responder access are independent, so joining a room does not authorize its inviter to interact with the agent.
 The agent continues to apply `access.users`, `access.current_room_members`, and `access.members_of_rooms` to every interaction after joining.
 Approval-gated tools are stricter than plain ad-hoc chat access.
@@ -585,8 +584,8 @@ agents:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `invited_rooms` | bool | `true` | Also export user-created rooms recorded in this agent's persisted invite state. Current membership rules still apply |
-| `private_room_scope` | string | `"owner_and_agent"` | Private agents only. Among rooms authorized for this agent, `owner_and_agent` requires both the requester and agent to be joined, while `owner` requires only the requester |
+| `invited_rooms` | bool | `true` | Also export user-created rooms the agent joined through invites. Current membership is always required |
+| `private_room_scope` | string | `"owner_and_agent"` | Private agents only. `owner_and_agent` exports rooms where both the requester and the agent are joined; `owner` exports every room the requester is joined to |
 
 Exports land at `<storage_root>/agents/<agent>/workspace/thread_exports/<urlencoded room key>/<urlencoded thread id>.yaml`, the same layout `mindroom threads export` writes.
 Inside the agent's own tools that directory is `$MINDROOM_AGENT_WORKSPACE/thread_exports/`.
@@ -595,15 +594,12 @@ Each room directory also holds an `index.json` mapping every thread file to its 
 
 MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, batching everything that arrives in that window into one pass, and runs one full pass at startup and after every config reload.
 A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
-A native workspace full pass treats successfully loaded configured-room and invite state as authoritative, so it removes stale rooms even when no authorized room remains while retaining any room whose source or membership check failed.
-The manual [`threads export`](../cli.md#threads-export) command keeps its conservative zero-room guard because its persisted source state may be incomplete.
+A full pass that could export no room at all skips that directory-wide removal, because an empty result cannot be told apart from a failed one; the same guard and its manual-cleanup guidance are described under [`threads export`](../cli.md#threads-export).
 Files are rewritten only when a thread's content changed.
 Agents may edit or delete their exported files; deleted files return on the next pass that touches the room.
 Thread bodies come from the event-journal projection the running bots already maintain, so a pass costs no Matrix history call for threads a bot has seen.
 
-Shared agents export only configured rooms attributed to the agent and invited rooms recorded in that agent's persisted invite state, and the agent's own Matrix account must still be joined.
-When multiple current agents accepted the same ad-hoc room, each reads through its own principal-bound projection for its own workspace, so one claimant's visibility-scoped history is never copied into another claimant's workspace.
-Claims left only by retired entities authorize no current workspace and cause prior exporter-owned copies to be retracted.
+Shared agents export only rooms where the agent's own Matrix account is currently joined.
 Private agents (`private:`) get one export tree per materialized instance under `<storage_root>/private_instances/<scope-key>/<agent>/<private root>/thread_exports/`, scoped to that requester's current room memberships, so one requester's private workspace never accumulates other users' conversations.
 A membership lookup failure blocks new writes for that room and leaves existing files in place until a successful lookup proves that access was revoked.
 

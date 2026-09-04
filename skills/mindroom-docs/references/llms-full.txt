@@ -1866,7 +1866,7 @@ agents:
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
-| `thread_exports` | bool or object | `null` | Continuously export every thread from rooms authorized by this agent's configuration or persisted invite state, subject to current membership checks, as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](#thread-exports)) |
+| `thread_exports` | bool or object | `null` | Continuously export every thread from rooms this agent is joined to as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](#thread-exports)) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 See [Knowledge Bases](https://docs.mindroom.chat/knowledge/) for `mode: semantic` and `mode: files`.
@@ -1881,7 +1881,6 @@ Unset `memory_search` fields inherit from top-level `memory.search`.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 Agents use `agents.<name>.accept_invites`, while teams and the router use their own `accept_invites` options with the same durable invite semantics.
 `true` accepts every valid invitation, `false` and `[]` reject every invitation, and a list accepts exact or wildcard Matrix user IDs after human-only alias resolution; non-human accounts retain their exact transport ID.
-With `thread_exports` enabled, a room in an agent's persisted invite state authorizes that agent's workspace export, subject to the configured current membership rules.
 Invite acceptance and responder access are independent, so joining a room does not authorize its inviter to interact with the agent.
 The agent continues to apply `access.users`, `access.current_room_members`, and `access.members_of_rooms` to every interaction after joining.
 Approval-gated tools are stricter than plain ad-hoc chat access.
@@ -2276,8 +2275,8 @@ agents:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `invited_rooms` | bool | `true` | Also export user-created rooms recorded in this agent's persisted invite state. Current membership rules still apply |
-| `private_room_scope` | string | `"owner_and_agent"` | Private agents only. Among rooms authorized for this agent, `owner_and_agent` requires both the requester and agent to be joined, while `owner` requires only the requester |
+| `invited_rooms` | bool | `true` | Also export user-created rooms the agent joined through invites. Current membership is always required |
+| `private_room_scope` | string | `"owner_and_agent"` | Private agents only. `owner_and_agent` exports rooms where both the requester and the agent are joined; `owner` exports every room the requester is joined to |
 
 Exports land at `<storage_root>/agents/<agent>/workspace/thread_exports/<urlencoded room key>/<urlencoded thread id>.yaml`, the same layout `mindroom threads export` writes.
 Inside the agent's own tools that directory is `$MINDROOM_AGENT_WORKSPACE/thread_exports/`.
@@ -2286,15 +2285,12 @@ Each room directory also holds an `index.json` mapping every thread file to its 
 
 MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, batching everything that arrives in that window into one pass, and runs one full pass at startup and after every config reload.
 A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
-A native workspace full pass treats successfully loaded configured-room and invite state as authoritative, so it removes stale rooms even when no authorized room remains while retaining any room whose source or membership check failed.
-The manual [`threads export`](https://docs.mindroom.chat/cli/#threads-export) command keeps its conservative zero-room guard because its persisted source state may be incomplete.
+A full pass that could export no room at all skips that directory-wide removal, because an empty result cannot be told apart from a failed one; the same guard and its manual-cleanup guidance are described under [`threads export`](https://docs.mindroom.chat/cli/#threads-export).
 Files are rewritten only when a thread's content changed.
 Agents may edit or delete their exported files; deleted files return on the next pass that touches the room.
 Thread bodies come from the event-journal projection the running bots already maintain, so a pass costs no Matrix history call for threads a bot has seen.
 
-Shared agents export only configured rooms attributed to the agent and invited rooms recorded in that agent's persisted invite state, and the agent's own Matrix account must still be joined.
-When multiple current agents accepted the same ad-hoc room, each reads through its own principal-bound projection for its own workspace, so one claimant's visibility-scoped history is never copied into another claimant's workspace.
-Claims left only by retired entities authorize no current workspace and cause prior exporter-owned copies to be retracted.
+Shared agents export only rooms where the agent's own Matrix account is currently joined.
 Private agents (`private:`) get one export tree per materialized instance under `<storage_root>/private_instances/<scope-key>/<agent>/<private root>/thread_exports/`, scoped to that requester's current room memberships, so one requester's private workspace never accumulates other users' conversations.
 A membership lookup failure blocks new writes for that room and leaves existing files in place until a successful lookup proves that access was revoked.
 
@@ -14906,8 +14902,7 @@ calls:
 MindRoom enforces at most one calls-enabled agent per room.
 Calls only join rooms configured for that agent and only while the sole caller passes the normal room and per-agent reply permissions.
 Calls-enabled agents also join calls in ad-hoc rooms they accepted through their normal authorized-invite policy. This lets Matrix clients create a private, temporary voice room and invite one agent without adding that room to `config.yaml` first.
-If persisted invite state names multiple calls-enabled agents for one ad-hoc room, MindRoom refuses to choose by configuration order and reports the conflicting agents and room ID.
-Assign that room ID under `agents.<name>.rooms` for exactly one calls-enabled agent to make ownership authoritative without weakening the other accounts' room-membership policy.
+An explicit room assignment to one calls-enabled agent takes precedence over persisted invite records; invite-only ambiguity still fails closed.
 Calls-enabled agents advertise `📞 Voice calls` in their Matrix presence status only when their MatrixRTC runtime is available, so clients can show the call action only where it will be answered.
 Requester-private agents use the sole authorized caller's verified Matrix user ID to resolve their workspace, memory, credentials, history, knowledge, and tool execution scope.
 The same caller scope applies in configured rooms and authorized ad-hoc invite rooms.
@@ -20218,16 +20213,13 @@ Export Matrix threads to local files.
 Export Matrix threads to YAML files for grep/ripgrep search.
 The command reads persisted Matrix accounts and rooms from `matrix_state.yaml`, so run MindRoom once before exporting.
 Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account, unless `--no-invited-rooms` is passed.
-Per-agent workspace targets export a room only when the agent's configuration or persisted invite state authorizes that source, because joined membership is an additional check rather than source authorization.
-Multiple current agents may authorize the same invited room for their own workspaces, and each workspace is populated from that agent's principal-bound history view.
-Claims left only by retired entities are excluded and prior exporter-owned copies are retracted until the room is assigned under a current entity.
 By default it writes to `<storage>/thread_exports`.
 For a continuously updated copy inside an agent's own workspace, set `thread_exports` on the agent instead; see [Thread Exports](https://docs.mindroom.chat/configuration/agents/#thread-exports).
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
 Complete passes normally remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
-The command's zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
+The zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
 A warning is logged when that guard preserves existing target state because the pass has no positive room evidence.
 A complete room enumeration that returns zero threads preserves existing YAML exports for that room and logs a warning because an anomalous empty response cannot be distinguished from deletion of the final thread.
 After either warning, verify the source state and remove the preserved export manually only when the deletion is confirmed; workspace git history remains the recovery path for mistaken cleanup.

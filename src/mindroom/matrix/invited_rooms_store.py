@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import stat
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -24,10 +22,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class _InvalidInvitedRoomsFileError(ValueError):
-    """Persisted invited-room state has an invalid shape."""
-
-
 def invited_rooms_path(storage_root: Path, agent_name: str) -> Path:
     """Return the storage path for one agent's persisted invited rooms."""
     return agent_state_root_path(storage_root, agent_name) / "invited_rooms.json"
@@ -44,67 +38,20 @@ def load_invited_rooms(path: Path) -> set[str]:
         return set()
 
     try:
-        return _read_invited_rooms(path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         logger.warning("failed_to_load_invited_rooms", path=str(path), exc_info=True)
         return set()
-    except _InvalidInvitedRoomsFileError:
+
+    if not isinstance(raw, list):
         logger.warning("invalid_invited_rooms_file", path=str(path))
         return set()
 
-
-def load_invited_room_claims(path: Path) -> set[str]:
-    """Load ownership evidence, failing closed when persisted state is invalid."""
-    try:
-        return _read_invited_rooms_no_follow(path)
-    except FileNotFoundError:
-        return set()
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, _InvalidInvitedRoomsFileError) as exc:
-        msg = f"Invalid invited-room claim file: {path}"
-        raise RuntimeError(msg) from exc
-
-
-def _read_invited_rooms(path: Path) -> set[str]:
-    """Read and validate one persisted invited-room state file."""
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    return _validated_invited_rooms(raw, path)
-
-
-def _read_invited_rooms_no_follow(path: Path) -> set[str]:
-    """Read one regular state file without following any path-component symlink."""
-    absolute_path = path.expanduser().absolute()
-    directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
-    file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW
-    directory_descriptor = os.open(absolute_path.anchor, directory_flags)
-    file_descriptor = -1
-    try:
-        for component in absolute_path.parts[1:-1]:
-            next_descriptor = os.open(component, directory_flags, dir_fd=directory_descriptor)
-            os.close(directory_descriptor)
-            directory_descriptor = next_descriptor
-        file_descriptor = os.open(absolute_path.name, file_flags, dir_fd=directory_descriptor)
-        if not stat.S_ISREG(os.fstat(file_descriptor).st_mode):
-            msg = f"Invited-room state must be a regular file: {path}"
-            raise _InvalidInvitedRoomsFileError(msg)
-        with os.fdopen(file_descriptor, encoding="utf-8") as claim_file:
-            file_descriptor = -1
-            raw = json.load(claim_file)
-    finally:
-        if file_descriptor >= 0:
-            os.close(file_descriptor)
-        os.close(directory_descriptor)
-    return _validated_invited_rooms(raw, path)
-
-
-def _validated_invited_rooms(raw: object, path: Path) -> set[str]:
-    """Validate and normalize one decoded invited-room state payload."""
-    if not isinstance(raw, list):
-        msg = f"Invited-room state must be a list of room IDs: {path}"
-        raise _InvalidInvitedRoomsFileError(msg)
     room_ids = [room_id for room_id in raw if isinstance(room_id, str)]
     if len(room_ids) != len(raw):
-        msg = f"Invited-room state must be a list of room IDs: {path}"
-        raise _InvalidInvitedRoomsFileError(msg)
+        logger.warning("invalid_invited_rooms_file", path=str(path))
+        return set()
+
     return set(room_ids)
 
 
