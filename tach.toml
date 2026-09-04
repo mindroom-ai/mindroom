@@ -1784,9 +1784,9 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
     "mindroom.tool_approval",
+    "mindroom.thread_export.workspace_sync",
     "mindroom.workers.runtime",
-
-    "mindroom.thread_export.workspace_sync",]
+]
 
 [[modules]]
 path = "mindroom.response_runner"

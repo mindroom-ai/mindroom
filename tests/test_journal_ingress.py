@@ -1342,6 +1342,20 @@ class TestRoomActivity:
 
         assert seen == [ROOM, ROOM, ROOM]
 
+    async def test_admitted_membership_changes_report_their_room(self, alice: PrincipalStore) -> None:
+        """A join or leave can change who may read an export, so it counts as activity."""
+        seen: list[str] = []
+        ingress = JournalIngress(
+            store=alice,
+            self_sender=BOT,
+            room_lifecycle_enabled=lambda: True,
+            on_room_activity=seen.append,
+        )
+
+        await ingress._admit(room(), member_event("$joined"), nio.TimelineEventProvenance.LIVE)
+
+        assert seen == [ROOM]
+
     async def test_reactions_and_redelivered_events_stay_silent(self, alice: PrincipalStore) -> None:
         """A reaction is not conversation, and a redelivered event changed nothing."""
         seen: list[str] = []

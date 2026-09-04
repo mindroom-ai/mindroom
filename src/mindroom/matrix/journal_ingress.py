@@ -42,6 +42,9 @@ _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 _DEPARTED_MEMBERSHIPS = frozenset({"leave", "ban"})
 # Kinds whose events carry conversation content, and so update the projection.
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
+# Kinds after which a room's exportable state may differ: its conversation
+# changed, or someone whose membership gates an export came or went.
+_ROOM_ACTIVITY_KINDS = _PROJECTED_KINDS | {EventKind.ROOM_LIFECYCLE}
 
 # What an `m.room.message` must have parsed to before MindRoom can treat it as
 # work: nio's base class for every msgtype that carries a textual body, which
@@ -449,7 +452,7 @@ class JournalIngress:
         admission: AdmissionResult,
     ) -> None:
         """Tell the consumers of a committed admission what just happened."""
-        if admission is AdmissionResult.ADMITTED and kind in _PROJECTED_KINDS:
+        if admission is AdmissionResult.ADMITTED and kind in _ROOM_ACTIVITY_KINDS:
             self.on_room_activity(room.room_id)
         if event_class is not EventClass.ACTIONABLE:
             return
