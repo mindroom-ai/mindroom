@@ -79,7 +79,7 @@ def _text_event(event_id: str, body: str, *, server_timestamp: int) -> nio.RoomM
 def _pending_text(event_id: str, body: str, *, server_timestamp: int) -> PendingEvent:
     return make_pending_event(
         _text_event(event_id, body, server_timestamp=server_timestamp),
-        MagicMock(spec=nio.MatrixRoom),
+        nio.MatrixRoom(room_id=_ROOM_ID, own_user_id="@agent:localhost"),
         source_kind=MESSAGE_SOURCE_KIND,
         requester_user_id=_REQUESTER,
     )

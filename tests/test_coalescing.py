@@ -145,6 +145,30 @@ def test_single_message_batch_is_not_structured() -> None:
     assert batch.event.body == "just one"
 
 
+def test_coalesced_message_tags_carry_current_member_display_names() -> None:
+    """Structured tags take each sender's current display name from the synced room cache."""
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    room.add_member("@user:localhost", "Banana Man", None)
+    room.add_member("@unnamed:localhost", None, None)
+    unnamed_event = _text_event("$a2:localhost", "second", 1_774_019_760_000)
+    unnamed_event.sender = "@unnamed:localhost"
+
+    turn = build_prepared_turn(
+        CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
+        [
+            make_pending_event(_text_event("$a1:localhost", "first", 1_774_019_700_000), room, source_kind="message"),
+            make_pending_event(unnamed_event, room, source_kind="message"),
+        ],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    assert turn.current_prompt_is_structured is True
+    assert (
+        '<msg event_id="$a1:localhost" from="@user:localhost" display_name="Banana Man" ts="2026-03-20 08:15 PDT">'
+    ) in turn.event.body
+    assert '<msg event_id="$a2:localhost" from="@unnamed:localhost" ts="2026-03-20 08:16 PDT">' in turn.event.body
+
+
 def test_prepared_turn_carries_structured_flag_and_metadata() -> None:
     """A structured turn must carry its flag and per-message metadata to dispatch."""
     turn = build_prepared_turn(

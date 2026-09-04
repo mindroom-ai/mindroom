@@ -285,7 +285,7 @@ class ResponseTurnContext:
     thread_id: str | None
     requester_id: str | None
     matrix_run_metadata: dict[str, Any] | None
-    member_display_names: dict[str, str] | None = None
+    member_display_names: Mapping[str, str] = field(default_factory=dict)
     active_model_name: str | None = None
     active_event_ids: frozenset[str] = frozenset()
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()

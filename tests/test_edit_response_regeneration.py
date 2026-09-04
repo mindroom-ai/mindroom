@@ -247,6 +247,7 @@ def _tagged_prompt(source_event_ids: tuple[str, ...], prompts: dict[str, str]) -
         prompts,
         _source_metadata(*source_event_ids),
         timestamp_formatter=lambda _timestamp_ms: None,
+        member_display_names={},
     )
     assert prompt is not None
     return prompt
@@ -4526,8 +4527,8 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
     room.users = {
-        "@mindroom_test_agent:example.com": None,
-        "@user:example.com": None,
+        "@mindroom_test_agent:example.com": nio.MatrixUser("@mindroom_test_agent:example.com"),
+        "@user:example.com": nio.MatrixUser("@user:example.com"),
     }
     room.members_synced = True
 
@@ -4637,8 +4638,8 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     # Create a room
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
     room.users = {
-        "@mindroom_test_agent:example.com": None,
-        "@user:example.com": None,
+        "@mindroom_test_agent:example.com": nio.MatrixUser("@mindroom_test_agent:example.com"),
+        "@user:example.com": nio.MatrixUser("@user:example.com"),
     }
     room.members_synced = True
 

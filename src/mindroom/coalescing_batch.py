@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -27,6 +27,7 @@ from .dispatch_source import (
     source_kind_from_content,
 )
 from .handled_turns import SourceEventMetadata, TurnRecord
+from .matrix.member_display_names import room_member_display_names
 from .prompt_message_tags import render_msg_tag
 from .timestamp_formatting import normalize_timestamp_ms
 
@@ -148,12 +149,15 @@ def _tagged_pending_message(
     pending_event: PendingEvent,
     *,
     timestamp_formatter: TimestampFormatter | None,
+    member_display_names: Mapping[str, str],
 ) -> str:
+    sender = pending_event.event.requester_user_id or pending_event.event.sender
     return render_msg_tag(
-        sender=pending_event.event.requester_user_id or pending_event.event.sender,
+        sender=sender,
         body=dispatch_prompt_for_event(pending_event.event),
         event_id=pending_event.event.event_id,
         ts=_format_event_timestamp(pending_event.event.server_timestamp, timestamp_formatter),
+        display_name=member_display_names.get(sender),
     )
 
 
@@ -162,8 +166,14 @@ def _rendered_pending_messages(
     *,
     timestamp_formatter: TimestampFormatter | None,
 ) -> str:
+    # Every event in one batch shares the coalescing key's room.
+    member_display_names = room_member_display_names(pending_events[-1].room)
     return "\n".join(
-        _tagged_pending_message(pending_event, timestamp_formatter=timestamp_formatter)
+        _tagged_pending_message(
+            pending_event,
+            timestamp_formatter=timestamp_formatter,
+            member_display_names=member_display_names,
+        )
         for pending_event in pending_events
     )
 
@@ -198,6 +208,7 @@ def tagged_coalesced_prompt(
     source_event_metadata: dict[str, SourceEventMetadata],
     *,
     timestamp_formatter: TimestampFormatter,
+    member_display_names: Mapping[str, str],
 ) -> str | None:
     """Render a persisted coalesced turn with the same model-facing message tags."""
     rendered_messages: list[str] = []
@@ -212,6 +223,7 @@ def tagged_coalesced_prompt(
                 body=prompt,
                 event_id=source_event_id,
                 ts=timestamp_formatter(metadata.timestamp_ms),
+                display_name=member_display_names.get(metadata.sender),
             ),
         )
     return _messages_envelope(

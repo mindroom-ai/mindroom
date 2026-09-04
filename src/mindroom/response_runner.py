@@ -147,8 +147,6 @@ _INTERRUPTED_APPROVAL_RECOVERY_REASON = (
     "Tool approval continuation was interrupted before final delivery and denied safely."
 )
 
-_MEMBER_DISPLAY_NAMES_LOOKUP_TIMEOUT_SECONDS = 2.0
-
 
 def _approval_interruption_cancel_source(reason: str) -> Literal["sync_restart", "interrupted"] | None:
     """Recover the cancellation provenance persisted for an interrupted approval."""
@@ -296,23 +294,6 @@ def _cached_room_display_name(runtime: BotRuntimeView, room_id: str) -> str | No
     return room.display_name
 
 
-def _cached_member_display_names(runtime: BotRuntimeView, room_id: str) -> dict[str, str]:
-    """Return joined-member display names already present in the synced Matrix cache."""
-    client = runtime.client
-    if client is None:
-        return {}
-    room = client.rooms.get(room_id)
-    if room is None:
-        return {}
-    invited_user_ids = set(room.invited_users)
-    return {
-        user_id: display_name
-        for user_id, user in room.users.items()
-        if user_id not in invited_user_ids
-        and (display_name := getattr(user, "display_name", None))
-    }
-
-
 def _matrix_message_target_item(
     target: MessageTarget,
     *,
@@ -443,6 +424,7 @@ class ResponseRequest:
     thread_history: Sequence[ResolvedVisibleMessage]
     prompt: str
     response_envelope: MessageEnvelope
+    member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
@@ -647,7 +629,6 @@ class _PreparedResponseRuntime:
     active_model_name: str
     show_tool_calls: bool
     tool_dispatch: ToolDispatchContext
-    member_display_names: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -824,45 +805,6 @@ class ResponseRunner:
             msg = "Matrix client is not ready for response coordination"
             raise RuntimeError(msg)
         return client
-
-
-    async def _member_display_names(self, room_id: str) -> dict[str, str]:
-        """Resolve current room member display names with bounded Matrix I/O and cache fallback."""
-        cached = _cached_member_display_names(self.deps.runtime, room_id)
-
-        try:
-            async with asyncio.timeout(_MEMBER_DISPLAY_NAMES_LOOKUP_TIMEOUT_SECONDS):
-                member_response = await self._client().joined_members(room_id)
-        except asyncio.CancelledError:
-            raise
-        except TimeoutError:
-            self.deps.logger.warning(
-                "response_member_display_names_lookup_timed_out",
-                room_id=room_id,
-                timeout_seconds=_MEMBER_DISPLAY_NAMES_LOOKUP_TIMEOUT_SECONDS,
-            )
-            return cached
-        except Exception as exc:
-            self.deps.logger.warning(
-                "response_member_display_names_lookup_failed",
-                room_id=room_id,
-                error=str(exc),
-            )
-            return cached
-
-        members = getattr(member_response, "members", None)
-        if members is None:
-            self.deps.logger.warning(
-                "response_member_display_names_lookup_failed",
-                room_id=room_id,
-                error=str(member_response),
-            )
-            return cached
-        return {
-            member.user_id: member.display_name
-            for member in members
-            if member.display_name
-        }
 
     def _log_delivery_failure(
         self,
@@ -2669,7 +2611,7 @@ class ResponseRunner:
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
-            member_display_names=runtime.member_display_names,
+            member_display_names=request.member_display_names,
             active_model_name=runtime.active_model_name,
             active_event_ids=frozenset(active_event_ids),
             transient_enrichment_items=_with_matrix_message_target(
@@ -3493,7 +3435,6 @@ class ResponseRunner:
         progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
         matrix_run_metadata = _materialize_matrix_run_metadata(request.matrix_run_metadata)
         active_event_ids = self._active_response_event_ids(request.room_id)
-        member_display_names = await self._member_display_names(resolved_target.room_id)
         # Team entries refine entity_label to the materialized team label and
         # append the knowledge-availability enrichment before the turn runs.
         team_turn_ctx = ResponseTurnContext(
@@ -3506,7 +3447,7 @@ class ResponseRunner:
             thread_id=resolved_target.resolved_thread_id,
             requester_id=requester_user_id or execution_identity.requester_id,
             matrix_run_metadata=matrix_run_metadata,
-            member_display_names=member_display_names,
+            member_display_names=request.member_display_names,
             active_event_ids=frozenset(active_event_ids),
             transient_enrichment_items=_with_matrix_message_target(
                 request.transient_enrichment_items,
@@ -3906,7 +3847,6 @@ class ResponseRunner:
                 thread_id=response_thread_id,
                 runtime_paths=self.deps.runtime_paths,
             ).model_name
-        member_display_names = await self._member_display_names(resolved_target.room_id)
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=request.user_id,
@@ -3924,7 +3864,6 @@ class ResponseRunner:
             active_model_name=active_model_name,
             show_tool_calls=self._show_tool_calls(),
             tool_dispatch=tool_dispatch,
-            member_display_names=member_display_names,
         )
 
     @timed("non_streaming_response_generation")

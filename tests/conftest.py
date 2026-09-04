@@ -2147,7 +2147,8 @@ def create_mock_room(
     room.room_id = room_id
     if agents:
         domain = config.get_domain(runtime_paths_for(config)) if config is not None else "localhost"
-        room.users = {f"@mindroom_{agent}:{domain}": None for agent in agents}
+        user_ids = [f"@mindroom_{agent}:{domain}" for agent in agents]
+        room.users = {user_id: nio.MatrixUser(user_id) for user_id in user_ids}
     else:
         room.users = {}
     return room

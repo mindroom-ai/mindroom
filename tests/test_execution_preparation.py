@@ -668,6 +668,31 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
     assert messages[1].content == "Current request"
 
 
+def test_thread_history_and_current_message_carry_member_display_names() -> None:
+    """History and the current turn label senders with their current display name, keyed by Matrix ID."""
+    messages = _build_thread_history_messages(
+        "Current request",
+        [make_visible_message(sender="@alice:localhost", body="Earlier", event_id="$earlier")],
+        response_sender_id="@mindroom_team:localhost",
+        current_sender_id="@alice:localhost",
+        current_event_id="$current",
+        member_display_names={"@alice:localhost": "Banana Man"},
+        config=_config(),
+    )
+
+    assert len(messages) == 2
+    assert messages[0].content == render_msg_tag(
+        sender="@alice:localhost",
+        body="Earlier",
+        event_id="$earlier",
+        display_name="Banana Man",
+    )
+    assert messages[1].content == (
+        'Current message:\n<msg event_id="$current" from="@alice:localhost" display_name="Banana Man">'
+        "<![CDATA[Current request]]></msg>"
+    )
+
+
 def test_current_matrix_message_renders_timestamp_as_msg_attribute() -> None:
     """Current Matrix messages should carry time as metadata, not body text."""
     config = _config()

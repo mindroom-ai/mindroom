@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from agno.models.message import Message
@@ -38,13 +39,13 @@ from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import ResolvedReplayPlan
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
-from mindroom.prompt_message_tags import enrich_msg_tags_with_display_names, render_msg_tag
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply, strip_visible_tool_markers
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
     from agno.agent import Agent
@@ -58,6 +59,8 @@ if TYPE_CHECKING:
     from mindroom.timing import DispatchPipelineTiming
 
 logger = get_logger(__name__)
+
+_NO_MEMBER_DISPLAY_NAMES: Mapping[str, str] = MappingProxyType({})
 
 _PARTIAL_REPLY_SENDER_LABELS = {
     "interrupted": "You (interrupted reply draft)",
@@ -248,7 +251,7 @@ def _context_message_from_visible_message(
     missing_sender_label: str | None = None,
     body: str | None = None,
     attachment_records: Sequence[AttachmentRecord] = (),
-    member_display_names: dict[str, str] | None = None,
+    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
 ) -> Message:
     """Convert one visible Matrix message into a structured Agno message."""
     # Matrix bodies include human-facing tool markers like "🔧 `tool` [1]".
@@ -282,16 +285,12 @@ def _context_message_from_visible_message(
             event_id=event_id,
         )
     else:
-        display_name = (
-            member_display_names.get(speaker_label)
-            if member_display_names is not None and speaker_label is not None
-            else None
-        )
+        sender = speaker_label or ""
         content = render_msg_tag(
-            sender=speaker_label or "",
+            sender=sender,
             body=body,
             event_id=event_id,
-            display_name=display_name,
+            display_name=member_display_names.get(sender),
         )
     return Message(role="user", content=content)
 
@@ -304,7 +303,7 @@ def _context_messages_from_visible_messages(
     max_message_length: int | None = None,
     missing_sender_label: str | None = None,
     attachment_context: _ThreadAttachmentContext | None = None,
-    member_display_names: dict[str, str] | None = None,
+    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
 ) -> tuple[Message, ...]:
     """Convert visible Matrix context into provider-native message objects."""
     visible_messages = messages[-max_messages:] if max_messages is not None else messages
@@ -342,7 +341,7 @@ def _messages_with_capped_context(
     context_messages: Sequence[Message],
     transient_context_messages: Sequence[Message] = (),
     current_sender_id: str | None,
-    member_display_names: dict[str, str] | None = None,
+    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
     current_timestamp_ms: float | None = None,
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
@@ -406,19 +405,14 @@ def _messages_with_current_prompt(
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
-    member_display_names: dict[str, str] | None = None,
+    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
 ) -> tuple[Message, ...]:
     """Return canonical live request messages with the current user turn last."""
     messages = [message.model_copy(deep=True) for message in context_messages]
     current_ts = format_timestamp_ms(current_timestamp_ms, timezone=config.timezone)
-    model_prompt = (
-        enrich_msg_tags_with_display_names(prompt, member_display_names)
-        if current_prompt_is_structured
-        else prompt
-    )
     current_prompt = (
         _build_matrix_prompt_with_history(
-            model_prompt,
+            prompt,
             [],
             header=config.get_prompt("PREVIOUS_CONVERSATION_THREAD_HEADER"),
             prompt_intro=config.get_prompt("CURRENT_MESSAGE_PROMPT_INTRO"),
@@ -426,11 +420,7 @@ def _messages_with_current_prompt(
             current_ts=current_ts,
             current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
-            current_display_name=(
-                member_display_names.get(current_sender_id)
-                if member_display_names is not None and current_sender_id is not None
-                else None
-            ),
+            current_display_name=member_display_names.get(current_sender_id),
         )
         if current_sender_id is not None
         else prompt
@@ -466,7 +456,7 @@ def _build_unseen_context_messages(
     active_event_ids: Collection[str],
     response_sender_id: str | None,
     current_sender_id: str | None = None,
-    member_display_names: dict[str, str] | None = None,
+    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
     current_timestamp_ms: float | None = None,
     prompt_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
@@ -518,7 +508,7 @@ def _build_thread_history_messages(
     transient_context_messages: Sequence[Message] = (),
     response_sender_id: str | None,
     current_sender_id: str | None = None,
-    member_display_names: dict[str, str] | None = None,
+    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
     current_timestamp_ms: float | None = None,
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
@@ -769,7 +759,7 @@ async def _prepare_execution_context_common(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     response_sender_id: str | None,
     current_sender_id: str | None,
-    member_display_names: dict[str, str] | None = None,
+    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
     current_timestamp_ms: float | None = None,
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
@@ -1023,7 +1013,7 @@ async def _prepare_bound_team_execution_context(
     active_context_window: int | None,
     response_sender_id: str | None = None,
     current_sender_id: str | None = None,
-    member_display_names: dict[str, str] | None = None,
+    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
     current_timestamp_ms: float | None = None,
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
