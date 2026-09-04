@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
+from structlog.testing import capture_logs
 
 from mindroom import legacy_session_migration
 from mindroom.agent_storage import create_state_storage, get_agent_session, save_runs
@@ -123,6 +124,64 @@ def test_migration_preserves_the_visible_order_of_partially_migrated_sessions(tm
     assert journal_mode == ("delete",)
     assert _schema_version(db_path) == "3.0.0"
     assert _migrate_table(db_path, "code_sessions").migrated_sessions == 0
+
+
+def test_table_migration_logs_start_and_bounded_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large migrations report totals and periodic progress without logging every session."""
+    monkeypatch.setattr(legacy_session_migration, "_PROGRESS_INTERVAL", 2)
+    db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executemany(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, runs, created_at) "
+            "VALUES (?, 'agent', 'code', '[]', ?)",
+            [(f"session-{index:03}", index) for index in range(2, 4)],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with capture_logs() as logs:
+        result = _migrate_table(db_path, "code_sessions")
+
+    progress = [
+        entry
+        for entry in logs
+        if entry["event"] in {"legacy_session_migration_started", "legacy_session_migration_progress"}
+    ]
+    assert result.migrated_sessions == 3
+    assert progress == [
+        {
+            "db_file": str(db_path),
+            "session_table": "code_sessions",
+            "total_sessions": 3,
+            "event": "legacy_session_migration_started",
+            "log_level": "info",
+        },
+        {
+            "db_file": str(db_path),
+            "session_table": "code_sessions",
+            "processed_sessions": 2,
+            "total_sessions": 3,
+            "migrated_sessions": 2,
+            "failed_sessions": 0,
+            "event": "legacy_session_migration_progress",
+            "log_level": "info",
+        },
+        {
+            "db_file": str(db_path),
+            "session_table": "code_sessions",
+            "processed_sessions": 3,
+            "total_sessions": 3,
+            "migrated_sessions": 3,
+            "failed_sessions": 0,
+            "event": "legacy_session_migration_progress",
+            "log_level": "info",
+        },
+    ]
 
 
 def test_malformed_session_is_left_untouched_without_blocking_other_sessions(tmp_path: Path) -> None:
@@ -249,9 +308,13 @@ def test_concurrent_delete_finishes_during_decode_and_is_preserved_by_retry(
 async def test_spawned_process_migrates_the_storage_root(tmp_path: Path) -> None:
     """The production process boundary performs the complete storage-root scan."""
     db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
-    await _run_legacy_session_migration(tmp_path, log_level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    runtime_paths = _runtime_paths(tmp_path)
+    await _run_legacy_session_migration(tmp_path, log_level="INFO", runtime_paths=runtime_paths)
 
     assert _blob_is_null(db_path, "session-1")
+    log_files = list((runtime_paths.storage_root / "logs").glob("*.log"))
+    assert len(log_files) == 1
+    assert "legacy_session_migration_finished" in log_files[0].read_text()
 
 
 @pytest.mark.asyncio
@@ -275,21 +338,6 @@ async def test_current_storage_does_not_spawn_a_migration_process(
     )
 
     await _run_legacy_session_migration(tmp_path, log_level="INFO", runtime_paths=_runtime_paths(tmp_path))
-
-
-def test_migration_child_configures_normal_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Child-process warnings use the same configured handlers as the runtime."""
-    configured: list[tuple[str, object]] = []
-    runtime_paths = _runtime_paths(tmp_path)
-    monkeypatch.setattr(
-        legacy_session_migration,
-        "setup_logging",
-        lambda *, level, runtime_paths: configured.append((level, runtime_paths)),
-    )
-
-    legacy_session_migration._migrate_storage_targets([], "WARNING", runtime_paths)
-
-    assert configured == [("WARNING", runtime_paths)]
 
 
 def test_preflight_skips_an_unreadable_database_without_hiding_valid_work(tmp_path: Path) -> None:

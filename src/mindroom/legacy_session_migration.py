@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import multiprocessing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
@@ -15,14 +15,16 @@ from sqlalchemy import MetaData, Table, bindparam, inspect, null, select, text, 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mindroom.agent_storage import configure_state_engine_pragmas, create_state_engine
-from mindroom.constants import RuntimePaths
 from mindroom.logging_config import get_logger, setup_logging
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session as OrmSession
 
+    from mindroom.constants import RuntimePaths
+
 logger = get_logger(__name__)
 _MAX_CHANGED_BLOB_RETRIES = 2
+_PROGRESS_INTERVAL = 100
 
 
 @dataclass(frozen=True)
@@ -31,12 +33,14 @@ class _MigrationResult:
 
     migrated_sessions: int = 0
     failed_sessions: int = 0
+    failed_databases: int = 0
 
     def __add__(self, other: _MigrationResult) -> _MigrationResult:
         """Combine counts from independently migrated databases or tables."""
         return _MigrationResult(
             migrated_sessions=self.migrated_sessions + other.migrated_sessions,
             failed_sessions=self.failed_sessions + other.failed_sessions,
+            failed_databases=self.failed_databases + other.failed_databases,
         )
 
 
@@ -71,8 +75,8 @@ def _validated_legacy_runs(blob: object) -> list[dict[str, Any]]:
     return runs
 
 
-def _legacy_session_tables(db_file: Path, *, pending_only: bool = False) -> list[str]:
-    """Return session tables with a legacy column, optionally only when it has data."""
+def _legacy_session_tables(db_file: Path) -> list[str]:
+    """Return session tables that still contain legacy run data."""
     engine = create_state_engine(str(db_file))
     try:
         inspector = inspect(engine)
@@ -82,14 +86,13 @@ def _legacy_session_tables(db_file: Path, *, pending_only: bool = False) -> list
                 continue
             if "runs" not in {column["name"] for column in inspector.get_columns(table_name)}:
                 continue
-            if pending_only:
-                table = Table(table_name, MetaData(), autoload_with=engine)
-                with engine.connect() as connection:
-                    pending = connection.execute(
-                        select(table.c.session_id).where(table.c.runs.isnot(None)).limit(1),
-                    ).first()
-                if pending is None:
-                    continue
+            table = Table(table_name, MetaData(), autoload_with=engine)
+            with engine.connect() as connection:
+                pending = connection.execute(
+                    select(table.c.session_id).where(table.c.runs.isnot(None)).limit(1),
+                ).first()
+            if pending is None:
+                continue
             tables.append(table_name)
         return tables
     finally:
@@ -101,9 +104,7 @@ def _pending_migration_targets(storage_root: Path) -> list[tuple[str, str]]:
     targets: list[tuple[str, str]] = []
     for db_file in sorted(storage_root.rglob("sessions/*.db")):
         try:
-            targets.extend(
-                (str(db_file), session_table) for session_table in _legacy_session_tables(db_file, pending_only=True)
-            )
+            targets.extend((str(db_file), session_table) for session_table in _legacy_session_tables(db_file))
         except Exception:
             logger.warning("legacy_session_database_scan_failed", db_file=str(db_file), exc_info=True)
     return targets
@@ -263,7 +264,14 @@ def _migrate_table(db_file: Path, session_table: str) -> _MigrationResult:
             )
         if not session_ids:
             return result
-        for session_id in session_ids:
+        total_sessions = len(session_ids)
+        logger.info(
+            "legacy_session_migration_started",
+            db_file=str(db_file),
+            session_table=session_table,
+            total_sessions=total_sessions,
+        )
+        for processed_sessions, session_id in enumerate(session_ids, start=1):
             try:
                 migrated = _migrate_session(database, sessions_table, runs_table, session_id)
             except Exception as exc:
@@ -277,6 +285,16 @@ def _migrate_table(db_file: Path, session_table: str) -> _MigrationResult:
                 result += _MigrationResult(failed_sessions=1)
             else:
                 result += _MigrationResult(migrated_sessions=int(migrated))
+            if processed_sessions % _PROGRESS_INTERVAL == 0 or processed_sessions == total_sessions:
+                logger.info(
+                    "legacy_session_migration_progress",
+                    db_file=str(db_file),
+                    session_table=session_table,
+                    processed_sessions=processed_sessions,
+                    total_sessions=total_sessions,
+                    migrated_sessions=result.migrated_sessions,
+                    failed_sessions=result.failed_sessions,
+                )
         if result.failed_sessions == 0:
             database.upsert_schema_version(session_table, "3.0.0")
     finally:
@@ -292,13 +310,12 @@ def _migrate_storage_targets(
     """Child-process entry point: migrate database tables one at a time."""
     setup_logging(level=log_level, runtime_paths=runtime_paths)
     result = _MigrationResult()
-    failed_databases = 0
     for db_file_value, session_table in targets:
         db_file = Path(db_file_value)
         try:
             result += _migrate_table(db_file, session_table)
         except Exception:
-            failed_databases += 1
+            result += _MigrationResult(failed_databases=1)
             logger.warning(
                 "legacy_session_database_migration_failed",
                 db_file=str(db_file),
@@ -309,7 +326,7 @@ def _migrate_storage_targets(
         "legacy_session_migration_finished",
         migrated_sessions=result.migrated_sessions,
         failed_sessions=result.failed_sessions,
-        failed_databases=failed_databases,
+        failed_databases=result.failed_databases,
     )
 
 
@@ -323,13 +340,8 @@ async def _run_legacy_session_migration(
     targets = await asyncio.to_thread(_pending_migration_targets, storage_root)
     if not targets:
         return
-    child_runtime_paths = RuntimePaths(
-        config_path=runtime_paths.config_path,
-        config_dir=runtime_paths.config_dir,
-        env_path=runtime_paths.env_path,
-        storage_root=runtime_paths.storage_root,
-        control_state_root=runtime_paths.control_state_root,
-    )
+    # MappingProxyType environment snapshots cannot cross the spawn boundary.
+    child_runtime_paths = replace(runtime_paths, process_env={}, env_file_values={})
     context = multiprocessing.get_context("spawn")
     process = context.Process(
         target=_migrate_storage_targets,
