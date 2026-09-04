@@ -4881,6 +4881,33 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_approval_pause_is_not_logged_as_response_error(tmp_path: Path) -> None:
+    """A native approval pause must reach the lifecycle handler without an error log."""
+    bot = _bot(tmp_path)
+    coordinator = replace_response_runner_deps(bot, logger=MagicMock())
+    pause = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-paused",
+            tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+        ),
+    )
+
+    with (
+        patch.object(
+            coordinator,
+            "generate_non_streaming_ai_response",
+            new=AsyncMock(side_effect=pause),
+        ),
+        pytest.raises(ResponsePausedForApproval) as raised,
+    ):
+        await coordinator._process_and_respond(_plain_request(_target()))
+
+    assert raised.value is pause
+    coordinator.deps.logger.exception.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_non_streaming_response_reuses_prepared_room_model_after_override_change(tmp_path: Path) -> None:
     """A blocking agent turn must not re-read a changed room default during execution."""
     bot = _bot(tmp_path)

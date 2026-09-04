@@ -4219,7 +4219,7 @@ class ResponseRunner:
                 ),
             )
         except Exception as error:
-            self.deps.logger.exception("Error in non-streaming response", error=str(error))
+            self._log_unexpected_non_streaming_exception(error)
             raise
 
         response_extra_content = _merge_response_extra_content(
@@ -4253,6 +4253,12 @@ class ResponseRunner:
             raise
         self._note_final_delivery_timing(request, delivery)
         return build_outcome(delivery)
+
+    def _log_unexpected_non_streaming_exception(self, error: Exception) -> None:
+        """Log failures while leaving approval suspension to its lifecycle handler."""
+        if isinstance(error, ResponsePausedForApproval):
+            return
+        self.deps.logger.exception("Error in non-streaming response", error=str(error))
 
     async def _process_and_respond_streaming(  # noqa: C901
         self,
