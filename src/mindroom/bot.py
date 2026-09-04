@@ -272,6 +272,7 @@ def create_bot_for_entity(
     *,
     agent_reply_memberships: AgentReplyMembershipIndex,
     agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
+    room_activity_observer: Callable[[str], None] | None = None,
 ) -> AgentBot | TeamBot | None:
     """Create appropriate bot instance for an entity (agent, team, or router).
 
@@ -285,6 +286,7 @@ def create_bot_for_entity(
         journal_store: Shared event-journal store to borrow, or None to open one
         agent_reply_memberships: Shared authoritative grant-room membership index
         agent_reply_membership_sync: Shared router receive-lifecycle coordinator
+        room_activity_observer: Called with a room ID whenever this bot admits a conversation event there
 
     Returns:
         Bot instance or None if entity not found in config
@@ -308,6 +310,7 @@ def create_bot_for_entity(
             journal_store=journal_store,
             agent_reply_memberships=agent_reply_memberships,
             agent_reply_membership_sync=agent_reply_membership_sync,
+            room_activity_observer=room_activity_observer,
         )
 
     if entity_name in config.teams:
@@ -325,6 +328,7 @@ def create_bot_for_entity(
             enable_streaming=enable_streaming,
             journal_store=journal_store,
             agent_reply_memberships=agent_reply_memberships,
+            room_activity_observer=room_activity_observer,
         )
 
     if entity_name in config.agents:
@@ -340,6 +344,7 @@ def create_bot_for_entity(
             enable_streaming=enable_streaming,
             journal_store=journal_store,
             agent_reply_memberships=agent_reply_memberships,
+            room_activity_observer=room_activity_observer,
         )
 
     msg = f"Entity '{entity_name}' not found in configuration."
@@ -413,6 +418,7 @@ class AgentBot:
         *,
         agent_reply_memberships: AgentReplyMembershipIndex,
         agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
+        room_activity_observer: Callable[[str], None] | None = None,
     ) -> None:
         """Initialize the bot with canonical runtime-backed config state.
 
@@ -424,6 +430,7 @@ class AgentBot:
         borrowed store is not closed here, because its owner outlives this bot.
         """
         self._borrowed_journal_store = journal_store
+        self._room_activity_observer: Callable[[str], None] = room_activity_observer or (lambda _room_id: None)
         self._approval_runtime_generation = uuid4().hex
         # Set when this bot opens its own, which only happens when nothing was
         # handed to it. What this bot opened is what this bot closes.
@@ -479,7 +486,7 @@ class AgentBot:
             # further down, and trusting a saved token means asserting that
             # store already holds every event the token covers.
             store_generation_provider=self._resolve_journal_generation,
-            history_recovery_provider=self._journal_principal,
+            history_recovery_provider=self.journal_principal,
         )
         self._deferred_overdue_task_drain_task = None
         self._call_manager: CallManager | None = None
@@ -536,8 +543,8 @@ class AgentBot:
             storage_path=self.storage_path,
         )
 
-    def _journal_principal(self) -> PrincipalStore:
-        """Return this bot's principal-bound store, once the journal is open."""
+    def journal_principal(self) -> PrincipalStore:
+        """Return this bot's principal-bound projection view, once the journal is open."""
         return self._journal_store.principal(self._journal_principal_id)
 
     def _open_own_journal(self) -> OpenEventJournal:
@@ -728,6 +735,7 @@ class AgentBot:
             runtime_generation=self._approval_runtime_generation,
             on_own_membership_transition=self._membership_fence.observe_reported_transition,
             on_live_room_membership_transition=self._apply_live_reply_membership_transition,
+            on_room_activity=self._room_activity_observer,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -2953,6 +2961,7 @@ class TeamBot(AgentBot):
         enable_streaming: bool = True,
         journal_store: EventJournalStore | None = None,
         agent_reply_memberships: AgentReplyMembershipIndex,
+        room_activity_observer: Callable[[str], None] | None = None,
     ) -> None:
         """Initialize the team bot and its shared agent runtime."""
         super().__init__(
@@ -2965,6 +2974,7 @@ class TeamBot(AgentBot):
             enable_streaming=enable_streaming,
             journal_store=journal_store,
             agent_reply_memberships=agent_reply_memberships,
+            room_activity_observer=room_activity_observer,
         )
         self.team_mode = team_mode
         self.team_model = team_model
