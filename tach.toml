@@ -4497,6 +4497,7 @@ expose = [
     "find_response_event_ids_via_room_messages",
     "get_room_threads_page",
     "is_room_message_event",
+    "missing_outbox_delivery_copy_indices_via_room_messages",
 ]
 from = ["mindroom.matrix.room_history_reads"]
 

@@ -1515,6 +1515,16 @@ class TestConsolidatedConfigManager:
         with pytest.raises(ValidationError, match="tool_output_auto_save_threshold_bytes"):
             DefaultsConfig(tool_output_auto_save_threshold_bytes=0)
 
+    def test_large_message_strategy_defaults_to_sidecar(self) -> None:
+        """Oversized responses keep the sidecar behavior unless split is configured."""
+        assert Config.model_validate({}).defaults.large_message_strategy == "sidecar"
+
+        config = Config.model_validate({"defaults": {"large_message_strategy": "split"}})
+        assert config.defaults.large_message_strategy == "split"
+
+        with pytest.raises(ValidationError, match="large_message_strategy"):
+            DefaultsConfig(large_message_strategy="chunks")
+
     def test_matrix_sync_null_section_uses_default_config(self) -> None:
         """An uncommented blank matrix_sync section should behave like an empty mapping."""
         config = Config.model_validate({"matrix_sync": None})

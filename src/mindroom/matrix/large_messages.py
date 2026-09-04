@@ -208,7 +208,7 @@ def _add_sidecar_metadata(
     }
 
 
-def _calculate_event_size(content: dict[str, Any]) -> int:
+def calculate_event_size(content: dict[str, Any]) -> int:
     """Calculate the approximate size of a Matrix event.
 
     Args:
@@ -240,7 +240,7 @@ def _calculate_delivery_event_size(
     boundary payload fail identically on every replay.
     """
     if not room_encrypted:
-        return _calculate_event_size(content)
+        return calculate_event_size(content)
 
     plaintext = nio.Api.to_json(
         {
@@ -274,7 +274,7 @@ def _calculate_delivery_event_size(
     if isinstance(relation, dict):
         estimated_content["m.relates_to"] = relation
     estimated_content.update(encryption_visible_metadata(content))
-    return _calculate_event_size(estimated_content)
+    return calculate_event_size(estimated_content)
 
 
 def _delivery_event_size_calculator(
@@ -301,7 +301,7 @@ def _delivery_event_size_calculator(
     return calculate
 
 
-def _is_edit_message(content: dict[str, Any]) -> bool:
+def is_edit_message(content: dict[str, Any]) -> bool:
     """Check if this is an edit message."""
     return "m.new_content" in content or (
         "m.relates_to" in content and content.get("m.relates_to", {}).get("rel_type") == "m.replace"
@@ -330,13 +330,13 @@ def should_send_oversized_nonterminal_streaming_edit(
     edit_content: dict[str, Any],
 ) -> bool:
     """Return whether one oversized non-terminal streaming edit may be sent now."""
-    if not original_event_id or not _is_edit_message(edit_content):
+    if not original_event_id or not is_edit_message(edit_content):
         return True
 
     source_content = edit_content.get("m.new_content")
     if not isinstance(source_content, dict) or not _is_nonterminal_stream_content(source_content):
         return True
-    if _calculate_event_size(edit_content) <= _EDIT_MESSAGE_LIMIT:
+    if calculate_event_size(edit_content) <= _EDIT_MESSAGE_LIMIT:
         return True
 
     key = (room_id, original_event_id)
@@ -766,7 +766,7 @@ def sidecar_upload_is_usable(
 
 def content_fits_normal_event(content: dict[str, Any]) -> bool:
     """Return whether one content payload fits a normal Matrix event send."""
-    return _calculate_event_size(content) <= _NORMAL_MESSAGE_LIMIT
+    return calculate_event_size(content) <= _NORMAL_MESSAGE_LIMIT
 
 
 async def upload_json_sidecar(
@@ -805,7 +805,7 @@ def _build_text_fallback_content(
             ),
         }
         _copy_preview_metadata(source_content, preview_content)
-        if _calculate_event_size(preview_content) <= size_limit or preview_limit == 0:
+        if calculate_event_size(preview_content) <= size_limit or preview_limit == 0:
             return preview_content
         preview_limit = max(0, preview_limit // 2)
 
@@ -905,7 +905,7 @@ async def prepare_large_message(
 
     """
     content = _without_local_recovery_data(content)
-    is_edit = _is_edit_message(content)
+    is_edit = is_edit_message(content)
     size_limit = _EDIT_MESSAGE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
     if room_encrypted is None:
         room_encrypted = _room_is_encrypted(client, room_id)
@@ -915,7 +915,7 @@ async def prepare_large_message(
         room_id=room_id,
         room_encrypted=encrypted_delivery_safe,
     )
-    current_size = _calculate_event_size(content)
+    current_size = calculate_event_size(content)
     if current_size <= size_limit and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
         return content
 
