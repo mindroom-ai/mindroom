@@ -467,17 +467,32 @@ def test_store_without_threads_section_is_accepted(tmp_path: Path) -> None:
     _store_path(tmp_path).write_text(json.dumps({"nonces": {}, "events": {}}), encoding="utf-8")
     store = ExternalTriggerReplayStore(tmp_path)
 
-    assert store.claim_thread_key(
+    claim, root, reservation = store.claim_thread_key(
         "campground",
         "site-42",
         room_id="!room:localhost",
         now=1_000,
         pending_ttl_seconds=60,
-    ) == (ExternalTriggerThreadKeyClaim.FRESH, None)
-    store.bind_thread_root("campground", "site-42", "$root-1", room_id="!room:localhost", now=1_000, ttl_seconds=600)
+    )
+    assert (claim, root) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert reservation
+    store.bind_thread_root(
+        "campground",
+        "site-42",
+        "$root-1",
+        room_id="!room:localhost",
+        reservation=reservation,
+        now=1_000,
+        ttl_seconds=600,
+    )
     assert json.loads(_store_path(tmp_path).read_text(encoding="utf-8"))["threads"] == {
         "campground": {
-            "site-42": {"room_id": "!room:localhost", "thread_event_id": "$root-1", "expires_at": 1_600},
+            "site-42": {
+                "room_id": "!room:localhost",
+                "thread_event_id": "$root-1",
+                "reservation": None,
+                "expires_at": 1_600,
+            },
         },
     }
 
@@ -485,10 +500,25 @@ def test_store_without_threads_section_is_accepted(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "threads_payload",
     [
-        {"campground": {"site-42": {"room_id": "!r:x", "thread_event_id": "", "expires_at": 1}}},
-        {"campground": {"site-42": {"room_id": "!r:x", "thread_event_id": "$root", "expires_at": "1"}}},
-        {"campground": {"site-42": {"room_id": "", "thread_event_id": "$root", "expires_at": 1}}},
-        {"campground": {"site-42": {"thread_event_id": "$root", "expires_at": 1}}},
+        {"campground": {"site-42": {"room_id": "!r:x", "thread_event_id": "", "reservation": None, "expires_at": 1}}},
+        {
+            "campground": {
+                "site-42": {"room_id": "!r:x", "thread_event_id": "$root", "reservation": None, "expires_at": "1"},
+            },
+        },
+        {"campground": {"site-42": {"room_id": "", "thread_event_id": "$root", "reservation": None, "expires_at": 1}}},
+        {"campground": {"site-42": {"thread_event_id": "$root", "reservation": None, "expires_at": 1}}},
+        # Missing thread_event_id must not be read as a pending reservation.
+        {"campground": {"site-42": {"room_id": "!r:x", "reservation": "r1", "expires_at": 1}}},
+        # A pending record must carry its owner's reservation; a bound one must not.
+        {"campground": {"site-42": {"room_id": "!r:x", "thread_event_id": None, "reservation": None, "expires_at": 1}}},
+        {"campground": {"site-42": {"room_id": "!r:x", "thread_event_id": None, "reservation": "", "expires_at": 1}}},
+        {
+            "campground": {
+                "site-42": {"room_id": "!r:x", "thread_event_id": "$root", "reservation": "r1", "expires_at": 1},
+            },
+        },
+        {"campground": {"site-42": {"room_id": "!r:x", "thread_event_id": None, "expires_at": 1}}},
         {"campground": {"site-42": {"expires_at": 1}}},
         {"campground": "not-a-mapping"},
     ],
@@ -521,16 +551,49 @@ def _claim(
     room: str = ROOM,
     now: int,
 ) -> tuple[ExternalTriggerThreadKeyClaim, str | None]:
-    return store.claim_thread_key(scope, key, room_id=room, now=now, pending_ttl_seconds=60)
+    claim, root, _reservation = store.claim_thread_key(scope, key, room_id=room, now=now, pending_ttl_seconds=60)
+    return claim, root
+
+
+def _reserve(store: ExternalTriggerReplayStore, *, now: int, room: str = ROOM) -> str:
+    claim, _root, reservation = store.claim_thread_key(
+        "campground",
+        "site-42",
+        room_id=room,
+        now=now,
+        pending_ttl_seconds=60,
+    )
+    assert claim is ExternalTriggerThreadKeyClaim.FRESH
+    assert reservation
+    return reservation
+
+
+def _bind(
+    store: ExternalTriggerReplayStore,
+    root: str,
+    *,
+    reservation: str | None,
+    now: int,
+    room: str = ROOM,
+) -> str | None:
+    return store.bind_thread_root(
+        "campground",
+        "site-42",
+        root,
+        room_id=room,
+        reservation=reservation,
+        now=now,
+        ttl_seconds=600,
+    )
 
 
 def test_thread_key_claim_reserves_then_binds_then_resolves(tmp_path: Path) -> None:
     """First claim reserves the key; a bound key resolves to its root within scope and room."""
     store = ExternalTriggerReplayStore(tmp_path)
 
-    assert _claim(store, now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    reservation = _reserve(store, now=1_000)
     assert _claim(store, now=1_001) == (ExternalTriggerThreadKeyClaim.PENDING, None)
-    store.bind_thread_root("campground", "site-42", "$root-1", room_id=ROOM, now=1_002, ttl_seconds=600)
+    assert _bind(store, "$root-1", reservation=reservation, now=1_002) == "$root-1"
 
     assert _claim(store, now=1_003) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
     assert _claim(store, now=1_602) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
@@ -542,35 +605,75 @@ def test_thread_key_claim_reserves_then_binds_then_resolves(tmp_path: Path) -> N
 def test_thread_key_bound_to_another_room_is_reclaimed(tmp_path: Path) -> None:
     """A re-pointed trigger room must not relate deliveries to a foreign root."""
     store = ExternalTriggerReplayStore(tmp_path)
-    store.bind_thread_root("campground", "site-42", "$root-1", room_id=ROOM, now=1_000, ttl_seconds=600)
+    reservation = _reserve(store, now=1_000)
+    assert _bind(store, "$root-1", reservation=reservation, now=1_001) == "$root-1"
 
-    assert _claim(store, room="!elsewhere:localhost", now=1_001) == (ExternalTriggerThreadKeyClaim.FRESH, None)
-    assert _claim(store, room="!elsewhere:localhost", now=1_002) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _claim(store, room="!elsewhere:localhost", now=1_002) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, room="!elsewhere:localhost", now=1_003) == (ExternalTriggerThreadKeyClaim.PENDING, None)
 
 
-def test_pending_thread_key_expires_and_release_keeps_bound_keys(tmp_path: Path) -> None:
-    """A crashed first delivery frees the key after the pending TTL; release never drops a bound key."""
+def test_pending_thread_key_expires_and_release_needs_its_reservation(tmp_path: Path) -> None:
+    """A crashed first delivery frees the key after the pending TTL; only the current owner may release early."""
     store = ExternalTriggerReplayStore(tmp_path)
 
-    assert _claim(store, now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    reservation_a = _reserve(store, now=1_000)
     assert _claim(store, now=1_060) == (ExternalTriggerThreadKeyClaim.PENDING, None)
-    assert _claim(store, now=1_061) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    reservation_b = _reserve(store, now=1_061)
 
-    store.release_thread_key("campground", "site-42")
-    assert _claim(store, now=1_062) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    store.release_thread_key("campground", "site-42", reservation="someone-else")
+    store.release_thread_key("campground", "site-42", reservation=reservation_a)
+    assert _claim(store, now=1_062) == (ExternalTriggerThreadKeyClaim.PENDING, None)
 
-    store.bind_thread_root("campground", "site-42", "$root-1", room_id=ROOM, now=1_063, ttl_seconds=600)
-    store.release_thread_key("campground", "site-42")
-    store.release_thread_key("campground", "missing")
-    store.release_thread_key("other-scope", "site-42")
-    assert _claim(store, now=1_064) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
+    store.release_thread_key("campground", "site-42", reservation=reservation_b)
+    assert _claim(store, now=1_063) == (ExternalTriggerThreadKeyClaim.FRESH, None)
 
 
-def test_bind_thread_root_refreshes_retention(tmp_path: Path) -> None:
+def test_release_drops_only_the_callers_pending_reservation(tmp_path: Path) -> None:
+    """Release is a no-op for other scopes, missing keys, and bound keys."""
+    store = ExternalTriggerReplayStore(tmp_path)
+    reservation = _reserve(store, now=1_000)
+
+    store.release_thread_key("other-scope", "site-42", reservation=reservation)
+    store.release_thread_key("campground", "missing", reservation=reservation)
+    assert _claim(store, now=1_001) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+
+    assert _bind(store, "$root-1", reservation=reservation, now=1_002) == "$root-1"
+    store.release_thread_key("campground", "site-42", reservation=reservation)
+    assert _claim(store, now=1_003) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
+
+
+def test_late_failure_of_an_expired_reservation_cannot_release_the_new_owner(tmp_path: Path) -> None:
+    """A outlives its lease, B reserves; A's late rollback must not free B's reservation."""
+    store = ExternalTriggerReplayStore(tmp_path)
+    reservation_a = _reserve(store, now=1_000)
+    reservation_b = _reserve(store, now=1_061)
+
+    store.release_thread_key("campground", "site-42", reservation=reservation_a)
+
+    assert _claim(store, now=1_062) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _bind(store, "$root-b", reservation=reservation_b, now=1_063) == "$root-b"
+
+
+def test_late_success_of_an_expired_reservation_cannot_bind_over_the_new_owner(tmp_path: Path) -> None:
+    """A outlives its lease, B reserves and is still posting; A's late bind is refused."""
+    store = ExternalTriggerReplayStore(tmp_path)
+    reservation_a = _reserve(store, now=1_000)
+    reservation_b = _reserve(store, now=1_061)
+
+    assert _bind(store, "$root-a", reservation=reservation_a, now=1_062) is None
+    assert _claim(store, now=1_063) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _bind(store, "$root-b", reservation=reservation_b, now=1_064) == "$root-b"
+    # Once bound, a late binder is told the real root and does not overwrite it.
+    assert _bind(store, "$root-a", reservation=reservation_a, now=1_065) == "$root-b"
+    assert _claim(store, now=1_066) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-b")
+
+
+def test_bind_thread_root_refreshes_retention_for_continuations(tmp_path: Path) -> None:
     """Every continued delivery extends how long the key keeps routing to its root."""
     store = ExternalTriggerReplayStore(tmp_path)
-    store.bind_thread_root("campground", "site-42", "$root-1", room_id=ROOM, now=1_000, ttl_seconds=600)
-    store.bind_thread_root("campground", "site-42", "$root-1", room_id=ROOM, now=1_500, ttl_seconds=600)
+    reservation = _reserve(store, now=1_000)
+    assert _bind(store, "$root-1", reservation=reservation, now=1_000) == "$root-1"
+    assert _bind(store, "$root-1", reservation=None, now=1_500) == "$root-1"
 
     assert _claim(store, now=2_099) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-1")
     assert _claim(store, now=2_101) == (ExternalTriggerThreadKeyClaim.FRESH, None)
@@ -597,7 +700,7 @@ def _claim_thread_key_with_slow_read_worker(
         if not start_event.wait(timeout=5):
             result_queue.put(("error", "timed out waiting for start signal"))
             return
-        claim, _root = ExternalTriggerReplayStore(Path(control_state_root)).claim_thread_key(
+        claim, _root, _reservation = ExternalTriggerReplayStore(Path(control_state_root)).claim_thread_key(
             "campground",
             "site-42",
             room_id=ROOM,
@@ -645,21 +748,3 @@ def test_concurrent_first_deliveries_reserve_one_thread_key(tmp_path: Path) -> N
 
     assert [process.exitcode for process in processes] == [0, 0]
     assert sorted(results) == ["fresh", "pending"]
-
-
-def test_bind_thread_root_keeps_a_root_bound_meanwhile_by_another_delivery(tmp_path: Path) -> None:
-    """A first delivery that outlived its reservation must not orphan the thread that replaced it."""
-    store = ExternalTriggerReplayStore(tmp_path)
-
-    assert _claim(store, now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
-    # Reservation expired; a second delivery opens and binds root B.
-    assert _claim(store, now=1_061) == (ExternalTriggerThreadKeyClaim.FRESH, None)
-    assert store.bind_thread_root("campground", "site-42", "$root-b", room_id=ROOM, now=1_062, ttl_seconds=600) == (
-        "$root-b"
-    )
-
-    # The slow first delivery finally finishes with root A.
-    assert store.bind_thread_root("campground", "site-42", "$root-a", room_id=ROOM, now=1_070, ttl_seconds=600) == (
-        "$root-b"
-    )
-    assert _claim(store, now=1_071) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-b")

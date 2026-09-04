@@ -208,8 +208,9 @@ async def _claim_and_execute_trigger(
     thread_key = payload.thread_key if snapshot.target.new_thread else None
     thread_claim = ExternalTriggerThreadKeyClaim.FRESH
     continue_thread_event_id: str | None = None
+    thread_reservation: str | None = None
     if thread_key is not None:
-        thread_claim, continue_thread_event_id = await _run_replay_store_call(
+        thread_claim, continue_thread_event_id, thread_reservation = await _run_replay_store_call(
             replay_store.claim_thread_key,
             snapshot.replay_scope,
             thread_key,
@@ -231,10 +232,10 @@ async def _claim_and_execute_trigger(
             continue_thread_event_id=continue_thread_event_id,
         )
     except Exception:
-        await _rollback_failed_delivery(replay_store, snapshot, event_id, thread_key, thread_claim)
+        await _rollback_failed_delivery(replay_store, snapshot, event_id, thread_key, thread_reservation)
         raise
     if matrix_event_id is None:
-        await _rollback_failed_delivery(replay_store, snapshot, event_id, thread_key, thread_claim)
+        await _rollback_failed_delivery(replay_store, snapshot, event_id, thread_key, thread_reservation)
         raise HTTPException(status_code=502, detail="External trigger delivery failed")
     if thread_key is not None:
         await _run_replay_store_call(
@@ -243,6 +244,7 @@ async def _claim_and_execute_trigger(
             thread_key,
             continue_thread_event_id or matrix_event_id,
             room_id=snapshot.resolved_room_id,
+            reservation=thread_reservation,
             now=int(time.time()),
             ttl_seconds=_THREAD_KEY_TTL_SECONDS,
         )
@@ -388,20 +390,25 @@ async def _rollback_failed_delivery(
     snapshot: TriggerDeliverySnapshot,
     event_id: str,
     thread_key: str | None,
-    thread_claim: ExternalTriggerThreadKeyClaim,
+    thread_reservation: str | None,
 ) -> None:
     """Undo replay claims after a failed send without masking the failure.
 
-    A failed first delivery releases its thread-key reservation so the next
-    delivery can open the root. A failed continuation keeps the key bound: the
-    root is still the right thread, and a transient send error must not split
-    the conversation.
+    A failed first delivery releases its own thread-key reservation so the next
+    delivery can open the root. A failed continuation holds no reservation and
+    keeps the key bound: the root is still the right thread, and a transient
+    send error must not split the conversation.
     """
     await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
-    if thread_key is None or thread_claim is not ExternalTriggerThreadKeyClaim.FRESH:
+    if thread_key is None or thread_reservation is None:
         return
     try:
-        await asyncio.to_thread(replay_store.release_thread_key, snapshot.replay_scope, thread_key)
+        await asyncio.to_thread(
+            replay_store.release_thread_key,
+            snapshot.replay_scope,
+            thread_key,
+            reservation=thread_reservation,
+        )
     except Exception:
         logger.warning(
             "Failed to release external trigger thread key after delivery failure",
