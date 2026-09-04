@@ -151,7 +151,7 @@ class InvitedRoomConflict:
 
 @dataclass(frozen=True)
 class InvitedRoomSelection:
-    """Uniquely owned invited rooms plus unsafe legacy ownership conflicts."""
+    """Currently claimed invited rooms plus retired-only ownership conflicts."""
 
     groups: tuple[tuple[str, tuple[ThreadExportRoom, ...]], ...]
     conflicts: tuple[InvitedRoomConflict, ...]

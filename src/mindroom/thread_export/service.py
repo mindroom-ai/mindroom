@@ -108,25 +108,29 @@ def _retract_ambiguous_invited_rooms(
     accumulators: Sequence[ThreadExportAccumulator],
     conflicts: Sequence[InvitedRoomConflict],
 ) -> None:
-    """Retract rooms whose legacy invite claims cannot identify one safe owner."""
+    """Retract rooms whose legacy invite claims identify no current source."""
     for conflict in conflicts:
         room = conflict.room
         claimants = ", ".join(conflict.claimant_labels)
         error = (
             f"ambiguous invited-room ownership across persisted entity states: {claimants}. "
-            f"Configure {room.room_id} under exactly one entity to resolve ownership"
+            f"Configure {room.room_id} under a current entity to resolve ownership"
         )
         for accumulator in accumulators:
             retract_room_export(accumulator, room)
             accumulator.failed_items.append(failure_for_room(room, error))
 
 
-def _reconcile_full_pass(accumulators: Sequence[ThreadExportAccumulator]) -> None:
+def _reconcile_full_pass(
+    accumulators: Sequence[ThreadExportAccumulator],
+    *,
+    allow_empty: bool,
+) -> None:
     """Remove room directories that the completed full pass did not retain."""
     for accumulator in accumulators:
         output_dir = accumulator.target.output_dir
         try:
-            if accumulator.rooms_exported == 0:
+            if accumulator.rooms_exported == 0 and not allow_empty:
                 logger.warning(
                     "Skipping thread export directory reconciliation without exported rooms",
                     output_dir=str(output_dir),
@@ -257,6 +261,7 @@ async def _export_sources(
     accumulators: Sequence[ThreadExportAccumulator],
     unreadable_rooms: _UnreadableRooms,
     full_pass: bool,
+    reconcile_empty_full_pass: bool,
     max_thread_roots: int,
 ) -> None:
     """Export every source into already-validated targets, then reconcile a full pass."""
@@ -271,7 +276,11 @@ async def _export_sources(
             max_thread_roots=max_thread_roots,
         )
     if full_pass:
-        await asyncio.to_thread(_reconcile_full_pass, accumulators)
+        await asyncio.to_thread(
+            _reconcile_full_pass,
+            accumulators,
+            allow_empty=reconcile_empty_full_pass,
+        )
 
 
 async def _validated_accumulators(
@@ -317,6 +326,7 @@ async def export_threads_to_sources(
             accumulators=validated_targets,
             unreadable_rooms=unreadable_rooms,
             full_pass=full_pass,
+            reconcile_empty_full_pass=True,
             max_thread_roots=max_thread_roots,
         )
     return tuple(accumulator.stats() for accumulator in accumulators)
@@ -377,7 +387,7 @@ async def export_threads_to_targets_once(
     if not export_groups:
         select_export_account(runtime_paths, homeserver)
         if full_pass:
-            await asyncio.to_thread(_reconcile_full_pass, validated_targets)
+            await asyncio.to_thread(_reconcile_full_pass, validated_targets, allow_empty=False)
         return tuple(accumulator.stats() for accumulator in accumulators)
 
     unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = [
@@ -429,6 +439,7 @@ async def export_threads_to_targets_once(
             accumulators=validated_targets,
             unreadable_rooms=unreadable_rooms,
             full_pass=full_pass,
+            reconcile_empty_full_pass=False,
             max_thread_roots=max_thread_roots,
         )
     finally:

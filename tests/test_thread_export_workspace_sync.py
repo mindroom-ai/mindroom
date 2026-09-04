@@ -271,8 +271,8 @@ async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path)
     assert call.kwargs["unreadable_rooms"] == []
 
 
-async def test_ambiguous_invited_room_is_forwarded_for_native_retraction(tmp_path: Path) -> None:
-    """The native runner must not assign a multiply claimed invited room to any workspace."""
+async def test_shared_invited_room_keeps_every_current_source_scope(tmp_path: Path) -> None:
+    """One deterministic reader may fan a shared ad-hoc room to every current claimant."""
     config = _config(
         tmp_path,
         {
@@ -301,10 +301,15 @@ async def test_ambiguous_invited_room_is_forwarded_for_native_retraction(tmp_pat
     call = export.await_args
     assert call is not None
     assert {target.source_entity_names for target in call.kwargs["targets"]} == {("code",), ("other",)}
-    [conflict] = call.kwargs["invited_room_conflicts"]
-    assert conflict.room.room_id == "!private:localhost"
-    assert conflict.claimant_labels == ("code", "other")
-    assert all(room.room_id != "!private:localhost" for source in call.kwargs["sources"] for room in source.rooms)
+    assert call.kwargs["invited_room_conflicts"] == ()
+    invited_sources = [
+        source
+        for source in call.kwargs["sources"]
+        if any(room.room_id == "!private:localhost" for room in source.rooms)
+    ]
+    assert len(invited_sources) == 1
+    [invited_room] = [room for room in invited_sources[0].rooms if room.room_id == "!private:localhost"]
+    assert invited_room.source_entity_names == ("code", "other")
 
 
 async def test_not_running_router_makes_configured_rooms_unreadable(tmp_path: Path) -> None:
@@ -350,6 +355,20 @@ async def test_not_running_invited_entity_is_reported_unreadable(tmp_path: Path)
     [(rooms, error)] = call.kwargs["unreadable_rooms"]
     assert [room.room_id for room in rooms] == ["!private:localhost"]
     assert error == "Bot 'code' is not running"
+
+
+async def test_full_pass_removes_export_after_room_claim_disappears(tmp_path: Path) -> None:
+    """A completed native selection may remove a stale room even when no room remains."""
+    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+    runtime_paths = runtime_paths_for(config)
+    output_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
+    stale_thread = _write_owned_export(output_dir)
+    runner = _runner(config, _bots(_FakeBot("@mindroom_code:localhost")))
+
+    runner.queue_full_pass()
+    await runner._run_pass_once()
+
+    assert not stale_thread.exists()
 
 
 async def test_full_pass_clears_exports_of_agents_without_the_setting(tmp_path: Path) -> None:

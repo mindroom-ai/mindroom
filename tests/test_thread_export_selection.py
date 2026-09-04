@@ -112,8 +112,8 @@ def test_an_install_with_only_the_internal_user_still_exports(tmp_path: Path) ->
     assert account.agent_name == "user"
 
 
-def test_invited_room_selection_rejects_multiple_persisted_owners(tmp_path: Path) -> None:
-    """Config iteration order must never choose between conflicting invited-room claimants."""
+def test_invited_room_selection_keeps_multiple_current_claimants(tmp_path: Path) -> None:
+    """Every current claimant may export a shared ad-hoc room it joined."""
     config = thread_export_config(tmp_path)
     config.agents["other"] = AgentConfig(display_name="Other Agent")
     runtime_paths = runtime_paths_for(config)
@@ -128,10 +128,12 @@ def test_invited_room_selection_rejects_multiple_persisted_owners(tmp_path: Path
         known_room_ids=set(),
     )
 
-    assert selection.groups == ()
-    assert len(selection.conflicts) == 1
-    assert selection.conflicts[0].room.room_id == room_id
-    assert selection.conflicts[0].room.source_entity_names == ("general", "other")
+    assert selection.conflicts == ()
+    assert len(selection.groups) == 1
+    reader_name, rooms = selection.groups[0]
+    assert reader_name == "general"
+    assert rooms[0].room_id == room_id
+    assert rooms[0].source_entity_names == ("general", "other")
 
 
 def test_explicit_room_owner_resolves_ambiguous_invited_room_without_matrix_state(tmp_path: Path) -> None:
@@ -182,8 +184,8 @@ def test_shared_explicit_room_keeps_every_source_without_matrix_state(tmp_path: 
     assert rooms[0].source_entity_names == ("general", "other")
 
 
-def test_retired_entity_invite_claim_keeps_current_claim_ambiguous(tmp_path: Path) -> None:
-    """Removing an entity from config cannot hide its durable claim and expose its room."""
+def test_current_invite_claim_takes_precedence_over_retired_membership(tmp_path: Path) -> None:
+    """Retired membership cannot block a current claimant from exporting its room."""
     room_id = "!private:localhost"
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
@@ -197,9 +199,29 @@ def test_retired_entity_invite_claim_keeps_current_claim_ambiguous(tmp_path: Pat
         known_room_ids=set(),
     )
 
-    assert selection.groups == ()
-    assert len(selection.conflicts) == 1
-    assert selection.conflicts[0].room.room_id == room_id
+    assert selection.conflicts == ()
+    assert len(selection.groups) == 1
+    reader_name, rooms = selection.groups[0]
+    assert reader_name == "general"
+    assert rooms[0].room_id == room_id
+    assert rooms[0].source_entity_names == ("general",)
+
+
+def test_retired_non_regular_invite_claim_fails_closed(tmp_path: Path) -> None:
+    """A non-regular retired claim is unsafe evidence, not an absent claim."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    claim_path = runtime_paths.storage_root / "agents" / "retired_paul" / "invited_rooms.json"
+    claim_path.parent.mkdir(parents=True)
+    os.mkfifo(claim_path)
+
+    with pytest.raises(RuntimeError, match="Unsafe invited-room claim file"):
+        invited_export_rooms(
+            config,
+            runtime_paths,
+            None,
+            known_room_ids=set(),
+        )
 
 
 def test_invited_room_claim_loader_rejects_symlink_at_open_time(tmp_path: Path) -> None:

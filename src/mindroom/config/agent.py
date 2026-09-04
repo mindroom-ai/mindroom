@@ -191,7 +191,8 @@ class AgentThreadExportConfig(BaseModel):
     invited_rooms: bool = Field(
         default=True,
         description=(
-            "Also export user-created rooms the agent joined through invites; current membership is always required"
+            "Also export user-created rooms recorded in this agent's persisted invite state; current membership "
+            "rules still apply"
         ),
     )
     private_room_scope: _PrivateThreadExportRoomScope = Field(
@@ -260,8 +261,8 @@ class AgentConfig(BaseModel):
     thread_exports: AgentThreadExportConfig | None = Field(
         default=None,
         description=(
-            "Keep <workspace>/thread_exports/ current with YAML exports of every thread in rooms this agent is "
-            "joined to; true enables the defaults"
+            "Keep <workspace>/thread_exports/ current with YAML exports of authorized rooms that satisfy current "
+            "membership rules; true enables the defaults"
         ),
     )
     knowledge_bases: list[str] = Field(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -102,7 +103,7 @@ def invited_export_rooms(
     *,
     known_room_ids: set[str],
 ) -> InvitedRoomSelection:
-    """Group uniquely owned invited rooms and reject conflicting legacy claims."""
+    """Group rooms by a current reader and reject retired-only claims."""
     normalized_filter = room_filter.strip().casefold() if isinstance(room_filter, str) and room_filter.strip() else None
     entity_names = invited_room_entity_names(config)
     claimants_by_room: dict[str, list[_PersistedInvitedRoomClaim]] = {}
@@ -139,7 +140,7 @@ def invited_export_rooms(
         if configured_names:
             rooms_by_entity.setdefault(configured_names[0], []).append(room)
             continue
-        if len(claims) == 1 and current_claimants:
+        if current_claimants:
             rooms_by_entity.setdefault(current_claimants[0], []).append(room)
             continue
         conflicts.append(
@@ -213,12 +214,24 @@ def _retired_invited_room_claim_paths(agents_root: Path, configured_paths: froze
             raise RuntimeError(msg)
         if not state_root.is_dir():
             continue
-        if path.is_symlink():
-            msg = f"Unsafe invited-room claim file: {path}"
-            raise RuntimeError(msg)
-        if path.is_file() and path not in configured_paths:
+        if _regular_claim_file_exists(path) and path not in configured_paths:
             retired_paths.append(path)
     return tuple(retired_paths)
+
+
+def _regular_claim_file_exists(path: Path) -> bool:
+    """Return whether a claim exists, rejecting unreadable or non-regular paths."""
+    try:
+        claim_mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        msg = f"Unsafe invited-room claim file: {path}"
+        raise RuntimeError(msg) from exc
+    if not stat.S_ISREG(claim_mode):
+        msg = f"Unsafe invited-room claim file: {path}"
+        raise RuntimeError(msg)
+    return True
 
 
 def _load_invited_room_claim(

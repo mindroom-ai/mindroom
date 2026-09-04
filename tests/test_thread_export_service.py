@@ -202,15 +202,13 @@ async def test_export_threads_once_deduplicates_invited_rooms_already_in_state(t
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_invited_room_retracts_legacy_exports_from_every_target(tmp_path: Path) -> None:
-    """Legacy duplicate ownership is unsafe and must remove every previously fanned-out copy."""
+async def test_retired_only_invited_room_retracts_legacy_exports_from_every_target(tmp_path: Path) -> None:
+    """A retired-only claim cannot authorize any current target to retain the room."""
     config = thread_export_config(tmp_path)
-    config.agents["other"] = config.agents["general"].model_copy(update={"display_name": "Other"})
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path, account_keys=("agent_general",), include_rooms=False)
     room_id = "!private:localhost"
-    write_invited_rooms(runtime_paths, "general", [room_id])
-    write_invited_rooms(runtime_paths, "other", [room_id])
+    write_invited_rooms(runtime_paths, "retired_paul", [room_id])
     targets = (
         ThreadExportTarget(output_dir=tmp_path / "general", source_entity_names=("general",)),
         ThreadExportTarget(output_dir=tmp_path / "other", source_entity_names=("other",)),
@@ -843,9 +841,9 @@ async def test_export_threads_to_sources_retracts_ambiguous_invited_room(tmp_pat
         alias="",
         name="",
         invited=True,
-        source_entity_names=("general", "other"),
+        source_entity_names=(),
     )
-    conflict = InvitedRoomConflict(room=room, claimant_labels=("general", "other"))
+    conflict = InvitedRoomConflict(room=room, claimant_labels=("retired state directory 'paul'",))
     mark_thread_export_root(output_dir)
     room_dir = output_dir / quote(room.key, safe="")
     room_dir.mkdir()
