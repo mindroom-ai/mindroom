@@ -75,9 +75,14 @@ main() entry
 
 ## Session Storage Upgrades
 
-After the runtime becomes ready, MindRoom checks session databases for Agno 2 run blobs off the event loop. A child process starts only when legacy data exists, then migrates and verifies each session in its own transaction. The runtime remains available throughout. Logs report each table's total, progress every 100 sessions, and completion. Invalid or conflicting blobs stay intact on the compatibility read path and are reported for a later retry.
+After the runtime becomes ready, MindRoom checks session databases for Agno 2 run blobs off the event loop.
+A child process starts only when legacy data exists, then migrates and verifies each session in its own transaction.
+The runtime remains available throughout.
+Logs report each table's total, progress every 100 sessions, and completion.
+Invalid or conflicting blobs stay intact on the compatibility read path and are reported for a later retry.
 
-The legacy column is cleared for successfully migrated sessions and retained for compatibility reads when migration fails. Removing the column is a separate explicit cleanup because changing a live SQLite table can block writes.
+The legacy column is cleared for successfully migrated sessions and retained for compatibility reads when migration fails.
+Removing the column is a separate explicit cleanup because changing a live SQLite table can block writes.
 
 ## Runtime Replacement Admission
 
