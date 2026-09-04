@@ -13,5 +13,9 @@ from mindroom.thread_export.models import ThreadExportRoom, ThreadExportTarget
 
 
 def target_accepts_room(target: ThreadExportTarget, room: ThreadExportRoom) -> bool:
-    """Return whether one target includes the room's source category."""
-    return target.include_invited_rooms or not room.invited
+    """Return whether one target includes the room's category and owning entity."""
+    if room.invited and not target.include_invited_rooms:
+        return False
+    if target.source_entity_names is None:
+        return True
+    return any(entity_name in target.source_entity_names for entity_name in room.source_entity_names)

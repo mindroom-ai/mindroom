@@ -11,6 +11,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.users import login_agent_user
 from mindroom.thread_export.execution import export_threads_for_targets_for_client, retract_room_export
 from mindroom.thread_export.models import (
+    InvitedRoomConflict,
     ThreadExportAccumulator,
     ThreadExportGroup,
     ThreadExportGroupFailure,
@@ -96,6 +97,23 @@ def _requested_invited_groups(
         if accepted_rooms:
             requested_groups.append((entity_name, accepted_rooms))
     return requested_groups
+
+
+def _retract_ambiguous_invited_rooms(
+    accumulators: Sequence[ThreadExportAccumulator],
+    conflicts: Sequence[InvitedRoomConflict],
+) -> None:
+    """Retract rooms whose legacy invite claims cannot identify one safe owner."""
+    for conflict in conflicts:
+        room = conflict.room
+        claimants = ", ".join(conflict.claimant_labels)
+        error = (
+            f"ambiguous invited-room ownership across persisted entity states: {claimants}. "
+            f"Configure {room.room_id} under exactly one entity to resolve ownership"
+        )
+        for accumulator in accumulators:
+            retract_room_export(accumulator, room)
+            accumulator.failed_items.append(failure_for_room(room, error))
 
 
 def _reconcile_full_pass(accumulators: Sequence[ThreadExportAccumulator]) -> None:
@@ -260,7 +278,7 @@ async def export_threads_to_targets_once(
     after that the body costs no Matrix history call at all.
 
     Each source thread is fetched once per room and fanned out to every authorized target.
-    Scoped targets export only rooms where every required member is currently joined.
+    Scoped targets export only rooms owned by an allowed source entity where every required member is joined.
     A failed membership check leaves prior exports untouched, records a failure, and writes nothing new.
     A successful check that proves any required member absent removes the prior room export.
     """
@@ -272,14 +290,15 @@ async def export_threads_to_targets_once(
         return tuple(accumulator.stats() for accumulator in accumulators)
 
     homeserver = runtime_matrix_homeserver(runtime_paths=runtime_paths)
-    state_rooms = export_rooms(runtime_paths, room_filter)
-    discovered_invited_groups = invited_export_rooms(
+    state_rooms = export_rooms(config, runtime_paths, room_filter)
+    invited_selection = invited_export_rooms(
         config,
         runtime_paths,
         room_filter,
         known_room_ids={room.room_id for room in state_rooms},
     )
-    invited_groups = _requested_invited_groups(discovered_invited_groups, validated_targets)
+    _retract_ambiguous_invited_rooms(validated_targets, invited_selection.conflicts)
+    invited_groups = _requested_invited_groups(invited_selection.groups, validated_targets)
     export_groups = build_export_groups(
         runtime_paths=runtime_paths,
         homeserver=homeserver,
@@ -351,6 +370,7 @@ async def export_threads_once(
         targets=(
             ThreadExportTarget(
                 output_dir=output_dir or _default_thread_export_dir(runtime_paths),
+                source_entity_names=None,
                 required_member_user_ids=required_member_user_ids,
                 include_invited_rooms=include_invited_rooms,
             ),

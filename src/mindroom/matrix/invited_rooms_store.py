@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class _InvalidInvitedRoomsFileError(ValueError):
+    """Persisted invited-room state has an invalid shape."""
+
+
 def invited_rooms_path(storage_root: Path, agent_name: str) -> Path:
     """Return the storage path for one agent's persisted invited rooms."""
     return agent_state_root_path(storage_root, agent_name) / "invited_rooms.json"
@@ -38,20 +42,37 @@ def load_invited_rooms(path: Path) -> set[str]:
         return set()
 
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        return _read_invited_rooms(path)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         logger.warning("failed_to_load_invited_rooms", path=str(path), exc_info=True)
         return set()
-
-    if not isinstance(raw, list):
+    except _InvalidInvitedRoomsFileError:
         logger.warning("invalid_invited_rooms_file", path=str(path))
         return set()
 
+
+def load_invited_room_claims(path: Path) -> set[str]:
+    """Load ownership evidence, failing closed when persisted state is invalid."""
+    if not path.exists():
+        return set()
+
+    try:
+        return _read_invited_rooms(path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, _InvalidInvitedRoomsFileError) as exc:
+        msg = f"Invalid invited-room claim file: {path}"
+        raise RuntimeError(msg) from exc
+
+
+def _read_invited_rooms(path: Path) -> set[str]:
+    """Read and validate one persisted invited-room state file."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        msg = f"Invited-room state must be a list of room IDs: {path}"
+        raise _InvalidInvitedRoomsFileError(msg)
     room_ids = [room_id for room_id in raw if isinstance(room_id, str)]
     if len(room_ids) != len(raw):
-        logger.warning("invalid_invited_rooms_file", path=str(path))
-        return set()
-
+        msg = f"Invited-room state must be a list of room IDs: {path}"
+        raise _InvalidInvitedRoomsFileError(msg)
     return set(room_ids)
 
 

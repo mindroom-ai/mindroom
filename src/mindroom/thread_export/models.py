@@ -20,6 +20,7 @@ class ThreadExportRoom:
     alias: str
     name: str
     invited: bool = False
+    source_entity_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -77,9 +78,10 @@ class ThreadExportStats:
 
 @dataclass(frozen=True)
 class ThreadExportTarget:
-    """One export destination and its optional room-membership scope."""
+    """One export destination and its required source-entity scope."""
 
     output_dir: Path
+    source_entity_names: tuple[str, ...] | None
     required_member_user_ids: tuple[str, ...] = ()
     include_invited_rooms: bool = True
     trusted_root: Path | None = None
@@ -125,6 +127,22 @@ class ThreadExportGroupFailure:
 
     rooms: tuple[ThreadExportRoom, ...]
     error: str
+
+
+@dataclass(frozen=True)
+class InvitedRoomConflict:
+    """One invited room whose persisted claims cannot identify a safe owner."""
+
+    room: ThreadExportRoom
+    claimant_labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class InvitedRoomSelection:
+    """Uniquely owned invited rooms plus unsafe legacy ownership conflicts."""
+
+    groups: tuple[tuple[str, tuple[ThreadExportRoom, ...]], ...]
+    conflicts: tuple[InvitedRoomConflict, ...]
 
 
 type ThreadExportGroupResult = ThreadExportGroup | ThreadExportGroupFailure

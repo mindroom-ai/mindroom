@@ -191,6 +191,50 @@ async def test_export_threads_once_deduplicates_invited_rooms_already_in_state(t
 
 
 @pytest.mark.asyncio
+async def test_ambiguous_invited_room_retracts_legacy_exports_from_every_target(tmp_path: Path) -> None:
+    """Legacy duplicate ownership is unsafe and must remove every previously fanned-out copy."""
+    config = thread_export_config(tmp_path)
+    config.agents["other"] = config.agents["general"].model_copy(update={"display_name": "Other"})
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path, account_keys=("agent_general",), include_rooms=False)
+    room_id = "!private:localhost"
+    write_invited_rooms(runtime_paths, "general", [room_id])
+    write_invited_rooms(runtime_paths, "other", [room_id])
+    targets = (
+        ThreadExportTarget(output_dir=tmp_path / "general", source_entity_names=("general",)),
+        ThreadExportTarget(output_dir=tmp_path / "other", source_entity_names=("other",)),
+    )
+    for target in targets:
+        mark_thread_export_root(target.output_dir)
+        room_dir = target.output_dir / quote(room_id, safe="")
+        room_dir.mkdir()
+        (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+        (room_dir / f"{quote('$private:localhost', safe='')}.yaml").write_text(
+            "version: 1\n",
+            encoding="utf-8",
+        )
+
+    with (
+        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock()) as login,
+        patch(
+            "mindroom.thread_export.service.export_threads_for_targets_for_client",
+            new=AsyncMock(),
+        ) as export_group,
+    ):
+        stats = await export_threads_to_targets_once(
+            config=config,
+            runtime_paths=runtime_paths,
+            targets=targets,
+        )
+
+    login.assert_not_awaited()
+    export_group.assert_not_awaited()
+    assert [item.failures for item in stats] == [1, 1]
+    assert all("ambiguous invited-room ownership" in item.failed_items[0].error for item in stats)
+    assert all(not (target.output_dir / quote(room_id, safe="")).exists() for target in targets)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("include_state_rooms", "room_filter"),
     [
@@ -264,7 +308,7 @@ async def test_export_threads_once_continues_after_one_account_login_failure(tmp
         stats = await export_threads_to_targets_once(
             config=config,
             runtime_paths=runtime_paths,
-            targets=(ThreadExportTarget(output_dir=tmp_path / "exports"),),
+            targets=(ThreadExportTarget(output_dir=tmp_path / "exports", source_entity_names=None),),
         )
 
     assert login.await_count == 2
@@ -316,8 +360,16 @@ async def test_an_unassignable_account_group_fails_only_the_targets_that_wanted_
         config=config,
         runtime_paths=runtime_paths,
         targets=(
-            ThreadExportTarget(output_dir=tmp_path / "invited", include_invited_rooms=True),
-            ThreadExportTarget(output_dir=tmp_path / "configured", include_invited_rooms=False),
+            ThreadExportTarget(
+                output_dir=tmp_path / "invited",
+                source_entity_names=None,
+                include_invited_rooms=True,
+            ),
+            ThreadExportTarget(
+                output_dir=tmp_path / "configured",
+                source_entity_names=None,
+                include_invited_rooms=False,
+            ),
         ),
         room_filter="!user-room:localhost",
     )
@@ -352,6 +404,7 @@ async def test_full_pass_retains_scoped_exports_when_account_group_cannot_run(tm
             targets=(
                 ThreadExportTarget(
                     output_dir=output_dir,
+                    source_entity_names=None,
                     required_member_user_ids=("@alice:localhost",),
                 ),
             ),
@@ -376,8 +429,11 @@ async def test_aliased_target_output_directories_are_all_skipped(tmp_path: Path)
     aliased_agent_dir = agents_dir / "agent_alias"
     aliased_agent_dir.symlink_to(real_agent_dir, target_is_directory=True)
     targets = (
-        ThreadExportTarget(aliased_agent_dir / "workspace" / "thread_exports"),
-        ThreadExportTarget(output_dir),
+        ThreadExportTarget(
+            aliased_agent_dir / "workspace" / "thread_exports",
+            source_entity_names=None,
+        ),
+        ThreadExportTarget(output_dir, source_entity_names=None),
     )
 
     with (
@@ -418,7 +474,7 @@ async def test_nested_target_output_directories_are_all_skipped(
     stats = await export_threads_to_targets_once(
         config=config,
         runtime_paths=runtime_paths,
-        targets=tuple(ThreadExportTarget(output_dir) for output_dir in ordered_dirs),
+        targets=tuple(ThreadExportTarget(output_dir, source_entity_names=None) for output_dir in ordered_dirs),
     )
 
     assert tuple(item.output_dir for item in stats) == ordered_dirs
@@ -443,7 +499,7 @@ async def test_symlink_loop_target_output_directory_fails_closed(tmp_path: Path)
     stats = await export_threads_to_targets_once(
         config=config,
         runtime_paths=runtime_paths,
-        targets=(ThreadExportTarget(output_dir),),
+        targets=(ThreadExportTarget(output_dir, source_entity_names=None),),
     )
 
     assert stats[0].output_dir == output_dir
@@ -467,7 +523,7 @@ async def test_symlinked_final_target_is_skipped_without_touching_destination(tm
     stats = await export_threads_to_targets_once(
         config=config,
         runtime_paths=runtime_paths,
-        targets=(ThreadExportTarget(output_dir),),
+        targets=(ThreadExportTarget(output_dir, source_entity_names=None),),
     )
 
     assert stats[0].failures == 1
@@ -511,6 +567,7 @@ async def test_trusted_root_target_rejects_parent_replaced_after_validation(
             targets=(
                 ThreadExportTarget(
                     output_dir,
+                    source_entity_names=None,
                     trusted_root=runtime_paths.storage_root,
                 ),
             ),
@@ -546,7 +603,7 @@ async def test_terminal_traversal_output_directory_is_rejected(
     stats = await export_threads_to_targets_once(
         config=config,
         runtime_paths=runtime_paths,
-        targets=(ThreadExportTarget(authored_output_dir),),
+        targets=(ThreadExportTarget(authored_output_dir, source_entity_names=None),),
     )
 
     assert stats[0].output_dir == authored_output_dir
@@ -570,7 +627,7 @@ async def test_explicit_broad_output_directory_is_rejected(tmp_path: Path) -> No
     stats = await export_threads_to_targets_once(
         config=config,
         runtime_paths=runtime_paths,
-        targets=(ThreadExportTarget(tmp_path),),
+        targets=(ThreadExportTarget(tmp_path, source_entity_names=None),),
     )
 
     assert stats[0].failures == 1
@@ -601,9 +658,12 @@ async def test_aliased_targets_are_skipped_while_unique_target_completes(
     stale_room.mkdir()
     (stale_room / "index.json").write_text("{}\n", encoding="utf-8")
     targets = (
-        ThreadExportTarget(aliased_agent_dir / "workspace" / "thread_exports"),
-        ThreadExportTarget(shared_output_dir),
-        ThreadExportTarget(healthy_output_dir),
+        ThreadExportTarget(
+            aliased_agent_dir / "workspace" / "thread_exports",
+            source_entity_names=None,
+        ),
+        ThreadExportTarget(shared_output_dir, source_entity_names=None),
+        ThreadExportTarget(healthy_output_dir, source_entity_names=None),
     )
     client = Mock()
     client.close = AsyncMock()
@@ -648,7 +708,7 @@ async def test_full_pass_with_zero_exported_rooms_skips_reconciliation(tmp_path:
         stats = await export_threads_to_targets_once(
             config=config,
             runtime_paths=runtime_paths,
-            targets=(ThreadExportTarget(output_dir),),
+            targets=(ThreadExportTarget(output_dir, source_entity_names=None),),
         )
 
     assert stats[0].rooms_exported == 0
@@ -695,7 +755,7 @@ async def test_the_export_reader_is_bound_to_the_principal_the_running_bot_write
         await export_threads_to_targets_once(
             config=config,
             runtime_paths=runtime_paths,
-            targets=(ThreadExportTarget(tmp_path / "exports"),),
+            targets=(ThreadExportTarget(tmp_path / "exports", source_entity_names=None),),
         )
 
     projection = export_group.await_args.kwargs["reader"]
