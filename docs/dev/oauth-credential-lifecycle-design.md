@@ -34,8 +34,8 @@ This makes the local state transition atomic instead of reconstructing it after 
 18. Every provider token service ends with `_oauth`, which keeps OAuth tokens out of worker credential mirrors.
 19. Provider adapters classify terminal refresh failures from structured error codes and never expose provider-controlled descriptions.
 20. All consumers build reconnect responses through the shared OAuth service factory.
-21. The reset tool is non-destructive and only issues a requester-bound browser confirmation URL.
-22. The authenticated browser POST is the reset execution boundary.
+21. The reset tool is non-destructive and only issues a requester-issued browser confirmation URL.
+22. The authenticated requester-scoped POST or one-time shared-scope capability POST is the reset execution boundary.
 23. MCP retirement completes before the credential transaction commits a reset.
 24. A same-generation HTTP bearer rejection retires the exact MCP credential-scope session without replaying the remote call.
 
@@ -70,7 +70,8 @@ Credential-scope sessions are fenced during reset so captured stale state cannot
 
 ### Browser reset
 
-`src/mindroom/oauth/reset.py` freezes provider, service, agent, canonical requester, scope, worker key, connection generation, and a random operation ID into a short-lived authenticated browser action.
+`src/mindroom/oauth/reset.py` freezes provider, service, agent, canonical requester, scope, worker key, connection generation, and a random operation ID into a short-lived browser action.
+Requester-scoped actions require the original authenticated browser user, while shared-scope actions are one-time bearer capabilities issued only to configured credential managers.
 `src/mindroom/api/oauth.py` revalidates that target on GET and POST, while GET remains non-mutating.
 `src/mindroom/oauth/reset_execution.py` returns completed operations before transport work, otherwise retires MCP state and asks the lifecycle to atomically reset the credential.
 

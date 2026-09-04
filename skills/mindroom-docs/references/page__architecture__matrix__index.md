@@ -171,6 +171,13 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 - Preview event is compact (for example no inline `io.mindroom.tool_trace`), while the sidecar preserves full content fidelity
 - Encrypted rooms: sidecar JSON is encrypted before upload (`message-content.json.enc`)
 
+With `defaults.large_message_strategy: split`, an oversized final text response is instead delivered as several complete rich-text events by `segment_matrix_content()` in `matrix/segmented_messages.py`.
+The body is cut at paragraph or line boundaries, never inside a fenced code block, and concatenating the segment bodies reproduces the original exactly.
+The first segment stays a final `m.replace` of the streaming placeholder when there is one; continuations are plain messages that stay in the thread when there is one.
+Every segment is rendered as standalone Markdown with `m.mentions` attached to the segment whose body carries the mention.
+Continuation payloads are frozen in the local outbox row and sent under deterministic transaction IDs, so a retry or restart resends only the segments the room does not already hold.
+Non-text payloads, metadata that alone exceeds the budget, and a single code fence larger than one event still use the sidecar path.
+
 ## Response Tracking
 
 Duplicate responses are prevented at two durable layers, both in `tracking/event_journal.db` under `mindroom_data/`.

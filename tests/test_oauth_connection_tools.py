@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 def _tool_and_context(
     tmp_path: Path,
     *,
-    worker_scope: WorkerScope,
+    worker_scope: WorkerScope | None,
     context_agent_name: str = "research",
     requester_id: str = "@alice:example.org",
     aliases: dict[str, list[str]] | None = None,
@@ -269,26 +269,46 @@ def test_oauth_target_does_not_canonicalize_configured_bot_alias(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_reset_oauth_connection_refuses_shared_scope(tmp_path: Path) -> None:
-    """The agent-facing action must not target credentials shared by requesters."""
+async def test_reset_oauth_connection_issues_browser_confirmation_for_shared_scope(tmp_path: Path) -> None:
+    """A credential manager may issue a browser-confirmed reset for the agent's shared credential."""
     tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="shared")
+    provider = google_drive_oauth_provider()
 
     with tool_runtime_context(context):
-        result = await tool.reset_oauth_connection("google_drive")
+        result = await tool.reset_oauth_connection(provider.id)
 
-    assert "requester-isolated" in result
+    intent = _reset_intent(result, provider=provider, context=context)
+    assert intent.binding.requested_agent_name == "research"
+    assert intent.requester_id == "@alice:example.org"
+    assert intent.binding.worker_scope == "shared"
+    assert "Keep this link private" in result
 
 
 @pytest.mark.asyncio
-async def test_reset_oauth_connection_denies_unauthorized_requester(tmp_path: Path) -> None:
+@pytest.mark.parametrize("worker_scope", ["shared", "user_agent"])
+async def test_reset_oauth_connection_denies_unauthorized_requester(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+) -> None:
     """Current authorization should be checked before issuing the browser action."""
-    tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
+    tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope=worker_scope)
     context.config.agents["research"].credential_managers = ["@bob:example.org"]
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection("google_drive")
 
     assert "not authorized" in result
+
+
+@pytest.mark.asyncio
+async def test_reset_oauth_connection_refuses_unscoped_credentials(tmp_path: Path) -> None:
+    """Credential managers must use the dashboard for installation-level credentials."""
+    tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope=None)
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection("google_drive")
+
+    assert "requires a shared, user, or user_agent scope" in result
 
 
 @pytest.mark.asyncio
