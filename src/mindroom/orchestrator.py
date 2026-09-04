@@ -125,6 +125,7 @@ from .orchestration.runtime import (
     wait_for_matrix_homeserver,
 )
 from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
+from .orchestration.thread_export_runtime import ThreadExportRuntimeCoordinator
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 
 if TYPE_CHECKING:
@@ -263,6 +264,7 @@ class _MultiAgentOrchestrator:
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
+    _thread_export_runtime: ThreadExportRuntimeCoordinator = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -313,6 +315,11 @@ class _MultiAgentOrchestrator:
             agent_reply_memberships=self.agent_reply_memberships,
         )
         self._todo_poke_runtime = TodoPokeRuntimeCoordinator(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
+        )
+        self._thread_export_runtime = ThreadExportRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
@@ -782,6 +789,7 @@ class _MultiAgentOrchestrator:
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
         await self._todo_poke_runtime.sync()
+        await self._thread_export_runtime.sync()
 
     async def _stop_mcp_manager(self) -> None:
         """Stop the MCP manager and clear the active runtime binding."""
@@ -926,6 +934,7 @@ class _MultiAgentOrchestrator:
                 agent_reply_membership_sync=(
                     self.agent_reply_membership_sync if entity_name == ROUTER_AGENT_NAME else None
                 ),
+                room_activity_observer=self._thread_export_runtime.mark_room_activity,
             ),
         )
         bot.orchestrator = self
@@ -2243,6 +2252,7 @@ class _MultiAgentOrchestrator:
         )
         await self._startup_maintenance.cancel()
         await self._todo_poke_runtime.stop()
+        await self._thread_export_runtime.stop()
         await self._stop_memory_auto_flush_worker()
         await self._knowledge_source_watcher.shutdown()
         await self._knowledge_refresh_scheduler.shutdown()

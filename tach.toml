@@ -1713,6 +1713,11 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.thread_export_runtime"
+depends_on = ["mindroom.thread_export.workspace_sync"]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
 path = "mindroom.orchestration.todo_poke_runtime"
 depends_on = [
     "mindroom.constants",
@@ -1778,6 +1783,7 @@ depends_on = [
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",
+    "mindroom.orchestration.thread_export_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.response_admission",
     "mindroom.scheduling_executor",
@@ -2721,6 +2727,7 @@ visibility = [
     "mindroom.thread_export.policy",
     "mindroom.thread_export.selection",
     "mindroom.thread_export.service",
+    "mindroom.thread_export.workspace_sync",
 ]
 
 [[modules]]
@@ -2730,6 +2737,7 @@ visibility = [
     "mindroom.thread_export",
     "mindroom.thread_export.execution",
     "mindroom.thread_export.service",
+    "mindroom.thread_export.workspace_sync",
 ]
 
 [[modules]]
@@ -2756,6 +2764,7 @@ depends_on = [
 visibility = [
     "mindroom.thread_export.execution",
     "mindroom.thread_export.service",
+    "mindroom.thread_export.workspace_sync",
 ]
 
 [[modules]]
@@ -2768,6 +2777,7 @@ depends_on = [
 visibility = [
     "mindroom.thread_export.execution",
     "mindroom.thread_export.service",
+    "mindroom.thread_export.workspace_sync",
 ]
 
 [[modules]]
@@ -2796,6 +2806,22 @@ depends_on = [
     "mindroom.thread_export.selection",
     "mindroom.thread_export.storage",
 ]
+
+[[modules]]
+path = "mindroom.thread_export.workspace_sync"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.private_instance_identity",
+    "mindroom.thread_export.models",
+    "mindroom.thread_export.projected_history",
+    "mindroom.thread_export.selection",
+    "mindroom.thread_export.service",
+    "mindroom.thread_export.storage",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workspaces",
+]
+visibility = ["mindroom.orchestration.thread_export_runtime"]
 
 [[modules]]
 path = "mindroom.thread_tags"
