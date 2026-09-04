@@ -29,10 +29,10 @@ class OAuthConnectionTools(Toolkit):
         """Return a browser link to reset and reconnect an OAuth connection this requester may manage.
 
         Use this only when an OAuth connection is stuck or revoked. The operation
-        opens an authenticated browser confirmation before changing credentials;
-        user scope can affect this requester across agents. It does not revoke
-        the grant at the provider. Shared-scope links are short-lived bearer
-        capabilities, so keep them private.
+        opens a browser confirmation before changing credentials. User scope can
+        affect this requester across agents; shared scope affects every requester
+        of this agent. It does not revoke the grant at the provider. Shared-scope
+        links are short-lived bearer capabilities, so keep them private.
 
         Args:
             provider_id: OAuth provider ID backing one of this agent's configured tools.
