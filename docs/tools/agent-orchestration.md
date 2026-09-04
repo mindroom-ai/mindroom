@@ -47,12 +47,10 @@ For [`openclaw_compat`], that means `matrix_message` is added directly and `atta
 ### What It Does
 
 The toolkit exposes only `reset_oauth_connection(provider_id)`.
-The provider must back one of the current agent's configured tools through that tool's `auth_provider` metadata.
-The call returns a time-limited, requester-issued browser link and does not change credentials itself.
-The browser confirmation retires the matching MCP OAuth session for that credential scope when applicable, deletes the matching local scoped credential under the same lock used by token refresh, and then opens the provider authorization page.
-The reset does not revoke the grant at the external provider.
-Opening the link without confirming is non-destructive.
-Confirming when no local credential exists is safe and still continues to provider authorization.
+The provider must back one of the current agent's configured tools.
+The call returns a temporary browser link and does not change the connection by itself.
+After you confirm, MindRoom removes its saved connection and opens the provider's sign-in page so you can reconnect.
+It does not revoke access at the provider itself.
 
 ### Configuration
 
@@ -70,31 +68,39 @@ agents:
       - google_drive
 ```
 
-### Browser Confirmation And Credential Scope
+### Who Can Reset A Connection
 
-The tool call itself is non-destructive: it only issues a browser URL and never deletes credentials or retires MCP sessions.
-Normal `tool_approval` policy still applies, so a matching `require_approval` rule can pause the tool call before it issues that URL.
-The browser page is the human approval boundary: its GET only displays the action, and its POST performs the reset.
-The link freezes the provider, credential service, invoking agent, canonical requester, credential scope, worker key, connection generation, and a stable reset operation ID.
-For `user` and `user_agent` scopes, only the original authenticated human requester can open and confirm the link.
-For `shared` scope, the short-lived link is a one-time bearer capability so a configured credential manager can confirm it without dashboard access.
-Keep a shared-scope link private because anyone with its complete URL can confirm it before it expires.
-Both link issuance and confirmation apply the current agent's credential-management policy, including configured sender aliases.
-Credential management accepts platform `administrators` and `agents.<name>.credential_managers`.
-The resolved credential scope must be `shared`, `user`, or `user_agent`; unscoped credentials are refused.
-A `shared` reset affects every requester using the current agent.
-A `user` reset affects the current requester across agents, while a `user_agent` reset affects only the current requester and current agent.
-Providers that define requester-scoped credentials, such as GitHub, may resolve to `user` scope independently of the agent's `worker_scope`.
+| Connection type | Who confirms the reset | What the reset affects |
+| --- | --- | --- |
+| Shared (`shared`) | An administrator or configured credential manager can request the link. Anyone with the complete link can confirm it before it expires. | Everyone using this agent |
+| Personal (`user`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection across agents |
+| Personal for one agent (`user_agent`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection for this agent only |
+
+A shared connection belongs to the agent or team rather than to one MindRoom user.
+On a private agent, users can manage their own personal connections.
+On other agents, requesting a reset requires platform `administrator` access or an entry in `agents.<name>.credential_managers`.
+Some providers always use personal connections, regardless of the agent's configured scope.
+
+### Reset A Connection
+
+1. Ask the agent to call `reset_oauth_connection()` for the affected provider.
+2. Open the returned link within 10 minutes.
+3. Review which agent and connection type will be affected, then confirm the reset.
+4. Sign in at the provider and retry the original request.
+
+Keep a shared reset link private.
+Anyone with the complete link can confirm it before it expires, and confirming it can disconnect the service for everyone using that agent until reconnection finishes.
 
 ### Notes
 
 - `oauth_connections` always runs in the primary MindRoom runtime, even if it appears in `worker_tools`.
-- Invalid, unavailable, unconfigured, unauthorized, expired, or mismatched links fail before credential deletion or MCP session disconnection.
-- Use the returned link, confirm the reset, complete provider authorization, then retry the original provider-backed tool call.
-- If an authenticated requester-scoped reset retries after the stable reset completed, MindRoom skips deletion and MCP retirement, so it cannot disturb a later reconnection.
-- A shared-scope reset link is consumed by its confirmation POST; request a fresh link if that request does not complete.
-- Credential deletion and the stable reset receipt commit atomically, so a restart observes either the intact connection or the completed reset.
-- The browser link expires after 10 minutes; run `reset_oauth_connection()` again to issue a fresh link.
+- Opening a reset link without confirming it does not change the connection.
+- MindRoom refuses an expired, unauthorized, or outdated link before deleting credentials.
+- A shared reset link works once. Run `reset_oauth_connection()` again if you need a new one.
+- Installation-level connections that are not assigned to an agent scope must be reset from the dashboard.
+- Normal `tool_approval` rules still apply when the agent creates the link.
+
+For implementation details and lifecycle guarantees, see [OAuth Credential Lifecycle Design](../dev/oauth-credential-lifecycle-design.md#browser-reset).
 
 ## [`usage_stats`]
 
