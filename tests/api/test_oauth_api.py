@@ -114,6 +114,8 @@ def _stored_oauth_credentials(
         thread_id=None,
         resolved_thread_id=None,
         session_id=None,
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
     )
     worker_target = (
         resolve_worker_target(worker_scope, agent_name, execution_identity=identity)
@@ -2324,6 +2326,191 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
     assert _stored_oauth_credentials(provider, runtime_paths) is None
 
 
+def _general_agent_reset_target(
+    api_app: FastAPI,
+    runtime_paths: constants.RuntimePaths,
+) -> tuple[OAuthProvider, oauth_reset._ResolvedOAuthResetTarget]:
+    """Resolve the google_drive reset target alice may issue for `general` at its configured scope."""
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+    )
+    config = main._app_context(api_app).runtime_config
+    assert config is not None
+    target = oauth_reset.resolve_oauth_reset_target(
+        provider.id,
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        ),
+    )
+    return provider, target
+
+
+def test_shared_browser_reset_uses_one_time_credential_manager_link_without_dashboard_login(tmp_path: Path) -> None:
+    """A shared credential manager link should confirm and reconnect without dashboard access."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            "CUSTOMER_ID": "tenant-a",
+        },
+    )
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(worker_scope="shared", allowed_users=["@alice:example.org"]),
+    )
+    provider, target = _general_agent_reset_target(api_app, runtime_paths)
+    get_runtime_credentials_manager(runtime_paths).for_primary_runtime_agent_scope("general").save_credentials(
+        provider.credential_service,
+        {
+            "token": "old-access-token",
+            "refresh_token": "old-refresh-token",
+            "client_id": "client-id",
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+    )
+    reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url="http://localhost:8765") as client:
+            confirmation = client.get(reset_url, follow_redirects=False)
+            before_confirmation = _stored_oauth_credentials(
+                provider,
+                runtime_paths,
+                worker_scope="shared",
+            )
+            confirmed = client.post(reset_url, follow_redirects=False)
+            after_confirmation = _stored_oauth_credentials(
+                provider,
+                runtime_paths,
+                worker_scope="shared",
+            )
+            authorization = client.get(confirmed.headers["location"], follow_redirects=False)
+            state = _state_from_auth_url(authorization.headers["location"])
+            callback = client.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                follow_redirects=False,
+            )
+            replayed = client.post(reset_url, follow_redirects=False)
+            after_replay = _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared")
+
+    assert confirmation.status_code == 200
+    assert "shared scope" in confirmation.text
+    assert "reset the shared connection for every requester" in confirmation.text
+    assert 'name="referrer" content="no-referrer"' in confirmation.text
+    assert confirmation.headers["referrer-policy"] == "no-referrer"
+    assert confirmation.headers["cache-control"] == "no-store"
+    assert before_confirmation is not None
+    assert before_confirmation["refresh_token"] == "old-refresh-token"
+    assert confirmed.status_code == 303
+    confirmed_location = urlparse(confirmed.headers["location"])
+    assert confirmed_location.path == f"/api/oauth/{provider.id}/authorize"
+    assert "connect_token" in parse_qs(confirmed_location.query)
+    assert after_confirmation is None
+    assert replayed.status_code == 400
+    assert authorization.status_code == 307
+    assert urlparse(authorization.headers["location"]).netloc == "auth.example.test"
+    assert callback.status_code == 200
+    assert "Test Drive is connected" in callback.text
+    stored = _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared")
+    assert stored is not None
+    assert stored["token"] == "google_drive-access-token"
+    assert after_replay is not None
+    assert after_replay["token"] == "google_drive-access-token"
+
+
+def test_shared_browser_reset_consumes_stale_link_without_deleting_replacement(tmp_path: Path) -> None:
+    """A stale shared reset capability should be consumed while preserving replacement credentials."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+        },
+    )
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(worker_scope="shared", allowed_users=["@alice:example.org"]),
+    )
+    provider, target = _general_agent_reset_target(api_app, runtime_paths)
+    reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
+
+    async def replace_credentials() -> None:
+        async with oauth_credential_store.oauth_credential_transaction(target.credential_context) as transaction:
+            transaction.publish(
+                {
+                    "token": "replacement-access-token",
+                    "refresh_token": "replacement-refresh-token",
+                    "client_id": "client-id",
+                    "scopes": list(provider.scopes),
+                    "_source": "oauth",
+                    "_oauth_provider": provider.id,
+                },
+                advance_connection_generation=True,
+            )
+            await transaction.commit()
+
+    asyncio.run(replace_credentials())
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url="http://localhost:8765") as client:
+            stale = client.post(reset_url, follow_redirects=False)
+            replayed = client.post(reset_url, follow_redirects=False)
+
+    assert stale.status_code == 409
+    assert stale.headers["referrer-policy"] == "no-referrer"
+    assert stale.headers["cache-control"] == "no-store"
+    assert "nothing was deleted" in stale.text
+    assert "reset_oauth_connection()" in stale.text
+    assert replayed.status_code == 400
+    stored = _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared")
+    assert stored is not None
+    assert stored["refresh_token"] == "replacement-refresh-token"
+
+
+def test_shared_browser_reset_rechecks_credential_manager_authority(tmp_path: Path) -> None:
+    """A shared reset link should fail after its requester's credential authority is removed."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+        },
+    )
+    api_app = _make_test_app(
+        runtime_paths,
+        _config_payload(worker_scope="shared", allowed_users=["@alice:example.org"]),
+    )
+    provider, target = _general_agent_reset_target(api_app, runtime_paths)
+    reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
+    _publish_config(api_app, runtime_paths, _config_payload(worker_scope="shared", allowed_users=[]))
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url="http://localhost:8765") as client:
+            confirmation = client.get(reset_url, follow_redirects=False)
+            reset = client.post(reset_url, follow_redirects=False)
+
+    assert confirmation.status_code == 409
+    assert "not authorized" in confirmation.text
+    assert reset.status_code == 409
+    assert "not authorized" in reset.text
+
+
 def test_private_agent_requester_can_resolve_own_oauth_reset_target(tmp_path: Path) -> None:
     """Private-agent requesters need no administrator or credential-manager grant to reset their own OAuth."""
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
@@ -2367,28 +2554,7 @@ def test_browser_reset_rejects_stale_connection_generation(tmp_path: Path) -> No
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = _fake_provider(
-        provider_id="google_drive",
-        credential_service="google_drive_oauth",
-        tool_config_service="google_drive",
-    )
-    config = main._app_context(api_app).runtime_config
-    assert config is not None
-    target = oauth_reset.resolve_oauth_reset_target(
-        provider.id,
-        agent_name="general",
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="general",
-            requester_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
-        ),
-    )
+    provider, target = _general_agent_reset_target(api_app, runtime_paths)
     scoped_manager = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_scope(
         "@alice:example.org",
         "general",
@@ -2518,28 +2684,7 @@ def test_browser_reset_rejects_a_different_authenticated_requester(tmp_path: Pat
         ),
     )
     _use_runtime_auth_settings(api_app)
-    provider = _fake_provider(
-        provider_id="google_drive",
-        credential_service="google_drive_oauth",
-        tool_config_service="google_drive",
-    )
-    config = main._app_context(api_app).runtime_config
-    assert config is not None
-    target = oauth_reset.resolve_oauth_reset_target(
-        provider.id,
-        agent_name="general",
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="general",
-            requester_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
-        ),
-    )
+    provider, target = _general_agent_reset_target(api_app, runtime_paths)
     reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
     bob_headers = trusted_upstream_headers(
         user_id="bob",

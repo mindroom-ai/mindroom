@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 class OAuthConnectionTools(Toolkit):
-    """Reset only the current requester's OAuth connections for the current agent."""
+    """Issue browser-confirmed resets for OAuth connections the requester may manage."""
 
     def __init__(self, runtime_paths: RuntimePaths, *, worker_target: ResolvedWorkerTarget | None) -> None:
         self._runtime_paths = runtime_paths
@@ -26,18 +26,19 @@ class OAuthConnectionTools(Toolkit):
         )
 
     async def reset_oauth_connection(self, provider_id: str) -> str:
-        """Return a browser link to reset and reconnect this requester's OAuth connection.
+        """Return a browser link to reset and reconnect an OAuth connection this requester may manage.
 
         Use this only when an OAuth connection is stuck or revoked. The operation
-        opens an authenticated browser confirmation before changing credentials;
-        user scope can affect this requester across agents. It does not revoke
-        the grant at the provider.
+        opens a browser confirmation before changing credentials. User scope can
+        affect this requester across agents; shared scope affects every requester
+        of this agent. It does not revoke the grant at the provider. Shared-scope
+        links are short-lived bearer capabilities, so keep them private.
 
         Args:
             provider_id: OAuth provider ID backing one of this agent's configured tools.
 
         Returns:
-            A requester-bound browser reset link.
+            A requester-issued browser reset link.
 
         """
         runtime_context = get_tool_runtime_context()
@@ -57,8 +58,13 @@ class OAuthConnectionTools(Toolkit):
             reset_url = await issue_browser_oauth_reset_url(target)
         except OAuthResetTargetError as exc:
             return f"Error: {exc}"
+        privacy_guidance = (
+            " Keep this link private because anyone with the complete URL can confirm a shared-scope reset."
+            if target.worker_target.worker_scope == "shared"
+            else ""
+        )
         return (
-            f"Open this requester-bound browser link to confirm resetting provider `{provider_id}`. "
+            f"Open this requester-issued browser link to confirm resetting provider `{provider_id}`. "
             f"No credentials change until you confirm in the browser. `reset_url`: {reset_url}; "
-            "the link is valid for 10 minutes."
+            f"the link is valid for 10 minutes.{privacy_guidance}"
         )
