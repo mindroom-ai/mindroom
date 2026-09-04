@@ -11,6 +11,8 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentThreadExportConfig
 from mindroom.config.main import Config
 from mindroom.orchestration.thread_export_runtime import ThreadExportRuntimeCoordinator
+from mindroom.thread_export.models import ThreadExportRoom
+from mindroom.thread_export.storage import write_thread_payload
 from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -153,3 +155,27 @@ async def test_stop_cancels_a_pass_in_flight(tmp_path: Path) -> None:
         await asyncio.wait_for(coordinator.stop(), timeout=5)
 
     assert task.cancelled()
+
+
+async def test_disabling_the_last_agent_clears_its_exports(tmp_path: Path) -> None:
+    """Removing the final ``thread_exports`` still cleans up, even though no runner is left to do it."""
+    enabled = _config(tmp_path, enabled=True)
+    disabled = _config(tmp_path, enabled=False)
+    export_dir = runtime_paths_for(enabled).storage_root / "agents" / "code" / "workspace" / "thread_exports"
+    room = ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="", name="Lobby")
+    write_thread_payload(export_dir, room, "$thread:localhost", {"messages": []})
+    (thread_file,) = export_dir.rglob("*.yaml")
+    active = enabled
+    coordinator = ThreadExportRuntimeCoordinator(
+        runtime_paths=runtime_paths_for(enabled),
+        config_provider=lambda: active,
+        bot_provider=lambda _name: None,
+    )
+
+    with patch.object(WorkspaceThreadExportRunner, "run", _idle_until_stopped):
+        await coordinator.sync()
+        active = disabled
+        await coordinator.sync()
+
+    assert coordinator._runner is None
+    assert not thread_file.exists()

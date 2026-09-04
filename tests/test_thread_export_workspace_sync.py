@@ -206,8 +206,8 @@ async def test_run_loop_debounces_and_stops(tmp_path: Path) -> None:
     export.assert_awaited_once()
 
 
-async def test_pass_failure_does_not_stop_the_runner(tmp_path: Path) -> None:
-    """Pass failure does not stop the runner."""
+async def test_pass_failure_keeps_the_work_for_the_next_trigger(tmp_path: Path) -> None:
+    """A crashed pass neither stops the runner nor drops what it was asked to export."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
     bots = _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost"))
@@ -216,11 +216,15 @@ async def test_pass_failure_does_not_stop_the_runner(tmp_path: Path) -> None:
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
+        runner.mark_room_activity("!lobby:localhost")
+        runner._wakeup.clear()
         await runner._run_pass_once()
-        runner.queue_full_pass()
+        assert not runner._wakeup.is_set()
         await runner._run_pass_once()
 
     assert export.await_count == 2
+    second = export.await_args_list[1]
+    assert second.kwargs["full_pass"] is True
 
 
 async def test_shared_agent_target_requires_agent_membership(tmp_path: Path) -> None:
@@ -287,8 +291,10 @@ async def test_not_running_router_leaves_work_pending(tmp_path: Path) -> None:
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
+        runner._wakeup.clear()
         await runner._run_pass_once()
         export.assert_not_awaited()
+        assert runner._wakeup.is_set()
         router.running = True
         await runner._run_pass_once()
 

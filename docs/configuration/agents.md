@@ -599,7 +599,7 @@ Agents may edit or delete their exported files; deleted files return on the next
 Thread bodies come from the event-journal projection the running bots already maintain, so a pass costs no Matrix history call for threads a bot has seen.
 
 Shared agents export only rooms where the agent's own Matrix account is currently joined.
-Private agents (`private:`) get one export tree per materialized instance under `<storage_root>/private_instances/<worker scope>/<agent>/<private root>/thread_exports/`, scoped to that requester's current room memberships, so one requester's private workspace never accumulates other users' conversations.
+Private agents (`private:`) get one export tree per materialized instance under `<storage_root>/private_instances/<scope-key>/<agent>/<private root>/thread_exports/`, scoped to that requester's current room memberships, so one requester's private workspace never accumulates other users' conversations.
 A membership lookup failure blocks new writes for that room and leaves existing files in place until a successful lookup proves that access was revoked.
 
 ### Semantic Search Over Exports

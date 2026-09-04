@@ -136,14 +136,25 @@ class WorkspaceThreadExportRunner:
         try:
             completed = await self._run_pass(config, full_pass=full_pass, room_ids=room_ids)
         except Exception:
+            # Keep the work for the next trigger rather than retrying in a tight
+            # loop on a fault that may not clear by itself.
             logger.exception("Thread export pass crashed")
+            self._requeue(full_pass=full_pass, room_ids=room_ids)
             return
         if not completed:
-            self._full_pass_pending |= full_pass
-            self._pending_room_ids |= room_ids
+            self._requeue(full_pass=full_pass, room_ids=room_ids)
+            self._wakeup.set()
+
+    def _requeue(self, *, full_pass: bool, room_ids: frozenset[str]) -> None:
+        self._full_pass_pending |= full_pass
+        self._pending_room_ids |= room_ids
 
     async def _run_pass(self, config: Config, *, full_pass: bool, room_ids: frozenset[str]) -> bool:
         """Export the dirty rooms, or everything, into every enabled agent's workspace."""
+        router_bot = self._ready_bot(ROUTER_AGENT_NAME)
+        if router_bot is None:
+            logger.debug("Deferring thread export pass until the router bot is running")
+            return False
         runtime_paths = self._deps.runtime_paths
         enabled = enabled_thread_export_agents(config)
         if full_pass:
@@ -158,18 +169,8 @@ class WorkspaceThreadExportRunner:
         agent_targets = await asyncio.to_thread(_build_targets, config, runtime_paths, enabled, agent_user_ids)
         if not agent_targets:
             return True
-        router_bot = self._ready_bot(ROUTER_AGENT_NAME)
-        if router_bot is None:
-            logger.info("Deferring thread export pass until the router bot is running")
-            return False
         targets = tuple(agent_target.target for agent_target in agent_targets)
-        state_rooms = export_rooms(runtime_paths, None)
-        invited_groups = invited_export_rooms(
-            config,
-            runtime_paths,
-            None,
-            known_room_ids={room.room_id for room in state_rooms},
-        )
+        state_rooms, invited_groups = await asyncio.to_thread(_select_rooms, config, runtime_paths)
         if not full_pass:
             state_rooms = [room for room in state_rooms if room.room_id in room_ids]
             invited_groups = [
@@ -202,6 +203,21 @@ class WorkspaceThreadExportRunner:
         if bot is None or not bot.running or bot.client is None:
             return None
         return bot
+
+
+def _select_rooms(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[list[ThreadExportRoom], list[tuple[str, list[ThreadExportRoom]]]]:
+    """Read the persisted configured and invited rooms, off the event loop."""
+    state_rooms = export_rooms(runtime_paths, None)
+    invited_groups = invited_export_rooms(
+        config,
+        runtime_paths,
+        None,
+        known_room_ids={room.room_id for room in state_rooms},
+    )
+    return state_rooms, invited_groups
 
 
 def _source_for_bot(bot: ThreadExportBot, rooms: tuple[ThreadExportRoom, ...], config: Config) -> ThreadExportSource:
@@ -416,6 +432,11 @@ def _clear_export_tree(runtime_paths: RuntimePaths, output_dir: Path) -> None:
         clear_thread_export_root(output_dir, trusted_root=runtime_paths.storage_root)
     except (OSError, RuntimeError):
         logger.warning("Skipping unsafe thread export cleanup", output_dir=str(output_dir))
+
+
+def clear_workspace_thread_exports(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Remove every configured agent's workspace exports, for when no agent enables them any more."""
+    _clear_disabled_agent_exports(config, runtime_paths, frozenset())
 
 
 def _clear_disabled_agent_exports(

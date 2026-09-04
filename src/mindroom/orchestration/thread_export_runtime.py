@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from mindroom.thread_export.workspace_sync import (
     WorkspaceThreadExportDeps,
     WorkspaceThreadExportRunner,
+    clear_workspace_thread_exports,
     enabled_thread_export_agents,
 )
 
@@ -33,8 +34,14 @@ class ThreadExportRuntimeCoordinator:
     async def sync(self) -> None:
         """Start or stop the runner from the active config, and reconcile every workspace once."""
         config = self.config_provider()
-        if config is None or not enabled_thread_export_agents(config):
+        if config is None:
             await self.stop()
+            return
+        if not enabled_thread_export_agents(config):
+            # The runner's full pass is what clears exports of agents that
+            # stopped enabling them; with nobody left to run for, do it here.
+            await self.stop()
+            await asyncio.to_thread(clear_workspace_thread_exports, config, self.runtime_paths)
             return
         if self._runner is None or self._task is None or self._task.done():
             runner = WorkspaceThreadExportRunner(

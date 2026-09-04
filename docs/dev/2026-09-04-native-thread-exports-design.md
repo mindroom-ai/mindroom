@@ -66,7 +66,7 @@ Every bot in a room fires for the same event; the dirty set deduplicates.
 `export_threads_to_sources` runs the shared body: validate targets, export each source, reconcile a full pass, return stats.
 `export_threads_to_targets_once` keeps the CLI behaviour: read `matrix_state.yaml`, log in per account group, open and bind the journal, build sources, delegate.
 The runner builds sources from live bots instead: configured rooms read through the router bot, invited rooms through the invited entity's bot, each with `export_conversation_reader(client=bot.client, store=bot.journal_principal(), self_sender=bot.agent_user.user_id)`.
-A bot that is not running yet leaves its rooms out of the pass and leaves the pending work queued; the next trigger retries.
+A pass that finds the router bot not running yet does no work, keeps the pending set, and wakes the loop again so the debounce becomes the retry interval; a pass that crashes keeps the pending set for the next trigger.
 
 ### Blocking I/O
 

@@ -403,8 +403,8 @@ async def export_threads_to_targets_once(
             max_thread_roots=max_thread_roots,
         )
     finally:
-        for client in clients:
-            await client.close()
+        # One client refusing to close must not leak the others or the journal.
+        await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
         await open_journal.close()
 
     return tuple(accumulator.stats() for accumulator in accumulators)
