@@ -11,6 +11,7 @@ import yaml
 from mindroom.thread_export import clear_thread_export_root
 from mindroom.thread_export.models import ThreadExportRoom
 from mindroom.thread_export.storage import (
+    _PRINCIPAL_BOUND_MARKER_FILENAME,
     _ROOT_MARKER_FILENAME,
     _ROOT_MARKER_TEXT,
     _safe_path_segment,
@@ -542,16 +543,17 @@ def test_symlinked_room_directory_is_never_followed_or_removed(tmp_path: Path) -
     assert keep.read_text(encoding="utf-8") == "secret"
 
 
-def test_room_key_cannot_collide_with_export_root_marker(tmp_path: Path) -> None:
+@pytest.mark.parametrize("marker_filename", [_ROOT_MARKER_FILENAME, _PRINCIPAL_BOUND_MARKER_FILENAME])
+def test_room_key_cannot_collide_with_export_root_marker(tmp_path: Path, marker_filename: str) -> None:
     """A valid room key equal to the marker should use a separate directory."""
     output_dir = tmp_path / "thread_exports"
-    room = _room(_ROOT_MARKER_FILENAME)
+    room = _room(marker_filename)
 
     write_thread_payload(output_dir, room, "$thread:localhost", {"version": 1})
     write_room_index(output_dir, room)
 
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
-    assert (output_dir / "%2Emindroom-thread-exports" / "index.json").is_file()
+    assert (output_dir / f"%2E{marker_filename.removeprefix('.')}" / "index.json").is_file()
 
 
 def test_room_export_query_ignores_unrecognized_yaml(tmp_path: Path) -> None:

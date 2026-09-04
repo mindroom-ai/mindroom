@@ -744,11 +744,57 @@ async def test_export_threads_to_sources_exports_each_source_and_reconciles(tmp_
 
 
 @pytest.mark.asyncio
+async def test_export_threads_to_sources_honors_each_sources_targets(tmp_path: Path) -> None:
+    """Each live source exports only to the targets explicitly bound to it."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    room = ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="", name="Lobby")
+    code_target = ThreadExportTarget(output_dir=tmp_path / "code")
+    other_target = ThreadExportTarget(output_dir=tmp_path / "other")
+    code_source = ThreadExportSource(
+        client=Mock(),
+        reader=Mock(),
+        rooms=(room,),
+        target_output_dirs=(code_target.output_dir,),
+    )
+    other_source = ThreadExportSource(
+        client=Mock(),
+        reader=Mock(),
+        rooms=(room,),
+        target_output_dirs=(other_target.output_dir,),
+    )
+
+    with patch(
+        "mindroom.thread_export.service.export_threads_for_targets_for_client",
+        new=AsyncMock(side_effect=successful_group_result),
+    ) as export_source:
+        await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths,
+            sources=(code_source, other_source),
+            targets=(code_target, other_target),
+            full_pass=False,
+        )
+
+    assert export_source.await_count == 2
+    assert [call.kwargs["targets"] for call in export_source.await_args_list] == [
+        (code_target,),
+        (other_target,),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_export_threads_to_sources_skips_matrix_work_without_valid_targets(tmp_path: Path) -> None:
     """A target that fails validation is reported and never triggers a source read."""
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    source = ThreadExportSource(client=Mock(), reader=Mock(), rooms=())
+    target = ThreadExportTarget(output_dir=tmp_path / "trailing" / "..")
+    source = ThreadExportSource(
+        client=Mock(),
+        reader=Mock(),
+        rooms=(),
+        target_output_dirs=(target.output_dir,),
+    )
 
     with patch(
         "mindroom.thread_export.service.export_threads_for_targets_for_client",
@@ -758,7 +804,7 @@ async def test_export_threads_to_sources_skips_matrix_work_without_valid_targets
             config=config,
             runtime_paths=runtime_paths,
             sources=(source,),
-            targets=(ThreadExportTarget(output_dir=tmp_path / "trailing" / ".."),),
+            targets=(target,),
             full_pass=False,
         )
 

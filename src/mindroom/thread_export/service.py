@@ -33,6 +33,7 @@ from mindroom.thread_export.selection import (
 from mindroom.thread_export.storage import (
     canonicalize_output_dir,
     prepare_export_root,
+    prepare_principal_bound_export_root,
     reconcile_room_directories,
 )
 
@@ -103,12 +104,16 @@ def _requested_invited_groups(
     return requested_groups
 
 
-def _reconcile_full_pass(accumulators: Sequence[ThreadExportAccumulator]) -> None:
+def _reconcile_full_pass(
+    accumulators: Sequence[ThreadExportAccumulator],
+    *,
+    principal_bound_output_dirs: frozenset[Path],
+) -> None:
     """Remove room directories that the completed full pass did not retain."""
     for accumulator in accumulators:
         output_dir = accumulator.target.output_dir
         try:
-            if accumulator.rooms_exported == 0:
+            if accumulator.rooms_exported == 0 and output_dir not in principal_bound_output_dirs:
                 logger.warning(
                     "Skipping thread export directory reconciliation without exported rooms",
                     output_dir=str(output_dir),
@@ -129,6 +134,8 @@ def _reconcile_full_pass(accumulators: Sequence[ThreadExportAccumulator]) -> Non
 
 def _validated_targets(
     accumulators: Sequence[ThreadExportAccumulator],
+    *,
+    principal_bound_output_dirs: frozenset[Path] = frozenset(),
 ) -> tuple[ThreadExportAccumulator, ...]:
     """Reject every resolved overlap, then prepare only disjoint roots."""
     candidates: list[tuple[ThreadExportAccumulator, Path]] = []
@@ -179,10 +186,12 @@ def _validated_targets(
             )
             continue
         try:
-            prepare_export_root(
-                accumulator.target.output_dir,
-                trusted_root=accumulator.target.trusted_root,
+            prepare = (
+                prepare_principal_bound_export_root
+                if accumulator.target.output_dir in principal_bound_output_dirs
+                else prepare_export_root
             )
+            prepare(accumulator.target.output_dir, trusted_root=accumulator.target.trusted_root)
         except (OSError, RuntimeError) as exc:
             accumulator.failed_items.append(failure_for_target(f"output directory preparation failed: {exc}"))
             logger.warning(
@@ -214,6 +223,13 @@ async def _run_export_source(
     max_thread_roots: int,
 ) -> None:
     """Run one source without preventing later sources after a failure."""
+    if source.target_output_dirs is not None:
+        bound_output_dirs = _principal_bound_output_dirs((source,))
+        accumulators = tuple(
+            accumulator for accumulator in accumulators if accumulator.target.output_dir in bound_output_dirs
+        )
+    if not accumulators:
+        return
     try:
         source_accumulators = await export_threads_for_targets_for_client(
             client=source.client,
@@ -239,6 +255,7 @@ async def _export_sources(
     accumulators: Sequence[ThreadExportAccumulator],
     unreadable_rooms: _UnreadableRooms,
     full_pass: bool,
+    principal_bound_output_dirs: frozenset[Path],
     max_thread_roots: int,
 ) -> None:
     """Export every source into already-validated targets, then reconcile a full pass."""
@@ -253,15 +270,37 @@ async def _export_sources(
             max_thread_roots=max_thread_roots,
         )
     if full_pass:
-        await asyncio.to_thread(_reconcile_full_pass, accumulators)
+        await asyncio.to_thread(
+            _reconcile_full_pass,
+            accumulators,
+            principal_bound_output_dirs=principal_bound_output_dirs,
+        )
 
 
 async def _validated_accumulators(
     targets: Sequence[ThreadExportTarget],
+    *,
+    principal_bound_output_dirs: frozenset[Path] = frozenset(),
 ) -> tuple[tuple[ThreadExportAccumulator, ...], tuple[ThreadExportAccumulator, ...]]:
     """Return every target's accumulator and the subset whose output directory checked out."""
     accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
-    return accumulators, await asyncio.to_thread(_validated_targets, accumulators)
+    return accumulators, await asyncio.to_thread(
+        _validated_targets,
+        accumulators,
+        principal_bound_output_dirs=principal_bound_output_dirs,
+    )
+
+
+def _principal_bound_output_dirs(sources: Sequence[ThreadExportSource]) -> frozenset[Path]:
+    """Return canonical target paths explicitly bound to a live source."""
+    output_dirs: set[Path] = set()
+    for source in sources:
+        for output_dir in source.target_output_dirs or ():
+            try:
+                output_dirs.add(canonicalize_output_dir(output_dir))
+            except (OSError, RuntimeError):
+                continue
+    return frozenset(output_dirs)
 
 
 async def export_threads_to_sources(
@@ -274,17 +313,23 @@ async def export_threads_to_sources(
     full_pass: bool,
     max_thread_roots: int = 2000,
 ) -> tuple[ThreadExportStats, ...]:
-    """Export threads from already-authenticated sources to every target.
+    """Export threads from already-authenticated sources to their allowed targets.
 
     This is the in-process path: a running bot lends its client and its
     projection view, so no login, journal open, or bind happens here.
+    An unbound source retains the existing all-target fan-out behavior.
+    The first explicitly bound use clears prior exporter-owned room data before writing.
     ``unreadable_rooms`` records a failure per room for rooms no source could
     read this pass, without retracting anything already exported for them.
     ``full_pass`` removes room directories the pass did not retain.
     """
     if not targets:
         return ()
-    accumulators, validated_targets = await _validated_accumulators(targets)
+    principal_bound_output_dirs = _principal_bound_output_dirs(sources)
+    accumulators, validated_targets = await _validated_accumulators(
+        targets,
+        principal_bound_output_dirs=principal_bound_output_dirs,
+    )
     if validated_targets:
         await _export_sources(
             sources,
@@ -293,6 +338,7 @@ async def export_threads_to_sources(
             accumulators=validated_targets,
             unreadable_rooms=unreadable_rooms,
             full_pass=full_pass,
+            principal_bound_output_dirs=principal_bound_output_dirs,
             max_thread_roots=max_thread_roots,
         )
     return tuple(accumulator.stats() for accumulator in accumulators)
@@ -348,7 +394,11 @@ async def export_threads_to_targets_once(
     if not export_groups:
         select_export_account(runtime_paths, homeserver)
         if full_pass:
-            await asyncio.to_thread(_reconcile_full_pass, validated_targets)
+            await asyncio.to_thread(
+                _reconcile_full_pass,
+                validated_targets,
+                principal_bound_output_dirs=frozenset(),
+            )
         return tuple(accumulator.stats() for accumulator in accumulators)
 
     unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = [
@@ -400,6 +450,7 @@ async def export_threads_to_targets_once(
             accumulators=validated_targets,
             unreadable_rooms=unreadable_rooms,
             full_pass=full_pass,
+            principal_bound_output_dirs=frozenset(),
             max_thread_roots=max_thread_roots,
         )
     finally:

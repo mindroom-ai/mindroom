@@ -23,7 +23,7 @@ from mindroom.thread_export.workspace_sync import (
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.thread_export_helpers import write_invited_rooms, write_thread_export_matrix_state
+from tests.thread_export_helpers import write_thread_export_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -45,10 +45,16 @@ class _FakeBot:
     running: bool = True
     client: object | None = field(default_factory=Mock)
     principal: object = field(default_factory=Mock)
+    rooms: list[str] = field(default_factory=lambda: ["!lobby:localhost", "!dev:localhost"])
+    invited_room_ids: frozenset[str] = frozenset()
 
     @property
     def matrix_id(self) -> MatrixID:
         return MatrixID.parse(self.user_id)
+
+    @property
+    def approval_room_ids(self) -> frozenset[str]:
+        return frozenset(self.rooms) | self.invited_room_ids
 
     def journal_principal(self) -> object:
         return self.principal
@@ -244,14 +250,63 @@ async def test_shared_agent_target_requires_agent_membership(tmp_path: Path) -> 
     )
 
 
-async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path) -> None:
-    """Invited rooms read through the invited entity bot."""
-    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+async def test_each_agent_source_is_bound_only_to_its_own_workspace(tmp_path: Path) -> None:
+    """Each workspace uses its agent's principal, including explicit rooms absent from managed state."""
+    config = _config(
+        tmp_path,
+        {
+            "code": AgentConfig(
+                display_name="Code",
+                rooms=["lobby"],
+                thread_exports=AgentThreadExportConfig(),
+            ),
+            "other": AgentConfig(
+                display_name="Other",
+                rooms=["!external:localhost"],
+                thread_exports=AgentThreadExportConfig(),
+            ),
+        },
+    )
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
-    write_invited_rooms(runtime_paths, "code", ["!private:localhost"])
+    code = _FakeBot("@mindroom_code:localhost", rooms=["!lobby:localhost", "!lobby:localhost"])
+    other = _FakeBot("@mindroom_other:localhost", rooms=["!external:localhost"])
+    runner = _runner(config, _bots(code, other))
+    export = _export_mock()
+
+    with patch(EXPORT_PATH, new=export):
+        runner.queue_full_pass()
+        await runner._run_pass_once()
+
+    call = export.await_args
+    assert call is not None
+    assert [
+        (
+            source.client,
+            tuple(room.room_id for room in source.rooms),
+            source.target_output_dirs,
+        )
+        for source in call.kwargs["sources"]
+    ] == [
+        (
+            code.client,
+            ("!lobby:localhost",),
+            (runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME,),
+        ),
+        (
+            other.client,
+            ("!external:localhost",),
+            (runtime_paths.storage_root / "agents" / "other" / "workspace" / _WORKSPACE_EXPORT_DIRNAME,),
+        ),
+    ]
+
+
+async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path) -> None:
+    """Configured and invited rooms read through the workspace agent's bot."""
+    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+    write_thread_export_matrix_state(tmp_path)
     router = _FakeBot("@mindroom_router:localhost")
-    code = _FakeBot("@mindroom_code:localhost")
+    code = _FakeBot("@mindroom_code:localhost", invited_room_ids=frozenset({"!private:localhost"}))
     runner = _runner(config, _bots(router, code))
     export = _export_mock()
 
@@ -263,40 +318,15 @@ async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path)
     assert call is not None
     sources = call.kwargs["sources"]
     assert [(source.client, tuple(room.room_id for room in source.rooms)) for source in sources] == [
-        (router.client, ("!lobby:localhost", "!dev:localhost")),
-        (code.client, ("!private:localhost",)),
+        (code.client, ("!lobby:localhost", "!dev:localhost", "!private:localhost")),
     ]
-    assert sources[1].reader.reader.hydrator.self_sender == "@mindroom_code:localhost"
-    assert call.kwargs["unreadable_rooms"] == []
+    assert sources[0].reader.reader.hydrator.self_sender == "@mindroom_code:localhost"
 
 
-async def test_not_running_router_makes_configured_rooms_unreadable(tmp_path: Path) -> None:
-    """Configured rooms are reported unreadable while the router is down; nothing is retracted or retried."""
+async def test_not_running_agent_skips_its_workspace_export(tmp_path: Path) -> None:
+    """A stopped agent cannot lend the principal-bound source for its workspace."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
-    router = _FakeBot("@mindroom_router:localhost", running=False)
-    runner = _runner(config, _bots(router, _FakeBot("@mindroom_code:localhost")))
-    export = _export_mock()
-
-    with patch(EXPORT_PATH, new=export):
-        runner.queue_full_pass()
-        await runner._run_pass_once()
-
-    call = export.await_args
-    assert call is not None
-    assert call.kwargs["sources"] == []
-    [(rooms, error)] = call.kwargs["unreadable_rooms"]
-    assert sorted(room.room_id for room in rooms) == ["!dev:localhost", "!lobby:localhost"]
-    assert error == "Bot 'router' is not running"
-    assert runner._full_pass_pending is False
-
-
-async def test_not_running_invited_entity_is_reported_unreadable(tmp_path: Path) -> None:
-    """Not running invited entity is reported unreadable."""
-    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
-    runtime_paths = runtime_paths_for(config)
-    write_thread_export_matrix_state(tmp_path)
-    write_invited_rooms(runtime_paths, "code", ["!private:localhost"])
     runner = _runner(
         config,
         _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost", client=None)),
@@ -307,12 +337,46 @@ async def test_not_running_invited_entity_is_reported_unreadable(tmp_path: Path)
         runner.queue_full_pass()
         await runner._run_pass_once()
 
-    call = export.await_args
-    assert call is not None
-    assert len(call.kwargs["sources"]) == 1
-    [(rooms, error)] = call.kwargs["unreadable_rooms"]
-    assert [room.room_id for room in rooms] == ["!private:localhost"]
-    assert error == "Bot 'code' is not running"
+    export.assert_not_awaited()
+
+
+async def test_full_pass_clears_stale_exports_when_agent_has_no_rooms(tmp_path: Path) -> None:
+    """An authoritative empty agent selection removes exports left by an older source."""
+    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path)
+    export_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
+    stale_thread = _write_owned_export(export_dir)
+    runner = _runner(config, _bots(_FakeBot("@mindroom_code:localhost", rooms=[])))
+
+    runner.queue_full_pass()
+    await runner._run_pass_once()
+
+    assert not stale_thread.exists()
+
+
+async def test_first_principal_bound_pass_purges_legacy_content_before_reading(tmp_path: Path) -> None:
+    """A failed first agent-bound read cannot preserve files written by the old shared source."""
+    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path)
+    export_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
+    stale_thread = _write_owned_export(export_dir)
+    runner = _runner(config, _bots(_FakeBot("@mindroom_code:localhost")))
+
+    with patch(
+        "mindroom.thread_export.service.export_threads_for_targets_for_client",
+        new=AsyncMock(side_effect=RuntimeError("read failed")),
+    ):
+        runner.queue_full_pass()
+        await runner._run_pass_once()
+        assert not stale_thread.exists()
+
+        current_thread = _write_owned_export(export_dir)
+        runner.queue_full_pass()
+        await runner._run_pass_once()
+
+    assert current_thread.exists()
 
 
 async def test_full_pass_clears_exports_of_agents_without_the_setting(tmp_path: Path) -> None:
