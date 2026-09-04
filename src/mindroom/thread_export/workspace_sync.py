@@ -163,31 +163,37 @@ class WorkspaceThreadExportRunner:
             logger.info("Deferring thread export pass until the router bot is running")
             return False
         targets = tuple(agent_target.target for agent_target in agent_targets)
-        for room_filter in (None,) if full_pass else sorted(room_ids):
-            state_rooms = export_rooms(runtime_paths, room_filter)
-            invited_groups = invited_export_rooms(
-                config,
-                runtime_paths,
-                room_filter,
-                known_room_ids={room.room_id for room in state_rooms},
-            )
-            sources = [_source_for_bot(router_bot, tuple(state_rooms), config)] if state_rooms else []
-            unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = []
-            for entity_name, rooms in invited_groups:
-                bot = self._ready_bot(entity_name)
-                if bot is None:
-                    unreadable_rooms.append((tuple(rooms), f"Bot '{entity_name}' is not running"))
-                    continue
-                sources.append(_source_for_bot(bot, tuple(rooms), config))
-            stats = await export_threads_to_sources(
-                config=config,
-                runtime_paths=runtime_paths,
-                sources=sources,
-                targets=targets,
-                unreadable_rooms=unreadable_rooms,
-                full_pass=full_pass,
-            )
-            _log_pass(agent_targets, stats, room_filter=room_filter, full_pass=full_pass)
+        state_rooms = export_rooms(runtime_paths, None)
+        invited_groups = invited_export_rooms(
+            config,
+            runtime_paths,
+            None,
+            known_room_ids={room.room_id for room in state_rooms},
+        )
+        if not full_pass:
+            state_rooms = [room for room in state_rooms if room.room_id in room_ids]
+            invited_groups = [
+                (entity_name, selected)
+                for entity_name, rooms in invited_groups
+                if (selected := [room for room in rooms if room.room_id in room_ids])
+            ]
+        sources = [_source_for_bot(router_bot, tuple(state_rooms), config)] if state_rooms else []
+        unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = []
+        for entity_name, rooms in invited_groups:
+            bot = self._ready_bot(entity_name)
+            if bot is None:
+                unreadable_rooms.append((tuple(rooms), f"Bot '{entity_name}' is not running"))
+                continue
+            sources.append(_source_for_bot(bot, tuple(rooms), config))
+        stats = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths,
+            sources=sources,
+            targets=targets,
+            unreadable_rooms=unreadable_rooms,
+            full_pass=full_pass,
+        )
+        _log_pass(agent_targets, stats, room_ids=room_ids, full_pass=full_pass)
         return True
 
     def _ready_bot(self, entity_name: str) -> ThreadExportBot | None:
@@ -218,7 +224,7 @@ def _log_pass(
     agent_targets: Sequence[_AgentTarget],
     stats: Sequence[ThreadExportStats],
     *,
-    room_filter: str | None,
+    room_ids: frozenset[str],
     full_pass: bool,
 ) -> None:
     """Log one line per target that did something, and every target on a full pass."""
@@ -235,7 +241,7 @@ def _log_pass(
         logger.info(
             "Exported threads to agent workspace",
             agent_name=agent_target.agent_name,
-            room_filter=room_filter,
+            room_ids=None if full_pass else sorted(room_ids),
             rooms_exported=target_stats.rooms_exported,
             threads_exported=target_stats.threads_exported,
             threads_unchanged=target_stats.threads_unchanged,
@@ -316,6 +322,11 @@ def _private_targets(
                 _clear_export_tree(runtime_paths, output_dir)
             continue
         if output_dir is None:
+            logger.warning(
+                "Skipping private instance without a resolvable workspace",
+                agent_name=agent_name,
+                instance_root=str(state_root),
+            )
             continue
         required_member_user_ids = (owner,) if options.private_room_scope == "owner" else (owner, agent_user_id)
         targets.append(

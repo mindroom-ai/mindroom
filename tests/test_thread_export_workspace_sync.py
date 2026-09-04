@@ -137,7 +137,7 @@ def test_enabled_agents_are_those_with_the_setting(tmp_path: Path) -> None:
     assert enabled_thread_export_agents(config) == {"code": AgentThreadExportConfig()}
 
 
-async def test_activity_marks_coalesce_into_one_pass_per_distinct_room(tmp_path: Path) -> None:
+async def test_activity_marks_coalesce_into_one_exact_room_pass(tmp_path: Path) -> None:
     """Activity marks coalesce into one pass per distinct room."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
@@ -151,13 +151,14 @@ async def test_activity_marks_coalesce_into_one_pass_per_distinct_room(tmp_path:
         runner.mark_room_activity("!dev:localhost")
         await runner._run_pass_once()
 
-    assert export.await_count == 2
-    exported_rooms = [
-        tuple(room.room_id for source in call.kwargs["sources"] for room in source.rooms)
-        for call in export.await_args_list
+    export.assert_awaited_once()
+    call = export.await_args
+    assert call is not None
+    assert call.kwargs["full_pass"] is False
+    assert sorted(room.room_id for source in call.kwargs["sources"] for room in source.rooms) == [
+        "!dev:localhost",
+        "!lobby:localhost",
     ]
-    assert exported_rooms == [("!dev:localhost",), ("!lobby:localhost",)]
-    assert all(call.kwargs["full_pass"] is False for call in export.await_args_list)
 
 
 async def test_full_pass_subsumes_dirty_rooms(tmp_path: Path) -> None:
@@ -481,3 +482,25 @@ async def test_unreadable_private_identity_does_not_block_other_targets(tmp_path
     assert call is not None
     assert [target.required_member_user_ids for target in call.kwargs["targets"]] == [("@mindroom_code:localhost",)]
     assert existing_thread.exists()
+
+
+async def test_incremental_pass_matches_room_ids_exactly(tmp_path: Path) -> None:
+    """A dirty room ID selects that room only, never a room whose ID merely contains it."""
+    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path)
+    write_invited_rooms(runtime_paths, "code", ["!lobby:localhost2", "!private:localhost"])
+    runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost")))
+    export = _export_mock()
+
+    with patch(EXPORT_PATH, new=export):
+        runner.mark_room_activity("!lobby:localhost")
+        runner.mark_room_activity("!private:localhost")
+        await runner._run_pass_once()
+
+    call = export.await_args
+    assert call is not None
+    assert [tuple(room.room_id for room in source.rooms) for source in call.kwargs["sources"]] == [
+        ("!lobby:localhost",),
+        ("!private:localhost",),
+    ]

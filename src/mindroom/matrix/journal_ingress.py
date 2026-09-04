@@ -40,9 +40,6 @@ logger = get_logger(__name__)
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 _DEPARTED_MEMBERSHIPS = frozenset({"leave", "ban"})
-# Kinds whose admission means a room's conversation changed.
-_ROOM_ACTIVITY_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
-
 # Kinds whose events carry conversation content, and so update the projection.
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
 
@@ -452,7 +449,7 @@ class JournalIngress:
         admission: AdmissionResult,
     ) -> None:
         """Tell the consumers of a committed admission what just happened."""
-        if admission is AdmissionResult.ADMITTED and kind in _ROOM_ACTIVITY_KINDS:
+        if admission is AdmissionResult.ADMITTED and kind in _PROJECTED_KINDS:
             self.on_room_activity(room.room_id)
         if event_class is not EventClass.ACTIONABLE:
             return

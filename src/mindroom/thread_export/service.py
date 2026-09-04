@@ -256,6 +256,14 @@ async def _export_sources(
         await asyncio.to_thread(_reconcile_full_pass, accumulators)
 
 
+async def _validated_accumulators(
+    targets: Sequence[ThreadExportTarget],
+) -> tuple[tuple[ThreadExportAccumulator, ...], tuple[ThreadExportAccumulator, ...]]:
+    """Return every target's accumulator and the subset whose output directory checked out."""
+    accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
+    return accumulators, await asyncio.to_thread(_validated_targets, accumulators)
+
+
 async def export_threads_to_sources(
     *,
     config: Config,
@@ -276,8 +284,7 @@ async def export_threads_to_sources(
     """
     if not targets:
         return ()
-    accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
-    validated_targets = await asyncio.to_thread(_validated_targets, accumulators)
+    accumulators, validated_targets = await _validated_accumulators(targets)
     if validated_targets:
         await _export_sources(
             sources,
@@ -317,8 +324,7 @@ async def export_threads_to_targets_once(
     """
     if not targets:
         return ()
-    accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
-    validated_targets = await asyncio.to_thread(_validated_targets, accumulators)
+    accumulators, validated_targets = await _validated_accumulators(targets)
     if not validated_targets:
         return tuple(accumulator.stats() for accumulator in accumulators)
 

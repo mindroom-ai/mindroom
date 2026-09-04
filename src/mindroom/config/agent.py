@@ -398,7 +398,7 @@ class AgentConfig(BaseModel):
 
     @field_validator("thread_exports", mode="before")
     @classmethod
-    def _thread_exports_shorthand(cls, value: object) -> object:
+    def normalize_thread_exports(cls, value: object) -> object:
         """Accept ``true``/``false`` as enable-with-defaults/disable."""
         if value is True:
             return AgentThreadExportConfig()
