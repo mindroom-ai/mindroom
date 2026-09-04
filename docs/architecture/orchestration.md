@@ -77,6 +77,12 @@ main() entry
 - **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; the default `matrix_sync.mode: classic` uses classic `/v3/sync` and `matrix_sync.mode: sliding` opts into MSC4186 Simplified Sliding Sync
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
+## Session Storage Upgrades
+
+After the runtime becomes ready, MindRoom checks session databases for Agno 2 run blobs off the event loop. A child process starts only when legacy data exists, then migrates and verifies each session in its own transaction. The runtime remains available throughout. Invalid or conflicting blobs stay intact on the compatibility read path and are reported in the normal logs for a later retry.
+
+The now-empty legacy column is retained, matching Agno's v3 migration behavior. Removing it is a separate explicit cleanup because changing a live SQLite table can block writes.
+
 ## Runtime Replacement Admission
 
 Config changes are detected via polling (`watch_paths()` checks watched source-file mtimes every second and fires after one quiet scan).

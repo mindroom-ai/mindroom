@@ -5,21 +5,20 @@ from __future__ import annotations
 import asyncio
 import json
 import multiprocessing
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from agno.db.sqlite import SqliteDb
 from agno.db.utils import build_single_run_row
-from sqlalchemy import bindparam, select, text, update
+from sqlalchemy import MetaData, Table, bindparam, inspect, null, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mindroom.agent_storage import configure_state_engine_pragmas, create_state_engine
-from mindroom.logging_config import get_logger
+from mindroom.constants import RuntimePaths
+from mindroom.logging_config import get_logger, setup_logging
 
 if TYPE_CHECKING:
-    from sqlalchemy import Table
     from sqlalchemy.orm import Session as OrmSession
 
 logger = get_logger(__name__)
@@ -53,11 +52,7 @@ def _refuse(reason: str) -> NoReturn:
     raise _MigrationRefusedError(reason)
 
 
-def _quote_identifier(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
-
-
-def _decode_legacy_runs(blob: object) -> list[dict[str, Any]]:
+def _validated_legacy_runs(blob: object) -> list[dict[str, Any]]:
     """Decode both JSON layers written by Agno 2 and require stable run identities."""
     decoded = blob
     try:
@@ -76,26 +71,42 @@ def _decode_legacy_runs(blob: object) -> list[dict[str, Any]]:
     return runs
 
 
-def _legacy_session_tables(db_file: Path) -> list[str]:
-    """Return session tables in one SQLite file that still have a legacy runs column."""
-    connection = sqlite3.connect(f"{db_file.resolve().as_uri()}?mode=ro", uri=True, timeout=30)
+def _legacy_session_tables(db_file: Path, *, pending_only: bool = False) -> list[str]:
+    """Return session tables with a legacy column, optionally only when it has data."""
+    engine = create_state_engine(str(db_file))
     try:
-        tables = [
-            row[0]
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-            if isinstance(row[0], str) and row[0].endswith("sessions")
-        ]
-        return [
-            table
-            for table in tables
-            if connection.execute(
-                "SELECT 1 FROM pragma_table_info(?) WHERE name = 'runs'",
-                (table,),
-            ).fetchone()
-            is not None
-        ]
+        inspector = inspect(engine)
+        tables: list[str] = []
+        for table_name in sorted(inspector.get_table_names()):
+            if not table_name.endswith("sessions"):
+                continue
+            if "runs" not in {column["name"] for column in inspector.get_columns(table_name)}:
+                continue
+            if pending_only:
+                table = Table(table_name, MetaData(), autoload_with=engine)
+                with engine.connect() as connection:
+                    pending = connection.execute(
+                        select(table.c.session_id).where(table.c.runs.isnot(None)).limit(1),
+                    ).first()
+                if pending is None:
+                    continue
+            tables.append(table_name)
+        return tables
     finally:
-        connection.close()
+        engine.dispose()
+
+
+def _pending_migration_targets(storage_root: Path) -> list[tuple[str, str]]:
+    """Find the database/table pairs that have legacy blobs to migrate."""
+    targets: list[tuple[str, str]] = []
+    for db_file in sorted(storage_root.rglob("sessions/*.db")):
+        try:
+            targets.extend(
+                (str(db_file), session_table) for session_table in _legacy_session_tables(db_file, pending_only=True)
+            )
+        except Exception:
+            logger.warning("legacy_session_database_scan_failed", db_file=str(db_file), exc_info=True)
+    return targets
 
 
 def _open_database(db_file: Path, session_table: str) -> SqliteDb:
@@ -107,25 +118,23 @@ def _open_database(db_file: Path, session_table: str) -> SqliteDb:
     return database
 
 
-def _legacy_session_row(sess: OrmSession, session_table: str, session_id: str) -> tuple[str | None, object] | None:
-    quoted_table = _quote_identifier(session_table)
+def _legacy_session_row(sess: OrmSession, sessions_table: Table, session_id: str) -> tuple[str | None, object] | None:
     row = sess.execute(
-        text(f"SELECT user_id, runs FROM {quoted_table} WHERE session_id = :session_id"),  # noqa: S608
-        {"session_id": session_id},
+        select(sessions_table.c.user_id, sessions_table.c.runs).where(sessions_table.c.session_id == session_id),
     ).one_or_none()
     return None if row is None or row[1] is None else (row[0], row[1])
 
 
 def _migrate_session_in_transaction(
     sess: OrmSession,
-    database: SqliteDb,
+    sessions_table: Table,
     runs_table: Table,
     session_id: str,
     expected_blob: object,
     legacy_runs: list[dict[str, Any]],
 ) -> bool:
     """Perform the copy and verification while the caller owns the writer transaction."""
-    session_row = _legacy_session_row(sess, database.session_table_name, session_id)
+    session_row = _legacy_session_row(sess, sessions_table, session_id)
     if session_row is None:
         return False
     user_id, blob = session_row
@@ -160,7 +169,10 @@ def _migrate_session_in_transaction(
     if canonical_ids:
         sess.execute(
             update(runs_table)
-            .where(runs_table.c.run_id == bindparam("target_run_id"))
+            .where(
+                runs_table.c.session_id == session_id,
+                runs_table.c.run_id == bindparam("target_run_id"),
+            )
             .values(run_index=bindparam("target_run_index")),
             [{"target_run_id": run_id, "target_run_index": index} for index, run_id in enumerate(canonical_ids)],
         )
@@ -178,16 +190,15 @@ def _migrate_session_in_transaction(
     if any(stored_by_id.get(run["run_id"]) != run for run in legacy_runs if run["run_id"] not in existing_ids):
         _refuse("stored_run_content_mismatch")
 
-    quoted_table = _quote_identifier(database.session_table_name)
     sess.execute(
-        text(f"UPDATE {quoted_table} SET runs = NULL WHERE session_id = :session_id"),  # noqa: S608
-        {"session_id": session_id},
+        update(sessions_table).where(sessions_table.c.session_id == session_id).values(runs=null()),
     )
     return True
 
 
 def _attempt_migrate_session(
     database: SqliteDb,
+    sessions_table: Table,
     runs_table: Table,
     session_id: str,
     expected_blob: object,
@@ -199,7 +210,7 @@ def _attempt_migrate_session(
             sess.execute(text("BEGIN IMMEDIATE"))
             migrated = _migrate_session_in_transaction(
                 sess,
-                database,
+                sessions_table,
                 runs_table,
                 session_id,
                 expected_blob,
@@ -214,19 +225,20 @@ def _attempt_migrate_session(
 
 def _migrate_session(
     database: SqliteDb,
+    sessions_table: Table,
     runs_table: Table,
     session_id: str,
 ) -> bool:
     """Prepare outside the writer lock, retrying if a current write changes the blob."""
     for _ in range(_MAX_CHANGED_BLOB_RETRIES):
         with database.Session() as sess:
-            session_row = _legacy_session_row(sess, database.session_table_name, session_id)
+            session_row = _legacy_session_row(sess, sessions_table, session_id)
         if session_row is None:
             return False
         _, blob = session_row
-        legacy_runs = _decode_legacy_runs(blob)
+        legacy_runs = _validated_legacy_runs(blob)
         try:
-            return _attempt_migrate_session(database, runs_table, session_id, blob, legacy_runs)
+            return _attempt_migrate_session(database, sessions_table, runs_table, session_id, blob, legacy_runs)
         except _LegacyBlobChangedError:
             continue
     _refuse("legacy_blob_kept_changing")
@@ -237,21 +249,23 @@ def _migrate_table(db_file: Path, session_table: str) -> _MigrationResult:
     database = _open_database(db_file, session_table)
     result = _MigrationResult()
     try:
+        sessions_table = database._get_table(table_type="sessions")
         runs_table = database._get_table(table_type="runs", create_table_if_not_found=True)
-        if runs_table is None:
+        if sessions_table is None or "runs" not in sessions_table.c or runs_table is None:
             return result
-        quoted_table = _quote_identifier(session_table)
         with database.Session() as sess:
             session_ids = list(
                 sess.execute(
-                    text(f"SELECT session_id FROM {quoted_table} WHERE runs IS NOT NULL ORDER BY session_id"),  # noqa: S608
+                    select(sessions_table.c.session_id)
+                    .where(sessions_table.c.runs.isnot(None))
+                    .order_by(sessions_table.c.session_id),
                 ).scalars(),
             )
         if not session_ids:
             return result
         for session_id in session_ids:
             try:
-                migrated = _migrate_session(database, runs_table, session_id)
+                migrated = _migrate_session(database, sessions_table, runs_table, session_id)
             except Exception as exc:
                 logger.warning(
                     "legacy_session_migration_skipped",
@@ -270,24 +284,27 @@ def _migrate_table(db_file: Path, session_table: str) -> _MigrationResult:
     return result
 
 
-def _migrate_database(db_file: Path) -> _MigrationResult:
-    """Migrate every legacy session table in one SQLite database."""
-    result = _MigrationResult()
-    for session_table in _legacy_session_tables(db_file):
-        result += _migrate_table(db_file, session_table)
-    return result
-
-
-def _migrate_storage_root(storage_root: str) -> None:
-    """Child-process entry point: scan and migrate databases one at a time."""
+def _migrate_storage_targets(
+    targets: list[tuple[str, str]],
+    log_level: str,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Child-process entry point: migrate database tables one at a time."""
+    setup_logging(level=log_level, runtime_paths=runtime_paths)
     result = _MigrationResult()
     failed_databases = 0
-    for db_file in sorted(Path(storage_root).rglob("sessions/*.db")):
+    for db_file_value, session_table in targets:
+        db_file = Path(db_file_value)
         try:
-            result += _migrate_database(db_file)
+            result += _migrate_table(db_file, session_table)
         except Exception:
             failed_databases += 1
-            logger.warning("legacy_session_database_migration_failed", db_file=str(db_file), exc_info=True)
+            logger.warning(
+                "legacy_session_database_migration_failed",
+                db_file=str(db_file),
+                session_table=session_table,
+                exc_info=True,
+            )
     logger.info(
         "legacy_session_migration_finished",
         migrated_sessions=result.migrated_sessions,
@@ -296,12 +313,27 @@ def _migrate_storage_root(storage_root: str) -> None:
     )
 
 
-async def _run_legacy_session_migration(storage_root: Path) -> None:
-    """Run the legacy scan outside this process and stop it with the runtime."""
+async def _run_legacy_session_migration(
+    storage_root: Path,
+    *,
+    log_level: str,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Preflight off-loop, then migrate pending blobs outside this process."""
+    targets = await asyncio.to_thread(_pending_migration_targets, storage_root)
+    if not targets:
+        return
+    child_runtime_paths = RuntimePaths(
+        config_path=runtime_paths.config_path,
+        config_dir=runtime_paths.config_dir,
+        env_path=runtime_paths.env_path,
+        storage_root=runtime_paths.storage_root,
+        control_state_root=runtime_paths.control_state_root,
+    )
     context = multiprocessing.get_context("spawn")
     process = context.Process(
-        target=_migrate_storage_root,
-        args=(str(storage_root),),
+        target=_migrate_storage_targets,
+        args=(targets, log_level, child_runtime_paths),
         name="legacy-session-migration",
         daemon=True,
     )
@@ -318,11 +350,17 @@ async def _run_legacy_session_migration(storage_root: Path) -> None:
         raise RuntimeError(msg)
 
 
-async def run_legacy_session_migration_after_ready(ready: asyncio.Event, storage_root: Path) -> None:
+async def run_legacy_session_migration_after_ready(
+    ready: asyncio.Event,
+    storage_root: Path,
+    *,
+    log_level: str,
+    runtime_paths: RuntimePaths,
+) -> None:
     """Wait for runtime availability, then run best-effort legacy migration."""
     await ready.wait()
     try:
-        await _run_legacy_session_migration(storage_root)
+        await _run_legacy_session_migration(storage_root, log_level=log_level, runtime_paths=runtime_paths)
     except asyncio.CancelledError:
         raise
     except Exception:

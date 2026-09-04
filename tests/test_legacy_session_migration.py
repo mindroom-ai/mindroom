@@ -17,7 +17,7 @@ from mindroom import legacy_session_migration
 from mindroom.agent_storage import create_state_storage, get_agent_session, save_runs
 from mindroom.constants import resolve_runtime_paths
 from mindroom.legacy_session_migration import (
-    _migrate_database,
+    _migrate_table,
     _run_legacy_session_migration,
 )
 from mindroom.orchestrator import _schedule_legacy_session_migration
@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 
     from agno.db.base import BaseDb
 
+    from mindroom.constants import RuntimePaths
+
 
 def _storage(tmp_path: Path) -> BaseDb:
     return create_state_storage(
@@ -35,6 +37,14 @@ def _storage(tmp_path: Path) -> BaseDb:
         tmp_path,
         subdir="sessions",
         session_table="code_sessions",
+    )
+
+
+def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
     )
 
 
@@ -88,7 +98,7 @@ def test_migration_preserves_the_visible_order_of_partially_migrated_sessions(tm
     finally:
         storage.close()
 
-    result = _migrate_database(db_path)
+    result = _migrate_table(db_path, "code_sessions")
 
     assert result.migrated_sessions == 1
     assert result.failed_sessions == 0
@@ -112,7 +122,7 @@ def test_migration_preserves_the_visible_order_of_partially_migrated_sessions(tm
     assert rows == [("run-1", 0), ("run-3", 1), ("run-4", 2)]
     assert journal_mode == ("delete",)
     assert _schema_version(db_path) == "3.0.0"
-    assert _migrate_database(db_path).migrated_sessions == 0
+    assert _migrate_table(db_path, "code_sessions").migrated_sessions == 0
 
 
 def test_malformed_session_is_left_untouched_without_blocking_other_sessions(tmp_path: Path) -> None:
@@ -128,7 +138,7 @@ def test_malformed_session_is_left_untouched_without_blocking_other_sessions(tmp
     finally:
         connection.close()
 
-    result = _migrate_database(db_path)
+    result = _migrate_table(db_path, "code_sessions")
 
     assert result.migrated_sessions == 1
     assert result.failed_sessions == 1
@@ -150,7 +160,7 @@ def test_blob_clear_failure_rolls_back_inserted_rows(tmp_path: Path) -> None:
     finally:
         connection.close()
 
-    result = _migrate_database(db_path)
+    result = _migrate_table(db_path, "code_sessions")
 
     assert result.migrated_sessions == 0
     assert result.failed_sessions == 1
@@ -176,7 +186,7 @@ def test_run_id_owned_by_another_session_keeps_the_legacy_blob(tmp_path: Path) -
     finally:
         storage.close()
 
-    result = _migrate_database(db_path)
+    result = _migrate_table(db_path, "code_sessions")
 
     assert result.migrated_sessions == 0
     assert result.failed_sessions == 1
@@ -184,11 +194,11 @@ def test_run_id_owned_by_another_session_keeps_the_legacy_blob(tmp_path: Path) -
     connection = sqlite3.connect(db_path)
     try:
         owner = connection.execute(
-            "SELECT session_id FROM code_sessions_runs WHERE run_id = 'run-1'",
+            "SELECT session_id, run_index FROM code_sessions_runs WHERE run_id = 'run-1'",
         ).fetchone()
     finally:
         connection.close()
-    assert owner == ("other-session",)
+    assert owner == ("other-session", 0)
 
 
 def test_concurrent_delete_finishes_during_decode_and_is_preserved_by_retry(
@@ -201,15 +211,15 @@ def test_concurrent_delete_finishes_during_decode_and_is_preserved_by_retry(
     allow_decode = threading.Event()
     delete_started = threading.Event()
     delete_finished = threading.Event()
-    original_decode = legacy_session_migration._decode_legacy_runs
+    original_decode = legacy_session_migration._validated_legacy_runs
 
     def blocked_decode(blob: object):  # noqa: ANN202
         decode_started.set()
         assert allow_decode.wait(5)
         return original_decode(blob)
 
-    monkeypatch.setattr(legacy_session_migration, "_decode_legacy_runs", blocked_decode)
-    migration = threading.Thread(target=_migrate_database, args=(db_path,))
+    monkeypatch.setattr(legacy_session_migration, "_validated_legacy_runs", blocked_decode)
+    migration = threading.Thread(target=_migrate_table, args=(db_path, "code_sessions"))
     migration.start()
     assert decode_started.wait(5)
 
@@ -239,9 +249,59 @@ def test_concurrent_delete_finishes_during_decode_and_is_preserved_by_retry(
 async def test_spawned_process_migrates_the_storage_root(tmp_path: Path) -> None:
     """The production process boundary performs the complete storage-root scan."""
     db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
-    await _run_legacy_session_migration(tmp_path)
+    await _run_legacy_session_migration(tmp_path, log_level="INFO", runtime_paths=_runtime_paths(tmp_path))
 
     assert _blob_is_null(db_path, "session-1")
+
+
+@pytest.mark.asyncio
+async def test_current_storage_does_not_spawn_a_migration_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary restart pays only the read-only preflight scan."""
+    storage = _storage(tmp_path)
+    storage.upsert_session(AgentSession(session_id="current-session", agent_id="code"))
+    storage.close()
+
+    class FakeContext:
+        def Process(self, **_kwargs: object) -> None:  # noqa: N802
+            pytest.fail("a migration process was spawned without legacy data")
+
+    monkeypatch.setattr(
+        legacy_session_migration.multiprocessing,
+        "get_context",
+        lambda _method: FakeContext(),
+    )
+
+    await _run_legacy_session_migration(tmp_path, log_level="INFO", runtime_paths=_runtime_paths(tmp_path))
+
+
+def test_migration_child_configures_normal_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Child-process warnings use the same configured handlers as the runtime."""
+    configured: list[tuple[str, object]] = []
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr(
+        legacy_session_migration,
+        "setup_logging",
+        lambda *, level, runtime_paths: configured.append((level, runtime_paths)),
+    )
+
+    legacy_session_migration._migrate_storage_targets([], "WARNING", runtime_paths)
+
+    assert configured == [("WARNING", runtime_paths)]
+
+
+def test_preflight_skips_an_unreadable_database_without_hiding_valid_work(tmp_path: Path) -> None:
+    """One broken database cannot prevent independent session databases from migrating."""
+    broken = tmp_path / "a" / "sessions" / "broken.db"
+    broken.parent.mkdir(parents=True)
+    broken.write_bytes(b"not sqlite")
+    valid = create_agno_2_sessions_db(tmp_path / "b" / "sessions" / "code.db")
+
+    targets = legacy_session_migration._pending_migration_targets(tmp_path)
+
+    assert targets == [(str(valid), "code_sessions")]
 
 
 @pytest.mark.asyncio
@@ -260,13 +320,16 @@ async def test_orchestrator_starts_migration_after_readiness_against_the_session
     orchestrator = MagicMock()
     runtime_ready_event = asyncio.Event()
     orchestrator._runtime_ready_event = runtime_ready_event
+    expected_runtime_paths = runtime_paths
 
-    async def record_start(storage_root: Path) -> None:
+    async def record_start(storage_root: Path, *, log_level: str, runtime_paths: object) -> None:
         assert storage_root == session_root
+        assert log_level == "INFO"
+        assert runtime_paths is expected_runtime_paths
         started.set()
 
     monkeypatch.setattr(legacy_session_migration, "_run_legacy_session_migration", record_start)
-    task = _schedule_legacy_session_migration(orchestrator, runtime_paths)
+    task = _schedule_legacy_session_migration(orchestrator, runtime_paths, "INFO")
     assert orchestrator._runtime_ready_event is runtime_ready_event
     await asyncio.sleep(0)
     assert not started.is_set()
@@ -282,6 +345,7 @@ async def test_background_process_is_terminated_when_runtime_stops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cancellation cannot leave the migration child running after runtime shutdown."""
+    create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
     join_started = threading.Event()
     release_join = threading.Event()
 
@@ -312,7 +376,9 @@ async def test_background_process_is_terminated_when_runtime_stops(
     context = FakeContext()
     monkeypatch.setattr(legacy_session_migration.multiprocessing, "get_context", lambda _method: context)
 
-    task = asyncio.create_task(_run_legacy_session_migration(tmp_path))
+    task = asyncio.create_task(
+        _run_legacy_session_migration(tmp_path, log_level="INFO", runtime_paths=_runtime_paths(tmp_path)),
+    )
     assert await asyncio.to_thread(join_started.wait, 5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

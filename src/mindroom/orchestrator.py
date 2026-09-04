@@ -2664,11 +2664,17 @@ def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_p
 def _schedule_legacy_session_migration(
     orchestrator: _MultiAgentOrchestrator,
     runtime_paths: RuntimePaths,
+    log_level: str,
 ) -> asyncio.Task[None]:
     """Schedule migration against the resolved session root behind readiness."""
     session_storage_path = constants.resolve_session_state_root(runtime_paths.storage_root, runtime_paths)
     return asyncio.create_task(
-        run_legacy_session_migration_after_ready(orchestrator._runtime_ready_event, session_storage_path),
+        run_legacy_session_migration_after_ready(
+            orchestrator._runtime_ready_event,
+            session_storage_path,
+            log_level=log_level,
+            runtime_paths=runtime_paths,
+        ),
         name="legacy_session_migration",
     )
 
@@ -2730,7 +2736,7 @@ async def main(
                 ),
             )
 
-        auxiliary_tasks.append(_schedule_legacy_session_migration(orchestrator, runtime_paths))
+        auxiliary_tasks.append(_schedule_legacy_session_migration(orchestrator, runtime_paths, log_level))
 
         if api:
             api_task = asyncio.create_task(
