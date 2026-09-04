@@ -42,8 +42,6 @@ logger = get_logger(__name__)
 _WORKSPACE_EXPORT_DIRNAME = "thread_exports"
 _DEBOUNCE_SECONDS = 2.0
 
-type _UnreadableRooms = list[tuple[Sequence[ThreadExportRoom], str]]
-
 
 class _ThreadExportBot(Protocol):
     """What the runner reads from a running bot."""
@@ -137,7 +135,9 @@ class WorkspaceThreadExportRunner:
     async def _run_pass(self, config: Config, *, full_pass: bool, room_ids: frozenset[str]) -> None:
         """Export the dirty rooms, or everything, into every enabled agent's workspace."""
         runtime_paths = self._deps.runtime_paths
-        enabled = {name: agent.thread_exports for name, agent in config.agents.items() if agent.thread_exports}
+        enabled = {
+            name: agent.thread_exports for name, agent in config.agents.items() if agent.thread_exports is not None
+        }
         if full_pass:
             await asyncio.to_thread(_clear_disabled_agent_exports, config, runtime_paths, frozenset(enabled))
         agent_user_ids = {
@@ -159,7 +159,7 @@ class WorkspaceThreadExportRunner:
                 if (selected := [room for room in rooms if room.room_id in room_ids])
             ]
         sources: list[ThreadExportSource] = []
-        unreadable_rooms: _UnreadableRooms = []
+        unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = []
         for entity_name, rooms in ((ROUTER_AGENT_NAME, state_rooms), *invited_groups):
             if not rooms:
                 continue

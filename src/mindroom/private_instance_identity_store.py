@@ -82,9 +82,14 @@ def _instance_requester(trusted_base_path: Path, scope_root: Path, worker_scope:
         identity = load_private_instance_identity(trusted_base_path, scope_root)
     except (PrivateInstanceIdentityError, OSError):
         return None
-    if identity is None or identity.worker_key.split(":")[2] != worker_scope:
+    if identity is None or _worker_key_scope(identity.worker_key) != worker_scope:
         return None
     return identity.requester_id
+
+
+def _worker_key_scope(worker_key: str) -> str:
+    """Return the worker-scope segment of a validated ``v1:<tenant>:<scope>:...`` key."""
+    return worker_key.split(":")[2]
 
 
 def load_private_instance_identity(base_storage_path: Path, scope_root: Path) -> PrivateInstanceIdentity | None:
@@ -261,7 +266,7 @@ def _reconstruct_worker_key(worker_key: str, requester_id: str) -> str:
     parts = worker_key.split(":")
     if len(parts) < 4 or parts[0] != "v1" or not parts[1]:
         _raise_invalid_record("has an invalid worker key")
-    tenant_id, scope = parts[1], parts[2]
+    tenant_id, scope = parts[1], _worker_key_scope(worker_key)
     if scope == "user":
         worker_scope: WorkerScope = "user"
         agent_name = "private-instance"
