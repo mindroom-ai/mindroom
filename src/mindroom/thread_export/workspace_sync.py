@@ -294,8 +294,18 @@ def _private_targets(
     """Return one owner-scoped target per private instance whose core identity checks out."""
     targets: list[ThreadExportTarget] = []
     for state_root in _private_instance_state_roots(runtime_paths.storage_root, agent_name):
-        owner = _private_instance_owner(config, runtime_paths, agent_name, state_root)
-        output_dir = _private_export_dir(config, runtime_paths, agent_name, state_root)
+        try:
+            owner = _private_instance_owner(config, runtime_paths, agent_name, state_root)
+            output_dir = _private_export_dir(config, runtime_paths, agent_name, state_root)
+        except OSError:
+            # One unreadable instance must not cost every other target its pass; its
+            # files stay as they are until a later pass can read the record again.
+            logger.exception(
+                "Skipping private instance whose identity could not be read",
+                agent_name=agent_name,
+                instance_root=str(state_root),
+            )
+            continue
         if owner is None:
             logger.warning(
                 "Skipping private instance without valid core identity",
@@ -325,15 +335,19 @@ def _private_instance_state_roots(storage_root: Path, agent_name: str) -> tuple[
     if not instances_root.is_dir() or instances_root.is_symlink():
         return ()
     instance_dir_names = {agent_name, agent_state_root_path(storage_root, agent_name).name}
-    return tuple(
-        sorted(
-            state_root
-            for scope_dir in instances_root.iterdir()
-            if scope_dir.is_dir() and not scope_dir.is_symlink()
-            for state_root in scope_dir.iterdir()
-            if state_root.is_dir() and not state_root.is_symlink() and state_root.name in instance_dir_names
-        ),
-    )
+    try:
+        return tuple(
+            sorted(
+                state_root
+                for scope_dir in instances_root.iterdir()
+                if scope_dir.is_dir() and not scope_dir.is_symlink()
+                for state_root in scope_dir.iterdir()
+                if state_root.is_dir() and not state_root.is_symlink() and state_root.name in instance_dir_names
+            ),
+        )
+    except OSError:
+        logger.exception("Skipping private instance discovery", agent_name=agent_name)
+        return ()
 
 
 def _private_instance_owner(

@@ -438,3 +438,46 @@ async def test_symlinked_private_root_is_ignored(tmp_path: Path) -> None:
 
     export.assert_not_awaited()
     assert external_thread.exists()
+
+
+async def test_unreadable_private_identity_does_not_block_other_targets(tmp_path: Path) -> None:
+    """A private instance whose record cannot be read is skipped, and the pass still runs."""
+    config = _config(
+        tmp_path,
+        {
+            "code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig()),
+            "secret": AgentConfig(
+                display_name="Secret",
+                private=AgentPrivateConfig(per="user"),
+                thread_exports=AgentThreadExportConfig(),
+            ),
+        },
+    )
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path)
+    alice_root = _materialize_private_instance(config, runtime_paths, "@alice:localhost")
+    existing_thread = _write_owned_export(alice_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME)
+    runner = _runner(
+        config,
+        _bots(
+            _FakeBot("@mindroom_router:localhost"),
+            _FakeBot("@mindroom_code:localhost"),
+            _FakeBot("@mindroom_secret:localhost"),
+        ),
+    )
+    export = _export_mock()
+
+    with (
+        patch(
+            "mindroom.thread_export.workspace_sync.load_private_instance_identity",
+            side_effect=PermissionError("record unreadable"),
+        ),
+        patch(EXPORT_PATH, new=export),
+    ):
+        runner.mark_room_activity("!lobby:localhost")
+        await runner._run_pass_once()
+
+    call = export.await_args
+    assert call is not None
+    assert [target.required_member_user_ids for target in call.kwargs["targets"]] == [("@mindroom_code:localhost",)]
+    assert existing_thread.exists()
