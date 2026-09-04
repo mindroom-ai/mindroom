@@ -45,7 +45,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDelivery
 from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _calculate_delivery_event_size,
-    _calculate_event_size,
+    calculate_event_size,
 )
 from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome
 from mindroom.message_target import MessageTarget
@@ -152,7 +152,7 @@ def _gateway(
     sending_device_id: str | None = "CURRENT-DEVICE",
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
     terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None,
-    large_message_strategy: LargeMessageStrategy = "split",
+    large_message_strategy: LargeMessageStrategy = "sidecar",
 ) -> DeliveryGateway:
     """Return a delivery gateway whose only real collaborator is the outbox."""
     config = bind_runtime_paths(
@@ -1125,7 +1125,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """A recoverable final edit must not leave an impossible outbox retry."""
         outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
+        gateway = _gateway(tmp_path, outbox, large_message_strategy="split")
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
@@ -1154,7 +1154,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.terminal_status == "completed"
         delivery = outbox.rows["$cause", "final"]
         frozen = delivery.payload
-        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
         assert frozen["m.new_content"][DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
         assert delivery.result is not None
         assert delivery.result["body"] == answer
@@ -1176,7 +1176,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """The default strategy uploads one sidecar instead of segmenting the answer."""
         outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox, large_message_strategy="sidecar")
+        gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
@@ -1201,7 +1201,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         delivery = outbox.rows["$cause", "final"]
         frozen = delivery.payload
         assert frozen["msgtype"] == "m.file"
-        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
         assert client.upload.await_count == 1
         assert client.room_send.await_count == 1
         assert delivery.result is not None
@@ -1220,7 +1220,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         the missing one goes out, under its stable derived transaction ID.
         """
         outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
+        gateway = _gateway(tmp_path, outbox, large_message_strategy="split")
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         answer = "\n\n".join(f"## Part {index}\n\n" + "x" * 500 for index in range(200))
 
@@ -1245,7 +1245,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             return None
 
         missing_indices = [index for index in range(len(continuations)) if index != 1]
-        recovered_gateway = _gateway(tmp_path, outbox, sending_device_id="NEW-DEVICE")
+        recovered_gateway = _gateway(tmp_path, outbox, sending_device_id="NEW-DEVICE", large_message_strategy="split")
         delivered = DeliveredMatrixEvent("$continuation", {})
         with (
             patch(
@@ -1276,7 +1276,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """The exact persisted and sent event must fit after identity is attached."""
         outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
+        gateway = _gateway(tmp_path, outbox, large_message_strategy="split")
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
@@ -1303,7 +1303,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert outcome.terminal_status == "completed"
         frozen = outbox.rows["$cause", "final"].payload
-        assert _calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
+        assert calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
         assert client.room_send.await_args.kwargs["content"] == frozen
 
     async def test_uncached_encrypted_room_is_fitted_before_durable_enqueue(
@@ -1312,7 +1312,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Remote encryption state must shape the payload before the outbox freezes it."""
         outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
+        gateway = _gateway(tmp_path, outbox, large_message_strategy="split")
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.rooms = {}
@@ -1356,7 +1356,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Persistence must freeze bytes that remain valid if encryption is enabled."""
         outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox)
+        gateway = _gateway(tmp_path, outbox, large_message_strategy="split")
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
@@ -1618,7 +1618,13 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         self,
         tmp_path: Path,
     ) -> None:
-        """Wire delivery must not prepare an already-frozen outbox payload again."""
+        """Wire delivery must not prepare an already-frozen outbox payload again.
+
+        A large edit becomes a sidecar-backed ``m.file`` replacement before
+        the outbox freezes it. Preparing that envelope a second time promotes
+        the inner ``m.file`` type to the outer edit without its required URL,
+        so nio rejects the event and later history reads cannot hydrate it.
+        """
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
         client = AsyncMock(spec=nio.AsyncClient)
@@ -1655,19 +1661,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         )
 
         assert delivered is not None
+        assert client.upload.await_count == 1, "wire delivery uploaded a second sidecar"
         frozen = outbox.rows["$cause", "final"].payload
-        result = outbox.rows["$cause", "final"].result
-        assert result is not None
-        continuations = result[_SEGMENT_PAYLOADS_RESULT_KEY]
-        assert isinstance(continuations, list)
-        assert continuations
-        assert client.upload.await_count == 0
-        sent_contents = [call.kwargs["content"] for call in client.room_send.await_args_list]
-        assert sent_contents == [frozen, *continuations]
-        wire_content = sent_contents[0]
-        assert wire_content["msgtype"] == "m.text"
-        assert wire_content["m.new_content"]["format"] == "org.matrix.custom.html"
-        assert "".join([wire_content["m.new_content"]["body"], *(item["body"] for item in continuations)]) == answer
+        wire_content = client.room_send.await_args.kwargs["content"]
+        assert wire_content == frozen
         parsed = nio.Event.parse_event(
             {
                 "event_id": "$edit",
@@ -1729,15 +1726,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         delivered = await terminal(client, _ROOM_ID, "$streamed", content, answer)
 
         assert delivered is not None
-        result = outbox.rows["$cause", "final"].result
-        assert result is not None
-        continuations = result[_SEGMENT_PAYLOADS_RESULT_KEY]
-        assert isinstance(continuations, list)
-        assert continuations
-        assert client.upload.await_count == 0
-        sent_contents = [call.kwargs["content"] for call in client.room_send.await_args_list]
-        assert sent_contents[:2] == [frozen, frozen]
-        assert sent_contents[2:] == continuations
+        assert client.upload.await_count == 1
+        assert client.room_send.await_args.kwargs["content"] == frozen
 
     async def test_a_definitive_oversized_refusal_stops_recovery(
         self,
@@ -1784,7 +1774,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert second is None
         assert stored.permanent_failure_reason is not None
         assert client.room_send.await_count == 1
-        assert client.upload.await_count == 0
+        assert client.upload.await_count == 1
 
     async def test_a_streamed_terminal_edit_freezes_its_fallback_body_too(
         self,

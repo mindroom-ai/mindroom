@@ -1,11 +1,11 @@
 """Tests for lossless Matrix Markdown segmentation."""
 
+from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.message_builder import build_matrix_edit_content, markdown_to_html
 from mindroom.matrix.segmented_messages import (
     _SEGMENT_TARGET_EDIT_BYTES,
     _SEGMENT_TARGET_PLAINTEXT_BYTES,
     _chunk_mentions,
-    _estimated_event_size,
     _render_segment_html,
     _unclosed_fence_start,
     segment_matrix_content,
@@ -44,7 +44,7 @@ def test_plaintext_segments_preserve_markdown_body() -> None:
     assert segmented.first["m.relates_to"] == content["m.relates_to"]
     assert all(part["format"] == "org.matrix.custom.html" for part in parts)
     assert all(part["formatted_body"] for part in parts)
-    assert all(_estimated_event_size(part) <= _SEGMENT_TARGET_PLAINTEXT_BYTES for part in parts)
+    assert all(calculate_event_size(part) <= _SEGMENT_TARGET_PLAINTEXT_BYTES for part in parts)
 
 
 def test_continuations_use_thread_fallback_relation() -> None:
@@ -131,10 +131,8 @@ def test_edit_segments_use_replace_then_thread_replies() -> None:
     assert "".join(part["body"] for part in parts) == body
     assert segmented.first["m.relates_to"]["rel_type"] == "m.replace"
     assert all(part["m.relates_to"]["rel_type"] == "m.thread" for part in segmented.continuations)
-    assert all(
-        _estimated_event_size(part) <= _SEGMENT_TARGET_EDIT_BYTES
-        for part in [segmented.first, *segmented.continuations]
-    )
+    assert calculate_event_size(segmented.first) <= _SEGMENT_TARGET_EDIT_BYTES
+    assert all(calculate_event_size(part) <= _SEGMENT_TARGET_PLAINTEXT_BYTES for part in segmented.continuations)
 
 
 def test_large_tool_trace_does_not_disable_visible_markdown() -> None:

@@ -157,6 +157,7 @@ Matrix sync callback
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
+| `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |
 | `matrix/sync_checkpoint_trust.py` | Sync-checkpoint persistence and the journal generation a checkpoint is certified against |
 | `matrix/sync_continuity.py` | Crash-atomic checkpoint and pending join-fence persistence |
 | `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |

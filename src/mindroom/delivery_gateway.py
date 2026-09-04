@@ -15,7 +15,6 @@ import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
-from mindroom.config.models import LargeMessageStrategy  # noqa: TC001
 from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, DURABLE_FINAL_OUTCOME_VERSION, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
@@ -144,18 +143,12 @@ def _result_with_segment_payloads(
 
 
 def _continuation_payloads(result: Mapping[str, object] | None) -> tuple[dict[str, Any], ...]:
-    """Read a frozen continuation list from an outbox result, if present."""
+    """Read the frozen continuation list from an outbox result, if present."""
     if result is None:
         return ()
-    raw_payloads = result.get(_SEGMENT_PAYLOADS_RESULT_KEY)
-    if not isinstance(raw_payloads, list):
-        return ()
-    payloads: list[dict[str, Any]] = []
-    for payload in raw_payloads:
-        if not isinstance(payload, dict):
-            return ()
-        payloads.append(dict(cast("dict[str, Any]", payload)))
-    return tuple(payloads)
+    raw_payloads = result.get(_SEGMENT_PAYLOADS_RESULT_KEY, [])
+    assert isinstance(raw_payloads, list), f"corrupt outbox result: {_SEGMENT_PAYLOADS_RESULT_KEY} is not a list"
+    return tuple(dict(cast("dict[str, Any]", payload)) for payload in raw_payloads)
 
 
 def _segment_transaction_id(base_transaction_id: str, index: int) -> str:
@@ -1957,7 +1950,6 @@ class DeliveryGateway:
             stage,
             content,
         )
-        strategy: LargeMessageStrategy = self.deps.runtime.config.defaults.large_message_strategy
         segmented = (
             segment_matrix_content(
                 wire_content,
@@ -1965,29 +1957,18 @@ class DeliveryGateway:
                 continuation_thread_id=continuation_thread_id,
                 continuation_reply_to_event_id=continuation_reply_to_event_id,
             )
-            if strategy == "split"
+            if self.deps.runtime.config.defaults.large_message_strategy == "split"
             else None
         )
         if segmented is not None:
-            continuation_payloads = tuple(
-                matrix_delivery_payload(
-                    self.deps.outbox.principal_id,
-                    turn_id,
-                    stage,
-                    continuation,
-                )
-                for continuation in segmented.continuations
-            )
+            # Segments already carry the durable identity copied from wire_content.
             self.deps.logger.info(
                 "Prepared lossless Matrix response segmentation",
                 delivery_id=turn_id,
                 stage=stage.value,
-                continuation_count=len(continuation_payloads),
+                continuation_count=len(segmented.continuations),
             )
-            return _PreparedWirePayload(
-                content=segmented.first,
-                continuation_payloads=continuation_payloads,
-            )
+            return _PreparedWirePayload(content=segmented.first, continuation_payloads=segmented.continuations)
         try:
             prepared = await prepare_large_message(
                 client,

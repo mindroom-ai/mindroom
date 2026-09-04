@@ -8,36 +8,39 @@ streaming placeholder; subsequent events are thread replies.
 
 from __future__ import annotations
 
-import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from mindroom.matrix.large_messages import calculate_event_size, is_edit_message
 from mindroom.matrix.message_builder import markdown_to_html
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+# Budgets stay below the ``large_messages`` sidecar thresholds so every segment
+# is sent as built. Encrypted budgets leave room for Megolm base64 expansion.
 _SEGMENT_TARGET_PLAINTEXT_BYTES = 46_000
 _SEGMENT_TARGET_EDIT_BYTES = 22_000
 _SEGMENT_TARGET_ENCRYPTED_PLAINTEXT_BYTES = 30_000
 _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES = 16_000
-_SEGMENT_FIRST_DROPPED_KEYS = frozenset(
-    {
-        # These fields are useful for rebuilding model context, but are not
-        # part of the visible answer. A long tool trace can otherwise make an
-        # otherwise segmentable response fall back to large_messages.py.
-        "io.mindroom.tool_trace",
-        "io.mindroom.visible_body",
-    },
-)
-_SEGMENT_METADATA_KEYS = frozenset(
-    {
-        "io.mindroom.tool_trace",
-        "io.mindroom.visible_body",
-        "m.mentions",
-    },
-)
+_SEGMENT_SHRINK_MARGIN = 0.9
+# Useful for rebuilding model context, but not part of the visible answer. A
+# long tool trace would otherwise push a segmentable response into a sidecar.
+_INTERNAL_STREAM_KEYS = frozenset({"io.mindroom.tool_trace", "io.mindroom.visible_body"})
+# Rebuilt per segment from the chunk it carries, or dropped as internal.
+_SEGMENT_DROPPED_KEYS = _INTERNAL_STREAM_KEYS | {
+    "body",
+    "format",
+    "formatted_body",
+    "m.new_content",
+    "m.relates_to",
+    "m.mentions",
+}
 _MENTION_PILL_PATTERN = re.compile(r'<a href="(?P<href>https://matrix\.to/#/[^"]+)">[^<]+</a>')
 _CODE_REGION_PATTERN = re.compile(r"(<code\b[^>]*>.*?</code>)", re.DOTALL)
+_FENCE_LINE_PATTERN = re.compile(r"[ \t]*((?:>[ \t]{0,3})*)(`{3,}|~{3,})(.*)")
 
 
 def _user_id_boundary_pattern(user_ids: list[str]) -> re.Pattern[str]:
@@ -59,42 +62,11 @@ class SegmentedMatrixContent:
     continuations: tuple[dict[str, Any], ...]
 
 
-def _estimated_event_size(content: Mapping[str, Any]) -> int:
-    """Estimate Matrix event bytes with the same conservative overhead as MindRoom."""
-    canonical = json.dumps(dict(content), sort_keys=True, separators=(",", ":"))
-    return len(canonical.encode("utf-8")) + 2000
-
-
-def _is_edit(content: Mapping[str, Any]) -> bool:
-    relation = content.get("m.relates_to")
-    return "m.new_content" in content or (isinstance(relation, Mapping) and relation.get("rel_type") == "m.replace")
-
-
-def _source_content(content: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    if _is_edit(content):
+def _source_content(content: dict[str, Any]) -> dict[str, Any] | None:
+    if is_edit_message(content):
         replacement = content.get("m.new_content")
-        return replacement if isinstance(replacement, Mapping) else None
+        return replacement if isinstance(replacement, dict) else None
     return content
-
-
-def _continuation_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
-    """Copy small semantic metadata without repeating bulky stream payloads."""
-    return {
-        key: value
-        for key, value in source.items()
-        if key not in {"body", "format", "formatted_body", "m.new_content", "m.relates_to"}
-        and key not in _SEGMENT_METADATA_KEYS
-    }
-
-
-def _first_segment_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
-    """Copy visible-event metadata without internal streaming baggage."""
-    return {
-        key: value
-        for key, value in source.items()
-        if key not in {"body", "format", "formatted_body", "m.new_content", "m.relates_to"}
-        and key not in _SEGMENT_FIRST_DROPPED_KEYS
-    }
 
 
 def _mention_pills(source: Mapping[str, Any]) -> dict[str, str]:
@@ -160,38 +132,23 @@ def _rich_text_content(
     source: Mapping[str, Any],
     body: str,
     *,
-    include_mentions: bool,
-    include_relation: bool = False,
+    relation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one normal rich-text content payload from one body chunk."""
-    if include_mentions:
-        # Keep mentions and other user-visible delivery metadata, but do not
-        # let internal tool-trace data consume the event budget needed for
-        # Markdown rendering.
-        candidate = _first_segment_metadata(source)
-    else:
-        candidate = _continuation_metadata(source)
-        candidate["msgtype"] = source.get("msgtype", "m.text")
-    candidate["body"] = body
-    candidate["format"] = "org.matrix.custom.html"
-    candidate["formatted_body"] = _render_segment_html(source, body)
-    chunk_mentions = _chunk_mentions(source, body)
-    if chunk_mentions is None:
-        candidate.pop("m.mentions", None)
-    else:
-        candidate["m.mentions"] = chunk_mentions
-    if include_relation:
-        relation = source.get("m.relates_to")
-        if isinstance(relation, Mapping):
-            candidate["m.relates_to"] = dict(relation)
-    return candidate
+    content = {key: value for key, value in source.items() if key not in _SEGMENT_DROPPED_KEYS}
+    content.setdefault("msgtype", "m.text")
+    content["body"] = body
+    content["format"] = "org.matrix.custom.html"
+    content["formatted_body"] = _render_segment_html(source, body)
+    mentions = _chunk_mentions(source, body)
+    if mentions is not None:
+        content["m.mentions"] = mentions
+    if relation is not None:
+        content["m.relates_to"] = dict(relation)
+    return content
 
 
-def _edit_content_chunk(
-    content: Mapping[str, Any],
-    source: Mapping[str, Any],
-    body: str,
-) -> dict[str, Any]:
+def _edit_content_chunk(content: dict[str, Any], source: dict[str, Any], body: str) -> dict[str, Any]:
     """Build the first edit event with one complete rich-text chunk.
 
     The outer envelope keeps the source edit's own ``m.mentions`` -- for an
@@ -199,28 +156,17 @@ def _edit_content_chunk(
     re-notify recipients an earlier revision already mentioned. The resolved
     per-chunk set lives under ``m.new_content``.
     """
-    replacement = _rich_text_content(source, body, include_mentions=True)
-    candidate = {key: value for key, value in content.items() if key not in _SEGMENT_FIRST_DROPPED_KEYS}
-    candidate["body"] = f"* {body}"
-    candidate["format"] = "org.matrix.custom.html"
-    candidate["formatted_body"] = _render_segment_html(source, candidate["body"])
-    candidate["m.new_content"] = replacement
-    return candidate
-
-
-def _thread_relation(thread_id: str | None, reply_to_event_id: str | None) -> dict[str, Any] | None:
-    if not thread_id:
-        return None
-    return {
-        "rel_type": "m.thread",
-        "event_id": thread_id,
-        "is_falling_back": True,
-        "m.in_reply_to": {"event_id": reply_to_event_id or thread_id},
-    }
+    replacement = _rich_text_content(source, body)
+    edit = {key: value for key, value in content.items() if key not in _INTERNAL_STREAM_KEYS}
+    edit["body"] = f"* {body}"
+    edit["format"] = "org.matrix.custom.html"
+    edit["formatted_body"] = replacement["formatted_body"]
+    edit["m.new_content"] = replacement
+    return edit
 
 
 def _continuation_content(
-    source: Mapping[str, Any],
+    source: dict[str, Any],
     body: str,
     *,
     thread_id: str | None,
@@ -234,11 +180,17 @@ def _continuation_content(
     refuses. Continuations therefore always take the thread-fallback form (or
     no relation outside threads), which recovery explicitly excludes.
     """
-    candidate = _rich_text_content(source, body, include_mentions=False)
-    relation = _thread_relation(thread_id, reply_to_event_id)
-    if relation is not None:
-        candidate["m.relates_to"] = relation
-    return candidate
+    relation = (
+        {
+            "rel_type": "m.thread",
+            "event_id": thread_id,
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": reply_to_event_id or thread_id},
+        }
+        if thread_id
+        else None
+    )
+    return _rich_text_content(source, body, relation=relation)
 
 
 def _segment_target_bytes(*, room_encrypted: bool, is_edit: bool) -> int:
@@ -250,51 +202,6 @@ def _segment_target_bytes(*, room_encrypted: bool, is_edit: bool) -> int:
         (True, True): _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES,
     }
     return budgets[room_encrypted, is_edit]
-
-
-def _segment_builders(
-    content: Mapping[str, Any],
-    source: Mapping[str, Any],
-    *,
-    is_edit: bool,
-    continuation_thread_id: str | None,
-    continuation_reply_to_event_id: str | None,
-) -> tuple[
-    Callable[[str], dict[str, Any]],
-    Callable[[str], dict[str, Any]],
-    Callable[[str], int],
-]:
-    """Build first, continuation, and worst-case sizing functions."""
-    if is_edit:
-
-        def first_builder(chunk: str) -> dict[str, Any]:
-            return _edit_content_chunk(content, source, chunk)
-
-    else:
-
-        def first_builder(chunk: str) -> dict[str, Any]:
-            return _rich_text_content(
-                source,
-                chunk,
-                include_mentions=True,
-                include_relation=True,
-            )
-
-    def continuation_builder(chunk: str) -> dict[str, Any]:
-        return _continuation_content(
-            source,
-            chunk,
-            thread_id=continuation_thread_id,
-            reply_to_event_id=continuation_reply_to_event_id,
-        )
-
-    def size_builder(chunk: str) -> int:
-        return max(
-            _estimated_event_size(first_builder(chunk)),
-            _estimated_event_size(continuation_builder(chunk)),
-        )
-
-    return first_builder, continuation_builder, size_builder
 
 
 def _preferred_boundary(text: str, start: int, end: int) -> int:
@@ -325,7 +232,7 @@ def _unclosed_fence_start(text: str, start: int, end: int) -> int | None:
     while pos < end:
         line_end = text.find("\n", pos, end)
         line_end = end if line_end == -1 else line_end
-        match = re.match(r"[ \t]*((?:>[ \t]{0,3})*)(`{3,}|~{3,})(.*)", text[pos:line_end])
+        match = _FENCE_LINE_PATTERN.match(text[pos:line_end])
         if match:
             quote_depth = match.group(1).count(">")
             marker = match.group(2)
@@ -342,36 +249,45 @@ def _unclosed_fence_start(text: str, start: int, end: int) -> int | None:
     return opener[3] if opener is not None else None
 
 
+def _fitting_end(text: str, start: int, build: Callable[[str], dict[str, Any]], target_bytes: int) -> int | None:
+    """Return the largest end whose built event fits, or None when one character does not.
+
+    Rendering Markdown is the expensive step, so instead of bisecting the
+    search shrinks the chunk in proportion to the measured overshoot; a chunk
+    normally converges in one to three renders.
+    """
+    overhead = calculate_event_size(build(""))
+    budget = target_bytes - overhead
+    if budget <= 0:
+        return None
+    end = min(len(text), start + budget)
+    while True:
+        used = calculate_event_size(build(text[start:end])) - overhead
+        if used <= budget:
+            return end
+        if end == start + 1:
+            return None
+        end = start + max(1, int((end - start) * budget / used * _SEGMENT_SHRINK_MARGIN))
+
+
 def _split_body(
     text: str,
-    builder: Callable[[str], dict[str, Any]],
+    first_build: Callable[[str], dict[str, Any]],
+    continuation_build: Callable[[str], dict[str, Any]],
     *,
-    target_bytes: int,
-    size_builder: Callable[[str], int] | None = None,
+    first_target: int,
+    continuation_target: int,
 ) -> list[str] | None:
-    """Split text at fitting Unicode boundaries while retaining every character."""
-    fits = size_builder or (lambda chunk: _estimated_event_size(builder(chunk)))
-    if not text:
-        return [text]
-    if fits(text) <= target_bytes:
-        return [text]
-
+    """Split text at fitting Markdown boundaries while retaining every character."""
     chunks: list[str] = []
     offset = 0
     while offset < len(text):
-        lower = offset + 1
-        upper = len(text)
-        best = offset
-        while lower <= upper:
-            candidate_end = (lower + upper) // 2
-            if fits(text[offset:candidate_end]) <= target_bytes:
-                best = candidate_end
-                lower = candidate_end + 1
-            else:
-                upper = candidate_end - 1
-        if best == offset:
+        build, target = (first_build, first_target) if offset == 0 else (continuation_build, continuation_target)
+        end = _fitting_end(text, offset, build, target)
+        if end is None:
             return None
-        end = _preferred_boundary(text, offset, best)
+        if end < len(text):
+            end = _preferred_boundary(text, offset, end)
         fence_start = _unclosed_fence_start(text, offset, end)
         if fence_start is not None:
             if fence_start == offset:
@@ -381,11 +297,11 @@ def _split_body(
             end = fence_start
         chunks.append(text[offset:end])
         offset = end
-    return chunks
+    return chunks or None
 
 
 def segment_matrix_content(
-    content: Mapping[str, Any],
+    content: dict[str, Any],
     *,
     room_encrypted: bool,
     continuation_thread_id: str | None = None,
@@ -393,39 +309,51 @@ def segment_matrix_content(
 ) -> SegmentedMatrixContent | None:
     """Return lossless rich-text payloads when one event is too large.
 
-    The thresholds intentionally stay below MindRoom's sidecar thresholds so
-    every returned event passes through ``large_messages`` unchanged. Internal
-    streaming metadata that is not needed by the visible answer is omitted
-    from the first event before sizing, so metadata alone cannot force a
-    Markdown response into a sidecar. A ``None`` result means the payload is
-    not a plain text response or its remaining fixed metadata alone is too
-    large; the caller can use the normal sidecar fallback in those cases.
+    The first segment is sized against the edit budget when the source is an
+    edit; continuations are plain messages and use the larger plain budget.
+    Internal streaming metadata that is not needed by the visible answer is
+    omitted before sizing, so metadata alone cannot force a Markdown response
+    into a sidecar. A ``None`` result means the payload is not a plain text
+    response, its fixed metadata alone is too large, or a code fence cannot be
+    kept whole; the caller uses the sidecar fallback in those cases.
     """
     source = _source_content(content)
     if source is None or not isinstance(source.get("body"), str):
         return None
 
-    is_edit = _is_edit(content)
-    target_bytes = _segment_target_bytes(room_encrypted=room_encrypted, is_edit=is_edit)
-    if _estimated_event_size(content) <= target_bytes:
+    is_edit = is_edit_message(content)
+    first_target = _segment_target_bytes(room_encrypted=room_encrypted, is_edit=is_edit)
+    if calculate_event_size(content) <= first_target:
         return None
+    continuation_target = _segment_target_bytes(room_encrypted=room_encrypted, is_edit=False)
 
-    body = source["body"]
-    first_builder, continuation_builder, size_builder = _segment_builders(
-        content,
-        source,
-        is_edit=is_edit,
-        continuation_thread_id=continuation_thread_id,
-        continuation_reply_to_event_id=continuation_reply_to_event_id,
+    def first_build(chunk: str) -> dict[str, Any]:
+        if is_edit:
+            return _edit_content_chunk(content, source, chunk)
+        return _rich_text_content(source, chunk, relation=source.get("m.relates_to"))
+
+    def continuation_build(chunk: str) -> dict[str, Any]:
+        return _continuation_content(
+            source,
+            chunk,
+            thread_id=continuation_thread_id,
+            reply_to_event_id=continuation_reply_to_event_id,
+        )
+
+    chunks = _split_body(
+        source["body"],
+        first_build,
+        continuation_build,
+        first_target=first_target,
+        continuation_target=continuation_target,
     )
-
-    chunks = _split_body(body, first_builder, target_bytes=target_bytes, size_builder=size_builder)
     if chunks is None:
         return None
-
-    first = first_builder(chunks[0])
-    continuations = tuple(continuation_builder(chunk) for chunk in chunks[1:])
-    if any(_estimated_event_size(candidate) > target_bytes for candidate in (first, *continuations)):
+    first = first_build(chunks[0])
+    continuations = tuple(continuation_build(chunk) for chunk in chunks[1:])
+    if calculate_event_size(first) > first_target or any(
+        calculate_event_size(candidate) > continuation_target for candidate in continuations
+    ):
         return None
     return SegmentedMatrixContent(first=first, continuations=continuations)
 
