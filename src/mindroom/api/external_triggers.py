@@ -53,6 +53,8 @@ router = APIRouter(prefix="/api/triggers", tags=["external-triggers"])
 logger = get_logger(__name__)
 _IN_PROGRESS_EVENT_ID_TTL_SECONDS = 86400
 _DELIVERED_EVENT_ID_TTL_SECONDS = 86400
+# A thread key keeps routing to the same Matrix thread for a week of activity.
+_THREAD_KEY_TTL_SECONDS = 7 * 86400
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -197,6 +199,17 @@ async def _claim_and_execute_trigger(
         raise HTTPException(status_code=409, detail="External trigger event is already in progress")
 
     payload = payload.model_copy(update={"event_id": event_id})
+    # Only per-fire targets group by thread key; a fixed target thread already
+    # collects every delivery.
+    thread_key = payload.thread_key if snapshot.target.new_thread else None
+    continue_thread_event_id = None
+    if thread_key is not None:
+        continue_thread_event_id = await _run_replay_store_call(
+            replay_store.thread_root,
+            snapshot.replay_scope,
+            thread_key,
+            now=now,
+        )
     try:
         matrix_event_id = await execute_external_trigger(
             client=cast("nio.AsyncClient", runtime.client),
@@ -205,6 +218,7 @@ async def _claim_and_execute_trigger(
             config=config,
             runtime_paths=runtime_paths,
             conversation_reader=cast("ConversationReader", runtime.conversation_reader),
+            continue_thread_event_id=continue_thread_event_id,
         )
     except Exception:
         await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
@@ -212,6 +226,15 @@ async def _claim_and_execute_trigger(
     if matrix_event_id is None:
         await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
         raise HTTPException(status_code=502, detail="External trigger delivery failed")
+    if thread_key is not None:
+        await _run_replay_store_call(
+            replay_store.remember_thread_root,
+            snapshot.replay_scope,
+            thread_key,
+            continue_thread_event_id or matrix_event_id,
+            now=int(time.time()),
+            ttl_seconds=_THREAD_KEY_TTL_SECONDS,
+        )
 
     await _run_replay_store_call(
         replay_store.mark_event_delivered,

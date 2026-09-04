@@ -132,6 +132,7 @@ _.normalize_allowed_kinds  # unused method (src/mindroom/external_triggers/store
 _.validate_record_keys  # unused method (src/mindroom/external_triggers/store.py)
 _.validate_kind  # unused method (src/mindroom/external_triggers/models.py)
 _.validate_message  # unused method (src/mindroom/external_triggers/models.py)
+_.validate_thread_key  # Pydantic field validator (src/mindroom/external_triggers/models.py)
 _.validate_auth  # unused method (src/mindroom/external_triggers/store.py)
 post_external_trigger  # unused function (src/mindroom/api/external_triggers.py)
 _.validate_team_agents  # unused method (src/mindroom/config/main.py)

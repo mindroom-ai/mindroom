@@ -436,3 +436,71 @@ def test_fsync_directory_ignores_unsupported_directory_fsync(
     _fsync_directory(tmp_path)
 
     assert closed_fds == [123]
+
+
+def test_payload_rejects_blank_thread_key() -> None:
+    """A thread key must carry a value when present; ``None`` means per-delivery threads."""
+    with pytest.raises(ValidationError, match="thread_key must not be empty"):
+        ExternalTriggerPayload(kind="campground.availability", message="Site open", thread_key="  ")
+
+    assert ExternalTriggerPayload(kind="campground.availability", message="Site open").thread_key is None
+    assert (
+        ExternalTriggerPayload(kind="campground.availability", message="Site open", thread_key=" site-42 ").thread_key
+        == "site-42"
+    )
+
+
+def test_thread_root_is_remembered_per_scope_until_expiry(tmp_path: Path) -> None:
+    """Thread keys resolve to their recorded Matrix root within one replay scope."""
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    assert store.thread_root("campground", "site-42", now=1_000) is None
+    store.remember_thread_root("campground", "site-42", "$root-1", now=1_000, ttl_seconds=600)
+
+    assert store.thread_root("campground", "site-42", now=1_000) == "$root-1"
+    assert store.thread_root("campground", "site-42", now=1_600) == "$root-1"
+    assert store.thread_root("other-scope", "site-42", now=1_000) is None
+    assert store.thread_root("campground", "site-43", now=1_000) is None
+    assert store.thread_root("campground", "site-42", now=1_601) is None
+
+
+def test_remember_thread_root_refreshes_retention_and_keeps_first_root(tmp_path: Path) -> None:
+    """Re-recording the same key extends retention; callers pass the existing root back."""
+    store = ExternalTriggerReplayStore(tmp_path)
+    store.remember_thread_root("campground", "site-42", "$root-1", now=1_000, ttl_seconds=600)
+    store.remember_thread_root("campground", "site-42", "$root-1", now=1_500, ttl_seconds=600)
+
+    assert store.thread_root("campground", "site-42", now=2_099) == "$root-1"
+    assert store.thread_root("campground", "site-42", now=2_101) is None
+
+
+def test_store_without_threads_section_is_accepted(tmp_path: Path) -> None:
+    """Replay files written before thread keys existed still load."""
+    _store_path(tmp_path).write_text(json.dumps({"nonces": {}, "events": {}}), encoding="utf-8")
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    assert store.thread_root("campground", "site-42", now=1_000) is None
+    store.remember_thread_root("campground", "site-42", "$root-1", now=1_000, ttl_seconds=600)
+    assert json.loads(_store_path(tmp_path).read_text(encoding="utf-8"))["threads"] == {
+        "campground": {"site-42": {"thread_event_id": "$root-1", "expires_at": 1_600}},
+    }
+
+
+@pytest.mark.parametrize(
+    "threads_payload",
+    [
+        {"campground": {"site-42": {"thread_event_id": "", "expires_at": 1}}},
+        {"campground": {"site-42": {"thread_event_id": "$root", "expires_at": "1"}}},
+        {"campground": {"site-42": {"expires_at": 1}}},
+        {"campground": "not-a-mapping"},
+    ],
+)
+def test_invalid_nested_thread_record_fails_closed(tmp_path: Path, threads_payload: object) -> None:
+    """Corrupt thread records are rejected instead of silently dropped."""
+    _store_path(tmp_path).write_text(
+        json.dumps({"nonces": {}, "events": {}, "threads": threads_payload}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid external trigger replay store structure"):
+        ExternalTriggerReplayStore(tmp_path).thread_root("campground", "site-42", now=1)
