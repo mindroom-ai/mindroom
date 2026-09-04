@@ -1373,7 +1373,11 @@ class KnowledgeManager:
             error_detail = str(inspection_error).lower()
             if not any(
                 marker in error_detail
-                for marker in ("error constructing hnsw segment reader", "error deserializing pickle file")
+                for marker in (
+                    "error constructing hnsw segment reader",
+                    "error deserializing pickle file",
+                    "failed to apply logs to the hnsw segment writer",
+                )
             ):
                 raise
             # A candidate is never live until publication, so an unreadable
