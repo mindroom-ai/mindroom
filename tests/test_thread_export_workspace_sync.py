@@ -17,9 +17,9 @@ from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportR
 from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME, write_thread_payload
 from mindroom.thread_export.workspace_sync import (
     _WORKSPACE_EXPORT_DIRNAME,
-    _ThreadExportBot,
     WorkspaceThreadExportDeps,
     WorkspaceThreadExportRunner,
+    _ThreadExportBot,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
