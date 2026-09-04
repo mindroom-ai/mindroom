@@ -117,6 +117,15 @@ def _event_kind(event: nio.Event) -> EventKind | None:
     return None
 
 
+def _happened_while_member(provenance: nio.TimelineEventProvenance) -> bool:
+    """Return whether an event is current: live, or recovered from a gap this bot missed.
+
+    Cold history is the one provenance that is neither. Every provenance rule
+    in this module goes through here so the three cannot drift apart.
+    """
+    return provenance is not nio.TimelineEventProvenance.HISTORY
+
+
 def _event_class_for(provenance: nio.TimelineEventProvenance, event: nio.Event) -> EventClass:
     """Return whether events with this provenance may start semantic work.
 
@@ -142,7 +151,7 @@ def _event_class_for(provenance: nio.TimelineEventProvenance, event: nio.Event) 
     not the same mistake as enumerating msgtypes -- the set stays correct as
     Matrix grows -- and it still projects, so the conversation keeps the event.
     """
-    if provenance is nio.TimelineEventProvenance.HISTORY:
+    if not _happened_while_member(provenance):
         return EventClass.CONTEXT_ONLY
     if isinstance(event, nio.RoomMessageNotice | nio.RoomMessageUnknown):
         return EventClass.CONTEXT_ONLY
@@ -408,10 +417,9 @@ class JournalIngress:
             # Declining is exactly when a later consumer needs the verdict:
             # nothing else in the response will have written it down.
             self.timeline_member_provenance.record(event.event_id, provenance)
-            if provenance is not nio.TimelineEventProvenance.HISTORY:
-                # Who may read a room's exports changed, live or while this bot
-                # was away. Only the router admits other people's membership,
-                # so this cannot wait for admission.
+            if _happened_while_member(provenance):
+                # Who may read a room's exports changed. Only the router admits
+                # other people's membership, so this cannot wait for admission.
                 self.on_room_activity(room.room_id)
         kind = self._admission_kind(event)
         if kind is None:
@@ -475,7 +483,7 @@ class JournalIngress:
         provenance: nio.TimelineEventProvenance,
     ) -> None:
         """Fence explicit self departures and rejoins before later timeline admission."""
-        if event.state_key != self.self_sender or provenance is nio.TimelineEventProvenance.HISTORY:
+        if event.state_key != self.self_sender or not _happened_while_member(provenance):
             return
         apply_transition = self.on_own_membership_transition
         if apply_transition is None or not self._is_own_membership_transition(event):

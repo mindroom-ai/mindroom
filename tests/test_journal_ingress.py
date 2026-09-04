@@ -1342,19 +1342,23 @@ class TestRoomActivity:
 
         assert seen == [ROOM, ROOM, ROOM]
 
-    async def test_live_membership_changes_report_their_room_even_when_not_admitted(
+    @pytest.mark.parametrize("provenance", list(nio.TimelineEventProvenance))
+    async def test_membership_changes_report_their_room_unless_cold_history(
         self,
         alice: PrincipalStore,
+        provenance: nio.TimelineEventProvenance,
     ) -> None:
-        """Only the router admits other people's membership; an agent alone in an invited room still learns of a leave."""
+        """Every current provenance announces a membership change, admitted or not; cold history never does.
+
+        Only the router admits other people's membership, so an agent alone in
+        an invited room relies on this to learn that a reader left.
+        """
         seen: list[str] = []
         ingress = JournalIngress(store=alice, self_sender=BOT, on_room_activity=seen.append)
 
-        await ingress._admit(room(), member_event("$joined"), nio.TimelineEventProvenance.LIVE)
-        await ingress._admit(room(), member_event("$missed"), nio.TimelineEventProvenance.RECOVERED)
-        await ingress._admit(room(), member_event("$history"), nio.TimelineEventProvenance.HISTORY)
+        await ingress._admit(room(), member_event("$member"), provenance)
 
-        assert seen == [ROOM, ROOM]
+        assert seen == ([] if provenance is nio.TimelineEventProvenance.HISTORY else [ROOM])
         assert not await alice.pending()
 
     async def test_reactions_and_redelivered_events_stay_silent(self, alice: PrincipalStore) -> None:

@@ -116,7 +116,14 @@ class WorkspaceThreadExportRunner:
             await self._run_pass_once()
 
     async def _run_pass_once(self) -> None:
-        """Consume the pending work and run one pass; a crash keeps the work for the next trigger."""
+        """Consume the pending work and run one pass.
+
+        Per-room Matrix and journal failures are caught inside the pass and
+        recorded as target failures. An exception that escapes is a fault in
+        this process or its disk, so the work is kept for the next trigger
+        rather than retried on a timer: a reload, a restart, or the next
+        message in a room all run it again.
+        """
         full_pass, room_ids = self._full_pass_pending, frozenset(self._pending_room_ids)
         self._full_pass_pending = False
         self._pending_room_ids.clear()
