@@ -1351,9 +1351,10 @@ class TestRoomActivity:
         ingress = JournalIngress(store=alice, self_sender=BOT, on_room_activity=seen.append)
 
         await ingress._admit(room(), member_event("$joined"), nio.TimelineEventProvenance.LIVE)
+        await ingress._admit(room(), member_event("$missed"), nio.TimelineEventProvenance.RECOVERED)
         await ingress._admit(room(), member_event("$history"), nio.TimelineEventProvenance.HISTORY)
 
-        assert seen == [ROOM]
+        assert seen == [ROOM, ROOM]
         assert not await alice.pending()
 
     async def test_reactions_and_redelivered_events_stay_silent(self, alice: PrincipalStore) -> None:

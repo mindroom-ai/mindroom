@@ -408,9 +408,10 @@ class JournalIngress:
             # Declining is exactly when a later consumer needs the verdict:
             # nothing else in the response will have written it down.
             self.timeline_member_provenance.record(event.event_id, provenance)
-            if provenance is nio.TimelineEventProvenance.LIVE:
-                # Who may read a room's exports changed. Only the router admits
-                # other people's membership, so this cannot wait for admission.
+            if provenance is not nio.TimelineEventProvenance.HISTORY:
+                # Who may read a room's exports changed, live or while this bot
+                # was away. Only the router admits other people's membership,
+                # so this cannot wait for admission.
                 self.on_room_activity(room.room_id)
         kind = self._admission_kind(event)
         if kind is None:
