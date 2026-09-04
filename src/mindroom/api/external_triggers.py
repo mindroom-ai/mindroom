@@ -387,11 +387,13 @@ async def _forget_stale_thread_root(
         return
     try:
         await asyncio.to_thread(replay_store.forget_thread_root, snapshot.replay_scope, thread_key)
-    except ExternalTriggerReplayStoreError:
+    except Exception:
+        # Never let store trouble mask the delivery failure being reported.
         logger.warning(
             "Could not forget stale external trigger thread root",
             trigger_id=snapshot.trigger_id,
             thread_key=thread_key,
+            exc_info=True,
         )
 
 
