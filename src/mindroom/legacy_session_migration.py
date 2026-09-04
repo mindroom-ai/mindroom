@@ -77,7 +77,7 @@ def _decode_legacy_runs(blob: object) -> list[dict[str, Any]]:
 
 
 def _legacy_session_tables(db_file: Path) -> list[str]:
-    """Return session tables in one SQLite file that still carry legacy run data."""
+    """Return session tables in one SQLite file that still have a legacy runs column."""
     connection = sqlite3.connect(f"{db_file.resolve().as_uri()}?mode=ro", uri=True, timeout=30)
     try:
         tables = [
@@ -88,9 +88,9 @@ def _legacy_session_tables(db_file: Path) -> list[str]:
         return [
             table
             for table in tables
-            if "runs" in {row[1] for row in connection.execute(f"PRAGMA table_info({_quote_identifier(table)})")}
-            and connection.execute(
-                f"SELECT 1 FROM {_quote_identifier(table)} WHERE runs IS NOT NULL LIMIT 1",  # noqa: S608
+            if connection.execute(
+                "SELECT 1 FROM pragma_table_info(?) WHERE name = 'runs'",
+                (table,),
             ).fetchone()
             is not None
         ]
@@ -247,6 +247,8 @@ def _migrate_table(db_file: Path, session_table: str) -> _MigrationResult:
                     text(f"SELECT session_id FROM {quoted_table} WHERE runs IS NOT NULL ORDER BY session_id"),  # noqa: S608
                 ).scalars(),
             )
+        if not session_ids:
+            return result
         for session_id in session_ids:
             try:
                 migrated = _migrate_session(database, runs_table, session_id)

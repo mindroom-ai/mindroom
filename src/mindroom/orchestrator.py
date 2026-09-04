@@ -2666,11 +2666,9 @@ def _schedule_legacy_session_migration(
     runtime_paths: RuntimePaths,
 ) -> asyncio.Task[None]:
     """Schedule migration against the resolved session root behind readiness."""
-    runtime_ready_event = asyncio.Event()
-    orchestrator._runtime_ready_event = runtime_ready_event
     session_storage_path = constants.resolve_session_state_root(runtime_paths.storage_root, runtime_paths)
     return asyncio.create_task(
-        run_legacy_session_migration_after_ready(runtime_ready_event, session_storage_path),
+        run_legacy_session_migration_after_ready(orchestrator._runtime_ready_event, session_storage_path),
         name="legacy_session_migration",
     )
 

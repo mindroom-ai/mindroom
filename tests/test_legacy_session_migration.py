@@ -258,6 +258,8 @@ async def test_orchestrator_starts_migration_after_readiness_against_the_session
         process_env={"MINDROOM_SESSION_STORAGE_PATH": str(session_root)},
     )
     orchestrator = MagicMock()
+    runtime_ready_event = asyncio.Event()
+    orchestrator._runtime_ready_event = runtime_ready_event
 
     async def record_start(storage_root: Path) -> None:
         assert storage_root == session_root
@@ -265,6 +267,7 @@ async def test_orchestrator_starts_migration_after_readiness_against_the_session
 
     monkeypatch.setattr(legacy_session_migration, "_run_legacy_session_migration", record_start)
     task = _schedule_legacy_session_migration(orchestrator, runtime_paths)
+    assert orchestrator._runtime_ready_event is runtime_ready_event
     await asyncio.sleep(0)
     assert not started.is_set()
 
