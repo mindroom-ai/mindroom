@@ -891,6 +891,54 @@ async def test_export_threads_to_sources_keeps_claimant_projections_target_local
 
 
 @pytest.mark.asyncio
+async def test_mixed_targets_write_one_deterministic_variant_to_unscoped_target(tmp_path: Path) -> None:
+    """An administrative target gets one variant while scoped targets keep their own projections."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    room_id = "!shared:localhost"
+    general_room = ThreadExportRoom(
+        key=room_id,
+        room_id=room_id,
+        alias="",
+        name="",
+        invited=True,
+        source_entity_names=("general",),
+    )
+    other_room = replace(general_room, source_entity_names=("other",))
+    general_client = Mock(name="general_client")
+    other_client = Mock(name="other_client")
+    unscoped_target = ThreadExportTarget(tmp_path / "all", source_entity_names=None)
+    general_target = ThreadExportTarget(tmp_path / "general", source_entity_names=("general",))
+    other_target = ThreadExportTarget(tmp_path / "other", source_entity_names=("other",))
+
+    with patch(
+        "mindroom.thread_export.service.export_threads_for_targets_for_client",
+        new=AsyncMock(side_effect=successful_group_result),
+    ) as export_source:
+        await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths,
+            sources=(
+                ThreadExportSource(client=other_client, reader=Mock(), rooms=(other_room,)),
+                ThreadExportSource(client=general_client, reader=Mock(), rooms=(general_room,)),
+            ),
+            targets=(unscoped_target, general_target, other_target),
+            full_pass=False,
+        )
+
+    calls_by_target = {
+        target: [call.kwargs["client"] for call in export_source.await_args_list if target in call.kwargs["targets"]]
+        for target in (unscoped_target, general_target, other_target)
+    }
+    assert calls_by_target == {
+        unscoped_target: [general_client],
+        general_target: [general_client],
+        other_target: [other_client],
+    }
+    assert [call.kwargs["client"] for call in export_source.await_args_list] == [other_client, general_client]
+
+
+@pytest.mark.asyncio
 async def test_source_scope_removal_failure_is_scoped_to_the_rejected_target(tmp_path: Path) -> None:
     """A failed source-scope retraction must not block an authorized target."""
     config = thread_export_config(tmp_path)
