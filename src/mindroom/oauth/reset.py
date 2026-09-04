@@ -23,7 +23,7 @@ from mindroom.oauth.credential_lifecycle import (
 )
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_public_base_url
-from mindroom.oauth.state import issue_opaque_oauth_state, read_opaque_oauth_state
+from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
@@ -45,7 +45,7 @@ class OAuthResetTargetError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class BrowserOAuthResetIntent:
-    """One requester-bound browser reset action."""
+    """One browser reset action frozen at issuance."""
 
     binding: OAuthCredentialBinding
     requester_id: str
@@ -55,7 +55,7 @@ class BrowserOAuthResetIntent:
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedOAuthResetTarget:
-    """Exact provider and requester-isolated credential target for one reset."""
+    """Exact provider and scoped credential target for one reset."""
 
     agent_name: str
     credential_context: OAuthCredentialContext
@@ -67,7 +67,7 @@ class _ResolvedOAuthResetTarget:
 
     @property
     def worker_target(self) -> ResolvedWorkerTarget:
-        """Return the requester-isolated target bound to this reset."""
+        """Return the scoped target bound to this reset."""
         worker_target = self.credential_context.worker_target
         assert worker_target is not None
         return worker_target
@@ -138,12 +138,8 @@ def resolve_oauth_reset_target(
         config=config,
     )
     credential_target = credential_context.worker_target
-    if (
-        credential_target is None
-        or credential_target.worker_scope not in {"user", "user_agent"}
-        or credential_target.worker_key is None
-    ):
-        msg = "Agent-initiated OAuth reset requires a requester-isolated user or user_agent scope."
+    if credential_target is None or credential_target.worker_scope is None or credential_target.worker_key is None:
+        msg = "Agent-initiated OAuth reset refuses unscoped installation-level credentials; use the dashboard."
         raise OAuthResetTargetError(msg)
     return _ResolvedOAuthResetTarget(
         agent_name=agent_name,
@@ -160,7 +156,7 @@ def _browser_oauth_reset_intent_from_payload(
         binding = parse_oauth_credential_binding_payload(
             provider,
             payload,
-            allowed_worker_scopes=frozenset({"user", "user_agent"}),
+            allowed_worker_scopes=frozenset({"shared", "user", "user_agent"}),
             require_agent_name=True,
             require_worker_key=True,
         )
@@ -220,3 +216,12 @@ def lookup_browser_oauth_reset_intent(
         token=token,
     )
     return _browser_oauth_reset_intent_from_payload(provider, payload)
+
+
+def consume_browser_oauth_reset_intent(runtime_paths: RuntimePaths, token: str) -> None:
+    """Consume one browser reset capability so it cannot be replayed."""
+    consume_opaque_oauth_state(
+        runtime_paths,
+        kind=_BROWSER_OAUTH_RESET_KIND,
+        token=token,
+    )
