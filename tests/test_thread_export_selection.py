@@ -129,11 +129,12 @@ def test_invited_room_selection_keeps_multiple_current_claimants(tmp_path: Path)
     )
 
     assert selection.conflicts == ()
-    assert len(selection.groups) == 1
-    reader_name, rooms = selection.groups[0]
-    assert reader_name == "general"
-    assert rooms[0].room_id == room_id
-    assert rooms[0].source_entity_names == ("general", "other")
+    assert [
+        (reader_name, rooms[0].room_id, rooms[0].source_entity_names) for reader_name, rooms in selection.groups
+    ] == [
+        ("general", room_id, ("general",)),
+        ("other", room_id, ("other",)),
+    ]
 
 
 def test_explicit_room_owner_resolves_ambiguous_invited_room_without_matrix_state(tmp_path: Path) -> None:

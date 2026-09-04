@@ -582,7 +582,7 @@ agents:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `invited_rooms` | bool | `true` | Also export user-created rooms recorded in this agent's persisted invite state. Current membership rules still apply |
-| `private_room_scope` | string | `"owner_and_agent"` | Private agents only. `owner_and_agent` exports rooms where both the requester and the agent are joined; `owner` exports every room the requester is joined to |
+| `private_room_scope` | string | `"owner_and_agent"` | Private agents only. Among rooms authorized for this agent, `owner_and_agent` requires both the requester and agent to be joined, while `owner` requires only the requester |
 
 Exports land at `<storage_root>/agents/<agent>/workspace/thread_exports/<urlencoded room key>/<urlencoded thread id>.yaml`, the same layout `mindroom threads export` writes.
 Inside the agent's own tools that directory is `$MINDROOM_AGENT_WORKSPACE/thread_exports/`.
@@ -598,7 +598,7 @@ Agents may edit or delete their exported files; deleted files return on the next
 Thread bodies come from the event-journal projection the running bots already maintain, so a pass costs no Matrix history call for threads a bot has seen.
 
 Shared agents export only configured rooms attributed to the agent and invited rooms recorded in that agent's persisted invite state, and the agent's own Matrix account must still be joined.
-When multiple current agents accepted the same ad-hoc room, each agent is an authorized source for its own workspace; one deterministic account reads the room for the shared export pass.
+When multiple current agents accepted the same ad-hoc room, each reads through its own principal-bound projection for its own workspace, so one claimant's visibility-scoped history is never copied into another claimant's workspace.
 Claims left only by retired entities authorize no current workspace and cause prior exporter-owned copies to be retracted.
 Private agents (`private:`) get one export tree per materialized instance under `<storage_root>/private_instances/<scope-key>/<agent>/<private root>/thread_exports/`, scoped to that requester's current room memberships, so one requester's private workspace never accumulates other users' conversations.
 A membership lookup failure blocks new writes for that room and leaves existing files in place until a successful lookup proves that access was revoked.

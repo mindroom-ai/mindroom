@@ -176,6 +176,37 @@ async def test_export_threads_once_exports_invited_rooms_with_entity_account(tmp
 
 
 @pytest.mark.asyncio
+async def test_unscoped_export_reads_shared_invited_room_once(tmp_path: Path) -> None:
+    """The administrative all-source target keeps one deterministic room copy."""
+    config = thread_export_config(tmp_path)
+    config.agents["other"] = config.agents["general"].model_copy(update={"display_name": "Other"})
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(
+        tmp_path,
+        account_keys=("agent_general", "agent_other"),
+        include_rooms=False,
+    )
+    room_id = "!shared:localhost"
+    write_invited_rooms(runtime_paths, "general", [room_id])
+    write_invited_rooms(runtime_paths, "other", [room_id])
+    client = Mock()
+    client.close = AsyncMock()
+
+    with (
+        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)) as login,
+        patch(
+            "mindroom.thread_export.service.export_threads_for_targets_for_client",
+            new=AsyncMock(side_effect=successful_group_result),
+        ) as export_group,
+    ):
+        await export_threads_once(config=config, runtime_paths=runtime_paths)
+
+    login.assert_awaited_once()
+    export_group.assert_awaited_once()
+    assert export_group.await_args.kwargs["rooms"][0].room_id == room_id
+
+
+@pytest.mark.asyncio
 async def test_export_threads_once_deduplicates_invited_rooms_already_in_state(tmp_path: Path) -> None:
     """A room tracked in matrix_state and an invite store should export only in the state group."""
     config = thread_export_config(tmp_path)
@@ -804,6 +835,58 @@ async def test_export_threads_to_sources_exports_each_source_and_reconciles(tmp_
     assert stats[0].rooms_exported == 1
     assert [failure.error for failure in stats[0].failed_items] == ["Bot 'code' is not running"]
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+
+
+@pytest.mark.asyncio
+async def test_export_threads_to_sources_keeps_claimant_projections_target_local(tmp_path: Path) -> None:
+    """One claimant's principal-bound payload must never fan out to another claimant."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    room_id = "!shared:localhost"
+    general_room = ThreadExportRoom(
+        key=room_id,
+        room_id=room_id,
+        alias="",
+        name="",
+        invited=True,
+        source_entity_names=("general",),
+    )
+    other_room = ThreadExportRoom(
+        key=room_id,
+        room_id=room_id,
+        alias="",
+        name="",
+        invited=True,
+        source_entity_names=("other",),
+    )
+    general_target = ThreadExportTarget(tmp_path / "general", source_entity_names=("general",))
+    other_target = ThreadExportTarget(tmp_path / "other", source_entity_names=("other",))
+    unrelated_target = ThreadExportTarget(tmp_path / "unrelated", source_entity_names=("unrelated",))
+    mark_thread_export_root(unrelated_target.output_dir)
+    stale_room_dir = unrelated_target.output_dir / quote(room_id, safe="")
+    stale_room_dir.mkdir()
+    (stale_room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+
+    with patch(
+        "mindroom.thread_export.service.export_threads_for_targets_for_client",
+        new=AsyncMock(side_effect=successful_group_result),
+    ) as export_source:
+        await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths,
+            sources=(
+                ThreadExportSource(client=Mock(), reader=Mock(), rooms=(general_room,)),
+                ThreadExportSource(client=Mock(), reader=Mock(), rooms=(other_room,)),
+            ),
+            targets=(general_target, other_target, unrelated_target),
+            full_pass=False,
+        )
+
+    assert [call.kwargs["targets"] for call in export_source.await_args_list] == [
+        (general_target,),
+        (other_target,),
+    ]
+    assert not stale_room_dir.exists()
 
 
 @pytest.mark.asyncio

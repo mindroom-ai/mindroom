@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -128,20 +128,24 @@ def invited_export_rooms(
             ),
         )
         current_claimants = tuple(sorted(claim.entity_name for claim in claims if claim.entity_name is not None))
-        source_entity_names = configured_names or current_claimants
         room = ThreadExportRoom(
             key=room_id,
             room_id=room_id,
             alias="",
             name="",
             invited=True,
-            source_entity_names=source_entity_names,
+            source_entity_names=(),
         )
         if configured_names:
-            rooms_by_entity.setdefault(configured_names[0], []).append(room)
+            rooms_by_entity.setdefault(configured_names[0], []).append(
+                replace(room, source_entity_names=configured_names),
+            )
             continue
         if current_claimants:
-            rooms_by_entity.setdefault(current_claimants[0], []).append(room)
+            for entity_name in current_claimants:
+                rooms_by_entity.setdefault(entity_name, []).append(
+                    replace(room, source_entity_names=(entity_name,)),
+                )
             continue
         conflicts.append(
             InvitedRoomConflict(

@@ -271,8 +271,8 @@ async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path)
     assert call.kwargs["unreadable_rooms"] == []
 
 
-async def test_shared_invited_room_keeps_every_current_source_scope(tmp_path: Path) -> None:
-    """One deterministic reader may fan a shared ad-hoc room to every current claimant."""
+async def test_shared_invited_room_keeps_each_current_projection_target_local(tmp_path: Path) -> None:
+    """Each claimant reads a shared ad-hoc room through its own principal-bound projection."""
     config = _config(
         tmp_path,
         {
@@ -302,14 +302,16 @@ async def test_shared_invited_room_keeps_every_current_source_scope(tmp_path: Pa
     assert call is not None
     assert {target.source_entity_names for target in call.kwargs["targets"]} == {("code",), ("other",)}
     assert call.kwargs["invited_room_conflicts"] == ()
-    invited_sources = [
-        source
+    invited_sources = {
+        source.reader.reader.hydrator.self_sender: room.source_entity_names
         for source in call.kwargs["sources"]
-        if any(room.room_id == "!private:localhost" for room in source.rooms)
-    ]
-    assert len(invited_sources) == 1
-    [invited_room] = [room for room in invited_sources[0].rooms if room.room_id == "!private:localhost"]
-    assert invited_room.source_entity_names == ("code", "other")
+        for room in source.rooms
+        if room.room_id == "!private:localhost"
+    }
+    assert invited_sources == {
+        "@mindroom_code:localhost": ("code",),
+        "@mindroom_other:localhost": ("other",),
+    }
 
 
 async def test_not_running_router_makes_configured_rooms_unreadable(tmp_path: Path) -> None:
