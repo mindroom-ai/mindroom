@@ -93,7 +93,7 @@ def _mock_room(room_id: str, member_ids: list[str]) -> MagicMock:
     room = MagicMock()
     room.room_id = room_id
     room.name = room_id
-    room.users = member_ids
+    room.users = {user_id: nio.MatrixUser(user_id) for user_id in member_ids}
     return room
 
 

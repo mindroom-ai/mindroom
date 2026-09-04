@@ -424,6 +424,7 @@ class ResponseRequest:
     thread_history: Sequence[ResolvedVisibleMessage]
     prompt: str
     response_envelope: MessageEnvelope
+    member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
@@ -2610,6 +2611,7 @@ class ResponseRunner:
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            member_display_names=request.member_display_names,
             active_model_name=runtime.active_model_name,
             active_event_ids=frozenset(active_event_ids),
             transient_enrichment_items=_with_matrix_message_target(
@@ -3445,6 +3447,7 @@ class ResponseRunner:
             thread_id=resolved_target.resolved_thread_id,
             requester_id=requester_user_id or execution_identity.requester_id,
             matrix_run_metadata=matrix_run_metadata,
+            member_display_names=request.member_display_names,
             active_event_ids=frozenset(active_event_ids),
             transient_enrichment_items=_with_matrix_message_target(
                 request.transient_enrichment_items,

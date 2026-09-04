@@ -172,6 +172,7 @@ Matrix sync callback
 | `matrix/reply_chain.py` | Reply chain context management |
 | `matrix/identity.py` | Matrix ID parsing and utilities |
 | `matrix/mentions.py` | Matrix mention formatting |
+| `matrix/member_display_names.py` | Current member display names snapshotted from the synced nio room cache for model-facing `<msg>` tags |
 | `matrix/typing.py` | Typing indicator utilities |
 | `matrix/avatar.py` | Avatar management |
 | `commands/` | Chat command parsing (`!help`, `!schedule`, `!config`, etc.) |
