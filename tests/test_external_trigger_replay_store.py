@@ -610,6 +610,8 @@ def test_thread_key_bound_to_another_room_is_reclaimed(tmp_path: Path) -> None:
 
     assert _claim(store, room="!elsewhere:localhost", now=1_002) == (ExternalTriggerThreadKeyClaim.FRESH, None)
     assert _claim(store, room="!elsewhere:localhost", now=1_003) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    # A continuation still in flight for the old room may not clobber the new room's reservation.
+    assert _bind(store, "$root-1", reservation=None, now=1_004) is None
 
 
 def test_pending_thread_key_expires_and_release_needs_its_reservation(tmp_path: Path) -> None:

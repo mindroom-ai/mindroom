@@ -187,8 +187,9 @@ class ExternalTriggerReplayStore:
                     thread_event_id = record["thread_event_id"]
                 elif record["reservation"] != reservation:
                     return None
-            elif reservation is not None and record is not None:
-                # The caller's reservation was replaced by a record for another room.
+            elif record is not None:
+                # The key now belongs to a delivery for another room (the trigger
+                # was re-pointed mid-flight); leave that record alone.
                 return None
             replay_threads[thread_key] = {
                 "room_id": room_id,

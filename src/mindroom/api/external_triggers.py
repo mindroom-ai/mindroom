@@ -238,16 +238,27 @@ async def _claim_and_execute_trigger(
         await _rollback_failed_delivery(replay_store, snapshot, event_id, thread_key, thread_reservation)
         raise HTTPException(status_code=502, detail="External trigger delivery failed")
     if thread_key is not None:
-        await _run_replay_store_call(
+        intended_root = continue_thread_event_id or matrix_event_id
+        bound_root = await _run_replay_store_call(
             replay_store.bind_thread_root,
             snapshot.replay_scope,
             thread_key,
-            continue_thread_event_id or matrix_event_id,
+            intended_root,
             room_id=snapshot.resolved_room_id,
             reservation=thread_reservation,
             now=int(time.time()),
             ttl_seconds=_THREAD_KEY_TTL_SECONDS,
         )
+        if bound_root != intended_root:
+            # The delivery outlived its reservation and another one opened the
+            # thread meanwhile. The message is posted; only its root is orphaned.
+            logger.warning(
+                "External trigger delivery lost its thread key to a newer delivery",
+                trigger_id=snapshot.trigger_id,
+                thread_key=thread_key,
+                matrix_event_id=matrix_event_id,
+                bound_root=bound_root,
+            )
 
     await _run_replay_store_call(
         replay_store.mark_event_delivered,
