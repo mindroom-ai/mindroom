@@ -78,6 +78,7 @@ from mindroom.oauth.service import (
 )
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
+    ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
     build_tool_execution_identity,
 )
@@ -96,6 +97,10 @@ _OAUTH_STALE_CONNECTION_MESSAGE = (
 )
 _OAUTH_STALE_CONVERSATION_MESSAGE = (
     "This OAuth connection changed before the request completed. Request a fresh connection link from the conversation."
+)
+_OAUTH_STALE_SHARED_RESET_MESSAGE = (
+    "This shared OAuth connection changed before the reset completed, so nothing was deleted. "
+    "Retry the original tool call; if it still fails, run reset_oauth_connection() again for a fresh reset link."
 )
 _OAUTH_BROWSER_SECURITY_HEADERS = {
     "Cache-Control": "no-store",
@@ -356,6 +361,24 @@ def _verify_conversation_connect_target_authorized(request: Request, target: OAu
     return config
 
 
+def _conversation_execution_identity(
+    agent_name: str,
+    requester_id: str,
+    runtime_paths: RuntimePaths,
+) -> ToolExecutionIdentity:
+    """Build the execution identity a conversation-issued OAuth link froze for one requester."""
+    return build_tool_execution_identity(
+        channel="matrix",
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+
+
 def _conversation_connect_context(
     request: Request,
     provider: OAuthProvider,
@@ -368,16 +391,7 @@ def _conversation_connect_context(
     requester_id = target.requester_id
     if not agent_name or not requester_id:
         raise HTTPException(status_code=400, detail="OAuth link target is invalid")
-    identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name=agent_name,
-        runtime_paths=runtime_paths,
-        requester_id=requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
+    identity = _conversation_execution_identity(agent_name, requester_id, runtime_paths)
     worker_target = build_agent_toolkit_worker_target(
         config.resolve_entity(agent_name).execution_scope,
         agent_name,
@@ -477,16 +491,7 @@ def _verify_browser_reset_intent(
     if not agent_name:
         raise HTTPException(status_code=403, detail="The current requester cannot manage this agent's credentials")
     if intent.binding.worker_scope == "shared":
-        identity = build_tool_execution_identity(
-            channel="matrix",
-            agent_name=agent_name,
-            runtime_paths=runtime_paths,
-            requester_id=intent.requester_id,
-            room_id=None,
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
-        )
+        identity = _conversation_execution_identity(agent_name, intent.requester_id, runtime_paths)
     else:
         _verify_connect_target_authorized(request, intent.requester_id, runtime_paths)
         identity = require_agent_oauth_connection_authorized(
@@ -684,17 +689,12 @@ async def reset_and_authorize(
             execution_scope=execution_scope,
         )
         if shared_capability:
-            consume_browser_oauth_reset_intent(
-                provider,
-                runtime_paths,
-                reset_token,
-                expected_intent=intent,
-            )
+            consume_browser_oauth_reset_intent(runtime_paths, reset_token)
     except HTTPException as exc:
         if exc.status_code == 409:
             return _oauth_browser_error_response(str(exc.detail), status_code=409)
         raise
-    except (OAuthProviderError, OAuthResetTargetError) as exc:
+    except OAuthProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
@@ -720,7 +720,7 @@ async def reset_and_authorize(
             ).auth_url
         )
     except OAuthCredentialConflictError:
-        stale_message = _OAUTH_STALE_CONVERSATION_MESSAGE if shared_capability else _OAUTH_STALE_CONNECTION_MESSAGE
+        stale_message = _OAUTH_STALE_SHARED_RESET_MESSAGE if shared_capability else _OAUTH_STALE_CONNECTION_MESSAGE
         return _oauth_browser_error_response(stale_message, status_code=409)
     except OAuthResetPreparationError as exc:
         logger.warning(

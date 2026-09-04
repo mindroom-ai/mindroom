@@ -308,7 +308,7 @@ async def test_reset_oauth_connection_refuses_unscoped_credentials(tmp_path: Pat
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection("google_drive")
 
-    assert "requires a shared, user, or user_agent scope" in result
+    assert "refuses unscoped installation-level credentials" in result
 
 
 @pytest.mark.asyncio

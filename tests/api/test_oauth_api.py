@@ -2487,7 +2487,8 @@ def test_shared_browser_reset_consumes_stale_link_without_deleting_replacement(t
     assert stale.status_code == 409
     assert stale.headers["referrer-policy"] == "no-referrer"
     assert stale.headers["cache-control"] == "no-store"
-    assert "fresh connection link from the conversation" in stale.text
+    assert "nothing was deleted" in stale.text
+    assert "reset_oauth_connection()" in stale.text
     assert replayed.status_code == 400
     stored = _stored_oauth_credentials(provider, runtime_paths, worker_scope="shared")
     assert stored is not None

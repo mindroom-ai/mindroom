@@ -45,7 +45,7 @@ class OAuthResetTargetError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class BrowserOAuthResetIntent:
-    """One requester-bound browser reset action."""
+    """One browser reset action frozen at issuance."""
 
     binding: OAuthCredentialBinding
     requester_id: str
@@ -138,12 +138,8 @@ def resolve_oauth_reset_target(
         config=config,
     )
     credential_target = credential_context.worker_target
-    if (
-        credential_target is None
-        or credential_target.worker_scope not in {"shared", "user", "user_agent"}
-        or credential_target.worker_key is None
-    ):
-        msg = "Agent-initiated OAuth reset requires a shared, user, or user_agent scope."
+    if credential_target is None or credential_target.worker_scope is None or credential_target.worker_key is None:
+        msg = "Agent-initiated OAuth reset refuses unscoped installation-level credentials; use the dashboard."
         raise OAuthResetTargetError(msg)
     return _ResolvedOAuthResetTarget(
         agent_name=agent_name,
@@ -222,21 +218,10 @@ def lookup_browser_oauth_reset_intent(
     return _browser_oauth_reset_intent_from_payload(provider, payload)
 
 
-def consume_browser_oauth_reset_intent(
-    provider: OAuthProvider,
-    runtime_paths: RuntimePaths,
-    token: str,
-    *,
-    expected_intent: BrowserOAuthResetIntent,
-) -> BrowserOAuthResetIntent:
-    """Consume one browser reset capability and require its target to remain unchanged."""
-    payload = consume_opaque_oauth_state(
+def consume_browser_oauth_reset_intent(runtime_paths: RuntimePaths, token: str) -> None:
+    """Consume one browser reset capability so it cannot be replayed."""
+    consume_opaque_oauth_state(
         runtime_paths,
         kind=_BROWSER_OAUTH_RESET_KIND,
         token=token,
     )
-    intent = _browser_oauth_reset_intent_from_payload(provider, payload)
-    if intent != expected_intent:
-        msg = "OAuth reset link target changed"
-        raise OAuthResetTargetError(msg)
-    return intent

@@ -152,7 +152,7 @@ If an error occurs during streaming, the message is finalized with:
 ## Large Streamed Messages
 
 If a streamed response exceeds the Matrix event size limit (55KB for new messages, 27KB for edits), the large message system automatically uploads a JSON sidecar and includes a preview in the event body.
-With `defaults.large_message_strategy: split`, segmentable oversized final text is delivered as several complete rich-text messages. Unsupported or unsegmentable payloads still use the sidecar path.
+With `defaults.large_message_strategy: split`, the final edit is instead delivered as several complete rich-text messages so the whole Markdown answer stays visible without a sidecar.
 See [Matrix Integration — Large Messages](https://docs.mindroom.chat/architecture/matrix/#large-messages) for details.
 
 ## Visibility Toggles
