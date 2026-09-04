@@ -1325,6 +1325,9 @@ Send one signed trigger request to MindRoom.
 │ *  --message                            TEXT   Trigger payload message. [required]     │
 │    --event-id                           TEXT   Optional idempotency event id.          │
 │    --title                              TEXT   Optional trigger title.                 │
+│    --thread-key                         TEXT   Optional key; deliveries sharing it     │
+│                                                land in one Matrix thread on new_thread │
+│                                                triggers.                               │
 │    --data-json                          TEXT   Optional JSON object for trigger data.  │
 │    --timeout                            FLOAT  HTTP request timeout in seconds.        │
 │                                                [default: 10.0]                         │

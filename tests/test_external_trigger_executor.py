@@ -368,3 +368,38 @@ async def test_execute_external_trigger_new_thread_sends_room_message_without_th
     assert "m.relates_to" not in content
     assert content[SOURCE_KIND_KEY] == EXTERNAL_TRIGGER_SOURCE_KIND
     assert content[PER_FIRE_THREAD_ROOT_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_external_trigger_continues_recorded_thread_instead_of_new_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A continued thread key posts into the earlier Matrix thread and is not a per-fire root."""
+    config = _config(tmp_path)
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest-in-thread")
+    send_and_track_message = AsyncMock(
+        return_value=DeliveredMatrixEvent(event_id="$continued-event", content_sent={}),
+    )
+    monkeypatch.setattr("mindroom.external_triggers.executor.send_matrix_message", send_and_track_message)
+
+    event_id = await execute_external_trigger(
+        client=AsyncMock(),
+        snapshot=_snapshot(new_thread=True, thread_id=None),
+        payload=_payload(),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        conversation_reader=conversation_reader,
+        continue_thread_event_id="$first-root",
+    )
+
+    assert event_id == "$continued-event"
+    conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id="!fixed:localhost",
+        thread_id="$first-root",
+    )
+    content: dict[str, Any] = send_and_track_message.await_args.args[2]
+    assert content["m.relates_to"]["event_id"] == "$first-root"
+    assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest-in-thread"
+    assert PER_FIRE_THREAD_ROOT_KEY not in content
+    assert content[SOURCE_KIND_KEY] == EXTERNAL_TRIGGER_SOURCE_KIND

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -43,7 +43,7 @@ async def test_concurrent_typing_indicators_share_one_matrix_lease(turn_count: i
 
     async def turn() -> None:
         nonlocal entered_count
-        async with typing_indicator(client, room_id):
+        async with typing_indicator(client, room_id, log_context={}):
             entered_count += 1
             if entered_count == turn_count:
                 all_entered.set()
@@ -78,7 +78,7 @@ async def test_cancelled_initial_typing_request_releases_shared_lease() -> None:
     client.room_typing.side_effect = block_initial_request
 
     async def run_turn() -> None:
-        async with typing_indicator(client, room_id):
+        async with typing_indicator(client, room_id, log_context={}):
             pass
 
     task = asyncio.create_task(run_turn())
@@ -112,12 +112,12 @@ async def test_new_typing_lease_waits_for_prior_stop_request() -> None:
     client.room_typing.side_effect = room_typing
 
     async def first_turn() -> None:
-        async with typing_indicator(client, room_id):
+        async with typing_indicator(client, room_id, log_context={}):
             first_entered.set()
             await release_first.wait()
 
     async def second_turn() -> None:
-        async with typing_indicator(client, room_id):
+        async with typing_indicator(client, room_id, log_context={}):
             second_entered.set()
             await release_second.wait()
 
@@ -159,7 +159,12 @@ async def test_shared_typing_lease_uses_longest_requested_timeout() -> None:
     client.room_typing.side_effect = room_typing
 
     async def turn(timeout_seconds: int, entered: asyncio.Event) -> None:
-        async with typing_indicator(client, room_id, timeout_seconds=timeout_seconds):
+        async with typing_indicator(
+            client,
+            room_id,
+            timeout_seconds=timeout_seconds,
+            log_context={},
+        ):
             entered.set()
             await release_turns.wait()
 
@@ -192,7 +197,7 @@ async def test_typing_start_failure_does_not_fail_response_turn() -> None:
     client.room_typing.side_effect = RuntimeError("Matrix unavailable")
     body_entered = False
 
-    async with typing_indicator(client, "!room:example.org"):
+    async with typing_indicator(client, "!room:example.org", log_context={}):
         body_entered = True
 
     assert body_entered is True
@@ -224,7 +229,12 @@ async def test_typing_refresh_failure_is_logged_and_retried() -> None:
 
     client.room_typing.side_effect = room_typing
 
-    async with typing_indicator(client, "!room:example.org", timeout_seconds=0):
+    async with typing_indicator(
+        client,
+        "!room:example.org",
+        timeout_seconds=0,
+        log_context={},
+    ):
         await asyncio.wait_for(refresh_failed.wait(), timeout=1)
         await asyncio.wait_for(recovered.wait(), timeout=1)
 
@@ -256,7 +266,12 @@ async def test_typing_recovers_for_joiner_after_failed_start() -> None:
     first_entered = asyncio.Event()
 
     async def holder(entered: asyncio.Event) -> None:
-        async with typing_indicator(client, room_id, timeout_seconds=0):
+        async with typing_indicator(
+            client,
+            room_id,
+            timeout_seconds=0,
+            log_context={},
+        ):
             entered.set()
             await let_holders_exit.wait()
 
@@ -276,3 +291,79 @@ async def test_typing_recovers_for_joiner_after_failed_start() -> None:
 
     assert start_attempts > 1
     assert not typing_module._ACTIVE_TYPING
+
+
+@pytest.mark.asyncio
+async def test_typing_heartbeat_and_stop_keep_initial_response_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every log from one typing lease should retain its response attribution."""
+    client = AsyncMock()
+    room_id = "!room:example.org"
+    heartbeat_sent = asyncio.Event()
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    release_second = asyncio.Event()
+    typing_calls = 0
+
+    async def room_typing(_room_id: str, typing: bool, _timeout_ms: int) -> None:
+        nonlocal typing_calls
+        if typing:
+            typing_calls += 1
+            if typing_calls == 2:
+                heartbeat_sent.set()
+
+    client.room_typing.side_effect = room_typing
+    log_context = {
+        "agent_id": "general",
+        "requester_id": "@user:example.org",
+        "room_id": room_id,
+        "thread_id": "$thread:example.org",
+        "session_id": "!room:example.org:$thread:example.org",
+        "reply_to_event_id": "$request:example.org",
+        "correlation_id": "$request:example.org",
+        "response_run_id": "response-run-1",
+    }
+    logger = MagicMock()
+    monkeypatch.setattr(typing_module, "logger", logger)
+
+    async def hold_typing(
+        context: dict[str, str],
+        entered: asyncio.Event,
+        release: asyncio.Event,
+    ) -> None:
+        async with typing_indicator(
+            client,
+            room_id,
+            timeout_seconds=0,
+            log_context=context,
+        ):
+            entered.set()
+            await release.wait()
+
+    first_task = asyncio.create_task(hold_typing(log_context, first_entered, release_first))
+    await asyncio.wait_for(first_entered.wait(), timeout=1)
+    await asyncio.wait_for(heartbeat_sent.wait(), timeout=1)
+
+    joiner_context = {
+        **log_context,
+        "agent_id": "secondary",
+        "session_id": "!room:example.org:$other-thread:example.org",
+        "reply_to_event_id": "$other-request:example.org",
+        "response_run_id": "response-run-2",
+    }
+    second_task = asyncio.create_task(hold_typing(joiner_context, second_entered, release_second))
+    await asyncio.wait_for(second_entered.wait(), timeout=1)
+    release_first.set()
+    await first_task
+    release_second.set()
+    await second_task
+
+    typing_logs = [call.kwargs for call in logger.debug.call_args_list if call.args == ("Set typing status",)]
+    assert len(typing_logs) >= 3
+    assert typing_logs[0]["typing"] is True
+    assert typing_logs[1]["typing"] is True
+    assert typing_logs[-1]["typing"] is False
+    for entry in typing_logs:
+        assert {key: entry[key] for key in log_context} == log_context
