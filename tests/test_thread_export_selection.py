@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.config.agent import AgentConfig
+from mindroom.matrix.invited_rooms_store import load_invited_room_claims
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.thread_export.models import ThreadExportGroup, ThreadExportGroupFailure, ThreadExportRoom
 from mindroom.thread_export.selection import (
@@ -200,6 +202,47 @@ def test_retired_entity_invite_claim_keeps_current_claim_ambiguous(tmp_path: Pat
     assert selection.conflicts[0].room.room_id == room_id
 
 
+def test_invited_room_claim_loader_rejects_symlink_at_open_time(tmp_path: Path) -> None:
+    """Ownership evidence cannot redirect its read through a symlink."""
+    outside_claim = tmp_path / "outside.json"
+    outside_claim.write_text('["!outside:localhost"]\n', encoding="utf-8")
+    claim_path = tmp_path / "invited_rooms.json"
+    claim_path.symlink_to(outside_claim)
+
+    with pytest.raises(RuntimeError, match="Invalid invited-room claim file"):
+        load_invited_room_claims(claim_path)
+
+
+def test_invited_room_claim_loader_rejects_symlinked_parent_at_open_time(tmp_path: Path) -> None:
+    """Ownership evidence cannot redirect through a replaced state directory."""
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir()
+    (outside_root / "invited_rooms.json").write_text('["!outside:localhost"]\n', encoding="utf-8")
+    linked_root = tmp_path / "agent-state"
+    linked_root.symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="Invalid invited-room claim file"):
+        load_invited_room_claims(linked_root / "invited_rooms.json")
+
+
+def test_invited_room_claim_loader_rejects_fifo_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-regular ownership file is rejected without a blocking Path read."""
+    claim_path = tmp_path / "invited_rooms.json"
+    os.mkfifo(claim_path)
+
+    def fail_read_text(*_args: object, **_kwargs: object) -> str:
+        msg = "claim loader attempted a potentially blocking Path.read_text"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(type(claim_path), "read_text", fail_read_text)
+
+    with pytest.raises(RuntimeError, match="Invalid invited-room claim file"):
+        load_invited_room_claims(claim_path)
+
+
 @pytest.mark.parametrize("claimant_kind", ["current", "retired"])
 @pytest.mark.parametrize("symlink_kind", ["state-root", "claim-file"])
 def test_symlinked_invite_claim_fails_closed(
@@ -281,16 +324,16 @@ def test_unreadable_invited_room_claim_fails_closed(tmp_path: Path, monkeypatch:
     runtime_paths = runtime_paths_for(config)
     claim_path = runtime_paths.storage_root / "agents" / "general" / "invited_rooms.json"
     claim_path.parent.mkdir(parents=True)
-    path_type = type(claim_path)
-    original_read_text = path_type.read_text
+    claim_path.write_text("[]\n", encoding="utf-8")
+    original_open = os.open
 
-    def read_text(path: Path, *args: object, **kwargs: object) -> str:
-        if path == claim_path:
+    def open_file(path: str | os.PathLike[str], flags: int, *, dir_fd: int | None = None) -> int:
+        if path == claim_path.name and dir_fd is not None:
             msg = "denied"
             raise PermissionError(msg)
-        return original_read_text(path, *args, **kwargs)
+        return original_open(path, flags, dir_fd=dir_fd)
 
-    monkeypatch.setattr(path_type, "read_text", read_text)
+    monkeypatch.setattr(os, "open", open_file)
 
     with pytest.raises(RuntimeError, match="Invalid invited-room claim file"):
         invited_export_rooms(
