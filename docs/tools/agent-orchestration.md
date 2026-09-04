@@ -76,7 +76,7 @@ agents:
 | Personal (`user`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection across agents |
 | Personal for one agent (`user_agent`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection for this agent only |
 
-A shared connection belongs to the agent or team rather than to one MindRoom user.
+A shared connection belongs to the agent rather than to one MindRoom user.
 On a private agent, users can manage their own personal connections.
 On other agents, requesting a reset requires platform `administrator` access or an entry in `agents.<name>.credential_managers`.
 Some providers always use personal connections, regardless of the agent's configured scope.
