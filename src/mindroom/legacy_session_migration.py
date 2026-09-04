@@ -280,7 +280,7 @@ def _migrate_table(db_file: Path, session_table: str) -> _MigrationResult:
                     db_file=str(db_file),
                     session_table=session_table,
                     session_id=session_id,
-                    error=str(exc),
+                    error=str(exc) if isinstance(exc, _MigrationRefusedError) else type(exc).__name__,
                 )
                 result += _MigrationResult(failed_sessions=1)
             else:

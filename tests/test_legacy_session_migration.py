@@ -232,6 +232,36 @@ def test_blob_clear_failure_rolls_back_inserted_rows(tmp_path: Path) -> None:
     assert stored_runs == 0
 
 
+def test_failed_migration_does_not_log_conversation_data(tmp_path: Path) -> None:
+    """Database errors report their type without serializing bound run data."""
+    sentinel = "PRIVATE_CONVERSATION_SENTINEL"
+    db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
+    database = legacy_session_migration._open_database(db_path, "code_sessions")
+    database._get_table(table_type="runs", create_table_if_not_found=True)
+    database.close()
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "UPDATE code_sessions SET runs = replace(runs, 'a1', ?)",
+            (sentinel,),
+        )
+        connection.execute(
+            "CREATE TRIGGER refuse_run_insert BEFORE INSERT ON code_sessions_runs "
+            "BEGIN SELECT RAISE(ABORT, 'run insert refused'); END",
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with capture_logs() as logs:
+        result = _migrate_table(db_path, "code_sessions")
+
+    skipped = next(entry for entry in logs if entry["event"] == "legacy_session_migration_skipped")
+    assert result.failed_sessions == 1
+    assert skipped["error"] == "IntegrityError"
+    assert sentinel not in str(skipped)
+
+
 def test_run_id_owned_by_another_session_keeps_the_legacy_blob(tmp_path: Path) -> None:
     """A global run-id collision cannot make verification retire the authoritative blob."""
     db_path = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
