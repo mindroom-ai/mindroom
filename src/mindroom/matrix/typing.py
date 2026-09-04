@@ -51,9 +51,9 @@ def _typing_log_fields(
 async def _set_typing(
     client: nio.AsyncClient,
     room_id: str,
-    typing: bool = True,
-    timeout_seconds: int = 30,
     *,
+    typing: bool,
+    timeout_seconds: int,
     log_context: Mapping[str, object],
 ) -> None:
     """Set typing status for a user in a room.
@@ -102,8 +102,8 @@ async def _refresh_typing(
             await _set_typing(
                 client,
                 room_id,
-                True,
-                sent_timeout_seconds,
+                typing=True,
+                timeout_seconds=sent_timeout_seconds,
                 log_context=state.log_context,
             )
         except asyncio.CancelledError:
@@ -149,7 +149,7 @@ async def _acquire_typing_state(
         references=1,
         timeout_seconds=timeout_seconds,
         started=started,
-        log_context={**log_context, "room_id": room_id},
+        log_context=dict(log_context),
     )
     state.refresh_task = asyncio.create_task(
         _refresh_typing(
@@ -185,8 +185,8 @@ async def _release_typing_state(
         await _set_typing(
             client,
             room_id,
-            False,
-            state.timeout_seconds,
+            typing=False,
+            timeout_seconds=state.timeout_seconds,
             log_context=state.log_context,
         )
     except Exception:
@@ -207,12 +207,12 @@ async def typing_indicator(
     room_id: str,
     timeout_seconds: int = 30,
     *,
-    log_context: Mapping[str, object] | None = None,
+    log_context: Mapping[str, object],
 ) -> AsyncGenerator[None, None]:
     """Context manager for showing typing indicator while processing.
 
     Usage:
-        async with typing_indicator(client, room_id):
+        async with typing_indicator(client, room_id, log_context={}):
             # Do work here - typing indicator shown
             response = await generate_response()
         # Typing indicator automatically stopped
@@ -228,7 +228,7 @@ async def typing_indicator(
         client,
         room_id,
         timeout_seconds=timeout_seconds,
-        log_context={} if log_context is None else log_context,
+        log_context=log_context,
     )
     try:
         await asyncio.shield(state.started)

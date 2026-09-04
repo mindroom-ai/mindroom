@@ -486,11 +486,13 @@ def _response_typing_log_context(
     response_run_id: str | None,
 ) -> dict[str, object]:
     """Return the stable response attribution shared by one typing lease."""
+    target = request.response_envelope.target
     return {
+        **target.log_context,
         "agent_id": request.response_envelope.agent_name,
         "requester_id": request.response_envelope.requester_id,
-        "room_id": request.room_id,
-        "thread_id": request.thread_id,
+        "session_id": target.session_id,
+        "reply_to_event_id": target.reply_to_event_id,
         "correlation_id": _correlation_id_for_request(request),
         "response_run_id": response_run_id,
     }

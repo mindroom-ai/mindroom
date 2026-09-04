@@ -71,6 +71,7 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
+from mindroom.matrix import typing as typing_module
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.client_visible_messages import fetch_latest_visible_body
 from mindroom.matrix.state import MatrixState
@@ -88,6 +89,7 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
+    _response_typing_indicator,
     _ResponseGenerationOutcome,
     prepare_memory_and_model_context,
 )
@@ -178,6 +180,40 @@ def _completed_outcome(event_id: str = "$response", body: str = "ok") -> FinalDe
         final_visible_body=body,
         delivery_kind="sent",
     )
+
+
+@pytest.mark.asyncio
+async def test_response_typing_supplies_complete_attribution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Response typing should supply every stable attribution field it owns."""
+    client = AsyncMock()
+    request = replace(
+        _plain_request(_target(thread_id="$thread:example.org")),
+        correlation_id="$correlation:example.org",
+    )
+    logger = MagicMock()
+    monkeypatch.setattr(typing_module, "logger", logger)
+
+    async with _response_typing_indicator(
+        client,
+        request,
+        response_run_id="response-run-1",
+    ):
+        pass
+
+    typing_logs = [call.kwargs for call in logger.debug.call_args_list if call.args == ("Set typing status",)]
+    expected_attribution = {
+        "agent_id": "general",
+        "requester_id": "@user:localhost",
+        "room_id": "!room:localhost",
+        "thread_id": "$thread:example.org",
+        "session_id": "!room:localhost:$thread:example.org",
+        "reply_to_event_id": "$event",
+        "correlation_id": "$correlation:example.org",
+        "response_run_id": "response-run-1",
+    }
+    assert [entry["typing"] for entry in typing_logs] == [True, False]
+    for entry in typing_logs:
+        assert {key: entry[key] for key in expected_attribution} == expected_attribution
 
 
 async def _admit_approval_source(store: PrincipalStore, *, event_id: str = "$source") -> None:
