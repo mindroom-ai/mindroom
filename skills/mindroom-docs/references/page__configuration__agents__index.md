@@ -590,6 +590,7 @@ Each room directory also holds an `index.json` mapping every thread file to its 
 
 MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, batching everything that arrives in that window into one pass, and runs one full pass at startup and after every config reload.
 A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
+A full pass that could export no room at all skips that directory-wide removal, because an empty result cannot be told apart from a failed one; the same guard and its manual-cleanup guidance are described under [`threads export`](https://docs.mindroom.chat/cli/#threads-export).
 Files are rewritten only when a thread's content changed.
 Agents may edit or delete their exported files; deleted files return on the next pass that touches the room.
 Thread bodies come from the event-journal projection the running bots already maintain, so a pass costs no Matrix history call for threads a bot has seen.

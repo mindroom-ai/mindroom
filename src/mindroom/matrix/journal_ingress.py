@@ -42,9 +42,6 @@ _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 _DEPARTED_MEMBERSHIPS = frozenset({"leave", "ban"})
 # Kinds whose events carry conversation content, and so update the projection.
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
-# Kinds after which a room's exportable state may differ: its conversation
-# changed, or someone whose membership gates an export came or went.
-_ROOM_ACTIVITY_KINDS = _PROJECTED_KINDS | {EventKind.ROOM_LIFECYCLE}
 
 # What an `m.room.message` must have parsed to before MindRoom can treat it as
 # work: nio's base class for every msgtype that carries a textual body, which
@@ -347,8 +344,9 @@ class JournalIngress:
     room_lifecycle_enabled: Callable[[], bool] = lambda: False
     on_event_admitted: Callable[[nio.MatrixRoom, nio.Event], None] = lambda _room, _event: None
     # Fires once per newly admitted conversation event, actionable or
-    # context-only, so a consumer can learn a room changed without owning any
-    # of the event's semantic work.
+    # context-only, and once per live membership event whether admitted or
+    # not, so a consumer can learn a room changed without owning any of the
+    # event's semantic work.
     on_room_activity: Callable[[str], None] = lambda _room_id: None
     on_live_room_membership_transition: Callable[[str, nio.RoomMemberEvent], Awaitable[None]] | None = None
     # A refused admission must also stop the sync checkpoint advancing past the
@@ -410,6 +408,10 @@ class JournalIngress:
             # Declining is exactly when a later consumer needs the verdict:
             # nothing else in the response will have written it down.
             self.timeline_member_provenance.record(event.event_id, provenance)
+            if provenance is nio.TimelineEventProvenance.LIVE:
+                # Who may read a room's exports changed. Only the router admits
+                # other people's membership, so this cannot wait for admission.
+                self.on_room_activity(room.room_id)
         kind = self._admission_kind(event)
         if kind is None:
             return
@@ -452,7 +454,7 @@ class JournalIngress:
         admission: AdmissionResult,
     ) -> None:
         """Tell the consumers of a committed admission what just happened."""
-        if admission is AdmissionResult.ADMITTED and kind in _ROOM_ACTIVITY_KINDS:
+        if admission is AdmissionResult.ADMITTED and kind in _PROJECTED_KINDS:
             self.on_room_activity(room.room_id)
         if event_class is not EventClass.ACTIONABLE:
             return
