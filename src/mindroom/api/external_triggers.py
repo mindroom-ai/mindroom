@@ -208,6 +208,7 @@ async def _claim_and_execute_trigger(
             replay_store.thread_root,
             snapshot.replay_scope,
             thread_key,
+            room_id=snapshot.resolved_room_id,
             now=now,
         )
     try:
@@ -222,9 +223,11 @@ async def _claim_and_execute_trigger(
         )
     except Exception:
         await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
+        await _forget_stale_thread_root(replay_store, snapshot, thread_key, continue_thread_event_id)
         raise
     if matrix_event_id is None:
         await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
+        await _forget_stale_thread_root(replay_store, snapshot, thread_key, continue_thread_event_id)
         raise HTTPException(status_code=502, detail="External trigger delivery failed")
     if thread_key is not None:
         await _run_replay_store_call(
@@ -232,6 +235,7 @@ async def _claim_and_execute_trigger(
             snapshot.replay_scope,
             thread_key,
             continue_thread_event_id or matrix_event_id,
+            room_id=snapshot.resolved_room_id,
             now=int(time.time()),
             ttl_seconds=_THREAD_KEY_TTL_SECONDS,
         )
@@ -370,6 +374,25 @@ async def _run_replay_store_call(call: Callable[_P, _T], *args: _P.args, **kwarg
         return await asyncio.to_thread(call, *args, **kwargs)
     except ExternalTriggerReplayStoreError as exc:
         raise HTTPException(status_code=503, detail="External trigger replay store is not available") from exc
+
+
+async def _forget_stale_thread_root(
+    replay_store: ExternalTriggerReplayStore,
+    snapshot: TriggerDeliverySnapshot,
+    thread_key: str | None,
+    continue_thread_event_id: str | None,
+) -> None:
+    """Drop a recorded root that could not be delivered to, so the next attempt opens a fresh one."""
+    if thread_key is None or continue_thread_event_id is None:
+        return
+    try:
+        await asyncio.to_thread(replay_store.forget_thread_root, snapshot.replay_scope, thread_key)
+    except ExternalTriggerReplayStoreError:
+        logger.warning(
+            "Could not forget stale external trigger thread root",
+            trigger_id=snapshot.trigger_id,
+            thread_key=thread_key,
+        )
 
 
 async def _release_event_id_best_effort(

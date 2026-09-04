@@ -961,3 +961,35 @@ def test_thread_key_is_ignored_for_fixed_thread_targets(
 
     assert (first.status_code, second.status_code) == (202, 202)
     assert continued == [None, None]
+
+
+def test_failed_continuation_forgets_thread_key_so_next_delivery_opens_fresh_root(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A root that can no longer be delivered to is dropped instead of retried for a week."""
+    continued: list[str | None] = []
+    outcomes = iter(["$root-a", None, "$root-b"])
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str | None:
+        continued.append(continue_thread_event_id)
+        return next(outcomes)
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    trigger_id = _create_new_thread_record(trigger_api)
+
+    def post(event_id: str, nonce: str) -> Response:
+        return _post_signed(
+            trigger_api,
+            body=_body(event_id=event_id, thread_key="chat:C1:100"),
+            nonce=nonce,
+            trigger_id=trigger_id,
+        )
+
+    first = post("msg-1", "nonce-1")
+    failed = post("msg-2", "nonce-2")
+    recovered = post("msg-3", "nonce-3")
+
+    assert (first.status_code, failed.status_code, recovered.status_code) == (202, 502, 202)
+    assert continued == [None, "$root-a", None]
+    assert recovered.json()["matrix_event_id"] == "$root-b"

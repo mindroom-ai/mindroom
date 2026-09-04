@@ -37,6 +37,7 @@ class _SerializedEvent(TypedDict):
 
 
 class _SerializedThread(TypedDict):
+    room_id: str
     thread_event_id: str
     expires_at: int
 
@@ -109,13 +110,19 @@ class ExternalTriggerReplayStore:
             }
             self._write_store(store)
 
-    def thread_root(self, replay_scope: str, thread_key: str, *, now: int) -> str | None:
-        """Return the Matrix thread root previously recorded for one thread key."""
+    def thread_root(self, replay_scope: str, thread_key: str, *, room_id: str, now: int) -> str | None:
+        """Return the Matrix thread root recorded for one thread key in one room.
+
+        A record bound to another room is a miss: the trigger's configured room
+        may have been re-pointed since the root was recorded.
+        """
         with advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
             record = store["threads"].get(replay_scope, {}).get(thread_key)
-            return None if record is None else record["thread_event_id"]
+            if record is None or record["room_id"] != room_id:
+                return None
+            return record["thread_event_id"]
 
     def remember_thread_root(
         self,
@@ -123,6 +130,7 @@ class ExternalTriggerReplayStore:
         thread_key: str,
         thread_event_id: str,
         *,
+        room_id: str,
         now: int,
         ttl_seconds: int,
     ) -> None:
@@ -131,9 +139,22 @@ class ExternalTriggerReplayStore:
             store = self._read_store()
             _prune_expired(store, now=now)
             store["threads"].setdefault(replay_scope, {})[thread_key] = {
+                "room_id": room_id,
                 "thread_event_id": thread_event_id,
                 "expires_at": now + ttl_seconds,
             }
+            self._write_store(store)
+
+    def forget_thread_root(self, replay_scope: str, thread_key: str) -> None:
+        """Drop a thread key whose recorded root could not be delivered to."""
+        with advisory_file_lock(self._lock_path):
+            store = self._read_store()
+            replay_threads = store["threads"].get(replay_scope)
+            if replay_threads is None or thread_key not in replay_threads:
+                return
+            replay_threads.pop(thread_key)
+            if not replay_threads:
+                store["threads"].pop(replay_scope, None)
             self._write_store(store)
 
     def release_event_id(self, replay_scope: str, event_id: str) -> None:
@@ -262,11 +283,19 @@ def _normalize_threads(raw_threads: Mapping[object, object]) -> dict[str, dict[s
             if not isinstance(thread_key, str) or not isinstance(record, Mapping):
                 raise _invalid_store_structure()
             record_mapping = cast("Mapping[object, object]", record)
+            room_id = record_mapping.get("room_id")
             thread_event_id = record_mapping.get("thread_event_id")
             expires_at = record_mapping.get("expires_at")
-            if not isinstance(thread_event_id, str) or not thread_event_id or not _is_json_int(expires_at):
+            if (
+                not isinstance(room_id, str)
+                or not room_id
+                or not isinstance(thread_event_id, str)
+                or not thread_event_id
+                or not _is_json_int(expires_at)
+            ):
                 raise _invalid_store_structure()
             normalized_trigger_threads[thread_key] = {
+                "room_id": room_id,
                 "thread_event_id": thread_event_id,
                 "expires_at": expires_at,
             }

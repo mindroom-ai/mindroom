@@ -207,8 +207,11 @@ mindroom trigger send support-inbox \
 
 Choose a key that names the upstream conversation, not the message: a ticket ID, an upstream thread timestamp, or a chat channel ID for a direct-message conversation.
 
-Thread key records live in the same replay store as `event_id` records, scoped per trigger, and are retained for 7 days after the most recent delivery that used them.
-After that, the next delivery with the key starts a new thread.
+Thread key records live in the same replay store as `event_id` records, scoped per trigger and signing key epoch, and are retained for 7 days after the most recent delivery that used them.
+After that, or after `rotate_trigger_key`, or when a recorded thread can no longer be delivered to, the next delivery with the key starts a new thread.
+
+Two deliveries that arrive at the same moment with a key nobody has used yet may each open a root; the key then follows the one that finished last.
+Senders that need strict ordering should deliver a conversation's first event before its follow-ups.
 
 `thread_key` has no effect on triggers with a fixed `target_thread_id`; that thread already collects every delivery.
 
