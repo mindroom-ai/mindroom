@@ -452,6 +452,7 @@ It waits up to 600 seconds for active Matrix responses to drain, then force-appl
 - Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
 - OAuth-backed remote MCP credentials and sessions follow the selected agent's effective execution scope.
 - OAuth-backed remote MCP typed functions appear only after MindRoom has cached a catalog for the active credential target.
-- Agent-initiated `reset_oauth_connection()` supports `user` and `user_agent` MCP credential scopes; reset shared or installation-level MCP connections from the authenticated dashboard.
+- Agent-initiated `reset_oauth_connection()` supports `shared`, `user`, and `user_agent` MCP credential scopes; shared resets require configured credential-management authority and a one-time browser confirmation link.
+- Reset installation-level unscoped MCP connections from the authenticated dashboard.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.
