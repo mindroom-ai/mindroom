@@ -40,7 +40,9 @@ logger = get_logger(__name__)
 agno_session_persistence_patch.install_patch()
 
 __all__ = [
+    "configure_state_engine_pragmas",
     "create_session_storage",
+    "create_state_engine",
     "create_state_storage",
     "get_agent_runtime_state_dbs",
     "get_agent_session",
@@ -89,7 +91,7 @@ def create_state_storage(
     )
 
 
-def _state_engine(db_file: str) -> Engine:
+def create_state_engine(db_file: str) -> Engine:
     """Build an engine that waits for state-database locks before failing."""
     return create_engine(
         f"sqlite:///{db_file}",
@@ -116,7 +118,7 @@ def _create_sqlite_state_storage(
         prompt_roles=prompt_roles or frozenset(),
         session_table=session_table,
         db_file=db_file,
-        db_engine=_state_engine(db_file),
+        db_engine=create_state_engine(db_file),
     )
     agno_session_persistence_patch._register_sync_session_storage(
         database,
@@ -129,7 +131,7 @@ def _create_sqlite_state_storage(
 _AGNO_CONNECT_LISTENER_NAME = "_set_sqlite_pragmas"
 
 
-def _replace_agno_connection_pragmas(engine: Engine) -> None:
+def configure_state_engine_pragmas(engine: Engine) -> None:
     """Keep rollback journaling on state databases despite Agno 3 forcing WAL.
 
     Agno's ``SqliteDb`` registers a connect listener that switches every
@@ -210,9 +212,9 @@ class _ConversationSqliteDb(SqliteDb):
     ``upsert_run``, a full read in ``get_session``, an owner guard on bulk
     session writes, and an atomic ``delete_runs``.
 
-    A 2.x database keeps its ``runs`` blob column. Agno merges that blob into
-    every read; ``delete_runs`` scrubs deleted ids out of it in the same
-    transaction as the row delete. Nothing else rewrites the blob.
+    Until background migration retires a 2.x ``runs`` blob, Agno merges it into
+    every read and ``delete_runs`` scrubs deleted ids from both stores in one
+    transaction. A blob that cannot be migrated keeps using this safe fallback.
     """
 
     def __init__(
@@ -225,7 +227,7 @@ class _ConversationSqliteDb(SqliteDb):
     ) -> None:
         super().__init__(session_table=session_table, db_file=db_file, db_engine=db_engine)
         self._prompt_roles = prompt_roles
-        _replace_agno_connection_pragmas(db_engine)
+        configure_state_engine_pragmas(db_engine)
 
     def get_session(
         self,
@@ -306,9 +308,9 @@ class _ConversationSqliteDb(SqliteDb):
                     frontier = [child for child in children if child not in wanted]
                     wanted.update(frontier)
                 sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
-            # --- 2.x legacy only: a sessions table that still has the ``runs`` blob column.
-            # Agno merges that blob into every read, so ids deleted above must leave it too.
-            # Goes away with the refuse-and-migrate gate (#1947).
+            # --- 2.x legacy only: a sessions table whose ``runs`` blob has not
+            # yet migrated (or was refused). Agno merges that blob into every
+            # read, so ids deleted above must leave it too.
             if sessions_table is None or "runs" not in sessions_table.c:
                 return
             rows = sess.execute(
@@ -366,7 +368,7 @@ class _ConversationSqliteDb(SqliteDb):
             )
 
 
-# --- 2.x legacy blob helpers. Only ``delete_runs`` above uses them; delete with #1947.
+# --- 2.x legacy blob helpers used by the safe fallback in ``delete_runs`` above.
 
 
 def _string_field(entry: object, key: str) -> str | None:

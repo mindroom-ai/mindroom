@@ -253,6 +253,13 @@ def _retry_tasks() -> list[asyncio.Task[Any]]:
     return [task for task in asyncio.all_tasks() if task.get_name() == "approval_startup_cleanup_retry"]
 
 
+def _mock_runtime_orchestrator() -> MagicMock:
+    """Create a lifecycle test double with the runtime readiness contract."""
+    orchestrator = MagicMock()
+    orchestrator._runtime_ready_event = asyncio.Event()
+    return orchestrator
+
+
 @contextmanager
 def _mock_approval_recovery(**kwargs: object) -> Iterator[AsyncMock]:
     recovery = AsyncMock(**kwargs)
@@ -385,7 +392,7 @@ class TestAgentBot(AgentBotTestBase):
         """Permanent startup errors should stop the process and surface the failure."""
         reset_runtime_state()
         blocking_event = asyncio.Event()
-        mock_orchestrator = MagicMock()
+        mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.start = AsyncMock(side_effect=PermanentMatrixStartupError("boom"))
         mock_orchestrator.stop = AsyncMock()
         mock_orchestrator.running = False
@@ -942,7 +949,7 @@ class TestAgentBot(AgentBotTestBase):
         events: list[str] = []
         orchestrator_cancelled = asyncio.Event()
         api_cancelled = asyncio.Event()
-        mock_orchestrator = MagicMock()
+        mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.knowledge_refresh_scheduler = None
         mock_orchestrator.stop = AsyncMock()
 
@@ -1022,7 +1029,7 @@ class TestAgentBot(AgentBotTestBase):
         api_completed = asyncio.Event()
         api_cancelled = asyncio.Event()
         start_blocker = asyncio.Event()
-        mock_orchestrator = MagicMock()
+        mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.knowledge_refresh_scheduler = None
         mock_orchestrator.stop = AsyncMock()
 
@@ -1086,7 +1093,7 @@ class TestAgentBot(AgentBotTestBase):
         """Regression coverage for API server signal shutdown not leaving the process half alive."""
         reset_runtime_state()
         start_released = asyncio.Event()
-        mock_orchestrator = MagicMock()
+        mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.knowledge_refresh_scheduler = None
 
         async def _start() -> None:
@@ -1189,7 +1196,7 @@ class TestAgentBot(AgentBotTestBase):
     async def test_orchestrator_main_fails_when_api_server_exits_unexpectedly(self, tmp_path: Path) -> None:
         """An unexpected API-server task failure should stop the top-level run non-silently."""
         reset_runtime_state()
-        mock_orchestrator = MagicMock()
+        mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.knowledge_refresh_scheduler = None
         mock_orchestrator.stop = AsyncMock()
         start_blocker = asyncio.Event()
@@ -1225,7 +1232,7 @@ class TestAgentBot(AgentBotTestBase):
         watched_paths: list[Path] = []
         config_watcher_ran = asyncio.Event()
         resolved_config_path = (tmp_path / "nested" / "config.yaml").resolve()
-        mock_orchestrator = MagicMock()
+        mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.config_path = resolved_config_path
         mock_orchestrator._require_config_path.return_value = resolved_config_path
         mock_orchestrator.stop = AsyncMock()
@@ -1274,7 +1281,7 @@ class TestAgentBot(AgentBotTestBase):
         runtime_storage = tmp_path / "runtime-storage"
         observed_logging_root: Path | None = None
         observed_credentials_root: Path | None = None
-        mock_orchestrator = MagicMock()
+        mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.start = AsyncMock(side_effect=RuntimeError("stop after storage capture"))
         mock_orchestrator.stop = AsyncMock()
 
@@ -1310,7 +1317,7 @@ class TestAgentBot(AgentBotTestBase):
         event_loop_thread_id = threading.get_ident()
         setup_thread_ids: list[int] = []
         events: list[str] = []
-        mock_orchestrator = MagicMock()
+        mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.start = AsyncMock(side_effect=RuntimeError("stop after setup"))
         mock_orchestrator.stop = AsyncMock()
         stall_detector = MagicMock()
@@ -1398,7 +1405,7 @@ class TestAgentBot(AgentBotTestBase):
     async def test_orchestrator_main_shuts_down_primary_worker_manager(self, tmp_path: Path) -> None:
         """The orchestrator should clear stale workers before startup and shut them down on exit."""
         reset_runtime_state()
-        mock_orchestrator = MagicMock()
+        mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.start = AsyncMock(side_effect=asyncio.CancelledError())
         mock_orchestrator.stop = AsyncMock()
         mock_orchestrator.running = False
@@ -1460,7 +1467,7 @@ class TestAgentBot(AgentBotTestBase):
     async def test_orchestrator_main_shuts_down_primary_worker_manager_when_stop_fails(self, tmp_path: Path) -> None:
         """Shutdown failures should still attempt primary worker manager shutdown."""
         reset_runtime_state()
-        mock_orchestrator = MagicMock()
+        mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.start = AsyncMock(side_effect=asyncio.CancelledError())
         mock_orchestrator.stop = AsyncMock(side_effect=RuntimeError("stop boom"))
         mock_orchestrator.running = False
