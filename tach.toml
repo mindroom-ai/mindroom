@@ -1784,6 +1784,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
     "mindroom.tool_approval",
+    "mindroom.thread_export.workspace_sync",
     "mindroom.workers.runtime",
 ]
 
@@ -2721,6 +2722,7 @@ visibility = [
     "mindroom.thread_export.policy",
     "mindroom.thread_export.selection",
     "mindroom.thread_export.service",
+    "mindroom.thread_export.workspace_sync",
 ]
 
 [[modules]]
@@ -2730,6 +2732,7 @@ visibility = [
     "mindroom.thread_export",
     "mindroom.thread_export.execution",
     "mindroom.thread_export.service",
+    "mindroom.thread_export.workspace_sync",
 ]
 
 [[modules]]
@@ -2756,6 +2759,7 @@ depends_on = [
 visibility = [
     "mindroom.thread_export.execution",
     "mindroom.thread_export.service",
+    "mindroom.thread_export.workspace_sync",
 ]
 
 [[modules]]
@@ -2768,6 +2772,7 @@ depends_on = [
 visibility = [
     "mindroom.thread_export.execution",
     "mindroom.thread_export.service",
+    "mindroom.thread_export.workspace_sync",
 ]
 
 [[modules]]
@@ -2796,6 +2801,22 @@ depends_on = [
     "mindroom.thread_export.selection",
     "mindroom.thread_export.storage",
 ]
+
+[[modules]]
+path = "mindroom.thread_export.workspace_sync"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.private_instance_identity",
+    "mindroom.thread_export.models",
+    "mindroom.thread_export.projected_history",
+    "mindroom.thread_export.selection",
+    "mindroom.thread_export.service",
+    "mindroom.thread_export.storage",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workspaces",
+]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.thread_tags"
@@ -4192,9 +4213,11 @@ from = ["mindroom.runtime_resolution"]
 
 [[interfaces]]
 expose = [
+    "PrivateInstance",
     "PrivateInstanceIdentity",
     "PrivateInstanceIdentityError",
     "load_private_instance_identity",
+    "private_instances_for_agent",
 ]
 from = ["mindroom.private_instance_identity"]
 
@@ -4743,7 +4766,7 @@ expose = [
     "build_worker_target_from_runtime_env",
     "get_tool_execution_identity",
     "private_instance_scope_root_path",
-    "private_instance_state_root_for_requester",
+    "private_instances_root_path",
     "parse_tool_execution_identity_payload",
     "require_worker_key_for_scope",
     "requires_explicit_private_agent_visibility",

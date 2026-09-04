@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import nio
+
     from mindroom.matrix.users import AgentMatrixUser
+    from mindroom.thread_export.projected_history import ProjectedThreadReader
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,15 @@ class ThreadExportGroup:
 
     rooms: tuple[ThreadExportRoom, ...]
     user: AgentMatrixUser
+
+
+@dataclass(frozen=True)
+class ThreadExportSource:
+    """Rooms readable through one live Matrix client and its projection view."""
+
+    client: nio.AsyncClient
+    reader: ProjectedThreadReader
+    rooms: tuple[ThreadExportRoom, ...]
 
 
 @dataclass(frozen=True)

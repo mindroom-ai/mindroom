@@ -192,6 +192,7 @@ Matrix sync callback
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
+| `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
 | `background_tasks.py` | Background task management for non-blocking operations |
 | `tool_system/events.py` | Tool-event formatting and metadata for Matrix messages |
 | `tool_system/declarations.py` | Leaf tool metadata enums and dataclasses shared by implementations and the runtime catalog |

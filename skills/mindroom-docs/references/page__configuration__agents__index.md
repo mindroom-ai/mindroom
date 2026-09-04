@@ -130,6 +130,10 @@ agents:
       reserve_tokens: 16384
       timeout_seconds: 600
 
+    # Keep <workspace>/thread_exports/ current with YAML exports of this agent's rooms
+    # (true enables the defaults; see Thread Exports below)
+    thread_exports: true
+
 ```
 
 ## Configuration Options
@@ -167,6 +171,7 @@ agents:
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
+| `thread_exports` | bool or object | `null` | Continuously export every thread from rooms this agent is joined to as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](#thread-exports)) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 See [Knowledge Bases](https://docs.mindroom.chat/knowledge/) for `mode: semantic` and `mode: files`.
@@ -558,6 +563,74 @@ For a `mind` agent with `private.per: user`, different users get different priva
 - Top-level `context_files` remain the shared workspace-relative mechanism used by single-user setups, including the default `mindroom config init` output.
 - Custom templates are fully supported.
 - The Mind-style filenames shown above are a convention, not a requirement, unless you choose to reference them in `private.context_files` or `private.knowledge.path`.
+
+## Thread Exports
+
+`thread_exports` keeps a YAML copy of the agent's conversation history inside its workspace, so its `file` and `shell` tools can grep past threads without any Matrix API access.
+
+```yaml
+agents:
+  code:
+    thread_exports: true            # defaults below
+  research:
+    thread_exports:
+      invited_rooms: false          # config rooms only
+      private_room_scope: owner     # private agents only
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `invited_rooms` | bool | `true` | Also export user-created rooms the agent joined through invites. Current membership is always required |
+| `private_room_scope` | string | `"owner_and_agent"` | Private agents only. `owner_and_agent` exports rooms where both the requester and the agent are joined; `owner` exports every room the requester is joined to |
+
+Exports land at `<storage_root>/agents/<agent>/workspace/thread_exports/<urlencoded room key>/<urlencoded thread id>.yaml`, the same layout `mindroom threads export` writes.
+Inside the agent's own tools that directory is `$MINDROOM_AGENT_WORKSPACE/thread_exports/`.
+Each thread file holds `version`, `room` metadata, `thread` metadata including the latest thread summary as `thread.summary`, and a `messages` list.
+Each room directory also holds an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
+
+MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, batching everything that arrives in that window into one pass, and runs one full pass at startup and after every config reload.
+A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
+A full pass that could export no room at all skips that directory-wide removal, because an empty result cannot be told apart from a failed one; the same guard and its manual-cleanup guidance are described under [`threads export`](https://docs.mindroom.chat/cli/#threads-export).
+Files are rewritten only when a thread's content changed.
+Agents may edit or delete their exported files; deleted files return on the next pass that touches the room.
+Thread bodies come from the event-journal projection the running bots already maintain, so a pass costs no Matrix history call for threads a bot has seen.
+
+Shared agents export only rooms where the agent's own Matrix account is currently joined.
+Private agents (`private:`) get one export tree per materialized instance under `<storage_root>/private_instances/<scope-key>/<agent>/<private root>/thread_exports/`, scoped to that requester's current room memberships, so one requester's private workspace never accumulates other users' conversations.
+A membership lookup failure blocks new writes for that room and leaves existing files in place until a successful lookup proves that access was revoked.
+
+### Semantic Search Over Exports
+
+The exports are plain YAML, so file-aware tools already cover keyword search.
+With an embedder configured (`memory.embedder`), point a knowledge base at the export directory for semantic search through `search_knowledge_base`.
+
+```yaml
+knowledge_bases:
+  code_threads:
+    path: ./mindroom_data/agents/code/workspace/thread_exports
+    description: Exported Matrix conversation history for the code agent
+    exclude_patterns: ["*/index.json"]
+agents:
+  code:
+    thread_exports: true
+    knowledge_bases: [code_threads]
+```
+
+For a private agent, index the private-root-relative path instead:
+
+```yaml
+agents:
+  secret:
+    thread_exports: true
+    private:
+      per: user
+      knowledge:
+        path: thread_exports
+        description: Your exported conversation history
+```
+
+The active thread's file rewrites on every message, so a watching semantic index re-embeds that thread per message.
+This is negligible with a local embedder but costs real money with paid embedding APIs in busy rooms.
 
 ## Thread Mode Resolution
 

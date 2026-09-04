@@ -11,9 +11,11 @@ import pytest
 
 from mindroom import private_instance_identity_store
 from mindroom.private_instance_identity import (
+    PrivateInstance,
     PrivateInstanceIdentity,
     PrivateInstanceIdentityError,
     load_private_instance_identity,
+    private_instances_for_agent,
 )
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
@@ -381,3 +383,39 @@ def test_load_rejects_duplicate_json_record_fields(tmp_path: Path) -> None:
 
     with pytest.raises(PrivateInstanceIdentityError):
         load_private_instance_identity(tmp_path, scope_root)
+
+
+def test_private_instances_for_agent_lists_owned_roots_and_flags_the_rest(tmp_path: Path) -> None:
+    """Every on-disk root is reported; only a valid same-scope record yields an owner."""
+    owned_key = "v1:tenant-a:user:requester-a"
+    ensure_private_instance_identity(tmp_path, worker_key=owned_key, requester_id="requester-a")
+    owned_root = _scope_root(tmp_path, owned_key) / "secret"
+    owned_root.mkdir()
+    other_scope_key = "v1:tenant-a:user_agent:requester-b:secret"
+    ensure_private_instance_identity(tmp_path, worker_key=other_scope_key, requester_id="requester-b")
+    other_scope_root = _scope_root(tmp_path, other_scope_key) / "secret"
+    other_scope_root.mkdir()
+    recordless_root = tmp_path / "private_instances" / "ghost-0000000000000000" / "secret"
+    recordless_root.mkdir(parents=True)
+    (tmp_path / "private_instances" / "ghost-0000000000000000" / "other_agent").mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    (tmp_path / "private_instances" / "linked").symlink_to(external, target_is_directory=True)
+
+    instances = private_instances_for_agent(tmp_path, "secret", "user")
+
+    assert instances == tuple(
+        sorted(
+            (
+                PrivateInstance(owned_root, "requester-a"),
+                PrivateInstance(other_scope_root, None),
+                PrivateInstance(recordless_root, None),
+            ),
+            key=lambda instance: instance.state_root,
+        ),
+    )
+
+
+def test_private_instances_for_agent_without_instances_root(tmp_path: Path) -> None:
+    """A storage root that never materialized a private instance has nothing to report."""
+    assert private_instances_for_agent(tmp_path, "secret", "user") == ()
