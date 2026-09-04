@@ -6,7 +6,6 @@
   "mindroom-ai/ping-hook-plugin",
   "mindroom-ai/restart-resume-plugin",
   "mindroom-ai/shell-guard-plugin",
-  "mindroom-ai/thread-export-plugin",
   "mindroom-ai/thread-goal-plugin",
   "mindroom-ai/thread-snooze-plugin",
   "mindroom-ai/voice-enrich-plugin"

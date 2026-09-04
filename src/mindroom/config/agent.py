@@ -180,6 +180,28 @@ class AgentPrivateConfig(BaseModel):
         return [_validate_safe_relative_path(path, field_name="private.context_files") for path in value]
 
 
+_PrivateThreadExportRoomScope = Literal["owner", "owner_and_agent"]
+
+
+class AgentThreadExportConfig(BaseModel):
+    """Continuous YAML thread exports into this agent's workspace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    invited_rooms: bool = Field(
+        default=True,
+        description=(
+            "Also export user-created rooms the agent joined through invites; current membership is always required"
+        ),
+    )
+    private_room_scope: _PrivateThreadExportRoomScope = Field(
+        default="owner_and_agent",
+        description=(
+            "Private agents only: require the owner alone, or both owner and agent, to be joined to an exported room"
+        ),
+    )
+
+
 class AgentConfig(BaseModel):
     """Configuration for a single agent."""
 
@@ -234,6 +256,13 @@ class AgentConfig(BaseModel):
     private: AgentPrivateConfig | None = Field(
         default=None,
         description="Optional requester-private state materialized per private.per partition",
+    )
+    thread_exports: AgentThreadExportConfig | None = Field(
+        default=None,
+        description=(
+            "Keep <workspace>/thread_exports/ current with YAML exports of every thread in rooms this agent is "
+            "joined to; true enables the defaults"
+        ),
     )
     knowledge_bases: list[str] = Field(
         default_factory=list,
@@ -366,6 +395,16 @@ class AgentConfig(BaseModel):
                 )
                 raise ValueError(msg)
         return data
+
+    @field_validator("thread_exports", mode="before")
+    @classmethod
+    def normalize_thread_exports(cls, value: object) -> object:
+        """Accept ``true``/``false`` as enable-with-defaults/disable."""
+        if value is True:
+            return AgentThreadExportConfig()
+        if value is False:
+            return None
+        return value
 
     @field_validator("tools")
     @classmethod

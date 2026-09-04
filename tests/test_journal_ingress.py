@@ -1328,6 +1328,51 @@ class TestDurableAdmission:
         assert await alice.pending() == ()
 
 
+class TestRoomActivity:
+    """Admission tells a consumer which rooms changed, and nothing more."""
+
+    async def test_conversation_events_report_their_room_once_each(self, alice: PrincipalStore) -> None:
+        """Messages, echoes, and redactions each name their room, whatever their class."""
+        seen: list[str] = []
+        ingress = JournalIngress(store=alice, self_sender=BOT, on_room_activity=seen.append)
+
+        await ingress._admit(room(), text_event("$hello"), nio.TimelineEventProvenance.LIVE)
+        await ingress._admit(room(), bot_event("$answer"), nio.TimelineEventProvenance.HISTORY)
+        await ingress._admit(room(), redaction_event("$gone", "$hello"), nio.TimelineEventProvenance.LIVE)
+
+        assert seen == [ROOM, ROOM, ROOM]
+
+    @pytest.mark.parametrize("provenance", list(nio.TimelineEventProvenance))
+    async def test_membership_changes_report_their_room_unless_cold_history(
+        self,
+        alice: PrincipalStore,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        """Every current provenance announces a membership change, admitted or not; cold history never does.
+
+        Only the router admits other people's membership, so an agent alone in
+        an invited room relies on this to learn that a reader left.
+        """
+        seen: list[str] = []
+        ingress = JournalIngress(store=alice, self_sender=BOT, on_room_activity=seen.append)
+
+        await ingress._admit(room(), member_event("$member"), provenance)
+
+        assert seen == ([] if provenance is nio.TimelineEventProvenance.HISTORY else [ROOM])
+        assert not await alice.pending()
+
+    async def test_reactions_and_redelivered_events_stay_silent(self, alice: PrincipalStore) -> None:
+        """A reaction is not conversation, and a redelivered event changed nothing."""
+        seen: list[str] = []
+        ingress = JournalIngress(store=alice, self_sender=BOT, on_room_activity=seen.append)
+
+        await ingress._admit(room(), reaction_event("$react"), nio.TimelineEventProvenance.LIVE)
+        await ingress._admit(room(), text_event("$hello"), nio.TimelineEventProvenance.LIVE)
+        await ingress._admit(room(), text_event("$hello"), nio.TimelineEventProvenance.LIVE)
+
+        assert seen == [ROOM]
+
+
 class TestScheduleTriggerAdmission:
     """Only the exact silent schedule event becomes durable turn work."""
 

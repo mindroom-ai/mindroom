@@ -13,7 +13,9 @@ from mindroom.file_locks import advisory_file_lock
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
+    agent_state_root_path,
     private_instance_scope_root_path,
+    private_instances_root_path,
     resolve_worker_key,
     shared_storage_root,
 )
@@ -38,6 +40,56 @@ class PrivateInstanceIdentity:
 
 class PrivateInstanceIdentityError(ValueError):
     """Raised when a private-instance identity record is invalid or conflicting."""
+
+
+@dataclass(frozen=True)
+class PrivateInstance:
+    """One materialized private-instance root and the requester its scope record names.
+
+    ``requester_id`` is ``None`` when the record is missing, unreadable, invalid, or
+    belongs to a different worker scope than the agent runs under today; nothing can
+    execute as such an instance.
+    """
+
+    state_root: Path
+    requester_id: str | None
+
+
+def private_instances_for_agent(
+    base_storage_path: Path,
+    agent_name: str,
+    worker_scope: WorkerScope,
+) -> tuple[PrivateInstance, ...]:
+    """Return every private-instance root that exists on disk for one agent, sorted by path."""
+    trusted_base_path = shared_storage_root(base_storage_path)
+    instances_root = private_instances_root_path(trusted_base_path)
+    if not instances_root.is_dir() or instances_root.is_symlink():
+        return ()
+    instance_dir_names = {agent_name, agent_state_root_path(trusted_base_path, agent_name).name}
+    instances = [
+        PrivateInstance(state_root, _instance_requester(trusted_base_path, scope_root, worker_scope))
+        for scope_root in instances_root.iterdir()
+        if scope_root.is_dir() and not scope_root.is_symlink()
+        for state_root in scope_root.iterdir()
+        if state_root.is_dir() and not state_root.is_symlink() and state_root.name in instance_dir_names
+    ]
+    return tuple(sorted(instances, key=lambda instance: instance.state_root))
+
+
+def _instance_requester(trusted_base_path: Path, scope_root: Path, worker_scope: WorkerScope) -> str | None:
+    """Return the requester one scope record names, when it is valid for ``worker_scope``."""
+    try:
+        identity = load_private_instance_identity(trusted_base_path, scope_root)
+    except (PrivateInstanceIdentityError, OSError):
+        return None
+    if identity is None or _worker_key_scope(identity.worker_key) != worker_scope:
+        return None
+    return identity.requester_id
+
+
+def _worker_key_scope(worker_key: str) -> str:
+    """Return the worker-scope segment of a validated ``v1:<tenant>:<scope>:...`` key."""
+    return worker_key.split(":")[2]
 
 
 def load_private_instance_identity(base_storage_path: Path, scope_root: Path) -> PrivateInstanceIdentity | None:
@@ -214,7 +266,7 @@ def _reconstruct_worker_key(worker_key: str, requester_id: str) -> str:
     parts = worker_key.split(":")
     if len(parts) < 4 or parts[0] != "v1" or not parts[1]:
         _raise_invalid_record("has an invalid worker key")
-    tenant_id, scope = parts[1], parts[2]
+    tenant_id, scope = parts[1], _worker_key_scope(worker_key)
     if scope == "user":
         worker_scope: WorkerScope = "user"
         agent_name = "private-instance"

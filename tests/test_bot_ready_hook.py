@@ -1197,7 +1197,7 @@ async def test_a_kick_after_a_rejoin_is_not_absorbed_by_the_earlier_leaves_repor
     user_id = bot.agent_user.user_id
     await bot._membership_fence.fence_local_departure(room_id)
     await bot._membership_fence.note_membership_restarted(room_id)
-    epoch_after_rejoin = await bot._journal_principal().membership_epoch(room_id)
+    epoch_after_rejoin = await bot.journal_principal().membership_epoch(room_id)
     response = nio.SyncResponse.from_dict(
         {
             "next_batch": "s-after-kick",
@@ -1231,7 +1231,7 @@ async def test_a_kick_after_a_rejoin_is_not_absorbed_by_the_earlier_leaves_repor
 
     await bot._apply_own_room_membership_from_sync(response)
 
-    assert await bot._journal_principal().membership_epoch(room_id) == epoch_after_rejoin + 1
+    assert await bot.journal_principal().membership_epoch(room_id) == epoch_after_rejoin + 1
 
 
 @pytest.mark.asyncio
@@ -1246,7 +1246,7 @@ async def test_replaying_one_sync_response_fences_its_departures_once(
     await bot._apply_own_room_membership_from_sync(response)
     await bot._apply_own_room_membership_from_sync(response)
 
-    assert await bot._journal_principal().membership_epoch(room_id) == 1
+    assert await bot.journal_principal().membership_epoch(room_id) == 1
 
 
 @pytest.mark.asyncio
@@ -1258,10 +1258,10 @@ async def test_replayed_truncated_leave_cannot_fence_a_rejoined_membership(tmp_p
 
     await bot._apply_own_room_membership_from_sync(response)
     await bot._membership_fence.note_membership_restarted(room_id)
-    epoch_after_rejoin = await bot._journal_principal().membership_epoch(room_id)
+    epoch_after_rejoin = await bot.journal_principal().membership_epoch(room_id)
     await bot._apply_own_room_membership_from_sync(response)
 
-    assert await bot._journal_principal().membership_epoch(room_id) == epoch_after_rejoin
+    assert await bot.journal_principal().membership_epoch(room_id) == epoch_after_rejoin
 
 
 @pytest.mark.asyncio
@@ -1301,11 +1301,11 @@ async def test_replayed_departure_cannot_leave_a_confirmed_join_fenced(tmp_path:
     )
     await bot._membership_fence.fence_local_departure(room_id)
     await bot._membership_fence.note_membership_restarted(room_id)
-    epoch_after_rejoin = await bot._journal_principal().membership_epoch(room_id)
+    epoch_after_rejoin = await bot.journal_principal().membership_epoch(room_id)
     await bot._apply_own_room_membership_from_sync(response)
     await bot._apply_own_room_membership_from_sync(response)
 
-    assert await bot._journal_principal().membership_epoch(room_id) == epoch_after_rejoin
+    assert await bot.journal_principal().membership_epoch(room_id) == epoch_after_rejoin
 
 
 @pytest.mark.asyncio
@@ -1360,7 +1360,7 @@ async def test_joined_sync_timeline_departure_fences_even_when_a_rejoin_follows(
     )
     await bot._apply_own_room_membership_from_sync(response)
 
-    principal = bot._journal_principal()
+    principal = bot.journal_principal()
     assert await principal.membership_epoch(room_id) == 1
     assert await membership_epoch_is_active(principal, room_id, 1)
 

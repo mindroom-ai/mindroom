@@ -22,10 +22,16 @@ from mindroom.event_journal_open import (
     write_event_journal_binding,
 )
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
-from mindroom.thread_export import ThreadExportTarget, export_threads_once, export_threads_to_targets_once
+from mindroom.thread_export import (
+    ThreadExportSource,
+    ThreadExportTarget,
+    export_threads_once,
+    export_threads_to_sources,
+    export_threads_to_targets_once,
+)
 from mindroom.thread_export import service as thread_export_service
 from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportGroupFailure, ThreadExportRoom
-from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME
+from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME, _ROOT_MARKER_TEXT
 from tests.conftest import runtime_paths_for
 from tests.thread_export_helpers import (
     mark_thread_export_root,
@@ -703,3 +709,58 @@ async def test_the_export_reader_is_bound_to_the_principal_the_running_bot_write
     # Both halves answer for one principal, so proving the reader is enough.
     assert projection.completeness is projection.reader.store
     assert projection.reader.hydrator.self_sender == "@agent_router:localhost"
+
+
+@pytest.mark.asyncio
+async def test_export_threads_to_sources_exports_each_source_and_reconciles(tmp_path: Path) -> None:
+    """The in-process path validates targets, records unreadable rooms, and reconciles a full pass."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    output_dir = tmp_path / "out"
+    lobby = ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="", name="Lobby")
+    dev = ThreadExportRoom(key="dev", room_id="!dev:localhost", alias="", name="Dev")
+    source = ThreadExportSource(client=Mock(), reader=Mock(), rooms=(lobby,))
+
+    with patch(
+        "mindroom.thread_export.service.export_threads_for_targets_for_client",
+        new=AsyncMock(side_effect=successful_group_result),
+    ) as export_source:
+        stats = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths,
+            sources=(source,),
+            targets=(ThreadExportTarget(output_dir=output_dir),),
+            unreadable_rooms=(((dev,), "Bot 'code' is not running"),),
+            full_pass=True,
+        )
+
+    export_source.assert_awaited_once()
+    assert export_source.await_args is not None
+    assert export_source.await_args.kwargs["client"] is source.client
+    assert export_source.await_args.kwargs["rooms"] == (lobby,)
+    assert stats[0].rooms_exported == 1
+    assert [failure.error for failure in stats[0].failed_items] == ["Bot 'code' is not running"]
+    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+
+
+@pytest.mark.asyncio
+async def test_export_threads_to_sources_skips_matrix_work_without_valid_targets(tmp_path: Path) -> None:
+    """A target that fails validation is reported and never triggers a source read."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    source = ThreadExportSource(client=Mock(), reader=Mock(), rooms=())
+
+    with patch(
+        "mindroom.thread_export.service.export_threads_for_targets_for_client",
+        new=AsyncMock(side_effect=successful_group_result),
+    ) as export_source:
+        stats = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths,
+            sources=(source,),
+            targets=(ThreadExportTarget(output_dir=tmp_path / "trailing" / ".."),),
+            full_pass=False,
+        )
+
+    export_source.assert_not_awaited()
+    assert stats[0].failures == 1
