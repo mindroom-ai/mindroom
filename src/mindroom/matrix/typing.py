@@ -12,7 +12,7 @@ import nio
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Mapping
 
 logger = get_logger(__name__)
 
@@ -26,6 +26,7 @@ class _TypingState:
     references: int
     timeout_seconds: int
     started: asyncio.Future[None]
+    log_context: dict[str, object]
     refresh_task: asyncio.Task[None] | None = None
     stopping: asyncio.Future[None] | None = None
     # Set when a joiner raises ``timeout_seconds``. The refresh loop waits on it
@@ -37,11 +38,23 @@ class _TypingState:
 _ACTIVE_TYPING: dict[tuple[nio.AsyncClient, str], _TypingState] = {}
 
 
+def _typing_log_fields(
+    log_context: Mapping[str, object],
+    *,
+    room_id: str,
+    typing: bool,
+) -> dict[str, object]:
+    """Return stable response attribution for one typing event."""
+    return {**log_context, "room_id": room_id, "typing": typing}
+
+
 async def _set_typing(
     client: nio.AsyncClient,
     room_id: str,
-    typing: bool = True,
-    timeout_seconds: int = 30,
+    *,
+    typing: bool,
+    timeout_seconds: int,
+    log_context: Mapping[str, object],
 ) -> None:
     """Set typing status for a user in a room.
 
@@ -50,19 +63,20 @@ async def _set_typing(
         room_id: Room to show typing indicator in
         typing: Whether to show or hide typing indicator
         timeout_seconds: How long the typing indicator should last (in seconds)
+        log_context: Stable attribution for this typing lease
 
     """
     timeout_ms = timeout_seconds * 1000
     response = await client.room_typing(room_id, typing, timeout_ms)
+    log_fields = _typing_log_fields(log_context, room_id=room_id, typing=typing)
     if isinstance(response, nio.RoomTypingError):
         logger.warning(
             "Failed to set typing status",
-            room_id=room_id,
-            typing=typing,
             error=response.message,
+            **log_fields,
         )
     else:
-        logger.debug("Set typing status", room_id=room_id, typing=typing)
+        logger.debug("Set typing status", **log_fields)
 
 
 async def _refresh_typing(
@@ -85,13 +99,23 @@ async def _refresh_typing(
         state.timeout_raised.clear()
         sent_timeout_seconds = state.timeout_seconds
         try:
-            await _set_typing(client, room_id, True, sent_timeout_seconds)
+            await _set_typing(
+                client,
+                room_id,
+                typing=True,
+                timeout_seconds=sent_timeout_seconds,
+                log_context=state.log_context,
+            )
         except asyncio.CancelledError:
             if not state.started.done():
                 state.started.cancel()
             raise
         except Exception:
-            logger.warning("Failed to set typing indicator", room_id=room_id, exc_info=True)
+            logger.warning(
+                "Failed to set typing indicator",
+                **_typing_log_fields(state.log_context, room_id=room_id, typing=True),
+                exc_info=True,
+            )
         if not state.started.done():
             state.started.set_result(None)
         with suppress(TimeoutError):
@@ -106,6 +130,7 @@ async def _acquire_typing_state(
     room_id: str,
     *,
     timeout_seconds: int,
+    log_context: Mapping[str, object],
 ) -> tuple[tuple[nio.AsyncClient, str], _TypingState]:
     """Acquire one process-local typing lease after any prior stop completes."""
     key = (client, room_id)
@@ -124,6 +149,7 @@ async def _acquire_typing_state(
         references=1,
         timeout_seconds=timeout_seconds,
         started=started,
+        log_context=dict(log_context),
     )
     state.refresh_task = asyncio.create_task(
         _refresh_typing(
@@ -156,9 +182,19 @@ async def _release_typing_state(
         await refresh_task
     client, room_id = key
     try:
-        await _set_typing(client, room_id, False, state.timeout_seconds)
+        await _set_typing(
+            client,
+            room_id,
+            typing=False,
+            timeout_seconds=state.timeout_seconds,
+            log_context=state.log_context,
+        )
     except Exception:
-        logger.warning("Failed to stop typing indicator", room_id=room_id, exc_info=True)
+        logger.warning(
+            "Failed to stop typing indicator",
+            **_typing_log_fields(state.log_context, room_id=room_id, typing=False),
+            exc_info=True,
+        )
     finally:
         if _ACTIVE_TYPING.get(key) is state:
             del _ACTIVE_TYPING[key]
@@ -170,11 +206,13 @@ async def typing_indicator(
     client: nio.AsyncClient,
     room_id: str,
     timeout_seconds: int = 30,
+    *,
+    log_context: Mapping[str, object],
 ) -> AsyncGenerator[None, None]:
     """Context manager for showing typing indicator while processing.
 
     Usage:
-        async with typing_indicator(client, room_id):
+        async with typing_indicator(client, room_id, log_context={}):
             # Do work here - typing indicator shown
             response = await generate_response()
         # Typing indicator automatically stopped
@@ -183,9 +221,15 @@ async def typing_indicator(
         client: Matrix client instance
         room_id: Room to show typing indicator in
         timeout_seconds: How long each typing notification lasts
+        log_context: Stable response attribution for typing log events
 
     """
-    key, state = await _acquire_typing_state(client, room_id, timeout_seconds=timeout_seconds)
+    key, state = await _acquire_typing_state(
+        client,
+        room_id,
+        timeout_seconds=timeout_seconds,
+        log_context=log_context,
+    )
     try:
         await asyncio.shield(state.started)
         yield
