@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -117,3 +118,38 @@ async def test_sync_without_config_is_a_no_op(tmp_path: Path) -> None:
     await coordinator.sync()
 
     assert coordinator._runner is None
+
+
+async def test_reconcile_queues_a_full_pass_only_while_running(tmp_path: Path) -> None:
+    """Bots starting after ``sync`` still get their startup pass."""
+    config = _config(tmp_path, enabled=True)
+    coordinator = _coordinator(config, config)
+
+    coordinator.reconcile()
+
+    with (
+        patch.object(WorkspaceThreadExportRunner, "run", _idle_until_stopped),
+        patch.object(WorkspaceThreadExportRunner, "queue_full_pass", autospec=True) as queue_full_pass,
+    ):
+        await coordinator.sync()
+        coordinator.reconcile()
+        await coordinator.stop()
+
+    assert queue_full_pass.call_count == 2
+
+
+async def test_stop_cancels_a_pass_in_flight(tmp_path: Path) -> None:
+    """Shutdown does not wait for a long export pass to finish."""
+    config = _config(tmp_path, enabled=True)
+    coordinator = _coordinator(config, config)
+
+    async def _stuck(_self: WorkspaceThreadExportRunner) -> None:
+        await asyncio.Event().wait()
+
+    with patch.object(WorkspaceThreadExportRunner, "run", _stuck):
+        await coordinator.sync()
+        task = coordinator._task
+        assert task is not None
+        await asyncio.wait_for(coordinator.stop(), timeout=5)
+
+    assert task.cancelled()

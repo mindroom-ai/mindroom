@@ -517,6 +517,7 @@ class _MultiAgentOrchestrator:
         for bot in bots:
             self._bind_response_admission_gate(bot)
         self._configure_approval_store_transport()
+        self._thread_export_runtime.reconcile()
 
     async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
         """Run startup room setup, then publish trigger delivery runtime."""

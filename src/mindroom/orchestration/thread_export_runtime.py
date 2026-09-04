@@ -49,7 +49,7 @@ class ThreadExportRuntimeCoordinator:
         self._runner.queue_full_pass()
 
     async def stop(self) -> None:
-        """Stop the runner if running."""
+        """Stop the runner, abandoning a pass in flight; every write it makes is atomic."""
         runner = self._runner
         task = self._task
         self._runner = None
@@ -57,7 +57,13 @@ class ThreadExportRuntimeCoordinator:
         if runner is not None:
             runner.stop()
         if task is not None:
+            task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+    def reconcile(self) -> None:
+        """Queue one full pass, for when bots just started and can now be read."""
+        if self._runner is not None:
+            self._runner.queue_full_pass()
 
     def mark_room_activity(self, room_id: str) -> None:
         """Queue one room for re-export when exports are enabled."""
