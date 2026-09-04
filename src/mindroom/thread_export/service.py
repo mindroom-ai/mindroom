@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.users import AgentMatrixUser
 
-type UnreadableRooms = Sequence[tuple[Sequence[ThreadExportRoom], str]]
+type _UnreadableRooms = Sequence[tuple[Sequence[ThreadExportRoom], str]]
 
 
 logger = get_logger(__name__)
@@ -237,7 +237,7 @@ async def _export_sources(
     config: Config,
     runtime_paths: RuntimePaths,
     accumulators: Sequence[ThreadExportAccumulator],
-    unreadable_rooms: UnreadableRooms,
+    unreadable_rooms: _UnreadableRooms,
     full_pass: bool,
     max_thread_roots: int,
 ) -> None:
@@ -262,7 +262,7 @@ async def export_threads_to_sources(
     runtime_paths: RuntimePaths,
     sources: Sequence[ThreadExportSource],
     targets: Sequence[ThreadExportTarget],
-    unreadable_rooms: UnreadableRooms = (),
+    unreadable_rooms: _UnreadableRooms = (),
     full_pass: bool,
     max_thread_roots: int = 2000,
 ) -> tuple[ThreadExportStats, ...]:

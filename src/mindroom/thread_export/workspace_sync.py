@@ -10,7 +10,6 @@ and target discovery runs off it here.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -30,7 +29,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     import nio
@@ -44,9 +43,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-WORKSPACE_EXPORT_DIRNAME = "thread_exports"
-PRIVATE_INSTANCES_DIRNAME = "private_instances"
-DEBOUNCE_SECONDS = 2.0
+_WORKSPACE_EXPORT_DIRNAME = "thread_exports"
+_PRIVATE_INSTANCES_DIRNAME = "private_instances"
+_DEBOUNCE_SECONDS = 2.0
 
 
 class ThreadExportBot(Protocol):
@@ -56,9 +55,13 @@ class ThreadExportBot(Protocol):
     client: nio.AsyncClient | None
 
     @property
-    def matrix_id(self) -> MatrixID: ...
+    def matrix_id(self) -> MatrixID:
+        """Return the bot's Matrix identity."""
+        ...
 
-    def journal_principal(self) -> PrincipalStore: ...
+    def journal_principal(self) -> PrincipalStore:
+        """Return the bot's principal-bound projection view."""
+        ...
 
 
 def enabled_thread_export_agents(config: Config) -> dict[str, AgentThreadExportConfig]:
@@ -73,7 +76,7 @@ class WorkspaceThreadExportDeps:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], ThreadExportBot | None]
-    debounce_seconds: float = DEBOUNCE_SECONDS
+    debounce_seconds: float = _DEBOUNCE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -118,9 +121,9 @@ class WorkspaceThreadExportRunner:
                 return
             if self._deps.debounce_seconds > 0:
                 await asyncio.sleep(self._deps.debounce_seconds)
-            await self.run_pass_once()
+            await self._run_pass_once()
 
-    async def run_pass_once(self) -> None:
+    async def _run_pass_once(self) -> None:
         """Consume the pending work and run one pass; requeue it when nothing could be read yet."""
         full_pass, room_ids = self._full_pass_pending, frozenset(self._pending_room_ids)
         self._full_pass_pending = False
@@ -198,7 +201,7 @@ class WorkspaceThreadExportRunner:
 def _source_for_bot(bot: ThreadExportBot, rooms: tuple[ThreadExportRoom, ...], config: Config) -> ThreadExportSource:
     """Read ``rooms`` through one running bot's client and projection view."""
     client = bot.client
-    assert client is not None  # noqa: S101 - _ready_bot checked this
+    assert client is not None
     return ThreadExportSource(
         client=client,
         reader=export_conversation_reader(
@@ -278,7 +281,7 @@ def _shared_target(
 
 
 def _shared_export_dir(runtime_paths: RuntimePaths, agent_name: str) -> Path:
-    return agent_workspace_root_path(runtime_paths.storage_root, agent_name) / WORKSPACE_EXPORT_DIRNAME
+    return agent_workspace_root_path(runtime_paths.storage_root, agent_name) / _WORKSPACE_EXPORT_DIRNAME
 
 
 def _private_targets(
@@ -318,7 +321,7 @@ def _private_targets(
 
 def _private_instance_state_roots(storage_root: Path, agent_name: str) -> tuple[Path, ...]:
     """Return existing private-instance state roots for one private agent."""
-    instances_root = storage_root / PRIVATE_INSTANCES_DIRNAME
+    instances_root = storage_root / _PRIVATE_INSTANCES_DIRNAME
     if not instances_root.is_dir() or instances_root.is_symlink():
         return ()
     instance_dir_names = {agent_name, agent_state_root_path(storage_root, agent_name).name}
@@ -341,7 +344,7 @@ def _private_instance_owner(
 ) -> str | None:
     """Return the requester the core identity record names, when it owns exactly this root."""
     private = config.agents[agent_name].private
-    assert private is not None  # noqa: S101 - callers only pass private agents
+    assert private is not None
     try:
         identity = load_private_instance_identity(runtime_paths.storage_root, state_root.parent)
     except PrivateInstanceIdentityError:
@@ -379,7 +382,7 @@ def _private_export_dir(
         return None
     if workspace is None:
         return None
-    return workspace.lexical_root / WORKSPACE_EXPORT_DIRNAME
+    return workspace.lexical_root / _WORKSPACE_EXPORT_DIRNAME
 
 
 def _clear_export_tree(runtime_paths: RuntimePaths, output_dir: Path) -> None:

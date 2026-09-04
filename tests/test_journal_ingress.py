@@ -1332,6 +1332,7 @@ class TestRoomActivity:
     """Admission tells a consumer which rooms changed, and nothing more."""
 
     async def test_conversation_events_report_their_room_once_each(self, alice: PrincipalStore) -> None:
+        """Messages, echoes, and redactions each name their room, whatever their class."""
         seen: list[str] = []
         ingress = JournalIngress(store=alice, self_sender=BOT, on_room_activity=seen.append)
 
@@ -1342,6 +1343,7 @@ class TestRoomActivity:
         assert seen == [ROOM, ROOM, ROOM]
 
     async def test_reactions_and_redelivered_events_stay_silent(self, alice: PrincipalStore) -> None:
+        """A reaction is not conversation, and a redelivered event changed nothing."""
         seen: list[str] = []
         ingress = JournalIngress(store=alice, self_sender=BOT, on_room_activity=seen.append)
 

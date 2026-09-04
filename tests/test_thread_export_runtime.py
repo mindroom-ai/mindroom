@@ -49,6 +49,7 @@ async def _idle_until_stopped(self: WorkspaceThreadExportRunner) -> None:
 
 
 async def test_sync_starts_runner_and_queues_full_pass_when_an_agent_enables_exports(tmp_path: Path) -> None:
+    """Sync starts runner and queues full pass when an agent enables exports."""
     config = _config(tmp_path, enabled=True)
     coordinator = _coordinator(config, config)
 
@@ -70,6 +71,7 @@ async def test_sync_starts_runner_and_queues_full_pass_when_an_agent_enables_exp
 
 
 async def test_sync_stops_runner_when_no_agent_enables_exports(tmp_path: Path) -> None:
+    """Sync stops runner when no agent enables exports."""
     enabled = _config(tmp_path, enabled=True)
     disabled = _config(tmp_path, enabled=False)
     active = enabled
@@ -90,6 +92,7 @@ async def test_sync_stops_runner_when_no_agent_enables_exports(tmp_path: Path) -
 
 
 async def test_mark_room_activity_is_ignored_while_stopped(tmp_path: Path) -> None:
+    """Mark room activity is ignored while stopped."""
     config = _config(tmp_path, enabled=True)
     coordinator = _coordinator(config, config)
 
@@ -108,6 +111,7 @@ async def test_mark_room_activity_is_ignored_while_stopped(tmp_path: Path) -> No
 
 
 async def test_sync_without_config_is_a_no_op(tmp_path: Path) -> None:
+    """Sync without config is a no op."""
     coordinator = _coordinator(None, _config(tmp_path, enabled=True))
 
     await coordinator.sync()

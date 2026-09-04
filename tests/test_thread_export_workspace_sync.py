@@ -16,7 +16,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportRoom, ThreadExportTarget
 from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME, write_thread_payload
 from mindroom.thread_export.workspace_sync import (
-    WORKSPACE_EXPORT_DIRNAME,
+    _WORKSPACE_EXPORT_DIRNAME,
     ThreadExportBot,
     WorkspaceThreadExportDeps,
     WorkspaceThreadExportRunner,
@@ -126,6 +126,7 @@ def _materialize_private_instance(config: Config, runtime_paths: RuntimePaths, r
 
 
 def test_enabled_agents_are_those_with_the_setting(tmp_path: Path) -> None:
+    """Enabled agents are those with the setting."""
     config = _config(
         tmp_path,
         {
@@ -137,6 +138,7 @@ def test_enabled_agents_are_those_with_the_setting(tmp_path: Path) -> None:
 
 
 async def test_activity_marks_coalesce_into_one_pass_per_distinct_room(tmp_path: Path) -> None:
+    """Activity marks coalesce into one pass per distinct room."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
     bots = _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost"))
@@ -147,7 +149,7 @@ async def test_activity_marks_coalesce_into_one_pass_per_distinct_room(tmp_path:
         runner.mark_room_activity("!lobby:localhost")
         runner.mark_room_activity("!lobby:localhost")
         runner.mark_room_activity("!dev:localhost")
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     assert export.await_count == 2
     exported_rooms = [
@@ -159,6 +161,7 @@ async def test_activity_marks_coalesce_into_one_pass_per_distinct_room(tmp_path:
 
 
 async def test_full_pass_subsumes_dirty_rooms(tmp_path: Path) -> None:
+    """Full pass subsumes dirty rooms."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
     bots = _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost"))
@@ -168,7 +171,7 @@ async def test_full_pass_subsumes_dirty_rooms(tmp_path: Path) -> None:
     with patch(EXPORT_PATH, new=export):
         runner.mark_room_activity("!lobby:localhost")
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     export.assert_awaited_once()
     call = export.await_args
@@ -181,6 +184,7 @@ async def test_full_pass_subsumes_dirty_rooms(tmp_path: Path) -> None:
 
 
 async def test_run_loop_debounces_and_stops(tmp_path: Path) -> None:
+    """Run loop debounces and stops."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
     bots = _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost"))
@@ -202,6 +206,7 @@ async def test_run_loop_debounces_and_stops(tmp_path: Path) -> None:
 
 
 async def test_pass_failure_does_not_stop_the_runner(tmp_path: Path) -> None:
+    """Pass failure does not stop the runner."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
     bots = _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost"))
@@ -210,14 +215,15 @@ async def test_pass_failure_does_not_stop_the_runner(tmp_path: Path) -> None:
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     assert export.await_count == 2
 
 
 async def test_shared_agent_target_requires_agent_membership(tmp_path: Path) -> None:
+    """Shared agent target requires agent membership."""
     config = _config(
         tmp_path,
         {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig(invited_rooms=False))},
@@ -230,13 +236,13 @@ async def test_shared_agent_target_requires_agent_membership(tmp_path: Path) -> 
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     call = export.await_args
     assert call is not None
     assert call.kwargs["targets"] == (
         ThreadExportTarget(
-            output_dir=runtime_paths.storage_root / "agents" / "code" / "workspace" / WORKSPACE_EXPORT_DIRNAME,
+            output_dir=runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME,
             required_member_user_ids=("@mindroom_code:localhost",),
             include_invited_rooms=False,
             trusted_root=runtime_paths.storage_root,
@@ -245,6 +251,7 @@ async def test_shared_agent_target_requires_agent_membership(tmp_path: Path) -> 
 
 
 async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path) -> None:
+    """Invited rooms read through the invited entity bot."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
@@ -256,7 +263,7 @@ async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path)
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     call = export.await_args
     assert call is not None
@@ -270,6 +277,7 @@ async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path)
 
 
 async def test_not_running_router_leaves_work_pending(tmp_path: Path) -> None:
+    """Not running router leaves work pending."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
     router = _FakeBot("@mindroom_router:localhost", running=False)
@@ -278,10 +286,10 @@ async def test_not_running_router_leaves_work_pending(tmp_path: Path) -> None:
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
         export.assert_not_awaited()
         router.running = True
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     export.assert_awaited_once()
     call = export.await_args
@@ -290,6 +298,7 @@ async def test_not_running_router_leaves_work_pending(tmp_path: Path) -> None:
 
 
 async def test_not_running_invited_entity_is_reported_unreadable(tmp_path: Path) -> None:
+    """Not running invited entity is reported unreadable."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
@@ -302,7 +311,7 @@ async def test_not_running_invited_entity_is_reported_unreadable(tmp_path: Path)
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     call = export.await_args
     assert call is not None
@@ -313,6 +322,7 @@ async def test_not_running_invited_entity_is_reported_unreadable(tmp_path: Path)
 
 
 async def test_full_pass_clears_exports_of_agents_without_the_setting(tmp_path: Path) -> None:
+    """Full pass clears exports of agents without the setting."""
     config = _config(
         tmp_path,
         {
@@ -322,7 +332,7 @@ async def test_full_pass_clears_exports_of_agents_without_the_setting(tmp_path: 
     )
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
-    other_export_dir = runtime_paths.storage_root / "agents" / "other" / "workspace" / WORKSPACE_EXPORT_DIRNAME
+    other_export_dir = runtime_paths.storage_root / "agents" / "other" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
     stale_thread = _write_owned_export(other_export_dir)
     unowned_dir = runtime_paths.storage_root / "agents" / "other" / "workspace" / "notes"
     unowned_dir.mkdir(parents=True)
@@ -331,7 +341,7 @@ async def test_full_pass_clears_exports_of_agents_without_the_setting(tmp_path: 
 
     with patch(EXPORT_PATH, new=_export_mock()):
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     assert not stale_thread.exists()
     assert (other_export_dir / _ROOT_MARKER_FILENAME).exists()
@@ -339,6 +349,7 @@ async def test_full_pass_clears_exports_of_agents_without_the_setting(tmp_path: 
 
 
 async def test_agent_without_a_bot_gets_no_target(tmp_path: Path) -> None:
+    """Agent without a bot gets no target."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
     runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost")))
@@ -346,7 +357,7 @@ async def test_agent_without_a_bot_gets_no_target(tmp_path: Path) -> None:
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     export.assert_not_awaited()
 
@@ -365,31 +376,33 @@ def _private_config(tmp_path: Path, *, scope: str = "owner_and_agent") -> Config
 
 
 async def test_private_agent_gets_one_owner_scoped_target_per_validated_instance(tmp_path: Path) -> None:
+    """Private agent gets one owner scoped target per validated instance."""
     config = _private_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
     alice_root = _materialize_private_instance(config, runtime_paths, "@alice:localhost")
     bob_root = _materialize_private_instance(config, runtime_paths, "@bob:localhost")
     ghost_root = runtime_paths.storage_root / "private_instances" / "ghost-0000000000000000" / "secret"
-    ghost_thread = _write_owned_export(ghost_root / "secret_data" / WORKSPACE_EXPORT_DIRNAME)
+    ghost_thread = _write_owned_export(ghost_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME)
     runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_secret:localhost")))
     export = _export_mock()
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     call = export.await_args
     assert call is not None
     exported = {target.required_member_user_ids: target.output_dir for target in call.kwargs["targets"]}
     assert exported == {
-        ("@alice:localhost", "@mindroom_secret:localhost"): alice_root / "secret_data" / WORKSPACE_EXPORT_DIRNAME,
-        ("@bob:localhost", "@mindroom_secret:localhost"): bob_root / "secret_data" / WORKSPACE_EXPORT_DIRNAME,
+        ("@alice:localhost", "@mindroom_secret:localhost"): alice_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME,
+        ("@bob:localhost", "@mindroom_secret:localhost"): bob_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME,
     }
     assert not ghost_thread.exists()
 
 
 async def test_private_owner_scope_requires_only_the_owner(tmp_path: Path) -> None:
+    """Private owner scope requires only the owner."""
     config = _private_config(tmp_path, scope="owner")
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
@@ -399,7 +412,7 @@ async def test_private_owner_scope_requires_only_the_owner(tmp_path: Path) -> No
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     call = export.await_args
     assert call is not None
@@ -407,11 +420,12 @@ async def test_private_owner_scope_requires_only_the_owner(tmp_path: Path) -> No
 
 
 async def test_symlinked_private_root_is_ignored(tmp_path: Path) -> None:
+    """Symlinked private root is ignored."""
     config = _private_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
     external_root = tmp_path / "external" / "secret"
-    external_thread = _write_owned_export(external_root / "secret_data" / WORKSPACE_EXPORT_DIRNAME)
+    external_thread = _write_owned_export(external_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME)
     symlink_root = runtime_paths.storage_root / "private_instances" / "untrusted" / "secret"
     symlink_root.parent.mkdir(parents=True)
     symlink_root.symlink_to(external_root, target_is_directory=True)
@@ -420,7 +434,7 @@ async def test_symlinked_private_root_is_ignored(tmp_path: Path) -> None:
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
-        await runner.run_pass_once()
+        await runner._run_pass_once()
 
     export.assert_not_awaited()
     assert external_thread.exists()

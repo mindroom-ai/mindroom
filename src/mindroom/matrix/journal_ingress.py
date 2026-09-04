@@ -441,6 +441,17 @@ class JournalIngress:
             # redelivery and does not advance the checkpoint past it.
             self.on_persist_failure()
             raise nio.CallbackNotAcceptedError(str(error)) from error
+        self._announce_admission(room, event, kind, event_class, admission)
+
+    def _announce_admission(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.Event,
+        kind: EventKind,
+        event_class: EventClass,
+        admission: AdmissionResult,
+    ) -> None:
+        """Tell the consumers of a committed admission what just happened."""
         if admission is AdmissionResult.ADMITTED and kind in _ROOM_ACTIVITY_KINDS:
             self.on_room_activity(room.room_id)
         if event_class is not EventClass.ACTIONABLE:

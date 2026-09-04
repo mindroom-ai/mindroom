@@ -180,7 +180,7 @@ class AgentPrivateConfig(BaseModel):
         return [_validate_safe_relative_path(path, field_name="private.context_files") for path in value]
 
 
-PrivateThreadExportRoomScope = Literal["owner", "owner_and_agent"]
+_PrivateThreadExportRoomScope = Literal["owner", "owner_and_agent"]
 
 
 class AgentThreadExportConfig(BaseModel):
@@ -194,7 +194,7 @@ class AgentThreadExportConfig(BaseModel):
             "Also export user-created rooms the agent joined through invites; current membership is always required"
         ),
     )
-    private_room_scope: PrivateThreadExportRoomScope = Field(
+    private_room_scope: _PrivateThreadExportRoomScope = Field(
         default="owner_and_agent",
         description=(
             "Private agents only: require the owner alone, or both owner and agent, to be joined to an exported room"
