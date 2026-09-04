@@ -44,6 +44,7 @@ from mindroom.hooks import (
 )
 from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.legacy_session_migration import run_legacy_session_migration_after_ready
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
@@ -281,6 +282,7 @@ class _MultiAgentOrchestrator:
         repr=False,
     )
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
+    _runtime_ready_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _router_reply_memberships_live_sync_ready: asyncio.Event = field(
         default_factory=asyncio.Event,
         init=False,
@@ -1396,6 +1398,7 @@ class _MultiAgentOrchestrator:
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
+        self._runtime_ready_event.clear()
         self._router_reply_memberships_live_sync_ready.clear()
         self._approval_transport.reset_startup_cleanup_gate()
         phase_started = log_startup_phase_started("wait_for_matrix_homeserver")
@@ -1467,6 +1470,7 @@ class _MultiAgentOrchestrator:
                 name="embedder_startup_health_check",
             )
             set_runtime_ready()
+            self._runtime_ready_event.set()
         # Stay alive until explicit shutdown. Hot reload replaces sync tasks in
         # self._sync_tasks, so awaiting the initial task generation would let a
         # config-triggered restart look like normal orchestrator completion.
@@ -2657,6 +2661,20 @@ def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_p
     storage_path.mkdir(parents=True, exist_ok=True)
 
 
+def _schedule_legacy_session_migration(
+    orchestrator: _MultiAgentOrchestrator,
+    runtime_paths: RuntimePaths,
+) -> asyncio.Task[None]:
+    """Schedule migration against the resolved session root behind readiness."""
+    runtime_ready_event = asyncio.Event()
+    orchestrator._runtime_ready_event = runtime_ready_event
+    session_storage_path = constants.resolve_session_state_root(runtime_paths.storage_root, runtime_paths)
+    return asyncio.create_task(
+        run_legacy_session_migration_after_ready(runtime_ready_event, session_storage_path),
+        name="legacy_session_migration",
+    )
+
+
 async def main(
     log_level: str,
     runtime_paths: RuntimePaths,
@@ -2713,6 +2731,8 @@ async def main(
                     name=supervisor_name,
                 ),
             )
+
+        auxiliary_tasks.append(_schedule_legacy_session_migration(orchestrator, runtime_paths))
 
         if api:
             api_task = asyncio.create_task(
