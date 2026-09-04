@@ -1064,3 +1064,29 @@ def test_thread_key_being_opened_elsewhere_returns_409_for_retry(
         replay_store.claim_event_id(snapshot.replay_scope, "msg-2", now=int(time.time()), ttl_seconds=60)
         is ExternalTriggerEventClaim.FRESH
     )
+
+
+def test_exception_during_first_delivery_releases_thread_key_reservation(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception while opening the root releases the key just like a None result does."""
+    continued: list[str | None] = []
+    attempts = iter([RuntimeError("matrix unavailable"), "$root-a"])
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str:
+        continued.append(continue_thread_event_id)
+        outcome = next(attempts)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    trigger_id = _create_new_thread_record(trigger_api)
+
+    with pytest.raises(RuntimeError, match="matrix unavailable"):
+        _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-1")
+    opened = _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-2")
+
+    assert opened.status_code == 202
+    assert continued == [None, None]

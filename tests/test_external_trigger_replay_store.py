@@ -645,3 +645,21 @@ def test_concurrent_first_deliveries_reserve_one_thread_key(tmp_path: Path) -> N
 
     assert [process.exitcode for process in processes] == [0, 0]
     assert sorted(results) == ["fresh", "pending"]
+
+
+def test_bind_thread_root_keeps_a_root_bound_meanwhile_by_another_delivery(tmp_path: Path) -> None:
+    """A first delivery that outlived its reservation must not orphan the thread that replaced it."""
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    assert _claim(store, now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    # Reservation expired; a second delivery opens and binds root B.
+    assert _claim(store, now=1_061) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert store.bind_thread_root("campground", "site-42", "$root-b", room_id=ROOM, now=1_062, ttl_seconds=600) == (
+        "$root-b"
+    )
+
+    # The slow first delivery finally finishes with root A.
+    assert store.bind_thread_root("campground", "site-42", "$root-a", room_id=ROOM, now=1_070, ttl_seconds=600) == (
+        "$root-b"
+    )
+    assert _claim(store, now=1_071) == (ExternalTriggerThreadKeyClaim.BOUND, "$root-b")

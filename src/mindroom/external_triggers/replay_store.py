@@ -161,17 +161,28 @@ class ExternalTriggerReplayStore:
         room_id: str,
         now: int,
         ttl_seconds: int,
-    ) -> None:
-        """Bind one thread key to its Matrix thread root, refreshing retention."""
+    ) -> str:
+        """Bind one thread key to its Matrix thread root, refreshing retention.
+
+        Returns the root the key is bound to afterwards. A root another delivery
+        already bound in the same room wins over the caller's, so a first
+        delivery that outlived its reservation cannot orphan the thread that
+        replaced it.
+        """
         with advisory_file_lock(self._lock_path):
             store = self._read_store()
             _prune_expired(store, now=now)
-            store["threads"].setdefault(replay_scope, {})[thread_key] = {
+            replay_threads = store["threads"].setdefault(replay_scope, {})
+            record = replay_threads.get(thread_key)
+            if record is not None and record["room_id"] == room_id and record["thread_event_id"] is not None:
+                thread_event_id = record["thread_event_id"]
+            replay_threads[thread_key] = {
                 "room_id": room_id,
                 "thread_event_id": thread_event_id,
                 "expires_at": now + ttl_seconds,
             }
             self._write_store(store)
+            return thread_event_id
 
     def release_thread_key(self, replay_scope: str, thread_key: str) -> None:
         """Drop a pending reservation whose first delivery failed; bound keys are kept."""
