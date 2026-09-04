@@ -53,11 +53,10 @@ def load_invited_rooms(path: Path) -> set[str]:
 
 def load_invited_room_claims(path: Path) -> set[str]:
     """Load ownership evidence, failing closed when persisted state is invalid."""
-    if not path.exists():
-        return set()
-
     try:
         return _read_invited_rooms(path)
+    except FileNotFoundError:
+        return set()
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, _InvalidInvitedRoomsFileError) as exc:
         msg = f"Invalid invited-room claim file: {path}"
         raise RuntimeError(msg) from exc

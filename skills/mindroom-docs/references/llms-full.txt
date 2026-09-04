@@ -14817,6 +14817,8 @@ calls:
 MindRoom enforces at most one calls-enabled agent per room.
 Calls only join rooms configured for that agent and only while the sole caller passes the normal room and per-agent reply permissions.
 Calls-enabled agents also join calls in ad-hoc rooms they accepted through their normal authorized-invite policy. This lets Matrix clients create a private, temporary voice room and invite one agent without adding that room to `config.yaml` first.
+If persisted invite state names multiple calls-enabled agents for one ad-hoc room, MindRoom refuses to choose by configuration order and reports the conflicting agents and room ID.
+Assign that room ID under `agents.<name>.rooms` for exactly one calls-enabled agent to make ownership authoritative without weakening the other accounts' room-membership policy.
 Calls-enabled agents advertise `📞 Voice calls` in their Matrix presence status only when their MatrixRTC runtime is available, so clients can show the call action only where it will be answered.
 Requester-private agents use the sole authorized caller's verified Matrix user ID to resolve their workspace, memory, credentials, history, knowledge, and tool execution scope.
 The same caller scope applies in configured rooms and authorized ad-hoc invite rooms.
@@ -15820,6 +15822,7 @@ If an error occurs during streaming, the message is finalized with:
 ## Large Streamed Messages
 
 If a streamed response exceeds the Matrix event size limit (55KB for new messages, 27KB for edits), the large message system automatically uploads a JSON sidecar and includes a preview in the event body.
+With `defaults.large_message_strategy: split`, the final edit is instead delivered as several complete rich-text messages so the whole Markdown answer stays visible without a sidecar.
 See [Matrix Integration — Large Messages](https://docs.mindroom.chat/architecture/matrix/#large-messages) for details.
 
 ## Visibility Toggles
@@ -17081,6 +17084,13 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 - Custom metadata dict `io.mindroom.long_text` contains `version: 2`, `encoding: "matrix_event_content_json"`, original and preview sizes, and a completeness flag
 - Preview event is compact (for example no inline `io.mindroom.tool_trace`), while the sidecar preserves full content fidelity
 - Encrypted rooms: sidecar JSON is encrypted before upload (`message-content.json.enc`)
+
+With `defaults.large_message_strategy: split`, an oversized final text response is instead delivered as several complete rich-text events by `segment_matrix_content()` in `matrix/segmented_messages.py`.
+The body is cut at paragraph or line boundaries, never inside a fenced code block, and concatenating the segment bodies reproduces the original exactly.
+The first segment stays a final `m.replace` of the streaming placeholder when there is one; continuations are plain messages that stay in the thread when there is one.
+Every segment is rendered as standalone Markdown with `m.mentions` attached to the segment whose body carries the mention.
+Continuation payloads are frozen in the local outbox row and sent under deterministic transaction IDs, so a retry or restart resends only the segments the room does not already hold.
+Non-text payloads, metadata that alone exceeds the budget, and a single code fence larger than one event still use the sidecar path.
 
 ## Response Tracking
 
@@ -20085,6 +20095,8 @@ Export Matrix threads to local files.
 Export Matrix threads to YAML files for grep/ripgrep search.
 The command reads persisted Matrix accounts and rooms from `matrix_state.yaml`, so run MindRoom once before exporting.
 Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account, unless `--no-invited-rooms` is passed.
+Plugin-owned per-agent targets export a room only when its configured or sole persisted invite owner is in the target's source scope, because joined membership is an additional check rather than ownership authority.
+Conflicting persisted invite claims are excluded and prior exporter-owned copies are retracted from every target until the room is explicitly assigned under one entity.
 By default it writes to `<storage>/thread_exports`.
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.

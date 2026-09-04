@@ -560,6 +560,8 @@ Export Matrix threads to local files.
 Export Matrix threads to YAML files for grep/ripgrep search.
 The command reads persisted Matrix accounts and rooms from `matrix_state.yaml`, so run MindRoom once before exporting.
 Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account, unless `--no-invited-rooms` is passed.
+Plugin-owned per-agent targets export a room only when its configured or sole persisted invite owner is in the target's source scope, because joined membership is an additional check rather than ownership authority.
+Conflicting persisted invite claims are excluded and prior exporter-owned copies are retracted from every target until the room is explicitly assigned under one entity.
 By default it writes to `<storage>/thread_exports`.
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.

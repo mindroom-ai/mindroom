@@ -197,14 +197,16 @@ def _retired_invited_room_claim_paths(agents_root: Path, configured_paths: froze
     if agents_root.is_symlink():
         msg = f"Unsafe invited-room state root: {agents_root}"
         raise RuntimeError(msg)
-    if not agents_root.exists():
+    try:
+        state_roots = sorted(agents_root.iterdir(), key=lambda path: path.name)
+    except FileNotFoundError:
         return ()
-    if not agents_root.is_dir():
+    except OSError as exc:
         msg = f"Unsafe invited-room state root: {agents_root}"
-        raise RuntimeError(msg)
+        raise RuntimeError(msg) from exc
 
     retired_paths: list[Path] = []
-    for state_root in sorted(agents_root.iterdir(), key=lambda path: path.name):
+    for state_root in state_roots:
         path = state_root / "invited_rooms.json"
         if state_root.is_symlink():
             msg = f"Unsafe invited-room claim state root: {state_root}"

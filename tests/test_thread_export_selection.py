@@ -23,6 +23,7 @@ from tests.thread_export_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -266,6 +267,61 @@ def test_invalid_invited_room_claim_fails_closed(tmp_path: Path, claimant_kind: 
     claim_path.write_text("not-json\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="Invalid invited-room claim file"):
+        invited_export_rooms(
+            config,
+            runtime_paths,
+            None,
+            known_room_ids=set(),
+        )
+
+
+def test_unreadable_invited_room_claim_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A claim read error cannot be collapsed into missing ownership evidence."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    claim_path = runtime_paths.storage_root / "agents" / "general" / "invited_rooms.json"
+    claim_path.parent.mkdir(parents=True)
+    path_type = type(claim_path)
+    original_read_text = path_type.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == claim_path:
+            msg = "denied"
+            raise PermissionError(msg)
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "read_text", read_text)
+
+    with pytest.raises(RuntimeError, match="Invalid invited-room claim file"):
+        invited_export_rooms(
+            config,
+            runtime_paths,
+            None,
+            known_room_ids=set(),
+        )
+
+
+def test_unreadable_invited_room_state_root_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A state-root enumeration error cannot hide every persisted claimant."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    agents_root = runtime_paths.storage_root / "agents"
+    agents_root.mkdir(parents=True)
+    path_type = type(agents_root)
+    original_iterdir = path_type.iterdir
+
+    def iterdir(path: Path) -> Iterator[Path]:
+        if path == agents_root:
+            msg = "denied"
+            raise PermissionError(msg)
+        return original_iterdir(path)
+
+    monkeypatch.setattr(path_type, "iterdir", iterdir)
+
+    with pytest.raises(RuntimeError, match="Unsafe invited-room state root"):
         invited_export_rooms(
             config,
             runtime_paths,
