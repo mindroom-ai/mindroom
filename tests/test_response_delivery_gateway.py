@@ -1276,7 +1276,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """The exact persisted and sent event must fit after identity is attached."""
         outbox = FakeOutbox()
-        gateway = _gateway(tmp_path, outbox, large_message_strategy="split")
+        gateway = _gateway(tmp_path, outbox)
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID

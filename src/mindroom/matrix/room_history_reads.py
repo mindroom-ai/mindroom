@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -377,14 +378,14 @@ async def _count_delivery_copies_via_room_messages(
     delivery_sender: str,
     expected: Mapping[str, int],
     delivery_event_type: str,
-) -> dict[str, int]:
+) -> Counter[str]:
     """Count exact-content copies per canonical key, stopping when all are found."""
-    found: dict[str, int] = {}
+    found: Counter[str] = Counter()
     from_token: str | None = None
     seen_pagination_tokens: set[str] = set()
     pages_fetched = 0
 
-    while any(found.get(key, 0) < count for key, count in expected.items()):
+    while any(found[key] < count for key, count in expected.items()):
         response = await client.room_messages(
             room_id,
             start=from_token,
@@ -405,18 +406,14 @@ async def _count_delivery_copies_via_room_messages(
                 expected=expected,
             )
             if key is not None:
-                found[key] = found.get(key, 0) + 1
+                found[key] += 1
         if not response.end:
             break
         if response.end in seen_pagination_tokens:
             msg = f"delivery copy count room scan repeated pagination token for {room_id}"
             raise RuntimeError(msg)
-        if _finish_exact_delivery_scan_at_bound(
-            room_id=room_id,
-            pages_fetched=pages_fetched,
-            delivery_found=all(found.get(key, 0) >= count for key, count in expected.items()),
-        ):
-            break
+        # Still inside the loop, so something is missing: the bound can only raise.
+        _finish_exact_delivery_scan_at_bound(room_id=room_id, pages_fetched=pages_fetched, delivery_found=False)
         seen_pagination_tokens.add(response.end)
         from_token = response.end
 
@@ -440,21 +437,17 @@ async def missing_outbox_delivery_copy_indices_via_room_messages(
     unsatisfied. The scan stops as soon as every position is accounted for,
     and fails closed at the page bound while an absence stays unproven.
     """
-    expected: dict[str, int] = {}
-    for content in delivery_contents:
-        key = _canonical_content_key(content)
-        expected[key] = expected.get(key, 0) + 1
+    keys = [_canonical_content_key(content) for content in delivery_contents]
     found = await _count_delivery_copies_via_room_messages(
         client,
         room_id,
         delivery_sender=delivery_sender,
-        expected=expected,
+        expected=Counter(keys),
         delivery_event_type=delivery_event_type,
     )
     missing: list[int] = []
-    for index, content in enumerate(delivery_contents):
-        key = _canonical_content_key(content)
-        if found.get(key, 0) > 0:
+    for index, key in enumerate(keys):
+        if found[key] > 0:
             found[key] -= 1
         else:
             missing.append(index)
