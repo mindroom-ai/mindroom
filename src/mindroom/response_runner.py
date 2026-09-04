@@ -475,6 +475,11 @@ def _is_silent_schedule_response(request: ResponseRequest) -> bool:
     return request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
 
 
+def _correlation_id_for_request(request: ResponseRequest) -> str:
+    """Resolve the correlation id for one request."""
+    return request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
+
+
 def _response_typing_log_context(
     request: ResponseRequest,
     *,
@@ -486,9 +491,7 @@ def _response_typing_log_context(
         "requester_id": request.response_envelope.requester_id,
         "room_id": request.room_id,
         "thread_id": request.thread_id,
-        "correlation_id": request.correlation_id
-        or request.reply_to_event_id
-        or request.response_envelope.source_event_id,
+        "correlation_id": _correlation_id_for_request(request),
         "response_run_id": response_run_id,
     }
 
@@ -1630,7 +1633,7 @@ class ResponseRunner:
             agent_name=continuation.entity_name,
             active_model_name=continuation.runtime_model_name,
             attachment_ids=continuation.attachment_ids,
-            correlation_id=self._correlation_id_for_request(request),
+            correlation_id=_correlation_id_for_request(request),
             source_envelope=request.response_envelope,
         )
         if tool_dispatch.execution_identity != execution_identity:
@@ -2603,16 +2606,12 @@ class ResponseRunner:
             used_streaming=used_streaming,
         )
 
-    def _correlation_id_for_request(self, request: ResponseRequest) -> str:
-        """Resolve the correlation id for one request."""
-        return request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
-
     def _response_identity(self, request: ResponseRequest, *, response_kind: str) -> ResponseIdentity:
         """Build the per-turn identity carried by delivery requests and response hooks."""
         return ResponseIdentity(
             response_kind=response_kind,
             response_envelope=request.response_envelope,
-            correlation_id=self._correlation_id_for_request(request),
+            correlation_id=_correlation_id_for_request(request),
             participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
         )
 
@@ -2640,7 +2639,7 @@ class ResponseRunner:
             entity_label=self.deps.agent_name,
             session_id=runtime.session_id,
             run_id=run_id,
-            correlation_id=self._correlation_id_for_request(request),
+            correlation_id=_correlation_id_for_request(request),
             reply_to_event_id=request.reply_to_event_id,
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
