@@ -35,7 +35,7 @@ from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_c
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Mapping
 
     import nio
     from agno.agent import Agent
@@ -145,6 +145,7 @@ class AgentApprovalExecution:
         decisions: dict[str, bool],
         denial_reasons: dict[str, str | None],
         tool_trace_collector: list[ToolTraceEntry],
+        typing_log_context: Mapping[str, object],
     ) -> CompletedApprovalRun | PausedAttempt:
         """Apply exact decisions and continue the matching persisted Agno run."""
         config = self.config()
@@ -203,7 +204,11 @@ class AgentApprovalExecution:
                 denial_reasons=denial_reasons,
             )
 
-            async with typing_indicator(self.client(), continuation.room_id):
+            async with typing_indicator(
+                self.client(),
+                continuation.room_id,
+                log_context=typing_log_context,
+            ):
                 response, presentation = await self.tool_runtime.run_in_context(
                     tool_context=runtime_context_from_dispatch_context(tool_dispatch),
                     operation=lambda: run_with_tool_execution_identity(

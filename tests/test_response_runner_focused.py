@@ -2513,6 +2513,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
             decisions={tool_call_id: approved},
             denial_reasons={tool_call_id: reason},
             tool_trace_collector=tool_trace,
+            typing_log_context={},
         )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -2632,6 +2633,7 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
             decisions=decisions,
             denial_reasons=denial_reasons,
             tool_trace_collector=[],
+            typing_log_context={},
         )
 
     agent.acontinue_run.assert_not_awaited()
@@ -2692,6 +2694,7 @@ async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tm
             decisions={},
             denial_reasons={},
             tool_trace_collector=[],
+            typing_log_context={},
         )
 
     close_runtime.assert_called_once_with(agent, shared_scope_storage=storage)
@@ -2764,6 +2767,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
             decisions={},
             denial_reasons={},
             tool_trace_collector=[],
+            typing_log_context={},
         )
 
 

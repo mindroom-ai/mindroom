@@ -475,16 +475,43 @@ def _is_silent_schedule_response(request: ResponseRequest) -> bool:
     return request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
 
 
+def _response_typing_log_context(
+    request: ResponseRequest,
+    *,
+    response_run_id: str | None,
+) -> dict[str, object]:
+    """Return the stable response attribution shared by one typing lease."""
+    return {
+        "agent_id": request.response_envelope.agent_name,
+        "requester_id": request.response_envelope.requester_id,
+        "room_id": request.room_id,
+        "thread_id": request.thread_id,
+        "correlation_id": request.correlation_id
+        or request.reply_to_event_id
+        or request.response_envelope.source_event_id,
+        "response_run_id": response_run_id,
+    }
+
+
 @asynccontextmanager
 async def _response_typing_indicator(
     client: nio.AsyncClient,
     request: ResponseRequest,
+    *,
+    response_run_id: str | None,
 ) -> AsyncIterator[None]:
     """Expose typing only for response kinds whose progress may be visible."""
     if _is_silent_schedule_response(request):
         yield
         return
-    async with typing_indicator(client, request.room_id):
+    async with typing_indicator(
+        client,
+        request.room_id,
+        log_context=_response_typing_log_context(
+            request,
+            response_run_id=response_run_id,
+        ),
+    ):
         yield
 
 
@@ -1646,7 +1673,11 @@ class ResponseRunner:
                         tool_trace_collector=tool_trace_collector,
                     )
 
-                async with typing_indicator(self._client(), continuation.room_id):
+                async with _response_typing_indicator(
+                    self._client(),
+                    request,
+                    response_run_id=continuation.run_id,
+                ):
                     response_text = await self._run_in_tool_context(
                         tool_dispatch=tool_dispatch,
                         operation=continue_team,
@@ -1659,6 +1690,10 @@ class ResponseRunner:
                     decisions=decisions,
                     denial_reasons=denial_reasons,
                     tool_trace_collector=tool_trace_collector,
+                    typing_log_context=_response_typing_log_context(
+                        request,
+                        response_run_id=continuation.run_id,
+                    ),
                 )
         return response_text
 
@@ -3503,7 +3538,11 @@ class ResponseRunner:
             if use_streaming and (
                 delivery_request.existing_event_id is None or delivery_request.existing_event_is_placeholder
             ):
-                async with _response_typing_indicator(self._client(), request):
+                async with _response_typing_indicator(
+                    self._client(),
+                    delivery_request,
+                    response_run_id=response_run_id,
+                ):
                     event_id: str | None = None
 
                     def build_response_stream() -> AsyncIterator[StreamInputChunk]:
@@ -3601,7 +3640,11 @@ class ResponseRunner:
             else:
                 try:
                     try:
-                        async with _response_typing_indicator(self._client(), request):
+                        async with _response_typing_indicator(
+                            self._client(),
+                            delivery_request,
+                            response_run_id=response_run_id,
+                        ):
 
                             async def build_response_text() -> str:
                                 return await team_response(
@@ -3935,7 +3978,11 @@ class ResponseRunner:
             )
 
         try:
-            async with _response_typing_indicator(self._client(), request):
+            async with _response_typing_indicator(
+                self._client(),
+                request,
+                response_run_id=run_id,
+            ):
                 response_text = await self._run_in_tool_context(
                     tool_dispatch=runtime.tool_dispatch,
                     operation=build_response_text,
@@ -4028,7 +4075,11 @@ class ResponseRunner:
                 attempt_model_runtime=self.deps.tool_runtime,
             )
 
-            async with _response_typing_indicator(self._client(), request):
+            async with _response_typing_indicator(
+                self._client(),
+                request,
+                response_run_id=run_id,
+            ):
                 wrapped_response_stream = self._stream_in_tool_context(
                     tool_dispatch=runtime.tool_dispatch,
                     stream_factory=lambda: response_stream,
