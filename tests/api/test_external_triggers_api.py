@@ -162,6 +162,25 @@ def _create_record(runtime_paths: constants.RuntimePaths, config: Config, public
     )
 
 
+def _create_new_thread_record(trigger_api: TriggerApiContext, *, trigger_id: str = "campground-threads") -> str:
+    """Create a reusable signed trigger that opens a per-fire thread on every delivery."""
+    ExternalTriggerStore(trigger_api.runtime_paths).create_record(
+        trigger_id=trigger_id,
+        owner_user_id=_OWNER,
+        created_by_agent_name="research",
+        created_in_room_id="campground",
+        created_in_thread_id=None,
+        target=ExternalTriggerTarget(room_id="campground", thread_id=None, agent="research", new_thread=True),
+        public_key=_public_key_b64(trigger_api.private_key),
+        key_id="campground-main",
+        allowed_kinds=["campground.availability"],
+        replay_window_seconds=30,
+        max_body_bytes=65536,
+        config=Config.model_validate(_config_payload()),
+    )
+    return trigger_id
+
+
 def _create_capability_record(
     trigger_api: TriggerApiContext,
     *,
@@ -886,3 +905,59 @@ def test_duplicate_event_id_returns_duplicate_response(
     assert first.status_code == 202
     assert second.status_code == 202
     assert second.json()["duplicate"] is True
+
+
+def test_thread_key_groups_new_thread_deliveries_into_one_matrix_thread(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliveries sharing a thread key continue the first delivery's Matrix thread."""
+    continued: list[str | None] = []
+    delivered_event_ids = iter(["$root-a", "$reply-a", "$root-b"])
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str:
+        continued.append(continue_thread_event_id)
+        return next(delivered_event_ids)
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    trigger_id = _create_new_thread_record(trigger_api)
+
+    def post(event_id: str, thread_key: str, nonce: str) -> Response:
+        return _post_signed(
+            trigger_api,
+            body=_body(event_id=event_id, thread_key=thread_key),
+            nonce=nonce,
+            trigger_id=trigger_id,
+        )
+
+    first = post("msg-1", "chat:C1:100", "nonce-1")
+    second = post("msg-2", "chat:C1:100", "nonce-2")
+    other = post("msg-3", "chat:C1:200", "nonce-3")
+
+    assert [response.status_code for response in (first, second, other)] == [202, 202, 202]
+    assert continued == [None, "$root-a", None]
+    assert [response.json()["matrix_event_id"] for response in (first, second, other)] == [
+        "$root-a",
+        "$reply-a",
+        "$root-b",
+    ]
+
+
+def test_thread_key_is_ignored_for_fixed_thread_targets(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fixed target thread already collects every delivery, so no key lookup happens."""
+    continued: list[str | None] = []
+
+    async def execute_external_trigger(*, continue_thread_event_id: str | None = None, **_kwargs: object) -> str:
+        continued.append(continue_thread_event_id)
+        return "$matrix-event"
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+
+    first = _post_signed(trigger_api, body=_body(event_id="msg-1", thread_key="slack:C1:100"), nonce="nonce-1")
+    second = _post_signed(trigger_api, body=_body(event_id="msg-2", thread_key="slack:C1:100"), nonce="nonce-2")
+
+    assert (first.status_code, second.status_code) == (202, 202)
+    assert continued == [None, None]

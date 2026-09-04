@@ -36,9 +36,15 @@ class _SerializedEvent(TypedDict):
     expires_at: int
 
 
+class _SerializedThread(TypedDict):
+    thread_event_id: str
+    expires_at: int
+
+
 class _SerializedReplayStore(TypedDict):
     nonces: dict[str, dict[str, _SerializedNonce]]
     events: dict[str, dict[str, _SerializedEvent]]
+    threads: dict[str, dict[str, _SerializedThread]]
 
 
 @dataclass
@@ -103,6 +109,33 @@ class ExternalTriggerReplayStore:
             }
             self._write_store(store)
 
+    def thread_root(self, replay_scope: str, thread_key: str, *, now: int) -> str | None:
+        """Return the Matrix thread root previously recorded for one thread key."""
+        with advisory_file_lock(self._lock_path):
+            store = self._read_store()
+            _prune_expired(store, now=now)
+            record = store["threads"].get(replay_scope, {}).get(thread_key)
+            return None if record is None else record["thread_event_id"]
+
+    def remember_thread_root(
+        self,
+        replay_scope: str,
+        thread_key: str,
+        thread_event_id: str,
+        *,
+        now: int,
+        ttl_seconds: int,
+    ) -> None:
+        """Bind one thread key to a Matrix thread root, refreshing its retention."""
+        with advisory_file_lock(self._lock_path):
+            store = self._read_store()
+            _prune_expired(store, now=now)
+            store["threads"].setdefault(replay_scope, {})[thread_key] = {
+                "thread_event_id": thread_event_id,
+                "expires_at": now + ttl_seconds,
+            }
+            self._write_store(store)
+
     def release_event_id(self, replay_scope: str, event_id: str) -> None:
         """Remove an event id claim after delivery failure."""
         with advisory_file_lock(self._lock_path):
@@ -139,7 +172,7 @@ class ExternalTriggerReplayStore:
 
 
 def _empty_store() -> _SerializedReplayStore:
-    return {"nonces": {}, "events": {}}
+    return {"nonces": {}, "events": {}, "threads": {}}
 
 
 def _normalize_store(raw_store: object) -> _SerializedReplayStore:
@@ -150,11 +183,18 @@ def _normalize_store(raw_store: object) -> _SerializedReplayStore:
         raise _invalid_store_structure()
     raw_nonces = store_mapping["nonces"]
     raw_events = store_mapping["events"]
-    if not isinstance(raw_nonces, Mapping) or not isinstance(raw_events, Mapping):
+    # Stores written before thread keys existed have no "threads" section.
+    raw_threads = store_mapping.get("threads", {})
+    if (
+        not isinstance(raw_nonces, Mapping)
+        or not isinstance(raw_events, Mapping)
+        or not isinstance(raw_threads, Mapping)
+    ):
         raise _invalid_store_structure()
     return {
         "nonces": _normalize_nonces(cast("Mapping[object, object]", raw_nonces)),
         "events": _normalize_events(cast("Mapping[object, object]", raw_events)),
+        "threads": _normalize_threads(cast("Mapping[object, object]", raw_threads)),
     }
 
 
@@ -211,6 +251,30 @@ def _normalize_events(raw_events: Mapping[object, object]) -> dict[str, dict[str
     return events
 
 
+def _normalize_threads(raw_threads: Mapping[object, object]) -> dict[str, dict[str, _SerializedThread]]:
+    threads: dict[str, dict[str, _SerializedThread]] = {}
+    for trigger_id, trigger_threads in raw_threads.items():
+        if not isinstance(trigger_id, str) or not isinstance(trigger_threads, Mapping):
+            raise _invalid_store_structure()
+        trigger_thread_mapping = cast("Mapping[object, object]", trigger_threads)
+        normalized_trigger_threads: dict[str, _SerializedThread] = {}
+        for thread_key, record in trigger_thread_mapping.items():
+            if not isinstance(thread_key, str) or not isinstance(record, Mapping):
+                raise _invalid_store_structure()
+            record_mapping = cast("Mapping[object, object]", record)
+            thread_event_id = record_mapping.get("thread_event_id")
+            expires_at = record_mapping.get("expires_at")
+            if not isinstance(thread_event_id, str) or not thread_event_id or not _is_json_int(expires_at):
+                raise _invalid_store_structure()
+            normalized_trigger_threads[thread_key] = {
+                "thread_event_id": thread_event_id,
+                "expires_at": expires_at,
+            }
+        if normalized_trigger_threads:
+            threads[trigger_id] = normalized_trigger_threads
+    return threads
+
+
 def _prune_expired(store: _SerializedReplayStore, *, now: int) -> None:
     for trigger_id, trigger_nonces in list(store["nonces"].items()):
         store["nonces"][trigger_id] = {
@@ -225,3 +289,10 @@ def _prune_expired(store: _SerializedReplayStore, *, now: int) -> None:
         }
         if not store["events"][trigger_id]:
             store["events"].pop(trigger_id)
+
+    for trigger_id, trigger_threads in list(store["threads"].items()):
+        store["threads"][trigger_id] = {
+            thread_key: record for thread_key, record in trigger_threads.items() if record["expires_at"] >= now
+        }
+        if not store["threads"][trigger_id]:
+            store["threads"].pop(trigger_id)
