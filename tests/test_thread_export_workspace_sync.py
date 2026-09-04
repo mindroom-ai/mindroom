@@ -14,7 +14,11 @@ from mindroom.config.main import Config
 from mindroom.matrix.identity import MatrixID
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportRoom, ThreadExportTarget
-from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME, write_thread_payload
+from mindroom.thread_export.storage import (
+    _ROOT_MARKER_FILENAME,
+    prepare_principal_bound_export_root,
+    write_thread_payload,
+)
 from mindroom.thread_export.workspace_sync import (
     _WORKSPACE_EXPORT_DIRNAME,
     WorkspaceThreadExportDeps,
@@ -47,6 +51,8 @@ class _FakeBot:
     principal: object = field(default_factory=Mock)
     rooms: list[str] = field(default_factory=lambda: ["!lobby:localhost", "!dev:localhost"])
     invited_room_ids: frozenset[str] = frozenset()
+    joined_room_ids: frozenset[str] | None = None
+    joined_rooms_error: Exception | None = None
 
     @property
     def matrix_id(self) -> MatrixID:
@@ -58,6 +64,11 @@ class _FakeBot:
 
     def journal_principal(self) -> object:
         return self.principal
+
+    async def current_joined_room_ids(self) -> frozenset[str] | None:
+        if self.joined_rooms_error is not None:
+            raise self.joined_rooms_error
+        return self.approval_room_ids if self.joined_room_ids is None else self.joined_room_ids
 
 
 def _bots(*bots: _FakeBot) -> dict[str, _ThreadExportBot]:
@@ -346,13 +357,34 @@ async def test_full_pass_clears_stale_exports_when_agent_has_no_rooms(tmp_path: 
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
     export_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
+    prepare_principal_bound_export_root(export_dir, trusted_root=runtime_paths.storage_root)
     stale_thread = _write_owned_export(export_dir)
-    runner = _runner(config, _bots(_FakeBot("@mindroom_code:localhost", rooms=[])))
+    runner = _runner(
+        config,
+        _bots(_FakeBot("@mindroom_code:localhost", joined_room_ids=frozenset())),
+    )
 
     runner.queue_full_pass()
     await runner._run_pass_once()
 
     assert not stale_thread.exists()
+
+
+async def test_failed_joined_room_lookup_preserves_existing_exports(tmp_path: Path) -> None:
+    """An unknown current-membership snapshot cannot authorize cleanup."""
+    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path)
+    export_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
+    prepare_principal_bound_export_root(export_dir, trusted_root=runtime_paths.storage_root)
+    stale_thread = _write_owned_export(export_dir)
+    code = _FakeBot("@mindroom_code:localhost", joined_rooms_error=RuntimeError("unavailable"))
+    runner = _runner(config, _bots(code))
+
+    runner.queue_full_pass()
+    await runner._run_pass_once()
+
+    assert stale_thread.exists()
 
 
 async def test_first_principal_bound_pass_purges_legacy_content_before_reading(tmp_path: Path) -> None:

@@ -17,6 +17,7 @@ from mindroom.thread_export.storage import (
     _safe_path_segment,
     _UnsafeThreadExportPathError,
     prepare_export_root,
+    prepare_principal_bound_export_root,
     reconcile_room_directories,
     remove_room_export,
     remove_stale_thread_exports,
@@ -553,7 +554,24 @@ def test_room_key_cannot_collide_with_export_root_marker(tmp_path: Path, marker_
     write_room_index(output_dir, room)
 
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
-    assert (output_dir / f"%2E{marker_filename.removeprefix('.')}" / "index.json").is_file()
+    room_dirs = [entry for entry in output_dir.iterdir() if entry.is_dir()]
+    assert len(room_dirs) == 1
+    assert room_dirs[0].name != marker_filename
+    assert (room_dirs[0] / "index.json").is_file()
+
+
+def test_principal_binding_replaces_legacy_room_directory_at_marker_path(tmp_path: Path) -> None:
+    """The new binding marker can replace an exporter-owned room directory from an older release."""
+    output_dir = tmp_path / "thread_exports"
+    _mark_export_root(output_dir)
+    legacy_room_dir = output_dir / ".mindroom-principal-bound"
+    legacy_room_dir.mkdir()
+    _write_thread_export(legacy_room_dir)
+    (legacy_room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+
+    prepare_principal_bound_export_root(output_dir, trusted_root=tmp_path)
+
+    assert (output_dir / _PRINCIPAL_BOUND_MARKER_FILENAME).is_file()
 
 
 def test_room_export_query_ignores_unrecognized_yaml(tmp_path: Path) -> None:

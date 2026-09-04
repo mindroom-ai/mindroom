@@ -63,6 +63,10 @@ class _ThreadExportBot(Protocol):
         """Return the bot's principal-bound projection view."""
         ...
 
+    async def current_joined_room_ids(self) -> frozenset[str] | None:
+        """Return the bot's authoritative joined rooms, or None when unavailable."""
+        ...
+
 
 @dataclass(frozen=True)
 class WorkspaceThreadExportDeps:
@@ -159,12 +163,33 @@ class WorkspaceThreadExportRunner:
         }
         for agent_name in enabled.keys() - active_bots.keys():
             logger.warning("Skipping thread exports for agent without a running bot", agent_name=agent_name)
+        joined_room_ids_by_agent: dict[str, frozenset[str]] = {}
+        for agent_name, bot in active_bots.items():
+            try:
+                joined_room_ids = await bot.current_joined_room_ids()
+            except Exception as exc:
+                logger.warning(
+                    "Skipping thread exports because joined rooms could not be read",
+                    agent_name=agent_name,
+                    error=str(exc),
+                )
+                continue
+            if joined_room_ids is None:
+                logger.warning(
+                    "Skipping thread exports because joined rooms could not be read",
+                    agent_name=agent_name,
+                )
+                continue
+            joined_room_ids_by_agent[agent_name] = frozenset(joined_room_ids) & bot.approval_room_ids
+        available_bots = {
+            agent_name: bot for agent_name, bot in active_bots.items() if agent_name in joined_room_ids_by_agent
+        }
         target_groups = await asyncio.to_thread(
             _build_target_groups,
             config,
             runtime_paths,
             enabled,
-            active_bots,
+            available_bots,
         )
         targets = tuple(target for group in target_groups.values() for target in group)
         if not targets:
@@ -172,11 +197,11 @@ class WorkspaceThreadExportRunner:
         state_rooms = await asyncio.to_thread(export_rooms, runtime_paths, None)
         sources: list[ThreadExportSource] = []
         for agent_name, agent_targets in target_groups.items():
-            bot = active_bots[agent_name]
+            bot = available_bots[agent_name]
             rooms = await asyncio.to_thread(
                 _select_agent_rooms,
                 bot.rooms,
-                bot.approval_room_ids,
+                joined_room_ids_by_agent[agent_name],
                 state_rooms,
             )
             if not full_pass:
