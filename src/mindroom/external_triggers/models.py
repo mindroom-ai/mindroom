@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from mindroom.config.validation import non_empty_stripped
 
 # Thread keys are retained for days in a shared store, so keep them short.
-MAX_THREAD_KEY_LENGTH = 256
+_MAX_THREAD_KEY_LENGTH = 256
 
 
 class ExternalTriggerPayload(BaseModel):
@@ -43,8 +43,8 @@ class ExternalTriggerPayload(BaseModel):
         if value is None:
             return None
         stripped = non_empty_stripped(value, field_name="thread_key")
-        if len(stripped) > MAX_THREAD_KEY_LENGTH:
-            msg = f"thread_key must be at most {MAX_THREAD_KEY_LENGTH} characters"
+        if len(stripped) > _MAX_THREAD_KEY_LENGTH:
+            msg = f"thread_key must be at most {_MAX_THREAD_KEY_LENGTH} characters"
             raise ValueError(msg)
         return stripped
 
