@@ -490,6 +490,13 @@ def _verify_browser_reset_intent(
         raise HTTPException(status_code=503, detail="OAuth reset requires an active configuration")
     if not agent_name:
         raise HTTPException(status_code=403, detail="The current requester cannot manage this agent's credentials")
+    # Deliberate split. A reset POST deletes a live credential before provider
+    # authorization, so a leaked requester-scoped link must not let another room
+    # member wipe the owner's connection and bind their own provider account into
+    # that scope; only a dashboard login as the token's requester proves the clicker
+    # is that requester. Shared credentials have no single human owner to log in
+    # as, so the one-time bearer link is the delegated authority for a configured
+    # credential manager and is consumed on POST instead.
     if intent.binding.worker_scope == "shared":
         identity = _conversation_execution_identity(agent_name, intent.requester_id, runtime_paths)
     else:
