@@ -116,6 +116,7 @@ class JournalDispatcher:
     runtime_generation: str = "unmanaged"
     on_own_membership_transition: Callable[[str, str, bool], Awaitable[None]] | None = None
     on_live_room_membership_transition: Callable[[str, nio.RoomMemberEvent], Awaitable[None]] | None = None
+    on_room_activity: Callable[[str], None] = lambda _room_id: None
     # Replaying a turn needs the agent fleet up, so the orchestrator releases
     # turn-backed replay separately from the rest of startup. Until it does,
     # those events stay pending; everything else drains immediately.
@@ -152,6 +153,7 @@ class JournalDispatcher:
             on_delivery_recovery_needed=self.on_delivery_recovery_needed,
             on_own_membership_transition=self.on_own_membership_transition,
             on_live_room_membership_transition=self.on_live_room_membership_transition,
+            on_room_activity=self.on_room_activity,
         )
 
     def _remember_live_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:
