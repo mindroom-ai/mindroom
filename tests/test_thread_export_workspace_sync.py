@@ -335,21 +335,37 @@ async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path)
     assert sources[0].reader.reader.hydrator.self_sender == "@mindroom_code:localhost"
 
 
-async def test_not_running_agent_skips_its_workspace_export(tmp_path: Path) -> None:
-    """A stopped agent cannot lend the principal-bound source for its workspace."""
+@pytest.mark.parametrize("availability", ["missing", "clientless", "stopped"])
+async def test_unavailable_agent_migrates_its_workspace_without_a_source(
+    tmp_path: Path,
+    availability: str,
+) -> None:
+    """A missing runtime cannot leave known-tainted legacy workspace exports behind."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+    runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
-    runner = _runner(
-        config,
-        _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost", client=None)),
-    )
-    export = _export_mock()
+    export_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
+    stale_thread = _write_owned_export(export_dir)
+    bots: dict[str, _ThreadExportBot] = {}
+    if availability != "missing":
+        bot = _FakeBot(
+            "@mindroom_code:localhost",
+            running=availability != "stopped",
+            client=None if availability == "clientless" else Mock(),
+        )
+        bots = _bots(bot)
+    runner = _runner(config, bots)
 
-    with patch(EXPORT_PATH, new=export):
+    with patch(
+        "mindroom.thread_export.service.export_threads_for_targets_for_client",
+        new=AsyncMock(),
+    ) as export_source:
         runner.queue_full_pass()
         await runner._run_pass_once()
 
-    export.assert_not_awaited()
+    export_source.assert_not_awaited()
+    assert not stale_thread.exists()
+    assert (export_dir / _PRINCIPAL_BOUND_MARKER_FILENAME).is_file()
 
 
 async def test_full_pass_clears_stale_exports_when_agent_has_no_rooms(tmp_path: Path) -> None:
@@ -505,20 +521,6 @@ async def test_full_pass_clears_exports_of_agents_without_the_setting(tmp_path: 
     assert (unowned_dir / "keep.yaml").exists()
 
 
-async def test_agent_without_a_bot_gets_no_target(tmp_path: Path) -> None:
-    """Agent without a bot gets no target."""
-    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
-    write_thread_export_matrix_state(tmp_path)
-    runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost")))
-    export = _export_mock()
-
-    with patch(EXPORT_PATH, new=export):
-        runner.queue_full_pass()
-        await runner._run_pass_once()
-
-    export.assert_not_awaited()
-
-
 def _private_config(tmp_path: Path, *, scope: str = "owner_and_agent") -> Config:
     return _config(
         tmp_path,
@@ -550,7 +552,11 @@ async def test_private_agent_gets_one_owner_scoped_target_per_validated_instance
 
     call = export.await_args
     assert call is not None
-    exported = {target.required_member_user_ids: target.output_dir for target in call.kwargs["targets"]}
+    exported = {
+        target.required_member_user_ids: target.output_dir
+        for target in call.kwargs["targets"]
+        if target.required_member_user_ids
+    }
     assert exported == {
         ("@alice:localhost", "@mindroom_secret:localhost"): alice_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME,
         ("@bob:localhost", "@mindroom_secret:localhost"): bob_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME,
@@ -636,5 +642,9 @@ async def test_unreadable_private_identity_clears_that_instance_and_keeps_the_pa
 
     call = export.await_args
     assert call is not None
-    assert [target.required_member_user_ids for target in call.kwargs["targets"]] == [("@mindroom_code:localhost",)]
+    assert [
+        target.required_member_user_ids for target in call.kwargs["targets"] if target.required_member_user_ids
+    ] == [
+        ("@mindroom_code:localhost",),
+    ]
     assert not existing_thread.exists()

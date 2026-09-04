@@ -188,7 +188,20 @@ class WorkspaceThreadExportRunner:
             enabled,
             active_bots,
         )
-        targets = tuple(target for group in target_groups.values() for target in group)
+        principal_bound_output_dirs = await asyncio.to_thread(
+            _enabled_export_dirs,
+            config,
+            runtime_paths,
+            enabled,
+        )
+        source_targets = tuple(target for group in target_groups.values() for target in group)
+        source_target_dirs = frozenset(target.output_dir for target in source_targets)
+        migration_targets = tuple(
+            ThreadExportTarget(output_dir=output_dir, trusted_root=runtime_paths.storage_root)
+            for output_dir in principal_bound_output_dirs
+            if output_dir not in source_target_dirs
+        )
+        targets = (*source_targets, *migration_targets)
         if not targets:
             return
         state_rooms = await asyncio.to_thread(export_rooms, runtime_paths, None)
@@ -217,7 +230,7 @@ class WorkspaceThreadExportRunner:
             sources=sources,
             targets=targets,
             full_pass=full_pass,
-            principal_bound_output_dirs=tuple(target.output_dir for target in targets),
+            principal_bound_output_dirs=principal_bound_output_dirs,
         )
         _log_pass(stats, room_ids=None if full_pass else sorted(room_ids))
 
@@ -311,6 +324,25 @@ def _build_target_groups(
         if targets:
             groups[agent_name] = targets
     return groups
+
+
+def _enabled_export_dirs(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    enabled: dict[str, AgentThreadExportConfig],
+) -> tuple[Path, ...]:
+    """Resolve enabled workspace destinations independently of live Matrix sources."""
+    output_dirs: list[Path] = []
+    for agent_name in enabled:
+        private = config.agents[agent_name].private
+        if private is None:
+            output_dirs.append(_shared_export_dir(runtime_paths, agent_name))
+            continue
+        for instance in private_instances_for_agent(runtime_paths.storage_root, agent_name, private.per):
+            output_dir = _private_export_dir(config, runtime_paths, agent_name, instance.state_root)
+            if output_dir is not None:
+                output_dirs.append(output_dir)
+    return tuple(dict.fromkeys(output_dirs))
 
 
 def _shared_target(
