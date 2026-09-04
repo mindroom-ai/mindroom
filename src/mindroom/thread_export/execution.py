@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -90,7 +91,7 @@ async def _authorized_room_accumulators(
     eligible = [accumulator for accumulator in accumulators if target_accepts_room(accumulator.target, room)]
     for accumulator in accumulators:
         if not target_accepts_room(accumulator.target, room):
-            retract_room_export(accumulator, room)
+            await asyncio.to_thread(retract_room_export, accumulator, room)
 
     scoped = [accumulator for accumulator in eligible if accumulator.target.required_member_user_ids]
     authorized = [accumulator for accumulator in eligible if not accumulator.target.required_member_user_ids]
@@ -112,7 +113,7 @@ async def _authorized_room_accumulators(
         if member_ids.issuperset(required_member_user_ids):
             authorized.append(accumulator)
         else:
-            retract_room_export(accumulator, room)
+            await asyncio.to_thread(retract_room_export, accumulator, room)
     return authorized
 
 
@@ -140,7 +141,8 @@ async def _write_thread_to_targets(
 
     for accumulator in accumulators:
         try:
-            wrote_file = write_thread_payload(
+            wrote_file = await asyncio.to_thread(
+                write_thread_payload,
                 accumulator.target.output_dir,
                 room,
                 thread_id,
@@ -157,7 +159,7 @@ async def _write_thread_to_targets(
             accumulator.threads_unchanged += 1
 
 
-def _finish_room_exports(
+def _finish_room_exports_blocking(
     room: ThreadExportRoom,
     thread_ids: Sequence[str],
     *,
@@ -165,7 +167,10 @@ def _finish_room_exports(
     accumulators: Sequence[ThreadExportAccumulator],
     changed_accumulator_ids: set[int],
 ) -> None:
-    """Reconcile removed threads and update indexes for one enumerated room."""
+    """Reconcile removed threads and update indexes for one enumerated room.
+
+    Re-reads every exported thread file in the room, so it runs off the event loop.
+    """
     for accumulator in accumulators:
         try:
             output_dir = accumulator.target.output_dir
@@ -279,7 +284,8 @@ async def _export_enumerated_room_threads(
             changed_accumulator_ids=changed_accumulator_ids,
         )
 
-    _finish_room_exports(
+    await asyncio.to_thread(
+        _finish_room_exports_blocking,
         room,
         thread_ids,
         truncated=truncated,

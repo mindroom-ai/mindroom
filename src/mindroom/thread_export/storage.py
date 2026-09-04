@@ -945,11 +945,8 @@ def clear_thread_export_root(
     output_dir: Path,
     *,
     trusted_root: Path | None = None,
-    should_clear: Callable[[], bool] | None = None,
 ) -> None:
     """Remove exporter-owned content from one target and preserve unrelated entries."""
-    if should_clear is not None and not should_clear():
-        return
     root_fd = _open_owned_export_root(
         output_dir,
         create=False,
