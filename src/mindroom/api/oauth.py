@@ -78,8 +78,8 @@ from mindroom.oauth.service import (
 )
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
-    ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
+    build_tool_execution_identity,
 )
 
 if TYPE_CHECKING:
@@ -368,9 +368,10 @@ def _conversation_connect_context(
     requester_id = target.requester_id
     if not agent_name or not requester_id:
         raise HTTPException(status_code=400, detail="OAuth link target is invalid")
-    identity = ToolExecutionIdentity(
+    identity = build_tool_execution_identity(
         channel="matrix",
         agent_name=agent_name,
+        runtime_paths=runtime_paths,
         requester_id=requester_id,
         room_id=None,
         thread_id=None,
@@ -476,9 +477,10 @@ def _verify_browser_reset_intent(
     if not agent_name:
         raise HTTPException(status_code=403, detail="The current requester cannot manage this agent's credentials")
     if intent.binding.worker_scope == "shared":
-        identity = ToolExecutionIdentity(
+        identity = build_tool_execution_identity(
             channel="matrix",
             agent_name=agent_name,
+            runtime_paths=runtime_paths,
             requester_id=intent.requester_id,
             room_id=None,
             thread_id=None,

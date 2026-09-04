@@ -114,6 +114,8 @@ def _stored_oauth_credentials(
         thread_id=None,
         resolved_thread_id=None,
         session_id=None,
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
     )
     worker_target = (
         resolve_worker_target(worker_scope, agent_name, execution_identity=identity)
@@ -2331,6 +2333,7 @@ def test_shared_browser_reset_uses_one_time_credential_manager_link_without_dash
         {
             "TEST_OAUTH_CLIENT_ID": "client-id",
             "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            "CUSTOMER_ID": "tenant-a",
         },
     )
     api_app = _make_test_app(
@@ -2357,6 +2360,8 @@ def test_shared_browser_reset_uses_one_time_credential_manager_link_without_dash
             thread_id=None,
             resolved_thread_id=None,
             session_id=None,
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         ),
     )
     get_runtime_credentials_manager(runtime_paths).for_primary_runtime_agent_scope("general").save_credentials(
