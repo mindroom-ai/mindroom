@@ -37,13 +37,13 @@ The ordinary invite lifecycle retains its existing fail-open state recovery and 
 - Focused tests were written red before production changes for call ownership, source-scoped export, ambiguous cleanup, raw-ID ownership, retired claims, symlink safety, and malformed claim handling.
 - `uv run pytest -q -n 0 tests/test_entity_resolution.py tests/test_thread_export_selection.py tests/test_thread_export_execution.py tests/test_thread_export_service.py tests/test_room_invites.py tests/test_matrix_rtc_call_manager.py` passed all 275 tests after merging current `origin/main` and hardening unreadable ownership evidence.
 - `uv run pytest -q` completed the full repository suite at 100 percent with exit status zero and only existing dependency, fork, and unawaited-mock warnings.
-- `uv run pre-commit run --all-files` passed every repository hook on the implementation base before the latest `origin/main` merge.
-- After that merge, all hooks covering this diff passed and documentation references were regenerated, while the repository-wide `privata` scan reports the unrelated `LargeMessageStrategy` symbol introduced by `origin/main` commit `f4928b970`.
-- The final independent security diff review approved the core change with no blockers after running its focused 74-test suite.
+- `uv sync --all-extras` completed successfully before the fresh-context verification pass.
+- `uv run pre-commit run --all-files` passed every hook covering this diff and regenerated no files, while the repository-wide `privata` scan still reports the unrelated `LargeMessageStrategy` symbol introduced by `origin/main` commit `f4928b970`.
+- The public `mindroom-ai/thread-export-plugin` main commit `e3d88ca6a4d97754f40f41b7fdb630d7f48461bb` failed 24 of its 48 tests against this core change because its targets do not yet pass `source_entity_names`.
 
 ## Residual risks and rollout
 
-The external `mindroom-ai/thread-export-plugin` must be released before or atomically with this core change because each per-agent `ThreadExportTarget` must now pass `source_entity_names=(agent_name,)`, or an explicit tuple for an intentionally shared target.
+The external `mindroom-ai/thread-export-plugin` must receive and verify a dual-compatible companion change before this core branch can merge because each per-agent `ThreadExportTarget` must now pass `source_entity_names=(agent_name,)`, or an explicit tuple for an intentionally shared target.
 No permissive compatibility default was added because that would recreate the privacy boundary failure.
 The first export pass after rollout removes ambiguous room copies from the filesystem, and the corresponding knowledge bases must complete a refresh so already indexed chunks are evicted from retrieval.
 Invite-only rooms with genuinely conflicting legacy claims intentionally remain unavailable for calls until operators configure the room under exactly one calls-enabled agent.
