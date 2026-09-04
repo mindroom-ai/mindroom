@@ -181,15 +181,12 @@ class WorkspaceThreadExportRunner:
                 )
                 continue
             joined_room_ids_by_agent[agent_name] = frozenset(joined_room_ids) & bot.approval_room_ids
-        available_bots = {
-            agent_name: bot for agent_name, bot in active_bots.items() if agent_name in joined_room_ids_by_agent
-        }
         target_groups = await asyncio.to_thread(
             _build_target_groups,
             config,
             runtime_paths,
             enabled,
-            available_bots,
+            active_bots,
         )
         targets = tuple(target for group in target_groups.values() for target in group)
         if not targets:
@@ -197,22 +194,30 @@ class WorkspaceThreadExportRunner:
         state_rooms = await asyncio.to_thread(export_rooms, runtime_paths, None)
         sources: list[ThreadExportSource] = []
         for agent_name, agent_targets in target_groups.items():
-            bot = available_bots[agent_name]
+            joined_room_ids = joined_room_ids_by_agent.get(agent_name)
+            if joined_room_ids is None:
+                continue
+            bot = active_bots[agent_name]
             rooms = await asyncio.to_thread(
                 _select_agent_rooms,
                 bot.rooms,
-                joined_room_ids_by_agent[agent_name],
+                joined_room_ids,
                 state_rooms,
             )
+            retracted_rooms: tuple[ThreadExportRoom, ...] = ()
             if not full_pass:
                 rooms = [room for room in rooms if room.room_id in room_ids]
-            sources.append(_source_for_bot(bot, tuple(rooms), agent_targets, config))
+                retracted_rooms = tuple(
+                    _select_agent_rooms(bot.rooms, room_ids - joined_room_ids, state_rooms),
+                )
+            sources.append(_source_for_bot(bot, tuple(rooms), retracted_rooms, agent_targets, config))
         stats = await export_threads_to_sources(
             config=config,
             runtime_paths=runtime_paths,
             sources=sources,
             targets=targets,
             full_pass=full_pass,
+            principal_bound_output_dirs=tuple(target.output_dir for target in targets),
         )
         _log_pass(stats, room_ids=None if full_pass else sorted(room_ids))
 
@@ -245,6 +250,7 @@ def _select_agent_rooms(
 def _source_for_bot(
     bot: _ThreadExportBot,
     rooms: tuple[ThreadExportRoom, ...],
+    retracted_rooms: tuple[ThreadExportRoom, ...],
     targets: tuple[ThreadExportTarget, ...],
     config: Config,
 ) -> ThreadExportSource:
@@ -260,6 +266,7 @@ def _source_for_bot(
             self_sender=bot.matrix_id.full_id,
         ),
         rooms=rooms,
+        retracted_rooms=retracted_rooms,
         target_output_dirs=tuple(target.output_dir for target in targets),
     )
 
