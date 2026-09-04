@@ -43,7 +43,9 @@ The wrapper refreshes stored Google tokens when needed and raises `OAuthConnecti
 It does not fall back to Agno's local OAuth flow when MindRoom credentials are missing.
 It only bypasses MindRoom OAuth when configured for Google service-account auth.
 The registered Gmail surface includes archive, trash, star, draft, message and thread retrieval, search, label mutation, attachment download, send, and reply operations.
-Its exact function names are `apply_label()`, `archive_email()`, `create_draft_email()`, `delete_custom_label()`, `download_attachment()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `list_labels()`, `mark_email_as_read()`, `mark_email_as_unread()`, `modify_message_labels()`, `modify_thread_labels()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_draft()`, `send_email()`, `send_email_reply()`, `star_email()`, `trash_message()`, `trash_thread()`, `unstar_email()`, and `update_draft()`.
+Its exact function names are `apply_label()`, `archive_email()`, `create_draft_email()`, `delete_custom_label()`, `download_attachment()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `list_labels()`, `mark_email_as_read()`, `mark_email_as_unread()`, `modify_message_labels()`, `modify_thread_labels()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_draft()`, `send_email()`, `send_email_reply()`, `send_email_to_self()`, `star_email()`, `trash_message()`, `trash_thread()`, `unstar_email()`, and `update_draft()`.
+`send_email_to_self(subject, body)` derives its sole recipient from the connected Gmail profile and accepts no recipient, CC, BCC, or attachment arguments.
+The function follows the configured tool approval policy, so operators can match `send_email_to_self` separately from other send functions.
 Draft and send operations accept local file-system paths for attachments.
 
 ### Configuration
@@ -73,6 +75,7 @@ agents:
 get_latest_emails(10)
 search_emails("label:unread from:billing@example.com", 10)
 send_email("alice@example.com", "Project update", "Here is the latest status.")
+send_email_to_self("Automation finished", "The scheduled report is ready.")
 send_email_reply("thread_id", "message_id", "alice@example.com", "Re: Project update", "Thanks for the update.")
 apply_label("is:unread category:promotions", "Needs Review", count=10)
 ```

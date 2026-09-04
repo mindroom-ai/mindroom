@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from agno.tools.google.auth import google_authenticate
 from agno.tools.google.gmail import GmailTools as AgnoGmailTools
+from agno.tools.google.gmail import validate_email
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -26,6 +28,24 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
+_authenticate = google_authenticate("gmail")
+_GMAIL_PROFILE_SCOPES = frozenset(
+    {
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.metadata",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.readonly",
+    },
+)
+_GMAIL_SEND_SCOPES = frozenset(
+    {
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.send",
+    },
+)
 
 
 class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmailTools):
@@ -65,10 +85,54 @@ class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmai
 
         # Pass credentials to parent class
         super().__init__(creds=creds, **kwargs)
+        self.register(self.send_email_to_self)
+        if self.functions.get("send_email_to_self") is not None and (
+            not _GMAIL_PROFILE_SCOPES.intersection(self.scopes) or not _GMAIL_SEND_SCOPES.intersection(self.scopes)
+        ):
+            self.functions.pop("send_email_to_self")
+            logger.warning("gmail_send_email_to_self_disabled_missing_scope")
 
         # Store original auth method for fallback
         self._set_original_auth(AgnoGmailTools._resolve_creds)
         self._wrap_oauth_function_entrypoints()
+
+    def _check_tools_filters(
+        self,
+        available_tools: list[str],
+        include_tools: list[str] | None = None,
+        exclude_tools: list[str] | None = None,
+    ) -> None:
+        """Include the local function in Agno's toolkit filter validation."""
+        super()._check_tools_filters(
+            [*available_tools, "send_email_to_self"],
+            include_tools=include_tools,
+            exclude_tools=exclude_tools,
+        )
+
+    @_authenticate
+    def send_email_to_self(self, subject: str, body: str) -> str:
+        """Send an email to the connected Gmail account.
+
+        Args:
+            subject: Email subject.
+            body: Email body content.
+
+        Returns:
+            Stringified dictionary containing the sent email details.
+
+        """
+        service = self.service
+        assert service is not None
+        profile = service.users().getProfile(userId="me").execute()
+        email_address = profile.get("emailAddress") if isinstance(profile, dict) else None
+        if (
+            not isinstance(email_address, str)
+            or email_address != email_address.strip()
+            or not validate_email(email_address)
+        ):
+            msg = "Connected Gmail profile did not return one valid email address"
+            raise RuntimeError(msg)
+        return self.send_email(to=email_address, subject=subject, body=body)
 
     def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
         return build("gmail", "v1", http=self._google_authorized_http(creds))

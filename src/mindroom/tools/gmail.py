@@ -130,6 +130,7 @@ if TYPE_CHECKING:
         "send_draft",
         "send_email",
         "send_email_reply",
+        "send_email_to_self",
         "star_email",
         "trash_message",
         "trash_thread",
