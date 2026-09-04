@@ -42,13 +42,13 @@ The debounce is a module constant of two seconds; the plugin setting was never t
 ### Modules
 
 `thread_export/workspace_sync.py` owns the feature.
-It holds the pending state (dirty room IDs, full-pass flag), the debounced single-flight loop, target resolution for shared and private agents, cleanup for agents whose `thread_exports` was removed, and one export pass.
+`WorkspaceThreadExportRunner` holds the pending state (dirty room IDs, full-pass flag), the debounced single-flight loop, target resolution for shared and private agents, cleanup for agents whose `thread_exports` was removed, and one export pass.
 Its dependencies arrive through a `WorkspaceThreadExportDeps` dataclass: `runtime_paths`, `config_provider`, and `bot_provider`.
-
-`orchestration/thread_export_runtime.py` is the lifecycle shell, shaped like `TodoPokeRuntimeCoordinator`.
-`sync()` starts the runner when any configured agent enables exports and stops it otherwise, and queues one full pass on every call so startup and hot reload both reconcile.
+The orchestrator owns one runner for its whole lifetime: `start()` on the first support-service sync, `queue_full_pass()` after bots start and after every config reload, `stop()` at shutdown.
+A full pass with no agent enabling exports is the cleanup sweep for agents that used to, so there is no separate on/off lifecycle.
 `mark_room_activity(room_id)` is the trigger the bots call.
-`stop()` cancels the runner on shutdown.
+
+Private-instance enumeration lives in `private_instance_identity_store.private_instances_for_agent`, which owns the on-disk layout and the record validation; the runner only turns each instance into a workspace target.
 
 ### Triggers
 
@@ -66,7 +66,7 @@ Every bot in a room fires for the same event; the dirty set deduplicates.
 `export_threads_to_sources` runs the shared body: validate targets, export each source, reconcile a full pass, return stats.
 `export_threads_to_targets_once` keeps the CLI behaviour: read `matrix_state.yaml`, log in per account group, open and bind the journal, build sources, delegate.
 The runner builds sources from live bots instead: configured rooms read through the router bot, invited rooms through the invited entity's bot, each with `export_conversation_reader(client=bot.client, store=bot.journal_principal(), self_sender=bot.agent_user.user_id)`.
-A pass that finds the router bot not running yet does no work, keeps the pending set, and wakes the loop again so the debounce becomes the retry interval; a pass that crashes keeps the pending set for the next trigger.
+A bot that is not running, the router included, makes its rooms unreadable for that pass: failures are recorded, nothing is retracted, and the full pass queued after bots start or after a reload catches up. A pass that crashes keeps the pending set for the next trigger.
 
 ### Blocking I/O
 
@@ -79,7 +79,7 @@ The CLI gets the same code path and the same behaviour.
 
 Shared agent: `agents/<name>/workspace/thread_exports`, membership scope `(agent_user_id,)`.
 Private agent: one target per instance root under `private_instances/`, workspace resolved through `resolve_agent_workspace_from_state_path`, scope `(owner,)` or `(owner, agent_user_id)` by `private_room_scope`.
-An instance counts only when `load_private_instance_identity` returns a record whose requester forward-resolves to that exact root; anything else is skipped with a warning and its stale export tree is cleared.
+An instance counts only when its scope record validates and names the agent's current `private.per` scope; anything else has its stale export tree cleared.
 Discovery runs once per pass through `asyncio.to_thread`, so no cache, revision counter, or eviction path exists.
 On a full pass, every configured agent without `thread_exports` has its export trees cleared, so removing the field from `config.yaml` cleans up on hot reload.
 `clear_thread_export_root` refuses roots without the ownership marker, so cleanup can never touch user files.
@@ -98,7 +98,7 @@ The retain-on-lookup-failure rule stays: a failed lookup writes nothing and dele
 ## Testing
 
 - `tests/test_thread_export_workspace_sync.py`: debounce and coalescing, full pass subsumes dirty rooms, a failing pass does not stop the runner, disabled-agent cleanup, shared and private target resolution, private identity validation, membership scopes, bot-not-ready leaves work pending.
-- `tests/test_thread_export_runtime.py`: coordinator start, stop, and reload transitions.
+- `tests/test_private_instance_identity.py`: `private_instances_for_agent` enumeration and ownership flags.
 - `tests/test_journal_ingress.py`: `on_room_activity` fires for admitted conversation kinds only.
 - Config tests for the `thread_exports` field and its `true`/`false` shorthand.
 - Existing `test_thread_export_*` suites keep covering the CLI path through the new split.

@@ -17,10 +17,9 @@ from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportR
 from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME, write_thread_payload
 from mindroom.thread_export.workspace_sync import (
     _WORKSPACE_EXPORT_DIRNAME,
-    ThreadExportBot,
+    _ThreadExportBot,
     WorkspaceThreadExportDeps,
     WorkspaceThreadExportRunner,
-    enabled_thread_export_agents,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -55,11 +54,11 @@ class _FakeBot:
         return self.principal
 
 
-def _bots(*bots: _FakeBot) -> dict[str, ThreadExportBot]:
+def _bots(*bots: _FakeBot) -> dict[str, _ThreadExportBot]:
     by_name = {}
     for bot in bots:
         agent_name = bot.matrix_id.username.removeprefix("mindroom_")
-        by_name[agent_name] = cast("ThreadExportBot", bot)
+        by_name[agent_name] = cast("_ThreadExportBot", bot)
     return by_name
 
 
@@ -67,7 +66,7 @@ def _config(tmp_path: Path, agents: dict[str, AgentConfig]) -> Config:
     return bind_runtime_paths(Config(agents=agents), test_runtime_paths(tmp_path))
 
 
-def _runner(config: Config, bots: dict[str, ThreadExportBot]) -> WorkspaceThreadExportRunner:
+def _runner(config: Config, bots: dict[str, _ThreadExportBot]) -> WorkspaceThreadExportRunner:
     return WorkspaceThreadExportRunner(
         WorkspaceThreadExportDeps(
             runtime_paths=runtime_paths_for(config),
@@ -125,18 +124,6 @@ def _materialize_private_instance(config: Config, runtime_paths: RuntimePaths, r
     ).state_root
 
 
-def test_enabled_agents_are_those_with_the_setting(tmp_path: Path) -> None:
-    """Enabled agents are those with the setting."""
-    config = _config(
-        tmp_path,
-        {
-            "code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig()),
-            "other": AgentConfig(display_name="Other"),
-        },
-    )
-    assert enabled_thread_export_agents(config) == {"code": AgentThreadExportConfig()}
-
-
 async def test_activity_marks_coalesce_into_one_exact_room_pass(tmp_path: Path) -> None:
     """Activity marks coalesce into one pass per distinct room."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
@@ -184,8 +171,8 @@ async def test_full_pass_subsumes_dirty_rooms(tmp_path: Path) -> None:
     ]
 
 
-async def test_run_loop_debounces_and_stops(tmp_path: Path) -> None:
-    """Run loop debounces and stops."""
+async def test_started_runner_exports_on_activity_and_stops_cleanly(tmp_path: Path) -> None:
+    """Started runner exports on activity and stops cleanly."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
     bots = _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost"))
@@ -197,13 +184,17 @@ async def test_run_loop_debounces_and_stops(tmp_path: Path) -> None:
         return _stats_for_targets(**kwargs)
 
     with patch(EXPORT_PATH, new=AsyncMock(side_effect=_export)) as export:
-        task = asyncio.create_task(runner.run())
+        runner.start()
+        runner.start()
         runner.mark_room_activity("!lobby:localhost")
         await asyncio.wait_for(exported.wait(), timeout=5)
-        runner.stop()
-        await asyncio.wait_for(task, timeout=5)
+        task = runner._task
+        assert task is not None
+        await asyncio.wait_for(runner.stop(), timeout=5)
 
     export.assert_awaited_once()
+    assert task.cancelled()
+    assert runner._task is None
 
 
 async def test_pass_failure_keeps_the_work_for_the_next_trigger(tmp_path: Path) -> None:
@@ -217,9 +208,7 @@ async def test_pass_failure_keeps_the_work_for_the_next_trigger(tmp_path: Path) 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
         runner.mark_room_activity("!lobby:localhost")
-        runner._wakeup.clear()
         await runner._run_pass_once()
-        assert not runner._wakeup.is_set()
         await runner._run_pass_once()
 
     assert export.await_count == 2
@@ -281,8 +270,8 @@ async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path)
     assert call.kwargs["unreadable_rooms"] == []
 
 
-async def test_not_running_router_leaves_work_pending(tmp_path: Path) -> None:
-    """Not running router leaves work pending."""
+async def test_not_running_router_makes_configured_rooms_unreadable(tmp_path: Path) -> None:
+    """Configured rooms are reported unreadable while the router is down; nothing is retracted or retried."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     write_thread_export_matrix_state(tmp_path)
     router = _FakeBot("@mindroom_router:localhost", running=False)
@@ -291,17 +280,15 @@ async def test_not_running_router_leaves_work_pending(tmp_path: Path) -> None:
 
     with patch(EXPORT_PATH, new=export):
         runner.queue_full_pass()
-        runner._wakeup.clear()
-        await runner._run_pass_once()
-        export.assert_not_awaited()
-        assert runner._wakeup.is_set()
-        router.running = True
         await runner._run_pass_once()
 
-    export.assert_awaited_once()
     call = export.await_args
     assert call is not None
-    assert call.kwargs["full_pass"] is True
+    assert call.kwargs["sources"] == []
+    [(rooms, error)] = call.kwargs["unreadable_rooms"]
+    assert sorted(room.room_id for room in rooms) == ["!dev:localhost", "!lobby:localhost"]
+    assert error == "Bot 'router' is not running"
+    assert runner._full_pass_pending is False
 
 
 async def test_not_running_invited_entity_is_reported_unreadable(tmp_path: Path) -> None:
@@ -447,8 +434,8 @@ async def test_symlinked_private_root_is_ignored(tmp_path: Path) -> None:
     assert external_thread.exists()
 
 
-async def test_unreadable_private_identity_does_not_block_other_targets(tmp_path: Path) -> None:
-    """A private instance whose record cannot be read is skipped, and the pass still runs."""
+async def test_unreadable_private_identity_clears_that_instance_and_keeps_the_pass_going(tmp_path: Path) -> None:
+    """A private instance whose record cannot be read is cleared like any ownerless root; other targets still export."""
     config = _config(
         tmp_path,
         {
@@ -476,7 +463,7 @@ async def test_unreadable_private_identity_does_not_block_other_targets(tmp_path
 
     with (
         patch(
-            "mindroom.thread_export.workspace_sync.load_private_instance_identity",
+            "mindroom.private_instance_identity_store.load_private_instance_identity",
             side_effect=PermissionError("record unreadable"),
         ),
         patch(EXPORT_PATH, new=export),
@@ -487,26 +474,4 @@ async def test_unreadable_private_identity_does_not_block_other_targets(tmp_path
     call = export.await_args
     assert call is not None
     assert [target.required_member_user_ids for target in call.kwargs["targets"]] == [("@mindroom_code:localhost",)]
-    assert existing_thread.exists()
-
-
-async def test_incremental_pass_matches_room_ids_exactly(tmp_path: Path) -> None:
-    """A dirty room ID selects that room only, never a room whose ID merely contains it."""
-    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
-    runtime_paths = runtime_paths_for(config)
-    write_thread_export_matrix_state(tmp_path)
-    write_invited_rooms(runtime_paths, "code", ["!lobby:localhost2", "!private:localhost"])
-    runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost")))
-    export = _export_mock()
-
-    with patch(EXPORT_PATH, new=export):
-        runner.mark_room_activity("!lobby:localhost")
-        runner.mark_room_activity("!private:localhost")
-        await runner._run_pass_once()
-
-    call = export.await_args
-    assert call is not None
-    assert [tuple(room.room_id for room in source.rooms) for source in call.kwargs["sources"]] == [
-        ("!lobby:localhost",),
-        ("!private:localhost",),
-    ]
+    assert not existing_thread.exists()

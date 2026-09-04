@@ -1,10 +1,10 @@
 """Keep enabled agents' workspaces current with YAML thread exports.
 
-Bots report room activity as the journal admits events; one runner debounces
-those reports and runs a single export pass at a time through the live bots'
-clients and projection views, so no pass logs in or opens a journal of its
-own. Storage I/O runs off the event loop inside ``export_threads_to_sources``,
-and target discovery runs off it here.
+Bots report room activity as the journal admits events; one always-running
+task debounces those reports into single-flight export passes that read through
+the live bots' clients and projection views, so no pass logs in or opens a
+journal of its own. Storage I/O runs off the event loop inside
+``export_threads_to_sources``, and target discovery runs off it here.
 """
 
 from __future__ import annotations
@@ -15,17 +15,13 @@ from typing import TYPE_CHECKING, Protocol
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
-from mindroom.private_instance_identity import PrivateInstanceIdentityError, load_private_instance_identity
+from mindroom.private_instance_identity import private_instances_for_agent
 from mindroom.thread_export.models import ThreadExportRoom, ThreadExportSource, ThreadExportTarget
 from mindroom.thread_export.projected_history import export_conversation_reader
 from mindroom.thread_export.selection import export_rooms, invited_export_rooms
 from mindroom.thread_export.service import export_threads_to_sources
 from mindroom.thread_export.storage import clear_thread_export_root
-from mindroom.tool_system.worker_routing import (
-    agent_state_root_path,
-    agent_workspace_root_path,
-    private_instance_state_root_for_requester,
-)
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
@@ -44,11 +40,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _WORKSPACE_EXPORT_DIRNAME = "thread_exports"
-_PRIVATE_INSTANCES_DIRNAME = "private_instances"
 _DEBOUNCE_SECONDS = 2.0
 
+type _UnreadableRooms = list[tuple[Sequence[ThreadExportRoom], str]]
 
-class ThreadExportBot(Protocol):
+
+class _ThreadExportBot(Protocol):
     """What the runner reads from a running bot."""
 
     running: bool
@@ -64,38 +61,43 @@ class ThreadExportBot(Protocol):
         ...
 
 
-def enabled_thread_export_agents(config: Config) -> dict[str, AgentThreadExportConfig]:
-    """Return the agents whose workspaces receive thread exports."""
-    return {name: agent.thread_exports for name, agent in config.agents.items() if agent.thread_exports is not None}
-
-
 @dataclass(frozen=True)
 class WorkspaceThreadExportDeps:
     """Runtime collaborators the workspace export runner reads through."""
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
-    bot_provider: Callable[[str], ThreadExportBot | None]
+    bot_provider: Callable[[str], _ThreadExportBot | None]
     debounce_seconds: float = _DEBOUNCE_SECONDS
 
 
-@dataclass(frozen=True)
-class _AgentTarget:
-    """One export target and the agent whose workspace it lives in."""
-
-    agent_name: str
-    target: ThreadExportTarget
-
-
 class WorkspaceThreadExportRunner:
-    """Debounce room activity into single-flight export passes."""
+    """Debounce room activity into single-flight export passes.
+
+    The runner exists for the whole orchestrator lifetime. A full pass with no
+    agent enabling exports is the cleanup sweep for agents that used to, after
+    which the loop idles on its event.
+    """
 
     def __init__(self, deps: WorkspaceThreadExportDeps) -> None:
         self._deps = deps
         self._pending_room_ids: set[str] = set()
         self._full_pass_pending = False
         self._wakeup = asyncio.Event()
-        self._stopped = False
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        """Start the loop once; later calls are no-ops."""
+        if self._task is None:
+            self._task = asyncio.create_task(self._run(), name="thread_export_workspace_sync")
+
+    async def stop(self) -> None:
+        """Cancel the loop, abandoning a pass in flight; every write it makes is atomic."""
+        task = self._task
+        self._task = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     def mark_room_activity(self, room_id: str) -> None:
         """Queue one room for re-export."""
@@ -103,28 +105,20 @@ class WorkspaceThreadExportRunner:
         self._wakeup.set()
 
     def queue_full_pass(self) -> None:
-        """Queue a pass over every room that also reconciles removed threads and rooms."""
+        """Queue a pass over every room that also reconciles removed threads, rooms, and agents."""
         self._full_pass_pending = True
         self._wakeup.set()
 
-    def stop(self) -> None:
-        """Let ``run`` return after the current pass."""
-        self._stopped = True
-        self._wakeup.set()
-
-    async def run(self) -> None:
-        """Drain triggers one debounced pass at a time until stopped."""
-        while not self._stopped:
+    async def _run(self) -> None:
+        while True:
             await self._wakeup.wait()
             self._wakeup.clear()
-            if self._stopped:
-                return
             if self._deps.debounce_seconds > 0:
                 await asyncio.sleep(self._deps.debounce_seconds)
             await self._run_pass_once()
 
     async def _run_pass_once(self) -> None:
-        """Consume the pending work and run one pass; requeue it when nothing could be read yet."""
+        """Consume the pending work and run one pass; a crash keeps the work for the next trigger."""
         full_pass, room_ids = self._full_pass_pending, frozenset(self._pending_room_ids)
         self._full_pass_pending = False
         self._pending_room_ids.clear()
@@ -134,29 +128,16 @@ class WorkspaceThreadExportRunner:
         if config is None:
             return
         try:
-            completed = await self._run_pass(config, full_pass=full_pass, room_ids=room_ids)
+            await self._run_pass(config, full_pass=full_pass, room_ids=room_ids)
         except Exception:
-            # Keep the work for the next trigger rather than retrying in a tight
-            # loop on a fault that may not clear by itself.
             logger.exception("Thread export pass crashed")
-            self._requeue(full_pass=full_pass, room_ids=room_ids)
-            return
-        if not completed:
-            self._requeue(full_pass=full_pass, room_ids=room_ids)
-            self._wakeup.set()
+            self._full_pass_pending |= full_pass
+            self._pending_room_ids |= room_ids
 
-    def _requeue(self, *, full_pass: bool, room_ids: frozenset[str]) -> None:
-        self._full_pass_pending |= full_pass
-        self._pending_room_ids |= room_ids
-
-    async def _run_pass(self, config: Config, *, full_pass: bool, room_ids: frozenset[str]) -> bool:
+    async def _run_pass(self, config: Config, *, full_pass: bool, room_ids: frozenset[str]) -> None:
         """Export the dirty rooms, or everything, into every enabled agent's workspace."""
-        router_bot = self._ready_bot(ROUTER_AGENT_NAME)
-        if router_bot is None:
-            logger.debug("Deferring thread export pass until the router bot is running")
-            return False
         runtime_paths = self._deps.runtime_paths
-        enabled = enabled_thread_export_agents(config)
+        enabled = {name: agent.thread_exports for name, agent in config.agents.items() if agent.thread_exports}
         if full_pass:
             await asyncio.to_thread(_clear_disabled_agent_exports, config, runtime_paths, frozenset(enabled))
         agent_user_ids = {
@@ -166,10 +147,9 @@ class WorkspaceThreadExportRunner:
         }
         for agent_name in enabled.keys() - agent_user_ids.keys():
             logger.warning("Skipping thread exports for agent without a bot", agent_name=agent_name)
-        agent_targets = await asyncio.to_thread(_build_targets, config, runtime_paths, enabled, agent_user_ids)
-        if not agent_targets:
-            return True
-        targets = tuple(agent_target.target for agent_target in agent_targets)
+        targets = await asyncio.to_thread(_build_targets, config, runtime_paths, enabled, agent_user_ids)
+        if not targets:
+            return
         state_rooms, invited_groups = await asyncio.to_thread(_select_rooms, config, runtime_paths)
         if not full_pass:
             state_rooms = [room for room in state_rooms if room.room_id in room_ids]
@@ -178,11 +158,13 @@ class WorkspaceThreadExportRunner:
                 for entity_name, rooms in invited_groups
                 if (selected := [room for room in rooms if room.room_id in room_ids])
             ]
-        sources = [_source_for_bot(router_bot, tuple(state_rooms), config)] if state_rooms else []
-        unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = []
-        for entity_name, rooms in invited_groups:
-            bot = self._ready_bot(entity_name)
-            if bot is None:
+        sources: list[ThreadExportSource] = []
+        unreadable_rooms: _UnreadableRooms = []
+        for entity_name, rooms in ((ROUTER_AGENT_NAME, state_rooms), *invited_groups):
+            if not rooms:
+                continue
+            bot = self._deps.bot_provider(entity_name)
+            if bot is None or not bot.running or bot.client is None:
                 unreadable_rooms.append((tuple(rooms), f"Bot '{entity_name}' is not running"))
                 continue
             sources.append(_source_for_bot(bot, tuple(rooms), config))
@@ -194,15 +176,7 @@ class WorkspaceThreadExportRunner:
             unreadable_rooms=unreadable_rooms,
             full_pass=full_pass,
         )
-        _log_pass(agent_targets, stats, room_ids=room_ids, full_pass=full_pass)
-        return True
-
-    def _ready_bot(self, entity_name: str) -> ThreadExportBot | None:
-        """Return the bot when it is running with a Matrix client."""
-        bot = self._deps.bot_provider(entity_name)
-        if bot is None or not bot.running or bot.client is None:
-            return None
-        return bot
+        _log_pass(stats, room_ids=None if full_pass else sorted(room_ids))
 
 
 def _select_rooms(
@@ -220,7 +194,7 @@ def _select_rooms(
     return state_rooms, invited_groups
 
 
-def _source_for_bot(bot: ThreadExportBot, rooms: tuple[ThreadExportRoom, ...], config: Config) -> ThreadExportSource:
+def _source_for_bot(bot: _ThreadExportBot, rooms: tuple[ThreadExportRoom, ...], config: Config) -> ThreadExportSource:
     """Read ``rooms`` through one running bot's client and projection view."""
     client = bot.client
     assert client is not None
@@ -236,33 +210,24 @@ def _source_for_bot(bot: ThreadExportBot, rooms: tuple[ThreadExportRoom, ...], c
     )
 
 
-def _log_pass(
-    agent_targets: Sequence[_AgentTarget],
-    stats: Sequence[ThreadExportStats],
-    *,
-    room_ids: frozenset[str],
-    full_pass: bool,
-) -> None:
-    """Log one line per target that did something, and every target on a full pass."""
-    for agent_target, target_stats in zip(agent_targets, stats, strict=True):
-        if not full_pass and not any(
-            (
-                target_stats.rooms_exported,
-                target_stats.threads_exported,
-                target_stats.threads_unchanged,
-                target_stats.failures,
-            ),
-        ):
-            continue
-        logger.info(
-            "Exported threads to agent workspace",
-            agent_name=agent_target.agent_name,
-            room_ids=None if full_pass else sorted(room_ids),
-            rooms_exported=target_stats.rooms_exported,
-            threads_exported=target_stats.threads_exported,
-            threads_unchanged=target_stats.threads_unchanged,
-            failures=target_stats.failures,
-        )
+def _log_pass(stats: Sequence[ThreadExportStats], *, room_ids: list[str] | None) -> None:
+    """Summarize one pass, and name every target that recorded a failure."""
+    logger.info(
+        "Exported threads to agent workspaces",
+        room_ids=room_ids,
+        targets=len(stats),
+        rooms_exported=sum(target_stats.rooms_exported for target_stats in stats),
+        threads_exported=sum(target_stats.threads_exported for target_stats in stats),
+        threads_unchanged=sum(target_stats.threads_unchanged for target_stats in stats),
+        failures=sum(target_stats.failures for target_stats in stats),
+    )
+    for target_stats in stats:
+        if target_stats.failures:
+            logger.warning(
+                "Thread export target recorded failures",
+                output_dir=str(target_stats.output_dir),
+                failures=[failure.error for failure in target_stats.failed_items],
+            )
 
 
 def _build_targets(
@@ -270,21 +235,18 @@ def _build_targets(
     runtime_paths: RuntimePaths,
     enabled: dict[str, AgentThreadExportConfig],
     agent_user_ids: dict[str, str],
-) -> tuple[_AgentTarget, ...]:
+) -> tuple[ThreadExportTarget, ...]:
     """Resolve every shared and private export target for the enabled agents."""
-    agent_targets: list[_AgentTarget] = []
+    targets: list[ThreadExportTarget] = []
     for agent_name, options in enabled.items():
         agent_user_id = agent_user_ids.get(agent_name)
         if agent_user_id is None:
             continue
         if config.agents[agent_name].private is None:
-            targets: tuple[ThreadExportTarget, ...] = (
-                _shared_target(runtime_paths, agent_name, agent_user_id, options),
-            )
+            targets.append(_shared_target(runtime_paths, agent_name, agent_user_id, options))
         else:
-            targets = _private_targets(config, runtime_paths, agent_name, agent_user_id, options)
-        agent_targets.extend(_AgentTarget(agent_name, target) for target in targets)
-    return tuple(agent_targets)
+            targets.extend(_private_targets(config, runtime_paths, agent_name, agent_user_id, options))
+    return tuple(targets)
 
 
 def _shared_target(
@@ -312,39 +274,35 @@ def _private_targets(
     agent_name: str,
     agent_user_id: str,
     options: AgentThreadExportConfig,
-) -> tuple[ThreadExportTarget, ...]:
-    """Return one owner-scoped target per private instance whose core identity checks out."""
+) -> list[ThreadExportTarget]:
+    """Return one owner-scoped target per private instance whose core identity checks out.
+
+    An instance without a valid owner gets its export tree cleared instead: nothing can
+    run as that instance, so nothing should keep reading conversations there.
+    """
+    private = config.agents[agent_name].private
+    assert private is not None
     targets: list[ThreadExportTarget] = []
-    for state_root in _private_instance_state_roots(runtime_paths.storage_root, agent_name):
-        try:
-            owner = _private_instance_owner(config, runtime_paths, agent_name, state_root)
-            output_dir = _private_export_dir(config, runtime_paths, agent_name, state_root)
-        except OSError:
-            # One unreadable instance must not cost every other target its pass; its
-            # files stay as they are until a later pass can read the record again.
-            logger.exception(
-                "Skipping private instance whose identity could not be read",
-                agent_name=agent_name,
-                instance_root=str(state_root),
-            )
-            continue
-        if owner is None:
-            logger.warning(
-                "Skipping private instance without valid core identity",
-                agent_name=agent_name,
-                instance_root=str(state_root),
-            )
-            if output_dir is not None:
-                _clear_export_tree(runtime_paths, output_dir)
-            continue
+    for instance in private_instances_for_agent(runtime_paths.storage_root, agent_name, private.per):
+        output_dir = _private_export_dir(config, runtime_paths, agent_name, instance.state_root)
         if output_dir is None:
             logger.warning(
                 "Skipping private instance without a resolvable workspace",
                 agent_name=agent_name,
-                instance_root=str(state_root),
+                instance_root=str(instance.state_root),
             )
             continue
-        required_member_user_ids = (owner,) if options.private_room_scope == "owner" else (owner, agent_user_id)
+        if instance.requester_id is None:
+            logger.warning(
+                "Clearing exports of private instance without valid core identity",
+                agent_name=agent_name,
+                instance_root=str(instance.state_root),
+            )
+            _clear_export_tree(runtime_paths, output_dir)
+            continue
+        required_member_user_ids = (instance.requester_id,)
+        if options.private_room_scope == "owner_and_agent":
+            required_member_user_ids += (agent_user_id,)
         targets.append(
             ThreadExportTarget(
                 output_dir=output_dir,
@@ -353,55 +311,7 @@ def _private_targets(
                 trusted_root=runtime_paths.storage_root,
             ),
         )
-    return tuple(targets)
-
-
-def _private_instance_state_roots(storage_root: Path, agent_name: str) -> tuple[Path, ...]:
-    """Return existing private-instance state roots for one private agent."""
-    instances_root = storage_root / _PRIVATE_INSTANCES_DIRNAME
-    if not instances_root.is_dir() or instances_root.is_symlink():
-        return ()
-    instance_dir_names = {agent_name, agent_state_root_path(storage_root, agent_name).name}
-    try:
-        return tuple(
-            sorted(
-                state_root
-                for scope_dir in instances_root.iterdir()
-                if scope_dir.is_dir() and not scope_dir.is_symlink()
-                for state_root in scope_dir.iterdir()
-                if state_root.is_dir() and not state_root.is_symlink() and state_root.name in instance_dir_names
-            ),
-        )
-    except OSError:
-        logger.exception("Skipping private instance discovery", agent_name=agent_name)
-        return ()
-
-
-def _private_instance_owner(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-    state_root: Path,
-) -> str | None:
-    """Return the requester the core identity record names, when it owns exactly this root."""
-    private = config.agents[agent_name].private
-    assert private is not None
-    try:
-        identity = load_private_instance_identity(runtime_paths.storage_root, state_root.parent)
-    except PrivateInstanceIdentityError:
-        return None
-    if identity is None:
-        return None
-    expected_state_root = private_instance_state_root_for_requester(
-        runtime_paths.storage_root,
-        requester_id=identity.requester_id,
-        agent_name=agent_name,
-        worker_scope=private.per,
-        runtime_paths=runtime_paths,
-    )
-    if expected_state_root is None or expected_state_root.resolve() != state_root.resolve():
-        return None
-    return identity.requester_id
+    return targets
 
 
 def _private_export_dir(
@@ -434,11 +344,6 @@ def _clear_export_tree(runtime_paths: RuntimePaths, output_dir: Path) -> None:
         logger.warning("Skipping unsafe thread export cleanup", output_dir=str(output_dir))
 
 
-def clear_workspace_thread_exports(config: Config, runtime_paths: RuntimePaths) -> None:
-    """Remove every configured agent's workspace exports, for when no agent enables them any more."""
-    _clear_disabled_agent_exports(config, runtime_paths, frozenset())
-
-
 def _clear_disabled_agent_exports(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -451,7 +356,7 @@ def _clear_disabled_agent_exports(
         if agent_config.private is None:
             _clear_export_tree(runtime_paths, _shared_export_dir(runtime_paths, agent_name))
             continue
-        for state_root in _private_instance_state_roots(runtime_paths.storage_root, agent_name):
-            output_dir = _private_export_dir(config, runtime_paths, agent_name, state_root)
+        for instance in private_instances_for_agent(runtime_paths.storage_root, agent_name, agent_config.private.per):
+            output_dir = _private_export_dir(config, runtime_paths, agent_name, instance.state_root)
             if output_dir is not None:
                 _clear_export_tree(runtime_paths, output_dir)

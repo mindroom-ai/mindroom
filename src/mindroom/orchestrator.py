@@ -125,8 +125,8 @@ from .orchestration.runtime import (
     wait_for_matrix_homeserver,
 )
 from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
-from .orchestration.thread_export_runtime import ThreadExportRuntimeCoordinator
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
+from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
 if TYPE_CHECKING:
     import socket
@@ -264,7 +264,7 @@ class _MultiAgentOrchestrator:
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
-    _thread_export_runtime: ThreadExportRuntimeCoordinator = field(init=False, repr=False)
+    _thread_export_runner: WorkspaceThreadExportRunner = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -319,10 +319,12 @@ class _MultiAgentOrchestrator:
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
         )
-        self._thread_export_runtime = ThreadExportRuntimeCoordinator(
-            runtime_paths=self.runtime_paths,
-            config_provider=lambda: self.config,
-            bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
+        self._thread_export_runner = WorkspaceThreadExportRunner(
+            WorkspaceThreadExportDeps(
+                runtime_paths=self.runtime_paths,
+                config_provider=lambda: self.config,
+                bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
+            ),
         )
         self._script_runtime = build_script_runtime(
             self.runtime_paths,
@@ -517,7 +519,7 @@ class _MultiAgentOrchestrator:
         for bot in bots:
             self._bind_response_admission_gate(bot)
         self._configure_approval_store_transport()
-        self._thread_export_runtime.reconcile()
+        self._thread_export_runner.queue_full_pass()
 
     async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
         """Run startup room setup, then publish trigger delivery runtime."""
@@ -790,7 +792,11 @@ class _MultiAgentOrchestrator:
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
         await self._todo_poke_runtime.sync()
-        await self._thread_export_runtime.sync()
+        self._thread_export_runner.start()
+        if self.running:
+            # Startup queues its own pass once the bots are up; a reload
+            # reconciles every workspace against the new config right away.
+            self._thread_export_runner.queue_full_pass()
 
     async def _stop_mcp_manager(self) -> None:
         """Stop the MCP manager and clear the active runtime binding."""
@@ -935,7 +941,7 @@ class _MultiAgentOrchestrator:
                 agent_reply_membership_sync=(
                     self.agent_reply_membership_sync if entity_name == ROUTER_AGENT_NAME else None
                 ),
-                room_activity_observer=self._thread_export_runtime.mark_room_activity,
+                room_activity_observer=self._thread_export_runner.mark_room_activity,
             ),
         )
         bot.orchestrator = self
@@ -2253,7 +2259,7 @@ class _MultiAgentOrchestrator:
         )
         await self._startup_maintenance.cancel()
         await self._todo_poke_runtime.stop()
-        await self._thread_export_runtime.stop()
+        await self._thread_export_runner.stop()
         await self._stop_memory_auto_flush_worker()
         await self._knowledge_source_watcher.shutdown()
         await self._knowledge_refresh_scheduler.shutdown()

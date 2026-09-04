@@ -1713,11 +1713,6 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.orchestration.thread_export_runtime"
-depends_on = ["mindroom.thread_export.workspace_sync"]
-visibility = ["mindroom.orchestrator"]
-
-[[modules]]
 path = "mindroom.orchestration.todo_poke_runtime"
 depends_on = [
     "mindroom.constants",
@@ -1783,7 +1778,6 @@ depends_on = [
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",
-    "mindroom.orchestration.thread_export_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.response_admission",
     "mindroom.scheduling_executor",
@@ -1791,7 +1785,8 @@ depends_on = [
     "mindroom.tool_system.skills",
     "mindroom.tool_approval",
     "mindroom.workers.runtime",
-]
+
+    "mindroom.thread_export.workspace_sync",]
 
 [[modules]]
 path = "mindroom.response_runner"
@@ -2821,7 +2816,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]
-visibility = ["mindroom.orchestration.thread_export_runtime"]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.thread_tags"
@@ -4218,9 +4213,11 @@ from = ["mindroom.runtime_resolution"]
 
 [[interfaces]]
 expose = [
+    "PrivateInstance",
     "PrivateInstanceIdentity",
     "PrivateInstanceIdentityError",
     "load_private_instance_identity",
+    "private_instances_for_agent",
 ]
 from = ["mindroom.private_instance_identity"]
 
@@ -4769,7 +4766,7 @@ expose = [
     "build_worker_target_from_runtime_env",
     "get_tool_execution_identity",
     "private_instance_scope_root_path",
-    "private_instance_state_root_for_requester",
+    "private_instances_root_path",
     "parse_tool_execution_identity_payload",
     "require_worker_key_for_scope",
     "requires_explicit_private_agent_visibility",
