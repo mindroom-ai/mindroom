@@ -4130,7 +4130,7 @@ class ResponseRunner:
             )
             raise
 
-    async def _process_and_respond(
+    async def _process_and_respond(  # noqa: C901
         self,
         request: ResponseRequest,
         *,
@@ -4205,6 +4205,8 @@ class ResponseRunner:
                     run_id=run_id,
                     response_event_id=request.existing_event_id,
                 )
+        except ResponsePausedForApproval:
+            raise
         except asyncio.CancelledError as exc:
             return build_outcome(
                 await self._settle_blocking_cancellation(
