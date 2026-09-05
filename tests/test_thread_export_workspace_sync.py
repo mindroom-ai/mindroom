@@ -49,6 +49,7 @@ class _FakeBot:
     invited_room_ids: frozenset[str] = frozenset()
     joined_room_ids: frozenset[str] | None = None
     joined_rooms_error: Exception | None = None
+    joined_room_lookup_count: int = 0
 
     @property
     def matrix_id(self) -> MatrixID:
@@ -62,6 +63,7 @@ class _FakeBot:
         return self.principal
 
     async def current_joined_room_ids(self) -> frozenset[str] | None:
+        self.joined_room_lookup_count += 1
         if self.joined_rooms_error is not None:
             raise self.joined_rooms_error
         return self.approval_room_ids if self.joined_room_ids is None else self.joined_room_ids
@@ -159,6 +161,36 @@ async def test_activity_marks_coalesce_into_one_exact_room_pass(tmp_path: Path) 
         "!dev:localhost",
         "!lobby:localhost",
     ]
+
+
+async def test_partial_pass_queries_only_agents_related_to_dirty_rooms(tmp_path: Path) -> None:
+    """A partial pass avoids joined-room lookups for unrelated agents."""
+    config = _config(
+        tmp_path,
+        {
+            "code": AgentConfig(
+                display_name="Code",
+                rooms=["lobby"],
+                thread_exports=AgentThreadExportConfig(),
+            ),
+            "other": AgentConfig(
+                display_name="Other",
+                rooms=["dev"],
+                thread_exports=AgentThreadExportConfig(),
+            ),
+        },
+    )
+    write_thread_export_matrix_state(tmp_path)
+    code = _FakeBot("@mindroom_code:localhost", rooms=["!lobby:localhost"])
+    other = _FakeBot("@mindroom_other:localhost", rooms=["!dev:localhost"])
+    runner = _runner(config, _bots(code, other))
+
+    with patch(EXPORT_PATH, new=_export_mock()):
+        runner.mark_room_activity("!lobby:localhost")
+        await runner._run_pass_once()
+
+    assert code.joined_room_lookup_count == 1
+    assert other.joined_room_lookup_count == 0
 
 
 async def test_full_pass_subsumes_dirty_rooms(tmp_path: Path) -> None:

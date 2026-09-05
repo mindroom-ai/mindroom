@@ -165,6 +165,9 @@ class WorkspaceThreadExportRunner:
             logger.warning("Skipping thread exports for agent without a running bot", agent_name=agent_name)
         joined_room_ids_by_agent: dict[str, frozenset[str]] = {}
         for agent_name, bot in active_bots.items():
+            approval_room_ids = bot.approval_room_ids
+            if not full_pass and room_ids.isdisjoint(approval_room_ids):
+                continue
             try:
                 joined_room_ids = await bot.current_joined_room_ids()
             except Exception as exc:
@@ -180,7 +183,7 @@ class WorkspaceThreadExportRunner:
                     agent_name=agent_name,
                 )
                 continue
-            joined_room_ids_by_agent[agent_name] = frozenset(joined_room_ids) & bot.approval_room_ids
+            joined_room_ids_by_agent[agent_name] = frozenset(joined_room_ids) & approval_room_ids
         target_groups = await asyncio.to_thread(
             _build_target_groups,
             config,
@@ -217,8 +220,7 @@ class WorkspaceThreadExportRunner:
                 joined_room_ids,
                 state_rooms,
             )
-            if not full_pass:
-                rooms = [room for room in rooms if room.room_id in room_ids]
+            rooms = [room for room in rooms if full_pass or room.room_id in room_ids]
             sources.append(_source_for_bot(bot, tuple(rooms), agent_targets, config))
         stats = await export_threads_to_sources(
             config=config,
