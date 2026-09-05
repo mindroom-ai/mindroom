@@ -371,8 +371,8 @@ async def test_unavailable_agent_target_blocks_aliased_active_write(
     assert stale_thread.exists()
 
 
-async def test_full_pass_clears_stale_exports_when_agent_has_no_rooms(tmp_path: Path) -> None:
-    """An authoritative empty agent selection removes exports left by an older source."""
+async def test_full_pass_with_no_joined_rooms_preserves_existing_exports(tmp_path: Path) -> None:
+    """A pass without a positive room export does not act as data erasure."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
@@ -386,7 +386,7 @@ async def test_full_pass_clears_stale_exports_when_agent_has_no_rooms(tmp_path: 
     runner.queue_full_pass()
     await runner._run_pass_once()
 
-    assert not stale_thread.exists()
+    assert stale_thread.exists()
 
 
 async def test_failed_joined_room_lookup_preserves_existing_exports(tmp_path: Path) -> None:
@@ -440,8 +440,8 @@ async def test_failed_room_lookup_keeps_target_in_overlap_validation(tmp_path: P
     assert existing_thread.exists()
 
 
-async def test_partial_pass_retracts_a_dirty_room_the_agent_left(tmp_path: Path) -> None:
-    """A departure removes that room without waiting for the next full pass."""
+async def test_partial_pass_for_a_room_the_agent_left_preserves_existing_exports(tmp_path: Path) -> None:
+    """A membership change limits future writes instead of promising data erasure."""
     config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
@@ -452,7 +452,7 @@ async def test_partial_pass_retracts_a_dirty_room_the_agent_left(tmp_path: Path)
     runner.mark_room_activity("!lobby:localhost")
     await runner._run_pass_once()
 
-    assert not stale_thread.exists()
+    assert stale_thread.exists()
 
 
 async def test_full_pass_clears_exports_of_agents_without_the_setting(tmp_path: Path) -> None:

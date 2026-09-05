@@ -2285,11 +2285,17 @@ Each room directory also holds an `index.json` mapping every thread file to its 
 
 MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, batching everything that arrives in that window into one pass, and runs one full pass at startup and after every config reload.
 A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
-The manual [`threads export`](https://docs.mindroom.chat/cli/#threads-export) command skips directory-wide removal when it could export no room, because an empty result cannot be told apart from a failed one.
-Continuous workspace exports have an authoritative per-agent room selection, so their full pass removes stale room directories even when that agent has no rooms left.
+A full pass that could export no room at all skips that directory-wide removal, because an empty result cannot be told apart from a failed one; the same guard and its manual-cleanup guidance are described under [`threads export`](https://docs.mindroom.chat/cli/#threads-export).
 Files are rewritten only when a thread's content changed.
 Agents may edit or delete their exported files; deleted files return on the next pass that touches the room.
 Each workspace is populated only through that agent's running Matrix account and principal-bound event-journal projection, so a pass costs no Matrix history call for threads that agent has seen.
+
+### Security and Retention
+
+Thread export authorization controls which data future passes may write.
+Export cleanup is best-effort workspace maintenance, not a revocation or data-erasure boundary.
+Previously exported data may remain or may have been copied or committed by the agent.
+Principal isolation does not trigger a one-time purge or migration of existing exports.
 
 Shared agents export only rooms where the agent's own Matrix account is currently joined.
 Private agents (`private:`) get one export tree per materialized instance under `<storage_root>/private_instances/<scope-key>/<agent>/<private root>/thread_exports/`; each tree stays within that agent's configured and invited rooms and is scoped to the requester's current room memberships, so one requester's private workspace never accumulates other users' conversations.

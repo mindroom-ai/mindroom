@@ -217,13 +217,9 @@ class WorkspaceThreadExportRunner:
                 joined_room_ids,
                 state_rooms,
             )
-            retracted_rooms: tuple[ThreadExportRoom, ...] = ()
             if not full_pass:
                 rooms = [room for room in rooms if room.room_id in room_ids]
-                retracted_rooms = tuple(
-                    _select_agent_rooms(bot.rooms, room_ids - joined_room_ids, state_rooms),
-                )
-            sources.append(_source_for_bot(bot, tuple(rooms), retracted_rooms, agent_targets, config))
+            sources.append(_source_for_bot(bot, tuple(rooms), agent_targets, config))
         stats = await export_threads_to_sources(
             config=config,
             runtime_paths=runtime_paths,
@@ -262,7 +258,6 @@ def _select_agent_rooms(
 def _source_for_bot(
     bot: _ThreadExportBot,
     rooms: tuple[ThreadExportRoom, ...],
-    retracted_rooms: tuple[ThreadExportRoom, ...],
     targets: tuple[ThreadExportTarget, ...],
     config: Config,
 ) -> ThreadExportSource:
@@ -278,7 +273,6 @@ def _source_for_bot(
             self_sender=bot.matrix_id.full_id,
         ),
         rooms=rooms,
-        retracted_rooms=retracted_rooms,
         target_output_dirs=tuple(target.output_dir for target in targets),
     )
 

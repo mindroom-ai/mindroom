@@ -128,14 +128,11 @@ class ThreadExportSource:
 
     ``target_output_dirs=None`` preserves the all-target fan-out used by
     administrative exports; workspace sources name only their own targets.
-    ``retracted_rooms`` names dirty rooms this source is authoritatively no
-    longer joined to, so partial passes can remove their old exports.
     """
 
     client: nio.AsyncClient
     reader: ProjectedThreadReader
     rooms: tuple[ThreadExportRoom, ...]
-    retracted_rooms: tuple[ThreadExportRoom, ...] = ()
     target_output_dirs: tuple[Path, ...] | None = None
 
 
