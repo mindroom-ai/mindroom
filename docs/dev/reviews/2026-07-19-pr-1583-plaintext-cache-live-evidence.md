@@ -118,4 +118,4 @@ The live runtime health endpoint was healthy with zero E2EE decrypt failures, ze
 
 The scenario passed encrypted wire transport, real sidecar decryption, principal and room isolation, certified restart reuse, atomic redaction, durable tombstone rejection, principal-scoped leave cleanup, and safe rejoin.
 
-PostgreSQL parity remains validated by the PR's disposable real-PostgreSQL backend contract suite rather than by this SQLite live runtime.
+At the tested PR head, PostgreSQL parity was validated by the disposable real-PostgreSQL backend contract suite rather than by this SQLite live runtime.

@@ -84,6 +84,7 @@ from mindroom.tools.google_sheets import google_sheets_tools
 from mindroom.tools.googlesearch import googlesearch_tools
 from mindroom.tools.groq import groq_tools
 from mindroom.tools.hackernews import hackernews_tools
+from mindroom.tools.invite_router import invite_router_tools
 from mindroom.tools.jina import jina_tools
 from mindroom.tools.jira import jira_tools
 from mindroom.tools.linear import linear_tools
@@ -99,6 +100,7 @@ from mindroom.tools.moviepy_video_tools import moviepy_video_tools
 from mindroom.tools.neo4j import neo4j_tools
 from mindroom.tools.newspaper4k import newspaper4k_tools
 from mindroom.tools.notion import notion_tools
+from mindroom.tools.oauth_connections import oauth_connections_tools
 from mindroom.tools.openai import openai_tools
 from mindroom.tools.openbb import openbb_tools
 from mindroom.tools.openweather import openweather_tools
@@ -114,6 +116,7 @@ from mindroom.tools.replicate import replicate_tools
 from mindroom.tools.resend import resend_tools
 from mindroom.tools.scheduler import scheduler_tools
 from mindroom.tools.scrapegraph import scrapegraph_tools
+from mindroom.tools.script import script_tools
 from mindroom.tools.searxng import searxng_tools
 from mindroom.tools.serpapi import serpapi_tools
 from mindroom.tools.serper import serper_tools
@@ -138,6 +141,7 @@ from mindroom.tools.trello import trello_tools
 from mindroom.tools.twilio import twilio_tools
 from mindroom.tools.unsplash import unsplash_tools
 from mindroom.tools.update_awareness import update_awareness_tools
+from mindroom.tools.usage_stats import usage_stats_tools
 from mindroom.tools.visualization import visualization_tools
 from mindroom.tools.web_browser_tools import web_browser_tools
 from mindroom.tools.webex import webex_tools
@@ -215,6 +219,7 @@ __all__ = [
     "googlesearch_tools",
     "groq_tools",
     "hackernews_tools",
+    "invite_router_tools",
     "jina_tools",
     "jira_tools",
     "linear_tools",
@@ -230,6 +235,7 @@ __all__ = [
     "neo4j_tools",
     "newspaper4k_tools",
     "notion_tools",
+    "oauth_connections_tools",
     "openai_tools",
     "openbb_tools",
     "openweather_tools",
@@ -246,6 +252,7 @@ __all__ = [
     "resend_tools",
     "scheduler_tools",
     "scrapegraph_tools",
+    "script_tools",
     "searxng_tools",
     "serpapi_tools",
     "serper_tools",
@@ -269,6 +276,7 @@ __all__ = [
     "twilio_tools",
     "unsplash_tools",
     "update_awareness_tools",
+    "usage_stats_tools",
     "visualization_tools",
     "web_browser_tools",
     "webex_tools",

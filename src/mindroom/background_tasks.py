@@ -11,6 +11,7 @@ from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
+    from contextvars import Context
 
 logger = get_logger(__name__)
 _MAX_BACKGROUND_TASK_CANCEL_ROUNDS = 3
@@ -21,12 +22,6 @@ _background_tasks: set[asyncio.Task[Any]] = set()
 _background_task_owners: dict[asyncio.Task[Any], object] = {}
 
 
-def _notify_cancelled(on_cancelled: Callable[[], None] | None) -> None:
-    """Report one cancellation observation when a caller asked for it."""
-    if on_cancelled is not None:
-        on_cancelled()
-
-
 async def run_coroutine_until_complete[Result](
     coroutine: Coroutine[Any, Any, Result],
     *,
@@ -34,33 +29,46 @@ async def run_coroutine_until_complete[Result](
 ) -> Result:
     """Finish one accepted coroutine before propagating cancellation."""
     worker_task = asyncio.create_task(coroutine)
+    return await wait_for_future_until_complete(worker_task, on_cancel=on_cancelled)
+
+
+async def wait_for_future_until_complete[Result](  # noqa: C901
+    future: asyncio.Future[Result],
+    *,
+    on_cancel: Callable[[], None] | None = None,
+    chain_cancelled_result: bool = True,
+) -> Result:
+    """Drain an accepted future before propagating cancellation from its waiter."""
     try:
-        return await asyncio.shield(worker_task)
+        return await asyncio.shield(future)
     except asyncio.CancelledError as cancellation:
-        _notify_cancelled(on_cancelled)
-        worker_error: BaseException | None = None
-        while not worker_task.done():
+        if on_cancel is not None:
+            on_cancel()
+        result_error: Exception | asyncio.CancelledError | None = None
+        while not future.done():
             try:
-                await asyncio.shield(worker_task)
-            except asyncio.CancelledError:
-                _notify_cancelled(on_cancelled)
-                continue
-            except Exception as exc:
-                worker_error = exc
-                break
-        if worker_error is None:
-            try:
-                worker_task.result()
+                await asyncio.shield(future)
             except asyncio.CancelledError as exc:
-                worker_error = exc
+                if not future.done() and on_cancel is not None:
+                    on_cancel()
+                result_error = exc if future.done() else None
             except Exception as exc:
-                worker_error = exc
-        if worker_error is not None:
-            raise cancellation from worker_error
+                result_error = exc
+            if result_error is not None:
+                break
+        if result_error is None:
+            try:
+                future.result()
+            except (Exception, asyncio.CancelledError) as exc:
+                result_error = exc
+        if result_error is not None and (
+            chain_cancelled_result or not isinstance(result_error, asyncio.CancelledError)
+        ):
+            raise cancellation from result_error
         raise
 
 
-async def _run_blocking_until_complete[Result](
+async def run_blocking_until_complete[Result](
     operation: Callable[..., Result],
     *args: object,
 ) -> Result:
@@ -75,6 +83,7 @@ def create_background_task(
     *,
     owner: object | None = None,
     log_exceptions: bool = True,
+    context: Context | None = None,
 ) -> asyncio.Task[Any]:
     """Create a background task that won't block the main execution.
 
@@ -84,12 +93,14 @@ def create_background_task(
         error_handler: Optional error handler function
         owner: Optional logical owner used for scoped shutdown waits
         log_exceptions: Whether unhandled task exceptions should be logged automatically
+        context: Execution context for the task. ``None`` preserves asyncio's normal
+            caller-context inheritance.
 
     Returns:
         The created task
 
     """
-    task: asyncio.Task[Any] = asyncio.create_task(coro)
+    task: asyncio.Task[Any] = asyncio.create_task(coro, context=context)
     if name:
         task.set_name(name)
 

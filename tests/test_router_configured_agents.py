@@ -7,11 +7,16 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom.authorization import get_available_responders_in_room, responder_candidate_entities_for_room
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.authorization import (
+    get_available_responders_in_room,
+    responder_candidate_entities_with_membership_refresh,
+)
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.entity_resolution import configured_routable_entity_ids_for_room
+from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
@@ -38,6 +43,7 @@ class TestResponderCandidateSelection:
 
     def setup_method(self) -> None:
         """Set up test config."""
+        self.agent_reply_memberships = AgentReplyMembershipIndex()
         self.config = self._bind_runtime(
             Config(
                 agents={
@@ -143,12 +149,13 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
             self.config,
             runtime_paths,
+            self.agent_reply_memberships,
         )
 
         available_names = self._entity_names(self.config, available)
@@ -170,12 +177,13 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
             self.config,
             runtime_paths,
+            self.agent_reply_memberships,
         )
 
         available_names = self._entity_names(self.config, available)
@@ -201,12 +209,13 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
             self.config,
             runtime_paths,
+            self.agent_reply_memberships,
         )
 
         assert [mid.full_id for mid in available] == ["@mindroom_calculator_oldns:localhost"]
@@ -230,12 +239,13 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
             self.config,
             runtime_paths,
+            self.agent_reply_memberships,
         )
 
         assert [mid.full_id for mid in available] == ["@actual_calculator:localhost"]
@@ -275,12 +285,13 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
             config,
             runtime_paths,
+            self.agent_reply_memberships,
         )
 
         available_names = self._entity_names(config, available)
@@ -304,12 +315,13 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
             self.config,
             runtime_paths,
+            self.agent_reply_memberships,
         )
 
         available_names = self._entity_names(self.config, available)
@@ -336,12 +348,13 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
             self.config,
             runtime_paths,
+            self.agent_reply_memberships,
         )
 
         assert [mid.full_id for mid in available] == ["@actual_writer:localhost"]
@@ -349,13 +362,12 @@ class TestResponderCandidateSelection:
         client.joined_members.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_responder_candidates_ad_hoc_room_respects_sender_permissions(self) -> None:
         """Ad-hoc room fallback should still apply per-agent sender allowlists."""
         runtime_paths = runtime_paths_for(self.config)
-        self.config.authorization.agent_reply_permissions = {
-            "calculator": ["@user:localhost"],
-            "writer": ["@other:localhost"],
-        }
+        self.config.agents["calculator"].access = ResponderAccessConfig(users=["@user:localhost"])
+        self.config.agents["writer"].access = ResponderAccessConfig(users=["@other:localhost"])
         room = MagicMock()
         room.room_id = "!adhoc:localhost"
         room.members_synced = True
@@ -367,16 +379,64 @@ class TestResponderCandidateSelection:
         client = AsyncMock()
         client.joined_members = AsyncMock()
 
-        available = await responder_candidate_entities_for_room(
+        available = await responder_candidate_entities_with_membership_refresh(
             client,
             room,
             "@user:localhost",
             self.config,
             runtime_paths,
+            self.agent_reply_memberships,
         )
 
         available_names = self._entity_names(self.config, available)
         assert available_names == ["calculator"]
+
+    @pytest.mark.asyncio
+    async def test_grant_room_membership_allows_agent_in_dm_without_router_present(self) -> None:
+        """The shared index should authorize an available agent without putting the router in the target DM."""
+        config = self._bind_runtime(
+            Config(
+                agents={
+                    "assistant": AgentConfig(
+                        display_name="Assistant",
+                        rooms=["project"],
+                        access=ResponderAccessConfig(members_of_rooms=["project"]),
+                    ),
+                },
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
+        )
+        runtime_paths = runtime_paths_for(config)
+        grant_room_id = "!project:localhost"
+        state = MatrixState.load(runtime_paths=runtime_paths)
+        state.add_room("project", grant_room_id, "#project:localhost", "Project")
+        state.save(runtime_paths=runtime_paths)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+        client.joined_members.return_value = nio.JoinedMembersResponse(
+            members=[nio.RoomMember("@alice:localhost", None, None)],
+            room_id=grant_room_id,
+        )
+        memberships = AgentReplyMembershipIndex()
+        await memberships.refresh(config, runtime_paths, client)
+        assistant_id = entity_identity_registry(config, runtime_paths).current_id("assistant").full_id
+        dm = nio.MatrixRoom("!dm:localhost", assistant_id)
+        dm.add_member("@alice:localhost", "Alice", None)
+        dm.add_member(assistant_id, "Assistant", None)
+        dm.members_synced = True
+
+        available = await responder_candidate_entities_with_membership_refresh(
+            client,
+            dm,
+            "@alice:localhost",
+            config,
+            runtime_paths,
+            memberships,
+        )
+
+        assert [responder.full_id for responder in available] == [assistant_id]
+        assert "@mindroom_router:localhost" not in dm.users
+        client.joined_members.assert_awaited_once_with(grant_room_id)
 
     def test_router_excludes_itself(self) -> None:
         """Test that router agent is excluded from available agents."""

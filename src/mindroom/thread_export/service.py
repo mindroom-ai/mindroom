@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,7 @@ from mindroom.thread_export.models import (
     ThreadExportGroup,
     ThreadExportGroupFailure,
     ThreadExportRoom,
+    ThreadExportSource,
     ThreadExportStats,
     ThreadExportTarget,
     failure_for_room,
@@ -35,13 +37,16 @@ from mindroom.thread_export.storage import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
+
+    import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import EventJournalStore
     from mindroom.matrix.users import AgentMatrixUser
+
+type _UnreadableRooms = Sequence[tuple[Sequence[ThreadExportRoom], str]]
 
 
 logger = get_logger(__name__)
@@ -114,6 +119,7 @@ def _reconcile_full_pass(accumulators: Sequence[ThreadExportAccumulator]) -> Non
             reconcile_room_directories(
                 output_dir,
                 accumulator.retained_room_keys,
+                trusted_root=accumulator.target.trusted_root,
             )
         except (OSError, RuntimeError) as exc:
             accumulator.failed_items.append(
@@ -173,7 +179,10 @@ def _validated_targets(
             )
             continue
         try:
-            prepare_export_root(accumulator.target.output_dir)
+            prepare_export_root(
+                accumulator.target.output_dir,
+                trusted_root=accumulator.target.trusted_root,
+            )
         except (OSError, RuntimeError) as exc:
             accumulator.failed_items.append(failure_for_target(f"output directory preparation failed: {exc}"))
             logger.warning(
@@ -196,44 +205,123 @@ def _journal_principal_id(user: AgentMatrixUser) -> str:
     return f"{user.agent_name}@{user.matrix_id.full_id}"
 
 
-async def _run_export_group(
-    group: ThreadExportGroup,
+async def _run_export_source(
+    source: ThreadExportSource,
     *,
-    homeserver: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    journal_store: EventJournalStore,
     accumulators: Sequence[ThreadExportAccumulator],
     max_thread_roots: int,
 ) -> None:
-    """Run one account group without preventing later groups after a failure."""
-    try:
-        client = await login_agent_user(homeserver, group.user, runtime_paths)
-    except Exception as exc:
-        _record_group_failure(accumulators, group.rooms, f"Matrix login failed: {exc}")
+    """Run one source without preventing later sources after a failure."""
+    if source.target_output_dirs is not None:
+        bound_output_dirs = _bound_output_dirs((source,))
+        accumulators = tuple(
+            accumulator for accumulator in accumulators if accumulator.target.output_dir in bound_output_dirs
+        )
+    if not accumulators:
+        return
+    if not source.rooms:
         return
     try:
-        group_accumulators = await export_threads_for_targets_for_client(
-            client=client,
-            reader=export_conversation_reader(
-                client=client,
-                config=config,
-                store=journal_store.principal(_journal_principal_id(group.user)),
-                self_sender=group.user.matrix_id.full_id,
-            ),
+        source_accumulators = await export_threads_for_targets_for_client(
+            client=source.client,
+            reader=source.reader,
             config=config,
             runtime_paths=runtime_paths,
-            rooms=group.rooms,
+            rooms=source.rooms,
             targets=tuple(accumulator.target for accumulator in accumulators),
             max_thread_roots=max_thread_roots,
         )
     except Exception as exc:
-        _record_group_failure(accumulators, group.rooms, f"Export group failed: {exc}")
+        await asyncio.to_thread(_record_group_failure, accumulators, source.rooms, f"Export group failed: {exc}")
         return
-    finally:
-        await client.close()
-    for accumulator, group_accumulator in zip(accumulators, group_accumulators, strict=True):
-        _merge_accumulator(accumulator, group_accumulator)
+    for accumulator, source_accumulator in zip(accumulators, source_accumulators, strict=True):
+        _merge_accumulator(accumulator, source_accumulator)
+
+
+async def _export_sources(
+    sources: Sequence[ThreadExportSource],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    accumulators: Sequence[ThreadExportAccumulator],
+    unreadable_rooms: _UnreadableRooms,
+    full_pass: bool,
+    max_thread_roots: int,
+) -> None:
+    """Export every source into already-validated targets, then reconcile a full pass."""
+    for rooms, error in unreadable_rooms:
+        await asyncio.to_thread(_record_group_failure, accumulators, rooms, error)
+    for source in sources:
+        await _run_export_source(
+            source,
+            config=config,
+            runtime_paths=runtime_paths,
+            accumulators=accumulators,
+            max_thread_roots=max_thread_roots,
+        )
+    if full_pass:
+        await asyncio.to_thread(_reconcile_full_pass, accumulators)
+
+
+async def _validated_accumulators(
+    targets: Sequence[ThreadExportTarget],
+) -> tuple[tuple[ThreadExportAccumulator, ...], tuple[ThreadExportAccumulator, ...]]:
+    """Return every target's accumulator and the subset whose output directory checked out."""
+    accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
+    return accumulators, await asyncio.to_thread(_validated_targets, accumulators)
+
+
+def _canonical_output_dirs(output_dirs: Iterable[Path]) -> frozenset[Path]:
+    """Return the valid canonical paths from an output-directory collection."""
+    canonical_dirs: set[Path] = set()
+    for output_dir in output_dirs:
+        try:
+            canonical_dirs.add(canonicalize_output_dir(output_dir))
+        except (OSError, RuntimeError):
+            continue
+    return frozenset(canonical_dirs)
+
+
+def _bound_output_dirs(sources: Sequence[ThreadExportSource]) -> frozenset[Path]:
+    """Return canonical target paths explicitly bound to a live source."""
+    return _canonical_output_dirs(output_dir for source in sources for output_dir in source.target_output_dirs or ())
+
+
+async def export_threads_to_sources(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    sources: Sequence[ThreadExportSource],
+    targets: Sequence[ThreadExportTarget],
+    unreadable_rooms: _UnreadableRooms = (),
+    full_pass: bool,
+    max_thread_roots: int = 2000,
+) -> tuple[ThreadExportStats, ...]:
+    """Export threads from already-authenticated sources to their allowed targets.
+
+    This is the in-process path: a running bot lends its client and its
+    projection view, so no login, journal open, or bind happens here.
+    An unbound source retains the existing all-target fan-out behavior.
+    ``unreadable_rooms`` records a failure per room for rooms no source could
+    read this pass, without retracting anything already exported for them.
+    ``full_pass`` removes room directories the pass did not retain.
+    """
+    if not targets:
+        return ()
+    accumulators, validated_targets = await _validated_accumulators(targets)
+    if validated_targets:
+        await _export_sources(
+            sources,
+            config=config,
+            runtime_paths=runtime_paths,
+            accumulators=validated_targets,
+            unreadable_rooms=unreadable_rooms,
+            full_pass=full_pass,
+            max_thread_roots=max_thread_roots,
+        )
+    return tuple(accumulator.stats() for accumulator in accumulators)
 
 
 async def export_threads_to_targets_once(
@@ -256,14 +344,13 @@ async def export_threads_to_targets_once(
     after that the body costs no Matrix history call at all.
 
     Each source thread is fetched once per room and fanned out to every authorized target.
-    Scoped targets export only rooms where their required member is currently joined.
+    Scoped targets export only rooms where every required member is currently joined.
     A failed membership check leaves prior exports untouched, records a failure, and writes nothing new.
-    A successful check that proves the member absent removes the prior room export.
+    A successful check that proves any required member absent removes the prior room export.
     """
     if not targets:
         return ()
-    accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
-    validated_targets = _validated_targets(accumulators)
+    accumulators, validated_targets = await _validated_accumulators(targets)
     if not validated_targets:
         return tuple(accumulator.stats() for accumulator in accumulators)
 
@@ -275,26 +362,25 @@ async def export_threads_to_targets_once(
         room_filter,
         known_room_ids={room.room_id for room in state_rooms},
     )
-    invited_groups = _requested_invited_groups(discovered_invited_groups, validated_targets)
+    invited_groups = await asyncio.to_thread(_requested_invited_groups, discovered_invited_groups, validated_targets)
     export_groups = build_export_groups(
         runtime_paths=runtime_paths,
         homeserver=homeserver,
         state_rooms=state_rooms,
         invited_groups=invited_groups,
     )
+    full_pass = room_filter is None
 
     if not export_groups:
         select_export_account(runtime_paths, homeserver)
-        if room_filter is None:
-            _reconcile_full_pass(validated_targets)
+        if full_pass:
+            await asyncio.to_thread(_reconcile_full_pass, validated_targets)
         return tuple(accumulator.stats() for accumulator in accumulators)
 
-    ready_groups: list[ThreadExportGroup] = []
-    for group in export_groups:
-        if isinstance(group, ThreadExportGroupFailure):
-            _record_group_failure(validated_targets, group.rooms, group.error)
-        else:
-            ready_groups.append(group)
+    unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = [
+        (group.rooms, group.error) for group in export_groups if isinstance(group, ThreadExportGroupFailure)
+    ]
+    ready_groups = [group for group in export_groups if isinstance(group, ThreadExportGroup)]
 
     open_journal = open_event_journal(
         config.event_journal,
@@ -302,6 +388,7 @@ async def export_threads_to_targets_once(
         storage_path=runtime_paths.storage_root,
     )
     journal_store = open_journal.store
+    clients: list[nio.AsyncClient] = []
     try:
         # Its own process, so nothing has vouched for this database yet. An
         # export reading a stranger's journal reports the wrong history rather
@@ -312,21 +399,40 @@ async def export_threads_to_targets_once(
             runtime_paths=runtime_paths,
             storage_path=runtime_paths.storage_root,
         )
+        sources: list[ThreadExportSource] = []
         for group in ready_groups:
-            await _run_export_group(
-                group,
-                homeserver=homeserver,
-                config=config,
-                runtime_paths=runtime_paths,
-                journal_store=journal_store,
-                accumulators=validated_targets,
-                max_thread_roots=max_thread_roots,
+            try:
+                client = await login_agent_user(homeserver, group.user, runtime_paths)
+            except Exception as exc:
+                unreadable_rooms.append((group.rooms, f"Matrix login failed: {exc}"))
+                continue
+            clients.append(client)
+            sources.append(
+                ThreadExportSource(
+                    client=client,
+                    reader=export_conversation_reader(
+                        client=client,
+                        config=config,
+                        store=journal_store.principal(_journal_principal_id(group.user)),
+                        self_sender=group.user.matrix_id.full_id,
+                    ),
+                    rooms=group.rooms,
+                ),
             )
+        await _export_sources(
+            sources,
+            config=config,
+            runtime_paths=runtime_paths,
+            accumulators=validated_targets,
+            unreadable_rooms=unreadable_rooms,
+            full_pass=full_pass,
+            max_thread_roots=max_thread_roots,
+        )
     finally:
+        # One client refusing to close must not leak the others or the journal.
+        await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
         await open_journal.close()
 
-    if room_filter is None:
-        _reconcile_full_pass(validated_targets)
     return tuple(accumulator.stats() for accumulator in accumulators)
 
 
@@ -337,7 +443,7 @@ async def export_threads_once(
     output_dir: Path | None = None,
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
-    required_member_user_id: str | None = None,
+    required_member_user_ids: tuple[str, ...] = (),
     include_invited_rooms: bool = True,
 ) -> ThreadExportStats:
     """Run one thread export pass for a single destination."""
@@ -347,7 +453,7 @@ async def export_threads_once(
         targets=(
             ThreadExportTarget(
                 output_dir=output_dir or _default_thread_export_dir(runtime_paths),
-                required_member_user_id=required_member_user_id,
+                required_member_user_ids=required_member_user_ids,
                 include_invited_rooms=include_invited_rooms,
             ),
         ),

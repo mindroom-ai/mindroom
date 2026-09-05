@@ -2203,13 +2203,35 @@ class ManagedTuwunelStack:
             unacknowledged_outbox_rows = cast(
                 "int",
                 database.execute(
-                    "SELECT COUNT(*) FROM response_outbox WHERE acknowledged_event_id IS NULL",
+                    "SELECT COUNT(*) FROM matrix_delivery_outbox WHERE acknowledged_event_id IS NULL",
                 ).fetchone()[0],
             )
         return ManagedStreamDrainCounts(
             pending_journal_rows=pending_journal_rows,
             unacknowledged_outbox_rows=unacknowledged_outbox_rows,
         )
+
+    def recovery_outbox_debt(self, source_event_ids: Collection[str]) -> int:
+        """Count exact workload FINAL rows observed after attempt but before acknowledgement."""
+        database_path = self.storage_path / "tracking" / "event_journal.db"
+        if not database_path.is_file():
+            msg = f"recovery-cliff event journal database is missing: {database_path}"
+            raise FileNotFoundError(msg)
+        source_ids = tuple(sorted(set(source_event_ids)))
+        if not source_ids:
+            return 0
+        placeholders = ", ".join("?" for _source_id in source_ids)
+        with closing(sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)) as database:
+            row = database.execute(
+                f"""
+                SELECT COUNT(*) FROM matrix_delivery_outbox
+                WHERE principal_id = ? AND stage = 'final'
+                  AND attempted = 1 AND acknowledged_event_id IS NULL
+                  AND delivery_id IN ({placeholders})
+                """,  # noqa: S608 - placeholders are generated, values remain bound
+                (self._journal_principal_id(self.agent_id), *source_ids),
+            ).fetchone()
+        return int(cast("int", row[0]))
 
     def managed_stream_reaction_state(self, event_id: str) -> str | None:
         """Return the responder's exact durable state for one reaction fence."""
@@ -2329,7 +2351,8 @@ class ManagedTuwunelStack:
                 acknowledged_event_id=None if row[3] is None else str(row[3]),
             )
             for row in self._journal_query(
-                "SELECT principal_id, stage, attempted, acknowledged_event_id FROM response_outbox WHERE turn_id = ?",
+                "SELECT principal_id, stage, attempted, acknowledged_event_id "
+                "FROM matrix_delivery_outbox WHERE delivery_id = ?",
                 (turn_id,),
             )
         )
@@ -2447,18 +2470,7 @@ class ManagedTuwunelStack:
             "memory": {"backend": "file"},
             "router": {"model": "router"},
             "mindroom_user": {"username": "livefuzzowner", "display_name": "Live Fuzz Owner"},
-            "matrix_room_access": {
-                "mode": "multi_user",
-                "multi_user_join_rule": "public",
-                "publish_to_room_directory": False,
-                "invite_only_rooms": [],
-                "reconcile_existing_rooms": False,
-            },
-            "authorization": {
-                "default_room_access": True,
-                "global_users": [],
-                "agent_reply_permissions": {},
-            },
+            "room_defaults": {"join_policy": "public"},
         }
         if self.profile == "sustained-stream-capacity":
             config["matrix_sync"] = {"mode": "sliding", "sliding_timeline_limit": 100}

@@ -26,6 +26,9 @@ from mindroom.room_thread_modes import (
     get_room_thread_mode_override,
     set_room_thread_mode_override,
 )
+from tests.authorization_helpers import (
+    make_test_command_handler_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -68,7 +71,7 @@ def _power_levels_response(
 def _thread_mode_context(tmp_path: Path, client: AsyncMock) -> CommandHandlerContext:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")
-    return CommandHandlerContext(
+    return make_test_command_handler_context(
         client=client,
         config=Config(),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data"),

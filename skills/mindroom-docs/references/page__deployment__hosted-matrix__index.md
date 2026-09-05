@@ -36,12 +36,14 @@ Use `uvx mindroom config init --provider codex` if you want the starter config t
 
 ## 2. Add AI Provider Key
 
-Edit `~/.mindroom/.env` and set at least one provider key:
+Edit `~/.mindroom/.env` and set credentials matching the provider selected during `config init`.
+The default provider is OpenAI:
 
 ```bash
 OPENAI_API_KEY=...
-# or OPENROUTER_API_KEY=...
 ```
+
+To use OpenRouter instead, regenerate with `uvx mindroom config init --provider openrouter` and then set `OPENROUTER_API_KEY`.
 
 For Codex CLI ChatGPT authentication, run `codex login` instead of adding an API key.
 MindRoom reads `~/.codex/auth.json` by default.
@@ -127,6 +129,9 @@ So the precise claim is: encrypted Matrix message content is protected from the 
 You can keep the same local flow and switch endpoints:
 
 - `MATRIX_HOMESERVER=https://your-matrix.example.com`
+- `MATRIX_SERVER_NAME=your-matrix.example.com`
 - `MINDROOM_PROVISIONING_URL=https://your-matrix.example.com` (or your dedicated provisioning host)
+
+If the homeserver requires a registration token for managed agent accounts, also set `MATRIX_REGISTRATION_TOKEN`.
 
 Then run `mindroom connect` again with a fresh pair code from your own UI.

@@ -23,7 +23,6 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.media_inputs import MediaInputs
 from mindroom.streaming import _queue_delivery_request
 from mindroom.tool_system import tool_hooks as tool_hooks_module
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
@@ -78,10 +77,6 @@ async def test_stream_processing_marks_tool_call_started() -> None:
                 state=ai_module._StreamingAttemptState(),
                 show_tool_calls=True,
                 agent_name="code",
-                media_inputs=MediaInputs(),
-                retried_after_media_fallback=False,
-                media_route=None,
-                context_media_kinds=frozenset(),
             )
         ]
 
@@ -331,5 +326,5 @@ async def test_tool_hook_bridge_times_blocked_after_hooks_separately(monkeypatch
     assert bridge_finish["before_hooks_ms"] == 3.0
     assert bridge_finish["result_ready_ms"] == 5.0
     assert bridge_finish["after_hooks_ms"] == 20.0
-    assert bridge_finish["approval_ms"] is None
+    assert "approval_ms" not in bridge_finish
     assert bridge_finish["tool_body_ms"] is None

@@ -69,9 +69,13 @@ external_trigger_policy:
 
 `enabled: false` makes signed and capability trigger endpoints return not found.
 
-`admin_users` can list, rotate, enable, disable, or delete triggers across owners.
+Top-level platform `administrators` can list, rotate, enable, disable, or delete triggers across owners.
 
-Admin-created triggers are still owned by the admin requester, but admins can choose a different target agent, team, or room.
+`admin_users` adds trigger-only administrators who receive the same cross-owner trigger authority without receiving wider platform authority.
+
+Both administrator lists use canonical identities after `authorization.aliases` resolution.
+
+Administrator-created triggers are still owned by the administrator requester, but administrators can choose a different target agent, team, or room.
 
 Non-admin callers can create triggers only for the current agent and current room in the live Matrix tool context, but can still choose either `target_thread_id` or `new_thread` inside that room.
 
@@ -123,8 +127,9 @@ For a non-admin caller, the target agent and room are the current agent and curr
 
 `target_thread_id` and `new_thread` are mutually exclusive.
 With `new_thread`, each delivery posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
+A sender can group related deliveries on a `new_thread` trigger by passing the same `thread_key`; see [Grouping Deliveries Into One Thread](#grouping-deliveries-into-one-thread).
 
-For an admin caller, `target_agent` and `target_room_id` can additionally target a different agent, team, or room.
+For an administrator caller, `target_agent` and `target_room_id` can additionally target a different agent, team, or room.
 
 The tool returns `/api/triggers/<trigger_id>` when creation succeeds.
 
@@ -144,7 +149,7 @@ mindroom trigger send campground \
   --data-json '{"campground":"Yosemite","site":"42","date":"2026-07-04"}'
 ```
 
-The request body contains `kind`, `message`, optional `event_id`, optional `title`, and optional `data`.
+The request body contains `kind`, `message`, optional `event_id`, optional `title`, optional `thread_key`, and optional `data`.
 
 `kind` must match `allowed_kinds` when the trigger record has an allowlist.
 
@@ -172,7 +177,7 @@ The trigger owner is the private-scope requester for the triggered turn.
 
 A trigger created by `@alice:example.org` wakes Alice's private state for that agent.
 
-An admin-created trigger for another private agent still wakes the admin's private state, because trigger ownership always stays with the requester that created it.
+An administrator-created trigger for another private agent still wakes the administrator's private state, because trigger ownership always stays with the requester that created it.
 
 The API does not store private workspace paths, worker keys, OAuth tokens, or serialized execution identities.
 
@@ -181,6 +186,38 @@ Shared target agents must still be configured for the target room.
 Private target agents created from their current live room may use that room even when it is not listed in `rooms`.
 
 The router plus target transport bot must be joined before delivery.
+
+## Grouping Deliveries Into One Thread
+
+A `new_thread` trigger opens a fresh Matrix thread for every delivery.
+That is right for independent events and noisy for a conversation that arrives as many events, such as replies in one upstream chat thread.
+
+Pass `thread_key` to group deliveries.
+The first delivery with a key posts the usual per-fire root and records the key.
+Later deliveries with the same key post into that thread instead of opening another root, so the agent keeps one session and one context for the whole upstream conversation.
+
+```bash
+mindroom trigger send support-inbox \
+  --key-file /etc/mindroom/triggers/support.key \
+  --kind support.message \
+  --event-id ticket-812:msg-3 \
+  --thread-key ticket-812 \
+  --message "Customer replied on ticket 812."
+```
+
+Choose a key that names the upstream conversation, not the message: a ticket ID, an upstream thread timestamp, or a chat channel ID for a direct-message conversation.
+
+Thread key records live in the same replay store as `event_id` records, scoped per trigger and signing key epoch, and are retained for 7 days after the most recent delivery that used them.
+After that, or after `rotate_trigger_key`, the next delivery with the key starts a new thread.
+
+Opening a thread is atomic per key.
+While one delivery is posting the first root, a concurrent delivery with the same key receives `409 External trigger thread is being opened by another delivery`; retry it with a fresh signed request and the same `event_id`, and it will join the thread.
+A reservation whose first delivery fails is released immediately; a crashed delivery releases it after 5 minutes.
+Reservations are fenced: a delivery that outlives its reservation can neither bind its root over a newer reservation nor release it, so a slow first delivery cannot orphan the thread that replaced it.
+
+A follow-up that fails to send keeps the key bound to its thread, so a transient error never splits one conversation across two threads.
+
+`thread_key` has no effect on triggers with a fixed `target_thread_id`; that thread already collects every delivery.
 
 ## Reusable Trigger Idempotency
 

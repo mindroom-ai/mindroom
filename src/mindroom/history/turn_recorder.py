@@ -106,6 +106,10 @@ class TurnRecorder:
         """Record successful completion."""
         self.outcome = "completed"
 
+    def mark_suspended(self) -> None:
+        """Record a native pause without classifying it as terminal."""
+        self.outcome = "suspended"
+
     def mark_interrupted(self, original_status: RunStatus = RunStatus.cancelled) -> None:
         """Record interruption."""
         self.outcome = "interrupted"

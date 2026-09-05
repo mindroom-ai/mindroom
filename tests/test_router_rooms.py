@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.bot import TeamBot, create_bot_for_entity
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
+from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -16,6 +18,9 @@ from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.authorization_helpers import (
+    make_test_bot_for_entity,
+)
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -24,6 +29,12 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.identity_helpers import persist_entity_accounts
+
+
+def _router_membership_dependencies() -> tuple[AgentReplyMembershipIndex, AgentReplyMembershipSync]:
+    """Return one consistent shared index and router sync owner for factory tests."""
+    memberships = AgentReplyMembershipIndex()
+    return memberships, AgentReplyMembershipSync(memberships)
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -94,12 +105,15 @@ async def test_router_gets_all_configured_rooms(
     )
 
     # Create the router bot
-    router_bot = create_bot_for_entity(
+    memberships, membership_sync = _router_membership_dependencies()
+    router_bot = make_test_bot_for_entity(
         ROUTER_AGENT_NAME,
         router_user,
         config_with_rooms,
         runtime_paths_for(config_with_rooms),
         tmp_path,
+        agent_reply_memberships=memberships,
+        agent_reply_membership_sync=membership_sync,
     )
 
     # Check that the router has all rooms
@@ -135,7 +149,7 @@ def test_team_bot_uses_defaults_streaming_setting(
         password=TEST_PASSWORD,
     )
 
-    team_bot = create_bot_for_entity(
+    team_bot = make_test_bot_for_entity(
         "team1",
         team_user,
         config_with_rooms,
@@ -169,7 +183,7 @@ def test_team_bot_uses_persisted_member_usernames(
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
-    team_bot = create_bot_for_entity(
+    team_bot = make_test_bot_for_entity(
         "team1",
         AgentMatrixUser(
             agent_name="team1",
@@ -238,12 +252,15 @@ async def test_router_joins_rooms_on_start(
     )
 
     # Create and configure the router bot
-    router_bot = create_bot_for_entity(
+    memberships, membership_sync = _router_membership_dependencies()
+    router_bot = make_test_bot_for_entity(
         ROUTER_AGENT_NAME,
         router_user,
         config_with_rooms,
         runtime_paths_for(config_with_rooms),
         tmp_path,
+        agent_reply_memberships=memberships,
+        agent_reply_membership_sync=membership_sync,
     )
 
     # Mock the client
@@ -309,7 +326,10 @@ async def test_orchestrator_creates_router_with_all_rooms(
 @pytest.mark.asyncio
 @pytest.mark.requires_matrix  # Requires real Matrix server for router room updates
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_router_updates_rooms_on_config_change(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Test that the router updates its room list when config changes."""
     # Initial config with some rooms
     initial_config = Config(
@@ -359,7 +379,8 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", mock_load_config)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
-    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
+    setup_rooms = AsyncMock()
+    monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", setup_rooms)
 
     # Create orchestrator with initial config
     # Mock start/sync_forever at class level so newly created bots in update_config don't perform real login/sync
@@ -379,7 +400,14 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
 
         # Check initial router rooms
         router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        agent1_bot = orchestrator.agent_bots["agent1"]
         assert set(router_bot.rooms) == {"room1"}
+
+        async def reconcile_room_aliases(bots: list[object]) -> None:
+            orchestrator._resolve_bot_room_aliases(bots, orchestrator._require_config())  # type: ignore[arg-type]
+
+        setup_rooms.reset_mock()
+        setup_rooms.side_effect = reconcile_room_aliases
 
         # Mock bot operations using monkeypatch to avoid method assignment errors
         async def mock_stop(*, shutdown_intent: object | None = None) -> None:
@@ -402,10 +430,13 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
 
         # Update config
         updated = await orchestrator.config_reload._update_config()
-        assert updated  # Should return True since router needs restart
+        assert updated
 
-        # Router should be recreated with new rooms
+        # Existing clients stay alive while their desired room lists change.
         new_router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
+        assert new_router_bot is router_bot
+        assert orchestrator.agent_bots["agent1"] is agent1_bot
         assert set(new_router_bot.rooms) == {"room1", "room2", "room3"}
+        setup_rooms.assert_awaited_once()
     finally:
         await orchestrator.stop()

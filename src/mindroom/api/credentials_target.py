@@ -10,9 +10,12 @@ from fastapi import HTTPException, Request
 from mindroom.agent_policy import dashboard_credentials_supported_for_scope
 from mindroom.api import config_lifecycle
 from mindroom.api.dashboard_credential_scope import (
+    build_dashboard_execution_identity,
     dashboard_scope_label,
     reject_unbound_private_dashboard_requester,
     require_agent_credential_management_authorized,
+    require_agent_oauth_connection_authorized,
+    require_platform_administrator_authorized,
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
@@ -100,8 +103,19 @@ def resolve_request_credentials_target(
             request,
         )
 
-    # Plain dashboard credential reads/writes with no agent selection remain global and
-    # must not start depending on a persisted config file.
+    global_config_requested = any(
+        credential_service_policy(service, None).uses_primary_runtime_global_credentials for service in service_names
+    )
+    if global_config_requested:
+        config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+        require_platform_administrator_authorized(
+            request,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    # Non-global dashboard credential reads/writes with no agent selection retain the
+    # legacy primary-runtime target without requiring a persisted config file.
     if agent_name is None and not execution_scope_override_provided:
         return RequestCredentialsTarget(
             runtime_paths=runtime_paths,
@@ -131,13 +145,28 @@ def resolve_request_credentials_target(
             execution_identity=None,
             allowed_shared_services=None,
         )
-    execution_identity = require_agent_credential_management_authorized(
+    execution_scope = scope_request.requested_execution_scope
+    allow_private_agent_requester = (
+        allow_private_scopes
+        and scope_request.persisted_policy is not None
+        and scope_request.persisted_policy.is_private
+        and execution_scope in {"user", "user_agent"}
+        and not any(
+            credential_service_policy(service, execution_scope).uses_primary_runtime_global_credentials
+            for service in service_names
+        )
+    )
+    authorize = (
+        require_agent_oauth_connection_authorized
+        if allow_private_agent_requester
+        else require_agent_credential_management_authorized
+    )
+    execution_identity = authorize(
         request,
         config=config,
         runtime_paths=runtime_paths,
         agent_name=scope_request.agent_name,
     )
-    execution_scope = scope_request.requested_execution_scope
     if execution_scope is None:
         return RequestCredentialsTarget(
             runtime_paths=runtime_paths,
@@ -192,6 +221,45 @@ def resolve_request_credentials_target(
         agent_name=scope_request.agent_name,
         execution_identity=execution_identity,
         allowed_shared_services=config.get_worker_grantable_credentials(),
+    )
+
+
+def resolve_requester_credentials_target(
+    request: Request,
+    *,
+    agent_name: str | None,
+    service_names: tuple[str, ...] = (),
+) -> RequestCredentialsTarget:
+    """Resolve credentials that must follow the authenticated requester, independent of worker reuse."""
+    base_target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=service_names,
+        execution_scope_override_provided=False,
+        execution_scope_override=None,
+        allow_private_scopes=True,
+    )
+    execution_identity = build_dashboard_execution_identity(
+        request,
+        agent_name or "oauth",
+        config=config_lifecycle.bind_current_request_snapshot(request).runtime_config,
+        runtime_paths=base_target.runtime_paths,
+    )
+    reject_unbound_private_dashboard_requester("user", execution_identity)
+    worker_key = require_worker_key_for_scope(
+        "user",
+        execution_identity=execution_identity,
+        agent_name=agent_name,
+        failure_message="Could not resolve requester-scoped OAuth credentials.",
+    )
+    return RequestCredentialsTarget(
+        runtime_paths=base_target.runtime_paths,
+        base_manager=base_target.base_manager,
+        target_manager=base_target.base_manager.for_worker(worker_key),
+        worker_scope="user",
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+        allowed_shared_services=base_target.allowed_shared_services,
     )
 
 

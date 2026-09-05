@@ -18,20 +18,11 @@ from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import create_agent
-from mindroom.approval_manager import (
-    PendingApproval,
-    SentApprovalEvent,
-    _ApprovalManager,
-    get_approval_store,
-    initialize_approval_store,
-)
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY
-from mindroom.entity_resolution import mindroom_user_id
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_RECEIVED,
@@ -39,6 +30,7 @@ from mindroom.hooks import (
     EVENT_TOOL_BEFORE_CALL,
     CustomEventContext,
     HookRegistry,
+    HookRegistryState,
     ToolAfterCallContext,
     ToolBeforeCallContext,
     emit_gate,
@@ -50,9 +42,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.session_ids import create_session_id
-from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
-from mindroom.tool_approval import ToolCallWorkflowOrigin, _shutdown_approval_store
-from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -61,10 +50,17 @@ from mindroom.tool_system.runtime_context import (
     emit_custom_event,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import (
+    SyncToolCompletionTracker,
+    build_tool_hook_bridge,
+    prepend_tool_hook_bridge,
+    track_sync_tool_completion,
+)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
-from mindroom.tools import approved_egress as _approved_egress
-from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -74,9 +70,10 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Generator
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
 
 type SyncBridgeEvent = (
@@ -160,39 +157,6 @@ def _plugin(
     )
 
 
-def _initialize_router_approval_store(
-    runtime_paths: RuntimePaths,
-    *,
-    room_send: AsyncMock | None = None,
-    editor: AsyncMock | None = None,
-) -> tuple[MagicMock, AsyncMock]:
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
-    orchestrator._capture_runtime_loop()
-
-    client = MagicMock()
-    client.user_id = "@mindroom_router:localhost"
-    client.room_send = room_send or AsyncMock(
-        return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"),
-    )
-    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
-    bot = MagicMock()
-    bot.agent_name = "router"
-    bot.running = True
-    bot.client = client
-    bot.approval_room_ids = frozenset({"!room:localhost"})
-    bot.latest_thread_event_id_if_needed = AsyncMock(return_value="$resolved-thread")
-    orchestrator.agent_bots = {"router": bot}
-
-    approval_editor = editor or AsyncMock()
-    initialize_approval_store(
-        runtime_paths,
-        sender=orchestrator._approval_transport.send_approval_event,
-        editor=approval_editor,
-    )
-    return client, approval_editor
-
-
 def _before_context(
     tmp_path: Path,
     *,
@@ -226,7 +190,7 @@ def _tool_runtime_context(
     hook_registry: HookRegistry | None = None,
 ) -> ToolRuntimeContext:
     config = _config(tmp_path, log_llm_requests=log_llm_requests)
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget(
             room_id="!room:localhost",
@@ -250,6 +214,26 @@ def _tool_runtime_context(
     )
 
 
+def test_detached_tool_runtime_context_fails_closed_without_reply_membership_index(tmp_path: Path) -> None:
+    """Extension contexts may omit the index but cannot perform membership-aware work."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+
+    context = ToolRuntimeContext(
+        agent_name="general",
+        target=MessageTarget.resolve(room_id="!room:example.org", thread_id=None, reply_to_event_id=None),
+        requester_id="@alice:example.org",
+        client=AsyncMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(),
+    )
+
+    with pytest.raises(RuntimeError, match="membership-aware authorization"):
+        context.require_agent_reply_memberships()
+
+
 def _execution_identity() -> ToolExecutionIdentity:
     return ToolExecutionIdentity(
         channel="matrix",
@@ -271,7 +255,7 @@ def _dispatch_context(
 
 
 def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> AgentBot:
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
             user_id=f"@mindroom_{agent_name}:localhost",
@@ -287,54 +271,10 @@ def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> A
     return bot
 
 
-def _initialize_test_approval_store(runtime_paths: RuntimePaths) -> tuple[AsyncMock, AsyncMock]:
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    editor = AsyncMock()
-    initialize_approval_store(
-        runtime_paths,
-        sender=sender,
-        editor=editor,
-    )
-    return sender, editor
-
-
-async def _wait_for_sent_pending(
-    store: _ApprovalManager,
-    sender: AsyncMock | MagicMock,
-    *,
-    room_id: str = "!room:localhost",
-) -> PendingApproval:
-    async with asyncio.timeout(5):
-        while True:
-            if sender.await_args is not None:
-                content = sender.await_args.kwargs.get("content")
-                if content is None:
-                    content = sender.await_args.args[2]
-                assert isinstance(content, dict)
-                approval_id = content["approval_id"]
-                card_event_id = store._live_card_event_id_for_approval(approval_id)
-                pending = (
-                    None
-                    if card_event_id is None
-                    else store._pending_approval_for_card(room_id=room_id, card_event_id=card_event_id)
-                )
-                if pending is not None:
-                    return pending
-            await asyncio.sleep(0)
-
-
 def _first_function(toolkit: Toolkit) -> Function:
     functions = [*toolkit.functions.values(), *toolkit.async_functions.values()]
     assert functions
     return functions[0]
-
-
-@pytest.fixture(autouse=True)
-def reset_approval_store() -> Generator[None, None, None]:
-    """Keep the module-level approval store isolated per test."""
-    asyncio.run(_shutdown_approval_store())
-    yield
-    asyncio.run(_shutdown_approval_store())
 
 
 def test_tool_events_are_registered_with_expected_timeouts() -> None:
@@ -549,7 +489,6 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     assert records[0]["correlation_id"] == "corr-runtime"
     assert records[0]["success"] is False
     assert records[0]["error_type"] == "ValueError"
-    assert isinstance(records[0]["timing"]["approval_ms"], float)
     assert isinstance(records[0]["timing"]["result_ready_ms"], float)
     assert isinstance(records[0]["timing"]["tool_body_ms"], float)
     assert records[0]["arguments"] == {
@@ -1383,12 +1322,21 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     )
 
 
+async def _tick_until_stopped(stop: asyncio.Event, ticks: list[None]) -> None:
+    while not stop.is_set():
+        await asyncio.sleep(0.005)
+        ticks.append(None)
+
+
 @pytest.mark.asyncio
-async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path) -> None:
-    """Sync-tool hooks should keep send_message() on the active request loop under aexecute()."""
+async def test_sync_tool_aexecute_keeps_hooks_on_loop_and_body_off_loop(tmp_path: Path) -> None:
+    """The real async chain offloads only the synchronous leaf while loop work advances."""
     request_thread = threading.get_ident()
     request_loop = asyncio.get_running_loop()
     seen: list[tuple[str, int, int] | tuple[str, str]] = []
+    tool_thread_ids: list[int] = []
+    ticks: list[None] = []
+    stop_ticking = asyncio.Event()
 
     async def hook_message_sender(
         room_id: str,
@@ -1417,7 +1365,15 @@ async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path)
         event_id = await ctx.send_message("!room:localhost", "before")
         seen.append(("event_id", event_id or ""))
 
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(_ctx: ToolAfterCallContext) -> None:
+        current_loop = asyncio.get_running_loop()
+        current_thread = threading.get_ident()
+        seen.append(("after", current_thread, id(current_loop)))
+        assert current_thread == request_thread
+        assert current_loop is request_loop
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
     bridge = build_tool_hook_bridge(
         registry,
         agent_name="code",
@@ -1430,22 +1386,27 @@ async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path)
             super().__init__(name="demo", tools=[self.echo])
 
         def echo(self, text: str) -> str:
-            current_loop = asyncio.get_running_loop()
             current_thread = threading.get_ident()
-            seen.append(("tool", current_thread, id(current_loop)))
-            assert current_thread == request_thread
-            assert current_loop is request_loop
+            tool_thread_ids.append(current_thread)
+            seen.append(("tool", current_thread, 0))
+            time.sleep(0.05)
             return text.upper()
 
     toolkit = DemoToolkit()
     function = _first_function(toolkit)
     prepend_tool_hook_bridge(toolkit, bridge)
 
-    with (
-        tool_runtime_context(_tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)),
-        tool_execution_identity(_execution_identity()),
-    ):
-        result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute()
+    ticker_task = asyncio.create_task(_tick_until_stopped(stop_ticking, ticks))
+    try:
+        with (
+            tool_runtime_context(_tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)),
+            tool_execution_identity(_execution_identity()),
+            track_sync_tool_completion(SyncToolCompletionTracker()),
+        ):
+            result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute()
+    finally:
+        stop_ticking.set()
+        await ticker_task
 
     assert result.status == "success"
     assert result.result == "HI"
@@ -1453,152 +1414,79 @@ async def test_sync_tool_aexecute_send_message_uses_request_loop(tmp_path: Path)
         ("hook", request_thread, id(request_loop)),
         ("sender", request_thread, id(request_loop)),
         ("event_id", "$ok"),
-        ("tool", request_thread, id(request_loop)),
+        ("tool", tool_thread_ids[0], 0),
+        ("after", request_thread, id(request_loop)),
     ]
+    assert tool_thread_ids[0] != request_thread
+    assert ticks
 
 
 @pytest.mark.asyncio
-async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None:
-    """Sync-tool approval sends should hop back to the runtime loop."""
+async def test_sync_tool_aexecute_keeps_original_agno_chain_without_background_tracker(tmp_path: Path) -> None:
+    """The broker's cancellation bridge must not rewrite ordinary agent tool execution."""
     request_thread = threading.get_ident()
-    request_loop = asyncio.get_running_loop()
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "timeout_days": 0.000001,
-                "rules": [{"match": "echo", "action": "require_approval"}],
-            },
-        ),
-        runtime_paths,
-    )
-
-    async def mock_room_send(
-        room_id: str,
-        message_type: str,
-        content: dict[str, object],
-        *,
-        ignore_unverified_devices: bool = False,
-        tx_id: str | None = None,
-    ) -> nio.RoomSendResponse:
-        current_loop = asyncio.get_running_loop()
-        current_thread = threading.get_ident()
-        assert current_thread == request_thread
-        assert current_loop is request_loop
-        assert room_id == "!room:localhost"
-        assert message_type == "io.mindroom.tool_approval"
-        assert ignore_unverified_devices is True
-        assert content["status"] == "pending"
-        # The card is claimed under this transaction before it is sent, so a
-        # repeat after a crash collapses onto whatever this call produced.
-        assert tx_id is not None
-        return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
-
-    client, _ = _initialize_router_approval_store(runtime_paths, room_send=AsyncMock(side_effect=mock_room_send))
-
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
+    body_threads: list[int] = []
+    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
 
     class DemoToolkit(Toolkit):
         def __init__(self) -> None:
             super().__init__(name="demo", tools=[self.echo])
 
         def echo(self, text: str) -> str:
+            body_threads.append(threading.get_ident())
             return text.upper()
 
     toolkit = DemoToolkit()
     function = _first_function(toolkit)
     prepend_tool_hook_bridge(toolkit, bridge)
-
-    result = await asyncio.to_thread(
-        lambda: FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute(),
-    )
+    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+        result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="ordinary").aexecute()
 
     assert result.status == "success"
-    assert result.result == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: echo\n"
-        "Reason: Tool approval request timed out.\n\n"
-        "Adjust your approach — try a different tool or different arguments."
-    )
-    client.room_send.assert_awaited_once()
+    assert result.result == "HI"
+    assert body_threads == [request_thread]
 
 
 @pytest.mark.asyncio
-async def test_sync_execute_async_tool_entrypoint_still_runs_approval_gate(tmp_path: Path) -> None:
-    """FunctionCall.execute() must not bypass approval hooks for async tool entrypoints."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "timeout_days": 0.000001,
-                "rules": [{"match": "echo", "action": "require_approval"}],
-            },
-        ),
-        runtime_paths,
-    )
-    client, _ = _initialize_router_approval_store(runtime_paths)
+async def test_sync_tool_aexecute_cancellation_during_before_hook_never_starts_body(tmp_path: Path) -> None:
+    """Cancellation before the synchronous leaf remains ordinary task cancellation."""
+    before_started = asyncio.Event()
+    body_called = False
 
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(_ctx: ToolBeforeCallContext) -> None:
+        before_started.set()
+        await asyncio.Event().wait()
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
     bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
+        registry,
         agent_name="code",
         dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
     )
-    assert bridge is not None
-
-    executed: list[str] = []
 
     class DemoToolkit(Toolkit):
         def __init__(self) -> None:
             super().__init__(name="demo", tools=[self.echo])
 
-        async def echo(self, text: str) -> str:
-            executed.append(text)
+        def echo(self, text: str) -> str:
+            nonlocal body_called
+            body_called = True
             return text.upper()
 
     toolkit = DemoToolkit()
     function = _first_function(toolkit)
     prepend_tool_hook_bridge(toolkit, bridge)
-
-    with patch("agno.tools.function.log_warning") as mock_log_warning:
-        result = await asyncio.to_thread(
-            lambda: FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute(),
+    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+        execution = asyncio.create_task(
+            FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute(),
         )
+        await before_started.wait()
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
 
-    assert result.status == "success"
-    assert result.result == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: echo\n"
-        "Reason: Tool approval request timed out.\n\n"
-        "Adjust your approach — try a different tool or different arguments."
-    )
-    assert executed == []
-    client.room_send.assert_awaited_once()
-    mock_log_warning.assert_not_called()
+    assert body_called is False
 
 
 def _request_network_access_config(runtime_paths: RuntimePaths) -> Config:
@@ -1627,644 +1515,6 @@ def _request_network_access_bridge(config: Config, runtime_paths: RuntimePaths) 
     )
     assert bridge is not None
     return bridge
-
-
-@pytest.mark.parametrize("ttl_minutes", [5, "5"])
-@pytest.mark.asyncio
-async def test_request_network_access_static_allowlist_skips_matrix_approval(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    ttl_minutes: object,
-) -> None:
-    """Static-allowlisted egress requests should answer without an approval card or a grant."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
-    config = _request_network_access_config(runtime_paths)
-    client, _ = _initialize_router_approval_store(runtime_paths)
-    bridge = _request_network_access_bridge(config, runtime_paths)
-
-    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
-        msg = "a static-allowlisted request must not create a temporary grant"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(_approved_egress, "_post_grant", post_grant)
-    toolkit = _approved_egress._ApprovedEgressTools()
-    function = toolkit.async_functions["request_network_access"]
-    prepend_tool_hook_bridge(toolkit, bridge)
-
-    result = await FunctionCall(
-        function=function,
-        arguments={"hostnames": ["docs.example.com"], "ttl_minutes": ttl_minutes, "reason": "Need docs."},
-        call_id="call-1",
-    ).aexecute()
-
-    assert result.status == "success"
-    assert (
-        result.result
-        == "Already allowed by the static egress allowlist: docs.example.com. No temporary grant was created."
-    )
-    client.room_send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_request_network_access_blocked_host_still_uses_matrix_approval(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Batches containing any blocked hostname should still go through Matrix approval before reaching the tool."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
-    config = _request_network_access_config(runtime_paths)
-    client, _ = _initialize_router_approval_store(runtime_paths)
-    bridge = _request_network_access_bridge(config, runtime_paths)
-    toolkit = _approved_egress._ApprovedEgressTools()
-
-    result = await bridge(
-        "request_network_access",
-        toolkit.async_functions["request_network_access"].entrypoint,
-        {"hostnames": ["docs.example.com", "docs.other.test"], "ttl_minutes": 5, "reason": "Need docs."},
-    )
-
-    assert result == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: request_network_access\n"
-        "Reason: Tool approval request timed out.\n\n"
-        "Adjust your approach — try a different tool or different arguments."
-    )
-    client.room_send.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_sync_tool_approval_resumes_after_cross_loop_resolution(tmp_path: Path) -> None:
-    """Approval-gated sync tools should resume after approval resolves on another loop."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "rules": [{"match": "echo", "action": "require_approval"}],
-            },
-        ),
-        runtime_paths,
-    )
-    editor = AsyncMock()
-    client, _ = _initialize_router_approval_store(runtime_paths, editor=editor)
-
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    class DemoToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="demo", tools=[self.echo])
-
-        def echo(self, text: str) -> str:
-            return text.upper()
-
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    prepend_tool_hook_bridge(toolkit, bridge)
-    result: object | None = None
-    error: BaseException | None = None
-
-    def worker() -> None:
-        nonlocal result, error
-
-        try:
-            result = FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute()
-        except BaseException as exc:  # pragma: no cover - asserted below
-            error = exc
-
-    thread = threading.Thread(target=worker)
-    thread.start()
-
-    store = get_approval_store()
-    assert store is not None
-    pending = await _wait_for_sent_pending(store, client.room_send)
-
-    await _resolve_pending_approval(
-        store,
-        pending,
-        status="approved",
-        reason=None,
-    )
-    await asyncio.to_thread(thread.join, 1)
-
-    assert error is None
-    assert not thread.is_alive()
-    assert result is not None
-    assert result.status == "success"
-    assert result.result == "HI"
-    client.room_send.assert_awaited_once()
-    assert editor.await_args.args[2]["status"] == "approved"
-
-
-@pytest.mark.asyncio
-async def test_sync_tool_approval_aexecute_resumes_on_runtime_loop(tmp_path: Path) -> None:
-    """Approval-gated sync tools should not deadlock under FunctionCall.aexecute()."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "rules": [{"match": "echo", "action": "require_approval"}],
-            },
-        ),
-        runtime_paths,
-    )
-    editor = AsyncMock(return_value=True)
-    client, _ = _initialize_router_approval_store(runtime_paths, editor=editor)
-
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    class DemoToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="demo", tools=[self.echo])
-
-        def echo(self, text: str) -> str:
-            return text.upper()
-
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    prepend_tool_hook_bridge(toolkit, bridge)
-
-    async def run_and_approve() -> object:
-        task = asyncio.create_task(
-            FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute(),
-        )
-        store = get_approval_store()
-        assert store is not None
-        pending = await _wait_for_sent_pending(store, client.room_send)
-        await _resolve_pending_approval(
-            store,
-            pending,
-            status="approved",
-            reason=None,
-        )
-        return await task
-
-    result = await asyncio.wait_for(run_and_approve(), timeout=1)
-
-    assert result.status == "success"
-    assert result.result == "HI"
-    client.room_send.assert_awaited_once()
-    assert editor.await_args.args[2]["status"] == "approved"
-
-
-@pytest.mark.asyncio
-async def test_deferred_sync_bridge_marks_runtime_loop_before_worker_start(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The sync bridge deadlock guard must be active before the worker can run."""
-    runtime_loop = asyncio.get_running_loop()
-    worker_started = threading.Event()
-    marker_observed: list[bool] = []
-    original_start = threading.Thread.start
-
-    def start_and_wait_for_worker(self: threading.Thread) -> None:
-        original_start(self)
-        if self.name == "mindroom-tool-hook-sync-bridge":
-            assert worker_started.wait(timeout=1)
-
-    monkeypatch.setattr(tool_hooks.threading.Thread, "start", start_and_wait_for_worker)
-
-    async def awaitable_result() -> str:
-        marker_observed.append(is_loop_blocked_by_sync_tool_bridge(runtime_loop))
-        worker_started.set()
-        return "done"
-
-    deferred = tool_hooks._run_coroutine_from_sync(awaitable_result())
-    result = tool_hooks._resolve_deferred_sync_result(deferred)
-
-    assert result == "done"
-    assert marker_observed == [True]
-
-
-@pytest.mark.asyncio
-async def test_sync_tool_approval_execute_on_runtime_loop_fails_fast(tmp_path: Path) -> None:
-    """Direct sync execute() on the runtime loop cannot wait for Matrix approval transport."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "rules": [{"match": "echo", "action": "require_approval"}],
-            },
-        ),
-        runtime_paths,
-    )
-    client, _ = _initialize_router_approval_store(runtime_paths)
-
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    class DemoToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="demo", tools=[self.echo])
-
-        def echo(self, text: str) -> str:
-            return text.upper()
-
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    prepend_tool_hook_bridge(toolkit, bridge)
-
-    result = FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute()
-
-    assert result.status == "success"
-    assert result.result == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: echo\n"
-        "Reason: Cannot perform Matrix approval transport while synchronous FunctionCall.execute() "
-        "is blocking the MindRoom runtime loop; use FunctionCall.aexecute() or run execute() "
-        "outside the runtime event loop.\n\n"
-        "Adjust your approach — try a different tool or different arguments."
-    )
-    client.room_send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_tool_approval_scripts_cannot_mutate_rendered_approval_payload(tmp_path: Path) -> None:
-    """Approval scripts should not be able to rewrite the payload the human approves."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    script_path = tmp_path / "approval_scripts" / "redact.py"
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.write_text(
-        "def check(tool_name, arguments, agent_name):\n    arguments['payload'] = 'tampered'\n    return True\n",
-        encoding="utf-8",
-    )
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "rules": [{"match": "echo", "script": "approval_scripts/redact.py"}],
-            },
-        ),
-        runtime_paths,
-    )
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
-
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    class DemoToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="demo", tools=[self.echo])
-
-        def echo(self, payload: str) -> str:
-            return json.dumps({"payload": payload}, sort_keys=True)
-
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    prepend_tool_hook_bridge(toolkit, bridge)
-    result: object | None = None
-    error: BaseException | None = None
-
-    def worker() -> None:
-        nonlocal result, error
-
-        try:
-            result = FunctionCall(function=function, arguments={"payload": "original"}, call_id="call-1").execute()
-        except BaseException as exc:  # pragma: no cover - asserted below
-            error = exc
-
-    thread = threading.Thread(target=worker)
-    thread.start()
-
-    store = get_approval_store()
-    assert store is not None
-    pending = await _wait_for_sent_pending(store, sender)
-
-    approval_payload = sender.await_args.args[2]
-    assert approval_payload["arguments"] == {"payload": "original"}
-
-    await _resolve_pending_approval(
-        store,
-        pending,
-        status="approved",
-        reason=None,
-    )
-    await asyncio.to_thread(thread.join, 1)
-
-    assert error is None
-    assert not thread.is_alive()
-    assert result is not None
-    assert result.status == "success"
-    assert result.result == json.dumps({"payload": "original"}, sort_keys=True)
-
-
-@pytest.mark.asyncio
-async def test_tool_approval_script_error_text_is_sanitized_in_decline_result(tmp_path: Path) -> None:
-    """Approval script failures should not leak policy internals to the requester."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    script_path = tmp_path / "approval_scripts" / "broken.py"
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.write_text(
-        "def check(tool_name, arguments, agent_name):\n    raise ValueError(arguments['secret'])\n",
-        encoding="utf-8",
-    )
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "rules": [{"match": "read_file", "script": "approval_scripts/broken.py"}],
-            },
-        ),
-        runtime_paths,
-    )
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    next_func = AsyncMock(return_value="should not run")
-    with tool_execution_identity(_execution_identity()):
-        result = await bridge("read_file", next_func, {"secret": "sk-secret-123"})
-
-    assert next_func.await_count == 0
-    assert "Tool approval policy failed." in result
-    assert "ValueError" not in result
-    assert "approval_scripts" not in result
-    assert "sk-secret-123" not in result
-
-
-@pytest.mark.asyncio
-async def test_tool_hook_bridge_sanitizes_import_time_approval_script_failures(tmp_path: Path) -> None:
-    """Import-time approval script failures should not leak raw exception text to the requester."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    script_path = tmp_path / "approval_scripts" / "broken_import.py"
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.write_text("raise RuntimeError('token sk-secret-123')\n", encoding="utf-8")
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "rules": [{"match": "read_file", "script": "approval_scripts/broken_import.py"}],
-            },
-        ),
-        runtime_paths,
-    )
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    next_func = AsyncMock(return_value="should not run")
-    with tool_execution_identity(_execution_identity()):
-        result = await bridge("read_file", next_func, {"secret": "sk-secret-123"})
-
-    assert next_func.await_count == 0
-    assert "Tool approval policy failed." in result
-    assert "RuntimeError" not in result
-    assert "approval_scripts" not in result
-    assert "sk-secret-123" not in result
-
-
-@pytest.mark.asyncio
-async def test_tool_approval_uses_transport_agent_for_detached_team_member_runs(tmp_path: Path) -> None:
-    """Detached team-member approvals should send from the ingress bot, not the child agent."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
-        ),
-        runtime_paths,
-    )
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
-    dispatch_context = _dispatch_context(
-        ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="general",
-            requester_id="@user:localhost",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            resolved_thread_id="$resolved-thread",
-            session_id=_SESSION_ID,
-            transport_agent_name="general",
-        ),
-    )
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=dispatch_context,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    next_func = AsyncMock(return_value="ok")
-    with tool_execution_identity(dispatch_context.execution_identity if dispatch_context is not None else None):
-        task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
-        await asyncio.sleep(0)
-        store = get_approval_store()
-        assert store is not None
-        pending = await _wait_for_sent_pending(store, sender)
-        assert sender.await_args.args[:2] == ("!room:localhost", "$resolved-thread")
-        assert sender.await_args.args[2]["agent_name"] == "code"
-        await _resolve_pending_approval(
-            store,
-            pending,
-            status="approved",
-        )
-        result = await task
-
-    assert result == "ok"
-    assert next_func.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_tool_approval_uses_transport_agent_for_delegated_live_runs(tmp_path: Path) -> None:
-    """Delegated approvals should keep using the ingress bot from the live runtime context."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
-        ),
-        runtime_paths,
-    )
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
-    delegated_runtime_context = replace(
-        _tool_runtime_context(tmp_path),
-        agent_name="code",
-        transport_agent_name="general",
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    delegated_execution_identity = replace(
-        _execution_identity(),
-        agent_name="code",
-        transport_agent_name="general",
-    )
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(delegated_execution_identity),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    next_func = AsyncMock(return_value="ok")
-    with (
-        tool_runtime_context(delegated_runtime_context),
-        tool_execution_identity(delegated_execution_identity),
-    ):
-        task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
-        await asyncio.sleep(0)
-        store = get_approval_store()
-        assert store is not None
-        pending = await _wait_for_sent_pending(store, sender)
-        assert sender.await_args.args[:2] == ("!room:localhost", "$resolved-thread")
-        assert sender.await_args.args[2]["agent_name"] == "code"
-        await _resolve_pending_approval(
-            store,
-            pending,
-            status="approved",
-        )
-        result = await task
-
-    assert result == "ok"
-    assert next_func.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_tool_approval_rejects_internal_mindroom_user_requester(tmp_path: Path) -> None:
-    """Internal system dispatches should fail fast instead of creating an unresolvable approval."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=["!room:localhost"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
-            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        ),
-        runtime_paths,
-    )
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
-    internal_user_id = mindroom_user_id(config, runtime_paths)
-    assert internal_user_id is not None
-    internal_execution_identity = replace(_execution_identity(), requester_id=internal_user_id)
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(internal_execution_identity),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    next_func = AsyncMock(return_value="should not run")
-    with tool_execution_identity(internal_execution_identity):
-        result = await bridge("read_file", next_func, {"path": "notes.txt"})
-
-    assert next_func.await_count == 0
-    assert result == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: read_file\n"
-        "Reason: Tool approval requires a human requester.\n\n"
-        "Adjust your approach — try a different tool or different arguments."
-    )
-    sender.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2426,278 +1676,6 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
         "[TOOL CALL DECLINED]\n"
         "Tool: read_file\n"
         "Reason: secret paths are blocked\n\n"
-        "Adjust your approach — try a different tool or different arguments."
-    )
-    assert after_seen == [(True, result, None)]
-
-
-@pytest.mark.asyncio
-async def test_tool_before_call_hooks_run_before_tool_approval_gate(tmp_path: Path) -> None:
-    """Policy gates should run before approval requests are emitted."""
-    seen: list[str] = []
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=[],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "rules": [
-                    {"match": "read_file", "action": "require_approval"},
-                ],
-            },
-        ),
-        runtime_paths,
-    )
-    sender, _ = _initialize_test_approval_store(runtime_paths)
-
-    @hook(EVENT_TOOL_BEFORE_CALL)
-    async def before(ctx: ToolBeforeCallContext) -> None:
-        del ctx
-        seen.append("before")
-
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = build_tool_hook_bridge(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    async def next_func(**kwargs: object) -> str:
-        del kwargs
-        seen.append("tool")
-        return "ok"
-
-    with tool_execution_identity(_execution_identity()):
-        task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
-        await asyncio.sleep(0)
-        store = get_approval_store()
-        assert store is not None
-        pending = await _wait_for_sent_pending(store, sender)
-        assert seen == ["before"]
-
-        await _resolve_pending_approval(
-            store,
-            pending,
-            status="approved",
-        )
-        result = await task
-
-    assert result == "ok"
-    assert seen == ["before", "tool"]
-
-
-@pytest.mark.asyncio
-async def test_bridge_workflow_origin_reaches_approval_card(tmp_path: Path) -> None:
-    """A bridge built with workflow provenance must surface it on the approval card."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={"code": AgentConfig(display_name="Code", role="Help with coding.", rooms=[])},
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
-        ),
-        runtime_paths,
-    )
-    sender, _ = _initialize_test_approval_store(runtime_paths)
-    bridge = build_tool_hook_bridge(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-        workflow_origin=ToolCallWorkflowOrigin(workflow_id="research-report", participant_id="writer"),
-    )
-    assert bridge is not None
-
-    async def next_func(**kwargs: object) -> str:
-        del kwargs
-        return "ok"
-
-    with tool_execution_identity(_execution_identity()):
-        task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
-        await asyncio.sleep(0)
-        store = get_approval_store()
-        assert store is not None
-        pending = await _wait_for_sent_pending(store, sender)
-
-        card_content = sender.await_args.args[2]
-        assert card_content["workflow_id"] == "research-report"
-        assert card_content["participant_id"] == "writer"
-        assert card_content["body"] == (
-            "🔒 Approval required: read_file — Dynamic Workflow 'research-report' participant 'writer'"
-        )
-
-        await _resolve_pending_approval(store, pending, status="approved")
-        result = await task
-
-    assert result == "ok"
-
-
-@pytest.mark.asyncio
-async def test_tool_before_call_decline_short_circuits_tool_approval(tmp_path: Path) -> None:
-    """Denied policy hooks should prevent approval cards from being shown."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
-    initialize_approval_store(runtime_paths, sender=sender, editor=AsyncMock())
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=[],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
-        ),
-        runtime_paths,
-    )
-
-    @hook(EVENT_TOOL_BEFORE_CALL)
-    async def before(ctx: ToolBeforeCallContext) -> None:
-        ctx.decline("policy blocked the tool")
-
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = build_tool_hook_bridge(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    next_func = AsyncMock(return_value="should not run")
-    with tool_execution_identity(_execution_identity()):
-        result = await bridge("read_file", next_func, {"path": "notes.txt"})
-
-    assert next_func.await_count == 0
-    assert result == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: read_file\n"
-        "Reason: policy blocked the tool\n\n"
-        "Adjust your approach — try a different tool or different arguments."
-    )
-    sender.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_tool_approval_deny_emits_after_call_as_blocked(tmp_path: Path) -> None:
-    """Denied approvals should return the declined result and still emit blocked after-call hooks."""
-    after_seen: list[tuple[bool, object | None, BaseException | None]] = []
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=[],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
-        ),
-        runtime_paths,
-    )
-    sender, _ = _initialize_test_approval_store(runtime_paths)
-
-    @hook(EVENT_TOOL_AFTER_CALL)
-    async def after(ctx: ToolAfterCallContext) -> None:
-        after_seen.append((ctx.blocked, ctx.result, ctx.error))
-
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [after])])
-    bridge = build_tool_hook_bridge(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    next_func = AsyncMock(return_value="should not run")
-    with tool_execution_identity(_execution_identity()):
-        task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
-        await asyncio.sleep(0)
-        store = get_approval_store()
-        assert store is not None
-        pending = await _wait_for_sent_pending(store, sender)
-        await _resolve_pending_approval(
-            store,
-            pending,
-            status="denied",
-            reason="Denied by dashboard user.",
-        )
-        result = await task
-
-    assert next_func.await_count == 0
-    assert result == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: read_file\n"
-        "Reason: Denied by dashboard user.\n\n"
-        "Adjust your approach — try a different tool or different arguments."
-    )
-    assert after_seen == [(True, result, None)]
-
-
-@pytest.mark.asyncio
-async def test_tool_approval_expiry_emits_after_call_as_blocked(tmp_path: Path) -> None:
-    """Expired approvals should return the declined result and emit blocked after-call hooks."""
-    after_seen: list[tuple[bool, object | None, BaseException | None]] = []
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Help with coding.",
-                    rooms=[],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "timeout_days": 0.000001,
-                "rules": [{"match": "read_file", "action": "require_approval"}],
-            },
-        ),
-        runtime_paths,
-    )
-    _initialize_test_approval_store(runtime_paths)
-
-    @hook(EVENT_TOOL_AFTER_CALL)
-    async def after(ctx: ToolAfterCallContext) -> None:
-        after_seen.append((ctx.blocked, ctx.result, ctx.error))
-
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [after])])
-    bridge = build_tool_hook_bridge(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    assert bridge is not None
-
-    next_func = AsyncMock(return_value="should not run")
-    with tool_execution_identity(_execution_identity()):
-        result = await bridge("read_file", next_func, {"path": "notes.txt"})
-
-    assert next_func.await_count == 0
-    assert result == (
-        "[TOOL CALL DECLINED]\n"
-        "Tool: read_file\n"
-        "Reason: Tool approval request timed out.\n\n"
         "Adjust your approach — try a different tool or different arguments."
     )
     assert after_seen == [(True, result, None)]
@@ -2891,6 +1869,7 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
     custom_event_name = "demo:tool_custom_event"
     sent: list[dict[str, object] | None] = []
     seen: list[tuple[dict[str, object] | None, bool]] = []
+    active_states: list[bool] = []
     room_state_querier = AsyncMock(return_value={"name": "Lobby"})
     room_state_putter = AsyncMock(return_value=True)
 
@@ -2909,6 +1888,10 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
 
     @hook(custom_event_name)
     async def on_custom_event(ctx: CustomEventContext) -> None:
+        active_states.append(ctx.is_active())
+        registry_state.registry = HookRegistry.empty()
+        active_states.append(ctx.is_active())
+        registry_state.registry = registry
         query_result = await ctx.query_room_state("!room:localhost", "m.room.name", "")
         put_result = await ctx.put_room_state(
             "!room:localhost",
@@ -2921,19 +1904,24 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
         assert event_id == "$dispatch-event"
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [on_custom_event])])
-    runtime_context = _tool_runtime_context(
-        tmp_path,
-        hook_message_sender=hook_message_sender,
-        room_state_querier=room_state_querier,
-        room_state_putter=room_state_putter,
-        message_received_depth=1,
-        hook_registry=registry,
+    registry_state = HookRegistryState(registry)
+    runtime_context = replace(
+        _tool_runtime_context(
+            tmp_path,
+            hook_message_sender=hook_message_sender,
+            room_state_querier=room_state_querier,
+            room_state_putter=room_state_putter,
+            message_received_depth=1,
+            hook_registry=registry,
+        ),
+        hook_registry_state=registry_state,
     )
 
     with tool_runtime_context(runtime_context):
         await emit_custom_event("tool-policy", custom_event_name, {"item_id": "123"})
 
     assert seen == [({"name": "Lobby"}, True)]
+    assert active_states == [True, False]
     room_state_querier.assert_awaited_once_with("!room:localhost", "m.room.name", "")
     room_state_putter.assert_awaited_once_with(
         "!room:localhost",
@@ -3001,6 +1989,45 @@ async def test_tool_hook_bridge_fails_open_when_before_hook_raises(tmp_path: Pat
 
     assert result == "ok"
     assert next_func.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_contexts_track_registry_lifecycle(tmp_path: Path) -> None:
+    """Before- and after-call hooks can detect registry replacement."""
+    active_states: list[tuple[str, bool]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        active_states.append(("before", ctx.is_active()))
+        registry_state.registry = HookRegistry.empty()
+        active_states.append(("before", ctx.is_active()))
+        registry_state.registry = registry
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        active_states.append(("after", ctx.is_active()))
+        registry_state.registry = HookRegistry.empty()
+        active_states.append(("after", ctx.is_active()))
+        registry_state.registry = registry
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
+    registry_state = HookRegistryState(registry)
+    runtime_context = replace(
+        _tool_runtime_context(tmp_path, hook_registry=registry),
+        hook_registry_state=registry_state,
+    )
+    bridge = build_tool_hook_bridge(registry, agent_name="code")
+
+    with tool_runtime_context(runtime_context):
+        result = await bridge("read_file", AsyncMock(return_value="ok"), {})
+
+    assert result == "ok"
+    assert active_states == [
+        ("before", True),
+        ("before", False),
+        ("after", True),
+        ("after", False),
+    ]
 
 
 @pytest.mark.asyncio

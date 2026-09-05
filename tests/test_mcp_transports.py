@@ -6,6 +6,7 @@ import threading
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, cast
 
+import httpx
 import pytest
 
 import mindroom.mcp.transports as transport_module
@@ -19,10 +20,10 @@ from mindroom.mcp.transports import (
     _TransportStreams,
     build_transport_handle,
 )
-from mindroom.server_fetch_url import ServerFetchUrlError
+from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -125,8 +126,9 @@ async def test_open_sse_interpolates_headers_and_passes_timeouts(
     async with handle.opener() as opened_streams:
         assert opened_streams == streams
 
-    httpx_client_factory = captured.pop("httpx_client_factory")
-    assert httpx_client_factory is _server_fetch_mcp_http_client
+    httpx_client_factory = cast("Callable[[], httpx.AsyncClient]", captured.pop("httpx_client_factory"))
+    async with httpx_client_factory() as client:
+        assert isinstance(client._transport, ServerFetchAsyncHTTPTransport)
     assert captured == {
         "url": "https://mcp.example/sse",
         "headers": {"Authorization": "Bearer secret-token"},
@@ -168,14 +170,52 @@ async def test_open_streamable_http_interpolates_headers_passes_timeouts_and_dro
     async with handle.opener() as streams:
         assert streams == (read_stream, write_stream)
 
-    httpx_client_factory = captured.pop("httpx_client_factory")
-    assert httpx_client_factory is _server_fetch_mcp_http_client
+    httpx_client_factory = cast("Callable[[], httpx.AsyncClient]", captured.pop("httpx_client_factory"))
+    async with httpx_client_factory() as client:
+        assert isinstance(client._transport, ServerFetchAsyncHTTPTransport)
     assert captured == {
         "url": "https://mcp.example/mcp",
         "headers": {"X-Token": "secret-token"},
         "timeout": 3.5,
         "sse_read_timeout": 4.5,
     }
+
+
+@pytest.mark.asyncio
+async def test_remote_transport_latches_http_401_without_response_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The handle retains structured bearer rejection after the MCP SDK closes its streams."""
+    runtime_paths = _runtime_paths(tmp_path)
+    captured: dict[str, object] = {}
+
+    @asynccontextmanager
+    async def fake_streamablehttp_client(
+        _url: str,
+        **kwargs: object,
+    ) -> AsyncIterator[tuple[object, object, object]]:
+        captured.update(kwargs)
+        yield object(), object(), lambda: "session-id"
+
+    monkeypatch.setattr(transport_module, "streamablehttp_client", fake_streamablehttp_client)
+    handle = build_transport_handle(
+        "demo",
+        MCPServerConfig(transport="streamable-http", url="https://mcp.example/mcp"),
+        runtime_paths,
+    )
+
+    async with handle.opener():
+        factory = cast("Callable[..., httpx.AsyncClient]", captured["httpx_client_factory"])
+        client = factory()
+        try:
+            request = httpx.Request("POST", "https://mcp.example/mcp")
+            for hook in client._event_hooks["response"]:
+                await hook(httpx.Response(401, request=request, content=b"secret provider response"))
+        finally:
+            await client.aclose()
+
+    assert handle.authorization_rejected()
 
 
 @pytest.mark.asyncio

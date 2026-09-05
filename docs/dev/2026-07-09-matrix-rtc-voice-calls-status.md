@@ -1,7 +1,8 @@
-# MatrixRTC Voice Calls — Living Status Doc
+# MatrixRTC Voice Calls — Historical Status Snapshot
 
 Last updated: 2026-07-14.
-This is the single source of truth for the voice-call effort; update it with every meaningful change.
+This document records the voice-call effort as of 2026-07-14 and is not the current implementation source of truth.
+Later MatrixRTC changes are intentionally not reflected here.
 
 ## Goal
 
@@ -93,8 +94,8 @@ LiveKit DTLS-timeout warnings in earlier server logs were teardown noise from sh
 - Committed: `tests/manual/scratch/live_agent_speaking_test.py` (the full loop for either backend: a synthetic caller speaks a TTS question into the SFU, the real CallManager agent greets, answers, and runs a real tool; checks audio energy, transcript, and memory reference).
 - The harness accepts exactly one account mode: set `MINDROOM_REG_TOKEN` to register throwaway users, or set all six of `CALLER_USER_ID`, `CALLER_DEVICE_ID`, `CALLER_TOKEN`, `BOT_USER_ID`, `BOT_DEVICE_ID`, and `BOT_TOKEN` to reuse existing accounts; `OPENAI_API_KEY` is required in both modes.
 - Existing-account mode uses a private test room, clears the caller's call membership, and makes both accounts leave and forget the room during cleanup.
-- Job scratch (`~/.claude/jobs/147b583c/tmp/`): `live_botcall_test.py` (real CallManager in a live call), `live_bridge_test.py` (RealtimeVoiceBridge + optional realtime agent), `e2ee_framekey_test.py` (real-olm round trip), `cinny_join_repro.py` (headless Playwright browser-join repro against prod Cinny: seeds the session via localStorage, creates an `org.matrix.msc3417.call` room, clicks Join, taps console/network/postMessage; `BLOCK_SW=1` and `HOST_RULES` env knobs).
-- Sandbox quirk: aiohttp/nio needs `SSL_CERT_FILE=$(python -c 'import certifi;print(certifi.where())')`; use `MATRIX_SSL_VERIFY=false` for a local bot run.
+- Historical job scratch under `~/.claude/jobs/147b583c/tmp/` contained `live_botcall_test.py`, `live_bridge_test.py`, `e2ee_framekey_test.py`, and `cinny_join_repro.py`, but that scratch directory is no longer available.
+- Historical sandbox quirk: aiohttp/nio needed `SSL_CERT_FILE=$(uv run python -c 'import certifi;print(certifi.where())')`; use `MATRIX_SSL_VERIFY=false` for a local bot run.
 
 ## Remaining work
 

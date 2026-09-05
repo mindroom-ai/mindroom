@@ -159,6 +159,7 @@ async def block_secret_reads(ctx):
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before scheduled task posts its synthetic message | `message_text`, `suppress` |
 | `reaction:received` | Observer | `ReactionReceivedContext` | After built-in reaction handlers (stop, config, interactive) | None (frozen) |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router bot after a live human `m.room.member` join, excluding initial sync history, configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
+| `room:member_left` | Observer | `RoomMemberLeftContext` | On the router bot after a human's self-authored `m.room.member` transition from `join` to `leave`, excluding configured agents, the internal `mindroom_user`, and `bot_accounts` | None (frozen) |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After orchestrator applies new config and restarts affected entities | None (frozen) |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call runs | `decline()` |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None (observer result snapshot) |
@@ -173,6 +174,8 @@ MindRoom does not sanitize attachments, media, tool calls, tool args, provider m
 For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation, interruption, suppression, and delivery failure recovery.
 `room:member_joined` uses at-least-once delivery because MindRoom records the durable room/user marker only after the hook completes.
 A process interruption or marker-write failure after a handler side effect can replay the same room/user pair, so handlers that create or invite resources must be idempotent.
+`room:member_left` reads `display_name` and `avatar_url` from the joined membership state that the leave replaces.
+Actionable room-lifecycle events remain pending until their callback completes, so an interruption can replay a leave before journal settlement and handlers must be idempotent.
 
 ### Default timeouts
 
@@ -187,6 +190,7 @@ A process interruption or marker-write failure after a handler side effect can r
 | `message:cancelled` | 3000 |
 | `reaction:received` | 500 |
 | `room:member_joined` | 3000 |
+| `room:member_left` | 3000 |
 | `schedule:fired` | 1000 |
 | `agent:started` | 5000 |
 | `agent:stopped` | 5000 |
@@ -467,13 +471,15 @@ If you are writing internal code or tests and already have an explicit `HookRegi
 ### Fault isolation
 
 Every hook invocation runs inside an `asyncio.timeout()` with structured error logging.
-No hook can crash the bot.
+Ordinary `Exception` and `SystemExit` failures are logged and isolated so later hooks can continue.
+Cancellation follows the caller and event policy, and external side effects completed before a failure cannot be rolled back.
 
 Failure semantics are mode-aware:
 
-- **Observer** failures lose only side effects; the next hook still runs
+- **Observer** failures stop that callback; completed external side effects remain, and the next hook still runs
 - **Collector** failures lose only that hook's contributed items
-- **Transformer** failures lose only that hook's draft changes; the previous draft continues
+- **`message:before_response` transformer** failures preserve mutations already made to the shared draft before the failure
+- **`message:final_response_transform` transformer** failures discard the failed hook's copy and continue with the previous draft
 
 ### No quarantine, no cooldown
 
@@ -509,9 +515,9 @@ Scoped sub-paths (per-room, per-user) are the plugin author's responsibility.
 
 ## Context reference
 
-### Base fields (all hooks)
+### Base fields (non-tool hooks)
 
-Every hook context includes these fields:
+Contexts derived from `HookContext` include these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -525,7 +531,10 @@ Every hook context includes these fields:
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful when plugin state must ignore anything recorded before it |
 | `state_root` | `Path` | Plugin state directory (property) |
 
-Every hook context also exposes the following helpers:
+Those non-tool contexts also expose the following helpers:
+
+`ToolBeforeCallContext` and `ToolAfterCallContext` use a separate tool-hook surface.
+Their `config` and `runtime_paths` values may be absent, and they do not expose `runtime_started_at` or `get_latest_agent_message_snapshot()`.
 
 **`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`**
 Sends a hook-originated Matrix message and returns the event ID on success, or `None` when no sender is bound.
@@ -564,8 +573,12 @@ Transport exceptions from the underlying Matrix client propagate to the hook.
 Provides a narrow Matrix admin facade when MindRoom has a router-backed admin client available for the current hook context.
 This facade is part of the supported hook contract and is intentionally not the raw Matrix client.
 It is `None` when no admin-capable client is bound.
-The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `get_room_members(room_id)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
+The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `force_join_user(room_id, user_id)`, `kick_user(room_id, user_id, reason=None)`, `get_room_members(room_id)`, `get_profile_avatar(user_id)`, `get_room_state_event(room_id, event_type, state_key)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
+Membership mutation methods return a boolean success result and surface transport exceptions consistently with the other admin operations.
 `get_room_members` returns `None` when the membership fetch fails, so callers can distinguish an unreadable room from a genuinely empty one.
+`get_profile_avatar` returns the user's Matrix avatar content URI, or `None` when no avatar is available or Matrix returns an error response.
+`get_room_state_event` returns `(True, content)` for a successful object response, `(True, None)` when Matrix confirms the event is missing, and `(False, None)` for other Matrix errors or malformed non-object content.
+Transport exceptions from both read methods propagate to the caller.
 Rooms created via `create_room` are retained for the creating bot across room cleanup and restarts, the same way rooms it is invited to are kept.
 
 ### Transport objects
@@ -650,6 +663,18 @@ RoomMemberJoinedContext(
     prev_membership: str | None,
 )
 
+RoomMemberLeftContext(
+    agent_name: str,
+    room_id: str,
+    event_id: str,
+    user_id: str,
+    sender_id: str,
+    display_name: str | None,
+    avatar_url: str | None,
+    membership: str,
+    prev_membership: str | None,
+)
+
 ToolBeforeCallContext(
     tool_name: str,
     arguments: dict[str, Any],
@@ -679,6 +704,8 @@ ToolAfterCallContext(
 
 For `schedule:fired`, `ScheduleFiredContext.thread_id` is the resolved delivery thread.
 This may differ from `workflow.thread_id` when the workflow starts a new thread or resolves to room mode.
+Visible and silent schedules both emit `schedule:fired` before their trigger is sent.
+Setting `ctx.suppress = True` cancels the fire, while replacing `ctx.message_text` with an empty or whitespace-only value produces a visible scheduled-task failure notice.
 
 ## Testing
 

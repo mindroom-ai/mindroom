@@ -17,7 +17,7 @@ import json
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 import pytest
@@ -125,17 +125,19 @@ class _FakeCollection:
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
         validate_where_operands(where)
-        _FakeVectorDb.get_calls += 1
-        if self._name in _FakeVectorDb.vanished_on_get:
-            message = f"Collection {self._name!r} does not exist"
-            raise NotFoundError(message)
-        records = list(_FakeVectorDb.store.get(self._name, []))
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.get_calls += 1
+            if self._name in _FakeVectorDb.vanished_on_get:
+                message = f"Collection {self._name!r} does not exist"
+                raise NotFoundError(message)
+            records = list(_FakeVectorDb.store.get(self._name, []))
         if where:
             key, condition = next(iter(where.items()))
             records = [record for record in records if metadata_matches(record.metadata, key, condition)]
         selected = records[offset:] if limit is None else records[offset : offset + limit]
-        _FakeVectorDb.queries.append((len(selected), where))
-        _FakeVectorDb.enforce_row_ceiling(len(selected))
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.queries.append((len(selected), where))
+            _FakeVectorDb.enforce_row_ceiling(len(selected))
         return chroma_get_result(
             ids=[record.identifier for record in selected],
             metadatas=[dict(record.metadata) for record in selected],
@@ -156,38 +158,43 @@ class _FakeCollection:
             # Chroma rejects an empty write rather than treating it as a no-op.
             message = "Expected Embeddings to be non-empty list or numpy array, got [] in add."
             raise ValueError(message)
-        _FakeVectorDb.writes.append(len(ids))
-        if len(_FakeVectorDb.writes) > _FakeVectorDb.max_writes:
-            message = "vector store refused the write"
-            raise RuntimeError(message)
-        _FakeVectorDb.store.setdefault(self._name, []).extend(
-            _Record(identifier=identifier, content=document, embedding=list(embedding), metadata=dict(metadata))
-            for identifier, embedding, document, metadata in zip(ids, embeddings, documents, metadatas, strict=True)
-        )
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.writes.append(len(ids))
+            if len(_FakeVectorDb.writes) > _FakeVectorDb.max_writes:
+                message = "vector store refused the write"
+                raise RuntimeError(message)
+            _FakeVectorDb.store.setdefault(self._name, []).extend(
+                _Record(identifier=identifier, content=document, embedding=list(embedding), metadata=dict(metadata))
+                for identifier, embedding, document, metadata in zip(ids, embeddings, documents, metadatas, strict=True)
+            )
 
     def delete(self, *, where: dict[str, object]) -> None:
         validate_where_operands(where)
         key, condition = next(iter(where.items()))
-        _FakeVectorDb.store[self._name] = [
-            record
-            for record in _FakeVectorDb.store.get(self._name, [])
-            if not metadata_matches(record.metadata, key, condition)
-        ]
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.store[self._name] = [
+                record
+                for record in _FakeVectorDb.store.get(self._name, [])
+                if not metadata_matches(record.metadata, key, condition)
+            ]
 
 
 class _FakeClient:
     def get_collection(self, name: str) -> _FakeCollection:
-        if name not in _FakeVectorDb.store:
-            message = f"Collection {name!r} does not exist"
-            raise NotFoundError(message)
+        with _FakeVectorDb.lock:
+            if name not in _FakeVectorDb.store:
+                message = f"Collection {name!r} does not exist"
+                raise NotFoundError(message)
         return _FakeCollection(name)
 
     def list_collections(self) -> list[str]:
-        return sorted(_FakeVectorDb.store)
+        with _FakeVectorDb.lock:
+            return sorted(_FakeVectorDb.store)
 
 
 class _FakeVectorDb:
     store: ClassVar[dict[str, list[_Record]]] = {}
+    lock: ClassVar[Lock] = Lock()
     #: Rows returned by each ``get``, with its filter, so tests can prove a copy
     #: query was paged and that a verification probe was or was not issued.
     queries: ClassVar[list[tuple[int, dict[str, object] | None]]] = []
@@ -221,23 +228,25 @@ class _FakeVectorDb:
         self.client = _FakeClient()
 
     def exists(self) -> bool:
-        return self.collection_name in self.store
+        with self.lock:
+            return self.collection_name in self.store
 
     def create(self) -> None:
-        self.store.setdefault(self.collection_name, [])
+        with self.lock:
+            self.store.setdefault(self.collection_name, [])
 
     def delete(self) -> bool:
-        if self.collection_name not in self.store:
-            return False
-        self.store.pop(self.collection_name)
-        return True
+        with self.lock:
+            if self.collection_name not in self.store:
+                return False
+            self.store.pop(self.collection_name)
+            return True
 
     def search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
         _ = (query, filters)
-        return [
-            Document(content=record.content, meta_data=dict(record.metadata))
-            for record in self.store.get(self.collection_name, [])[:limit]
-        ]
+        with self.lock:
+            records = list(self.store.get(self.collection_name, [])[:limit])
+        return [Document(content=record.content, meta_data=dict(record.metadata)) for record in records]
 
     async def async_search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
         return self.search(query=query, limit=limit, filters=filters)
@@ -266,7 +275,6 @@ class _FakeKnowledge:
         documents = (
             reader.read(source, name=source.name) if reader is not None else [Document(content=source.read_text())]
         )
-        records = _FakeVectorDb.store.setdefault(self.vector_db.collection_name, [])
         embedded: list[_Record] = []
         for document in documents:
             embedder = self.vector_db.embedder
@@ -280,22 +288,96 @@ class _FakeKnowledge:
                     metadata=dict(metadata),
                 ),
             )
-        records.extend(embedded)
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.store.setdefault(self.vector_db.collection_name, []).extend(embedded)
 
     def remove_vectors_by_metadata(self, metadata: dict[str, Any]) -> bool:
         assert self.vector_db is not None
-        records = _FakeVectorDb.store.get(self.vector_db.collection_name, [])
-        kept = [
-            record
-            for record in records
-            if not all(record.metadata.get(key) == value for key, value in metadata.items())
-        ]
-        _FakeVectorDb.store[self.vector_db.collection_name] = kept
-        return len(kept) != len(records)
+        with _FakeVectorDb.lock:
+            records = _FakeVectorDb.store.get(self.vector_db.collection_name, [])
+            kept = [
+                record
+                for record in records
+                if not all(record.metadata.get(key) == value for key, value in metadata.items())
+            ]
+            _FakeVectorDb.store[self.vector_db.collection_name] = kept
+            return len(kept) != len(records)
 
     def search(self, query: str, max_results: int | None = None) -> list[Document]:
         assert self.vector_db is not None
         return self.vector_db.search(query=query, limit=max_results or self.max_results)
+
+
+def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleaning one source must not discard another source's completed insert."""
+    cleanup_scanned = Event()
+    release_cleanup = Event()
+    insert_reached_store = Event()
+
+    class _SignalingLock:
+        def __init__(self) -> None:
+            self._lock = Lock()
+
+        def __enter__(self) -> None:
+            if self._lock.locked():
+                insert_reached_store.set()
+            self._lock.acquire()
+
+        def __exit__(self, *_args: object) -> None:
+            self._lock.release()
+
+    class _PausingRecordList(list[_Record]):
+        def __iter__(self) -> Iterator[_Record]:
+            yield from super().__iter__()
+            cleanup_scanned.set()
+            assert release_cleanup.wait(timeout=10)
+
+    monkeypatch.setattr(_FakeVectorDb, "lock", _SignalingLock())
+    collection = "concurrent-cleanup"
+    vector_db = _FakeVectorDb(collection=collection, embedder=embedder)
+    _FakeVectorDb.store[collection] = _PausingRecordList(
+        [
+            _Record(
+                identifier=_next_record_id(),
+                content="stale",
+                embedding=[1.0],
+                metadata={"source_path": "stale.md"},
+            ),
+        ],
+    )
+    knowledge = _FakeKnowledge(vector_db)
+    inserted = tmp_path / "inserted.md"
+    inserted.write_text("new content", encoding="utf-8")
+
+    cleanup_thread = Thread(
+        target=knowledge.remove_vectors_by_metadata,
+        args=({"source_path": "stale.md"},),
+    )
+    cleanup_thread.start()
+    assert cleanup_scanned.wait(timeout=5)
+
+    def _insert() -> None:
+        knowledge.insert(
+            path=str(inserted),
+            metadata={"source_path": inserted.name},
+            upsert=True,
+        )
+
+    insert_thread = Thread(target=_insert)
+    insert_thread.start()
+    reached_store_before_cleanup = insert_reached_store.wait(timeout=5)
+    release_cleanup.set()
+    cleanup_thread.join(timeout=5)
+    insert_thread.join(timeout=5)
+
+    assert reached_store_before_cleanup
+    assert not cleanup_thread.is_alive()
+    assert not insert_thread.is_alive()
+    assert [record.metadata["source_path"] for record in _FakeVectorDb.store[collection]] == [inserted.name]
 
 
 class _AutoCreatingFakeKnowledge(_FakeKnowledge):
@@ -1542,6 +1624,42 @@ def test_candidate_checkpoint_replays_journal_and_tolerates_a_torn_tail(tmp_path
     assert reloaded == compacted
     assert reloaded.completed == checkpoint.completed
     assert reloaded.failed == checkpoint.failed
+
+
+def test_candidate_checkpoint_retirement_deletes_the_authoritative_snapshot_last(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure on the second unlink must leave a resumable checkpoint."""
+    storage_path = tmp_path / "state"
+    settings = _manager(_config(tmp_path / "cfg", tmp_path / "cfg" / "docs"))._indexing_settings
+    save_candidate_checkpoint(
+        storage_path,
+        CandidateCheckpoint(collection="candidate", settings=settings, completed={"a.md": (1, 2, "digest")}),
+    )
+    append_candidate_journal(storage_path, completed=[("b.md", (3, 4, "journal-digest"))])
+    snapshot_path = _candidate_checkpoint_path(storage_path)
+    journal_path = _candidate_journal_path(storage_path)
+    original_unlink = Path.unlink
+    unlinked: list[Path] = []
+
+    def _fail_second_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        unlinked.append(path)
+        if len(unlinked) == 2:
+            message = "checkpoint directory stopped accepting unlinks"
+            raise OSError(message)
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _fail_second_unlink)
+
+    with pytest.raises(OSError, match="stopped accepting unlinks"):
+        delete_candidate_checkpoint(storage_path)
+
+    assert unlinked == [journal_path, snapshot_path]
+    checkpoint = load_candidate_checkpoint(storage_path)
+    assert checkpoint is not None
+    assert checkpoint.collection == "candidate"
+    assert checkpoint.completed == {"a.md": (1, 2, "digest")}
 
 
 def test_unknown_checkpoint_schema_version_is_ignored(tmp_path: Path) -> None:
@@ -3611,6 +3729,151 @@ async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resu
 
     assert run.resumed is False
     assert run.completed == {}, "claims survived a collection that no longer holds their vectors"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unreadable_error",
+    [
+        "Error constructing hnsw segment reader: EOF while parsing",
+        "Error sending backfill request to compactor: Failed to apply logs to the hnsw segment writer",
+    ],
+)
+async def test_an_unreadable_candidate_is_discarded_without_touching_the_published_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreadable_error: str,
+) -> None:
+    """A corrupt unpublished vector segment must not permanently block refresh."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    await manager.reindex_all()
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection is not None
+    published_collection = state.collection
+    published_records = list(_FakeVectorDb.store[published_collection])
+
+    unreadable_candidate = candidate_collection_name(manager._collections)
+    _FakeVectorDb.store[unreadable_candidate] = list(published_records)
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(
+            collection=unreadable_candidate,
+            settings=manager._indexing_settings,
+            completed={names[0]: (1, 1, "digest")},
+        ),
+    )
+    original_get = _FakeCollection.get
+
+    def _fail_unreadable_candidate(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
+        if self._name == unreadable_candidate:
+            raise InternalError(unreadable_error)
+        return original_get(self, **kwargs)
+
+    monkeypatch.setattr(_FakeCollection, "get", _fail_unreadable_candidate)
+
+    run = await manager._open_candidate_run()
+
+    assert run.resumed is False
+    assert run.checkpoint.collection != unreadable_candidate
+    assert sorted(run.completed) == names
+    assert unreadable_candidate not in _FakeVectorDb.store
+    assert _FakeVectorDb.store[published_collection] == published_records
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_candidate_is_not_deleted_when_its_checkpoint_cannot_be_retired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup failure must leave the candidate and published index recoverable."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 1)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    await manager.reindex_all()
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection is not None
+    published_collection = state.collection
+    published_records = list(_FakeVectorDb.store[published_collection])
+
+    unreadable_candidate = candidate_collection_name(manager._collections)
+    _FakeVectorDb.store[unreadable_candidate] = list(published_records)
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(collection=unreadable_candidate, settings=manager._indexing_settings),
+    )
+    original_get = _FakeCollection.get
+
+    def _fail_unreadable_candidate(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
+        if self._name == unreadable_candidate:
+            message = "Error constructing hnsw segment reader: EOF while parsing"
+            raise InternalError(message)
+        return original_get(self, **kwargs)
+
+    def _fail_checkpoint_cleanup(_base_storage_path: Path) -> None:
+        message = "checkpoint directory is read-only"
+        raise PermissionError(message)
+
+    monkeypatch.setattr(_FakeCollection, "get", _fail_unreadable_candidate)
+    monkeypatch.setattr(knowledge_manager_module, "delete_candidate_checkpoint", _fail_checkpoint_cleanup)
+
+    with pytest.raises(RuntimeError, match="Cannot retire unreadable knowledge candidate checkpoint"):
+        await manager._open_candidate_run()
+
+    assert unreadable_candidate in _FakeVectorDb.store
+    assert _FakeVectorDb.store[published_collection] == published_records
+
+
+@pytest.mark.asyncio
+async def test_a_transient_candidate_probe_failure_preserves_resumable_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated vector-store failure is not evidence of index corruption."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 1)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    await manager.reindex_all()
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection is not None
+    published_collection = state.collection
+    published_records = list(_FakeVectorDb.store[published_collection])
+
+    candidate = candidate_collection_name(manager._collections)
+    _FakeVectorDb.store[candidate] = list(published_records)
+    storage = _storage_path(config, runtime_paths)
+    save_candidate_checkpoint(
+        storage,
+        CandidateCheckpoint(collection=candidate, settings=manager._indexing_settings),
+    )
+    original_get = _FakeCollection.get
+
+    def _fail_transient_probe(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
+        if self._name == candidate:
+            message = "database connection unexpectedly closed"
+            raise InternalError(message)
+        return original_get(self, **kwargs)
+
+    monkeypatch.setattr(_FakeCollection, "get", _fail_transient_probe)
+
+    with pytest.raises(InternalError, match="database connection unexpectedly closed"):
+        await manager._open_candidate_run()
+
+    checkpoint = load_candidate_checkpoint(storage)
+    assert checkpoint is not None
+    assert checkpoint.collection == candidate
+    assert candidate in _FakeVectorDb.store
+    assert _FakeVectorDb.store[published_collection] == published_records
 
 
 @pytest.mark.asyncio

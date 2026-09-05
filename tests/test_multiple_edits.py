@@ -8,13 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -47,18 +48,20 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     )
 
     config = bind_runtime_paths(
-        Config(
-            agents={"test": AgentConfig(display_name="TestAgent", rooms=["!test:localhost"])},
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
-            authorization={"default_room_access": True},
+        with_current_room_member_access(
+            Config(
+                agents={"test": AgentConfig(display_name="TestAgent", rooms=["!test:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+                authorization={},
+            ),
         ),
         test_runtime_paths(tmp_path),
     )
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         rooms=["!test:localhost"],

@@ -41,6 +41,23 @@ _VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES = frozenset(
 _VERTEX_TOOL_SEARCH_TOKEN_RESERVE = 256
 
 
+def _messages_with_replay_safe_reasoning(messages: list[Message]) -> list[Message]:
+    """Omit reasoning that cannot be replayed as an Anthropic thinking block."""
+    sanitized_messages: list[Message] | None = None
+    for index, message in enumerate(messages):
+        if message.reasoning_content is None or message.provider_data is None:
+            continue
+        signature = message.provider_data.get("signature")
+        if isinstance(signature, str) and signature:
+            continue
+        if sanitized_messages is None:
+            sanitized_messages = list(messages)
+        sanitized_message = message.model_copy(deep=True)
+        sanitized_message.reasoning_content = None
+        sanitized_messages[index] = sanitized_message
+    return sanitized_messages if sanitized_messages is not None else messages
+
+
 def _strip_vertex_claude_tool_strict(
     tools: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]] | None:
@@ -326,6 +343,7 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         compress_tool_results: bool,
     ) -> list[Message]:
         """Drop the oldest replay turns until the exact request fits."""
+        messages = _messages_with_replay_safe_reasoning(messages)
         if self.context_window is None:
             return messages
         output_reserve = self.max_tokens or 0

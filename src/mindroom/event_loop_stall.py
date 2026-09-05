@@ -19,12 +19,15 @@ import threading
 import time
 import traceback
 from collections import deque
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.timing import elapsed_ms_between
 
 if TYPE_CHECKING:
+    from types import FrameType
+
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -35,6 +38,11 @@ _HEARTBEAT_INTERVAL_SECONDS = 0.05
 _SCHEDULER_LAG_WINDOW_SECONDS = 60.0
 _REPEAT_LOG_INTERVAL_SECONDS = 30.0
 _THREAD_JOIN_TIMEOUT_SECONDS = 2.0
+_MAX_OTHER_THREAD_STACKS = 8
+_MAX_STACK_FRAMES = 32
+# Eight one-thousand-character stacks bound stack text to eight thousand characters.
+_MAX_OTHER_THREAD_STACK_CHARACTERS = 1_000
+_STACK_TRUNCATION_MARKER = "\n...\n"
 
 
 def _event_loop_stall_threshold_seconds(runtime_paths: RuntimePaths) -> float:
@@ -43,6 +51,40 @@ def _event_loop_stall_threshold_seconds(runtime_paths: RuntimePaths) -> float:
     if not raw:
         return _DEFAULT_EVENT_LOOP_STALL_THRESHOLD_SECONDS
     return float(raw)
+
+
+def _truncate_stack(stack: str) -> str:
+    """Return a bounded stack suffix while preserving its active tail."""
+    if len(stack) <= _MAX_OTHER_THREAD_STACK_CHARACTERS:
+        return stack
+    tail_length = _MAX_OTHER_THREAD_STACK_CHARACTERS - len(_STACK_TRUNCATION_MARKER)
+    return f"{_STACK_TRUNCATION_MARKER}{stack[-tail_length:]}"
+
+
+def _frame_chain_exceeds_limit(frame: FrameType, frame_limit: int) -> bool:
+    """Return whether walking at most ``frame_limit`` frames omits an ancestor."""
+    older_frame: FrameType | None = frame
+    for _ in range(frame_limit):
+        older_frame = older_frame.f_back
+        if older_frame is None:
+            return False
+    return True
+
+
+def _format_bounded_stack(frame: FrameType) -> tuple[str, bool]:
+    """Format one stack and report whether its frame or character limit applied."""
+    frame_limit_truncated = _frame_chain_exceeds_limit(frame, _MAX_STACK_FRAMES)
+    full_stack = "".join(traceback.format_stack(frame, limit=_MAX_STACK_FRAMES))
+    stack = _truncate_stack(full_stack)
+    return stack, frame_limit_truncated or len(stack) < len(full_stack)
+
+
+@dataclass(frozen=True)
+class _Heartbeat:
+    """One atomically published heartbeat and its matching process CPU baseline."""
+
+    monotonic_seconds: float
+    process_cpu_seconds: float
 
 
 class EventLoopStallDetector:
@@ -67,7 +109,7 @@ class EventLoopStallDetector:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread_ident: int | None = None
         self._heartbeat_handle: asyncio.TimerHandle | None = None
-        self._last_beat: float = 0.0
+        self._heartbeat = _Heartbeat(monotonic_seconds=0.0, process_cpu_seconds=0.0)
         self._stalled_beat: float | None = None
         self._next_repeat_log: float = 0.0
         self._scheduler_lag_samples: deque[float] = deque(
@@ -82,7 +124,10 @@ class EventLoopStallDetector:
         """Arm the heartbeat on the running loop and start the watcher thread."""
         self._loop = asyncio.get_running_loop()
         self._loop_thread_ident = threading.get_ident()
-        self._last_beat = time.monotonic()
+        self._heartbeat = _Heartbeat(
+            monotonic_seconds=time.monotonic(),
+            process_cpu_seconds=time.process_time(),
+        )
         self._scheduler_lag_window_started_at = time.monotonic()
         self._schedule_heartbeat(self._loop.time() + self.heartbeat_interval_seconds)
         self._thread = threading.Thread(
@@ -116,7 +161,10 @@ class EventLoopStallDetector:
         """Refresh heartbeat, sample callback lag, and re-arm from actual loop time."""
         assert self._loop is not None
         actual_loop_time = self._loop.time()
-        self._last_beat = time.monotonic()
+        self._heartbeat = _Heartbeat(
+            monotonic_seconds=time.monotonic(),
+            process_cpu_seconds=time.process_time(),
+        )
         with self._scheduler_lag_lock:
             self._scheduler_lag_samples.append(max(0.0, actual_loop_time - scheduled_loop_time))
         if not self._stop_event.is_set():
@@ -142,14 +190,63 @@ class EventLoopStallDetector:
             max_ms=milliseconds[-1],
         )
 
-    def _loop_thread_stack(self) -> str | None:
+    def _loop_thread_stack(self, frames: dict[int, FrameType]) -> str | None:
         """Return the loop thread's current stack, formatted for logging."""
         if self._loop_thread_ident is None:
             return None
-        frame = sys._current_frames().get(self._loop_thread_ident)
+        frame = frames.get(self._loop_thread_ident)
         if frame is None:
             return None
         return "".join(traceback.format_stack(frame))
+
+    def _other_thread_stacks(
+        self,
+        frames: dict[int, FrameType],
+    ) -> tuple[list[dict[str, object]], int]:
+        """Return bounded stacks from a frame snapshot, excluding loop and watcher."""
+        current_ident = threading.get_ident()
+        known_threads = {thread.ident: thread for thread in threading.enumerate() if thread.ident is not None}
+        candidates = sorted(
+            (thread_ident for thread_ident in frames if thread_ident not in {self._loop_thread_ident, current_ident}),
+            key=lambda thread_ident: (
+                known_threads[thread_ident].daemon if thread_ident in known_threads else True,
+                known_threads[thread_ident].name if thread_ident in known_threads else f"thread-{thread_ident}",
+                thread_ident,
+            ),
+        )
+        stacks: list[dict[str, object]] = []
+        for thread_ident in candidates[:_MAX_OTHER_THREAD_STACKS]:
+            thread = known_threads.get(thread_ident)
+            thread_name = thread.name if thread is not None else f"thread-{thread_ident}"
+            stack, truncated = _format_bounded_stack(frames[thread_ident])
+            stacks.append(
+                {
+                    "thread_name": thread_name,
+                    "thread_ident": thread_ident,
+                    "daemon": thread.daemon if thread is not None else None,
+                    "stack": stack,
+                    "truncated": truncated,
+                },
+            )
+        return stacks, len(candidates) - len(stacks)
+
+    def _stall_diagnostics(
+        self,
+        heartbeat: _Heartbeat,
+        *,
+        frames: dict[int, FrameType],
+        current_process_cpu: float,
+    ) -> dict[str, object]:
+        """Capture process activity and competing Python work for one stall log."""
+        other_thread_stacks, omitted_thread_stack_count = self._other_thread_stacks(frames)
+        return {
+            "process_cpu_seconds_since_heartbeat": round(
+                max(0.0, current_process_cpu - heartbeat.process_cpu_seconds),
+                3,
+            ),
+            "other_thread_stacks": other_thread_stacks,
+            "omitted_thread_stack_count": omitted_thread_stack_count,
+        }
 
     def _note_stall_ended(self, fresh_beat: float) -> None:
         """Log the end of one stall using the heartbeat gap as its duration."""
@@ -160,25 +257,32 @@ class EventLoopStallDetector:
         )
         self._stalled_beat = None
 
-    def _note_stalled(self, now: float, last_beat: float) -> None:
+    def _note_stalled(self, now: float, heartbeat: _Heartbeat) -> None:
         """Log one stalled heartbeat, rate-limited to once per repeat interval."""
+        last_beat = heartbeat.monotonic_seconds
         stalled_for_seconds = round(now - last_beat, 3)
         if self._stalled_beat is None:
             self._stalled_beat = last_beat
             self._next_repeat_log = now + self.repeat_log_interval_seconds
+            current_process_cpu = time.process_time()
+            frames = sys._current_frames()
             logger.error(
                 "event_loop_stall_detected",
                 stalled_for_seconds=stalled_for_seconds,
                 threshold_seconds=self.threshold_seconds,
-                stack=self._loop_thread_stack(),
+                stack=self._loop_thread_stack(frames),
+                **self._stall_diagnostics(heartbeat, frames=frames, current_process_cpu=current_process_cpu),
             )
         elif now >= self._next_repeat_log:
             self._next_repeat_log = now + self.repeat_log_interval_seconds
+            current_process_cpu = time.process_time()
+            frames = sys._current_frames()
             logger.error(
                 "event_loop_stall_ongoing",
                 stalled_for_seconds=stalled_for_seconds,
                 threshold_seconds=self.threshold_seconds,
-                stack=self._loop_thread_stack(),
+                stack=self._loop_thread_stack(frames),
+                **self._stall_diagnostics(heartbeat, frames=frames, current_process_cpu=current_process_cpu),
             )
 
     def _watch(self) -> None:
@@ -186,11 +290,12 @@ class EventLoopStallDetector:
         while not self._stop_event.wait(self.poll_interval_seconds):
             now = time.monotonic()
             self._report_scheduler_lag(now)
-            last_beat = self._last_beat
+            heartbeat = self._heartbeat
+            last_beat = heartbeat.monotonic_seconds
             if self._stalled_beat is not None and last_beat != self._stalled_beat:
                 self._note_stall_ended(last_beat)
             if now - last_beat > self.threshold_seconds:
-                self._note_stalled(now, last_beat)
+                self._note_stalled(now, heartbeat)
 
 
 def _nearest_rank_percentile(samples: list[float], percentile: int) -> float:

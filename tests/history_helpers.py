@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
@@ -48,13 +49,19 @@ from mindroom.hooks import (
     HookRegistry,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.runtime_context import ToolRuntimeContext
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     FakeModel,
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
+    seed_session,
 )
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
 
@@ -308,7 +315,7 @@ def _hook_runtime_context(
     session_id: str,
     thread_id: str | None = "$thread",
 ) -> ToolRuntimeContext:
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="test_agent",
         target=MessageTarget(
             room_id="!room:localhost",
@@ -352,7 +359,7 @@ def _forced_compaction_context(
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
     runtime_context = _hook_runtime_context(
         config=config,
         runtime_paths=runtime_paths,

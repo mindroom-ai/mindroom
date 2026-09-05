@@ -6,6 +6,7 @@ import asyncio
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -19,6 +20,7 @@ from mindroom.config.main import Config, load_config
 from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_source, partial_source_files
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
+from mindroom.orchestrator import _watch_config_task
 from mindroom.response_admission import ResponseAdmissionGate
 
 if TYPE_CHECKING:
@@ -714,6 +716,34 @@ class TestFailedReloadWatchSet:
         await lifecycle._apply_queued_config_reload()
 
         assert lifecycle.failed_reload_source_files is None
+
+    @pytest.mark.asyncio
+    async def test_config_watcher_uses_sources_from_a_successful_noop_reload(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The dynamic watcher should replace stale include topology after an equal reload."""
+        config_path = (tmp_path / "config.yaml").resolve()
+        old_include = (tmp_path / "old.yaml").resolve()
+        new_include = (tmp_path / "new.yaml").resolve()
+        orchestrator = SimpleNamespace(
+            config=SimpleNamespace(source_files=frozenset({config_path, old_include})),
+            config_reload=SimpleNamespace(
+                loaded_source_files=frozenset({config_path, new_include}),
+                failed_reload_source_files=None,
+            ),
+        )
+        watched: set[Path] = set()
+
+        async def capture_paths(paths_provider: Callable[[], set[Path]], _callback: object) -> None:
+            watched.update(paths_provider())
+
+        monkeypatch.setattr(file_watcher, "watch_paths", capture_paths)
+
+        await _watch_config_task(config_path, orchestrator)  # type: ignore[arg-type]
+
+        assert watched == {config_path, new_include}
 
     @pytest.mark.asyncio
     async def test_broken_new_include_file_stays_watched_until_fixed(self, tmp_path: Path) -> None:

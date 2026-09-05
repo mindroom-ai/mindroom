@@ -30,6 +30,9 @@ from mindroom.message_target import MessageTarget
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
@@ -211,7 +214,7 @@ def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: 
     )
     tool = BrowserTools(runtime_paths)
     context_storage_path = tmp_path / "context-storage"
-    context = ToolRuntimeContext(
+    context = make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
             room_id="!room:example.org",
@@ -244,7 +247,7 @@ def test_resolve_output_dir_does_not_reuse_previous_context_storage_path(tmp_pat
     tool = BrowserTools(runtime_paths)
 
     def runtime_context(storage_path: Path) -> ToolRuntimeContext:
-        return ToolRuntimeContext(
+        return make_test_tool_runtime_context(
             agent_name="general",
             target=MessageTarget.resolve(
                 room_id="!room:example.org",
@@ -330,7 +333,7 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     """Tool schema should make browser actions and act request kinds discoverable."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
-    parameters = tool.async_functions["browser"].parameters
+    parameters = tool.async_functions["browser_control"].parameters
     properties = parameters["properties"]
 
     action_schema = properties["action"]
@@ -348,12 +351,12 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
 def test_browser_schema_description_requires_registered_browser_function() -> None:
     """BrowserTools should fail fast if the browser entrypoint is missing."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
-    function = tool.async_functions.pop("browser")
+    function = tool.async_functions.pop("browser_control")
     try:
         with pytest.raises(RuntimeError, match="Browser function was not registered"):
             tool._describe_browser_schema()
     finally:
-        tool.async_functions["browser"] = function
+        tool.async_functions["browser_control"] = function
 
 
 def test_browser_docstring_lists_discovery_actions() -> None:
@@ -918,7 +921,7 @@ def test_browser_upload_roots_do_not_reuse_previous_context_output_dir(tmp_path:
     tool = BrowserTools(runtime_paths)
 
     def runtime_context(storage_path: Path) -> ToolRuntimeContext:
-        return ToolRuntimeContext(
+        return make_test_tool_runtime_context(
             agent_name="general",
             target=MessageTarget.resolve(
                 room_id="!room:example.org",

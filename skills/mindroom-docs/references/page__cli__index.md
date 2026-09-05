@@ -557,6 +557,7 @@ Export Matrix threads to YAML files for grep/ripgrep search.
 The command reads persisted Matrix accounts and rooms from `matrix_state.yaml`, so run MindRoom once before exporting.
 Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account, unless `--no-invited-rooms` is passed.
 By default it writes to `<storage>/thread_exports`.
+For a continuously updated copy inside an agent's own workspace, set `thread_exports` on the agent instead; see [Thread Exports](https://docs.mindroom.chat/configuration/agents/#thread-exports).
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
@@ -921,6 +922,7 @@ Runs a series of checks in one pass:
 - **Memory config** — checks memory LLM and embedder reachability (Ollama, OpenAI embeddings, sentence-transformers)
 - **Matrix homeserver** — verifies the homeserver is reachable via `/_matrix/client/versions`
 - **Storage** — confirms the storage directory is writable
+- **Encryption stores** — checks that persisted Matrix device identities still have their local E2EE stores
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -988,7 +990,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ validate   Validate config.yaml and check for common issues.                           │
 │ resolve    Print the fully merged config YAML with all !include tags resolved.         │
 │ path       Show the resolved config file path and search locations.                    │
-│ migrate    Apply safe, text-preserving migrations to config.yaml.                      │
+│ migrate    Apply supported migrations to config.yaml.                                  │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1001,7 +1003,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
-Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
+Provider presets (`--provider`) set the default model: `anthropic`, `azure`, `bedrock_claude`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
 Generated configs include commented model alternatives for providers that have common variants, such as OpenAI mini/nano models.
 
 ```bash
@@ -1099,6 +1101,16 @@ Show the resolved config file path and all search locations.
 mindroom config path
 ```
 
+### config resolve
+
+Print the fully merged YAML after recursively resolving every `!include` tag.
+Keys are sorted so the output can be diffed before and after splitting a configuration into include files.
+
+```bash
+mindroom config resolve
+mindroom config resolve --path ./config.yaml
+```
+
 ## connect
 
 Pair this local MindRoom install with a provisioning service.
@@ -1116,7 +1128,7 @@ On success (default `--persist-env`), this writes to `.env` next to `config.yaml
 - `MINDROOM_LOCAL_CLIENT_SECRET`
 - `MINDROOM_NAMESPACE`
 
-If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__`, `connect` will auto-replace it in authorization and managed-room admin settings when pairing returns a valid `owner_user_id`.
+If your config still contains the owner placeholder token `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__`, `connect` will auto-replace it in membership access and managed-room policy settings when pairing returns a valid `owner_user_id`.
 
 Use `--no-persist-env` if you want to export variables only for the current shell session.
 
@@ -1306,6 +1318,9 @@ Send one signed trigger request to MindRoom.
 │ *  --message                            TEXT   Trigger payload message. [required]     │
 │    --event-id                           TEXT   Optional idempotency event id.          │
 │    --title                              TEXT   Optional trigger title.                 │
+│    --thread-key                         TEXT   Optional key; deliveries sharing it     │
+│                                                land in one Matrix thread on new_thread │
+│                                                triggers.                               │
 │    --data-json                          TEXT   Optional JSON object for trigger data.  │
 │    --timeout                            FLOAT  HTTP request timeout in seconds.        │
 │                                                [default: 10.0]                         │

@@ -61,7 +61,7 @@ You are {display_name} (Matrix ID: {matrix_id}), a specialized agent in the Mind
 You are powered by the {model_provider} model: {model_id}.
 When working in teams with other agents, you should identify yourself as {display_name} and leverage your specific expertise.
 
-In Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from="@user:server"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID, and the CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts="2026-03-20 08:15 PDT"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.target`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from="..." ts="...">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.
+In Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from="@user:server" display_name="Current Name"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts="2026-03-20 08:15 PDT"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.target`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from="..." display_name="..." ts="...">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.
 {openai_compat_history_guidance}When mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.
 
 ## Matrix Reply Targeting
@@ -367,6 +367,7 @@ Your task is to:
 3. Create a message that mentions the appropriate agents or teams
 4. Set is_conditional=true only when the request is event-based or conditional
 5. Resolve history_limit using the conversation context rules below
+6. Resolve silent using the schedule visibility rules below
 
 Available agents and teams: {agent_list}
 
@@ -385,6 +386,12 @@ Conversation context (history_limit):
 - On edits, keep the current history_limit unchanged when the request says nothing about context or history
 - For new schedules, leave history_limit unset (null) when the request says nothing about context or history
 - Remove context phrases like "with no history" from the message itself
+
+Schedule visibility (silent):
+- For new schedules, default silent=false when the request says nothing about visibility
+- Explicit quiet or silent wording sets silent=true
+- Explicit visible wording sets silent=false
+- On edits, preserve the current silent value when the request omits visibility
 
 Important rules:
 - Set is_conditional=false for normal time-based schedules

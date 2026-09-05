@@ -10,7 +10,9 @@ import hashlib
 import json
 import os
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
@@ -46,12 +48,12 @@ from mindroom.workers.runtime import (
     primary_worker_backend_available,
     primary_worker_backend_is_dedicated,
     primary_worker_backend_name,
+    serialized_dedicated_worker_validation_snapshot,
     serialized_kubernetes_worker_config_snapshot,
-    serialized_kubernetes_worker_validation_snapshot,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
@@ -68,6 +70,8 @@ _DEFAULT_INLINE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 _SANDBOX_ALL_EXECUTION_MODES = frozenset({"all", "sandbox_all"})
 _SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"})
 _UNSAFE_LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
+# Process-lifetime pool: threads start lazily and ThreadPoolExecutor joins them at interpreter shutdown.
+_WORKER_PROXY_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="mindroom-worker-proxy")
 
 
 class _AttachmentSavePayloadFields(TypedDict):
@@ -160,7 +164,7 @@ class _PrimaryWorkerManagerContext:
     """Runtime-context-derived parameters for resolving the primary worker manager."""
 
     storage_root: Path
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None
     kubernetes_config_snapshot: dict[str, object] | None
     worker_grantable_credentials: frozenset[str] | None
 
@@ -416,17 +420,18 @@ def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWork
     storage_root = (
         context.storage_path if context is not None and context.storage_path is not None else runtime_paths.storage_root
     )
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
+    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None
     kubernetes_config_snapshot: dict[str, object] | None = None
-    if context is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
-        kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
+    if context is not None and primary_worker_backend_name(runtime_paths) in {"docker", "kubernetes"}:
+        dedicated_worker_validation_snapshot = serialized_dedicated_worker_validation_snapshot(
             runtime_paths,
             runtime_config=context.config,
         )
+    if context is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
         kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(context.config)
     return _PrimaryWorkerManagerContext(
         storage_root=storage_root,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=(
             context.config.get_worker_grantable_credentials() if context is not None else None
@@ -444,7 +449,7 @@ def _get_worker_manager(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=manager_context.storage_root,
-        kubernetes_tool_validation_snapshot=manager_context.kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
         worker_grantable_credentials=manager_context.worker_grantable_credentials,
     )
@@ -559,7 +564,7 @@ def save_attachment_to_worker(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=manager_context.storage_root,
-        kubernetes_tool_validation_snapshot=manager_context.kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
         worker_grantable_credentials=manager_context.worker_grantable_credentials,
     ) as worker_manager:
@@ -794,7 +799,7 @@ def _call_proxy_sync(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=manager_context.storage_root,
-        kubernetes_tool_validation_snapshot=manager_context.kubernetes_tool_validation_snapshot,
+        dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
         worker_grantable_credentials=manager_context.worker_grantable_credentials,
     ) as worker_manager:
@@ -832,6 +837,13 @@ def _call_proxy_sync(
             worker_manager=worker_manager,
             client_factory=httpx.Client,
         )
+
+
+async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
+    """Run one blocking worker proxy call outside asyncio's default executor."""
+    context = copy_context()
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_WORKER_PROXY_EXECUTOR, context.run, call)
 
 
 def _wrap_sync_function(
@@ -891,7 +903,7 @@ def _wrap_async_function(
 
     @functools.wraps(function.entrypoint)
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
-        return await asyncio.to_thread(
+        call = functools.partial(
             _call_proxy_sync,
             runtime_paths=runtime_paths,
             tool_name=tool_name,
@@ -906,6 +918,7 @@ def _wrap_async_function(
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
         )
+        return await _run_in_worker_proxy_executor(call)
 
     wrapped.entrypoint = proxy_entrypoint
     return wrapped

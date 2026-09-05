@@ -16,9 +16,8 @@ Install [TestFlight](https://apps.apple.com/app/testflight/id899247664) from the
 
 Open the link on your iPhone or iPad, tap **Accept**, then install **MindRoom AI** from TestFlight.
 
-If TestFlight says the beta is not accepting new testers, the current build is still waiting for Apple's Beta App Review.
-Try the button again later.
-If TestFlight says the beta is full, expired, or has no build available after the beta opens, email `support@mindroom.chat` with the Apple ID email address you use on your iOS device.
+If TestFlight says the beta is not accepting new testers, enrollment is temporarily unavailable.
+Try the button again later or use the [support page](support.md).
 
 ## Sign In
 
@@ -36,6 +35,6 @@ Then follow the [Getting Started](getting-started.md) guide to pair your local M
 
 - TestFlight builds expire after 90 days.
   Install updates from TestFlight when they appear.
-- The public beta link starts accepting new testers after Apple approves the current TestFlight build for external testing.
-- If the invitation is full, expired, or missing, email `support@mindroom.chat` with your Apple ID email address.
+- The public beta link accepts testers only while an eligible build and public enrollment are available.
+- If the invitation is full, expired, or missing, use the [support page](support.md).
 - Include your device model, iOS version, app version, and homeserver URL when reporting beta issues.

@@ -99,8 +99,8 @@ Expected outcome: The new or changed team becomes available with the updated mem
 - [ ] `CONF-005` Add, remove, or edit a configured knowledge base, skill, or plugin during a live run.
 Expected outcome: Runtime caches invalidate correctly and the change is visible on the next relevant request without stale copies lingering.
 
-- [ ] `CONF-006` Enable `matrix_room_access.reconcile_existing_rooms` for one restart and then disable it again.
-Expected outcome: Existing managed rooms are reconciled once to the configured access policy and steady-state behavior returns after the flag is turned back off.
+- [ ] `CONF-006` Change `room_defaults.join_policy` or `room_defaults.listed` while the runtime is active.
+Expected outcome: Existing managed rooms reconcile to the replacement policy without a separate opt-in flag.
 
 - [ ] `CONF-007` Edit only shared defaults such as `defaults.enable_streaming` during a live run without changing any entities.
 Expected outcome: Unchanged bots pick up the new defaults in place without restart and subsequent responses reflect the updated default behavior immediately.
@@ -263,7 +263,7 @@ Expected outcome: Mentions do not revive the removed command and the runtime sti
 - [ ] `CMD-009` Exercise reaction-based interactive prompts that are scoped to one conversation.
 Expected outcome: Reactions outside the intended room, message, or thread do not mutate the interactive workflow.
 
-- [ ] `CMD-010` With `authorization.config_command_enabled: true` and a global admin user, use `!config show`, `!config get <path>`, and `!config set <path> <value>` in chat.
+- [ ] `CMD-010` With `authorization.config_command_enabled: true` and a platform administrator, use `!config show`, `!config get <path>`, and `!config set <path> <value>` in chat.
 Expected outcome: The router uses the active runtime config path, returns current values correctly, and `set` produces a preview plus confirmation flow before applying the change.
 
 - [ ] `CMD-011` Attempt malformed or invalid `!config set` inputs while enabled, including quote-parse failures and runtime-invalid changes.
@@ -271,22 +271,22 @@ Expected outcome: Parse or validation errors are explained clearly and no partia
 
 ## 8. Authorization And Room Access Policy
 
-Source anchors: `src/mindroom/authorization.py`, `src/mindroom/config/auth.py`, `src/mindroom/config/matrix.py`, `src/mindroom/bot.py`, `src/mindroom/voice_handler.py`.
+Source anchors: `src/mindroom/access_policy.py`, `src/mindroom/authorization.py`, `src/mindroom/config/access.py`, `src/mindroom/bot.py`, `src/mindroom/voice_handler.py`.
 
-- [ ] `AUTH-001` Test a user listed in `authorization.global_users`.
-Expected outcome: The user can interact across managed rooms without needing room-specific entries.
+- [ ] `AUTH-001` Test a user listed in `administrators`.
+Expected outcome: The user bypasses responder access without being invited or granted Matrix room power automatically.
 
-- [ ] `AUTH-002` Test room permissions keyed by room ID, full alias, and managed room key.
-Expected outcome: Each identifier format matches the same intended access rule and does not fall through unexpectedly.
+- [ ] `AUTH-002` Test `access.users`, `access.current_room_members`, and `access.members_of_rooms` independently.
+Expected outcome: Each responder clause grants only conversation access and unresolved membership state fails closed.
 
-- [ ] `AUTH-003` Test a room that is not in `room_permissions`.
-Expected outcome: Access is controlled solely by `default_room_access` for that room.
+- [ ] `AUTH-003` Test a responder whose `access` field is omitted.
+Expected outcome: Access defaults to current membership in one of the responder's configured rooms.
 
 - [ ] `AUTH-004` Test bridged or alternate identities configured through `authorization.aliases`.
 Expected outcome: Alias mapping resolves to the canonical user ID before room access and reply-permission checks run.
 
-- [ ] `AUTH-005` Configure `authorization.agent_reply_permissions` with both `*` and per-agent entries.
-Expected outcome: Default reply rules and explicit per-entity overrides both enforce exactly as configured.
+- [ ] `AUTH-005` Configure both default and per-agent responder `access` values.
+Expected outcome: The explicit per-agent value replaces the default without combining list fields.
 
 - [ ] `AUTH-006` Verify internal MindRoom identities and non-MindRoom bot accounts under the same scenario.
 Expected outcome: Internal system identities bypass the intended checks, while `bot_accounts` still obey reply permission enforcement.
@@ -325,19 +325,19 @@ Expected outcome: The runtime returns the documented or implemented fallback beh
 - [ ] `MEDIA-009` Repeat the voice flow with `voice.visible_router_echo` enabled and disabled.
 Expected outcome: Visible router echo behavior matches the configuration without changing the underlying responder selection logic.
 
-- [ ] `MEDIA-010` Exercise voice command intelligence with an explicit spoken help request, an explicit spoken removed-`!skill` request, and a similar non-command question.
-Expected outcome: Explicit help intent can normalize to `!help`, removed `!skill` intent stays an unknown command, and speculative command rewrites are rejected so natural-language queries stay natural language.
+- [ ] `MEDIA-010` Exercise voice transcript normalization with an explicit spoken help request, an explicit spoken removed-`!skill` request, and a similar natural-language question.
+Expected outcome: The normalizer never invents `!help`, `!skill`, or another command, so all three natural-language requests remain natural language while mentions and light ASR errors may be corrected.
 
 - [ ] `MEDIA-011` Speak or inject unavailable entity mentions while voice normalization runs in a room with limited available entities.
 Expected outcome: Unavailable configured entities lose their `@` mention marker while available room-scoped entities keep valid mentions and dispatch correctly.
 
-- [ ] `MEDIA-012` Send a voice message that becomes a normalized command or threaded follow-up and then inspect later follow-up or attachment-aware handling.
+- [ ] `MEDIA-012` Send a voice message that becomes a normalized transcript or threaded follow-up and then inspect later follow-up or attachment-aware handling.
 Expected outcome: The synthetic voice-derived message preserves original sender identity, thread context, attachment IDs, and raw-audio fallback metadata so router handling and later follow-ups can recover the correct audio context.
 
 - [ ] `MEDIA-013` Repeat a voice flow that emits visible router echo, retry the same event, hand off to the final responder, and repeat with reply permissions denied.
 Expected outcome: Router echo is emitted at most once per voice event, reused across retries or handoff when appropriate, and fully suppressed when reply permissions deny the sender.
 
-## 10. Memory, Knowledge, Workspaces, Private Roots, And Cultures
+## 10. Memory, Knowledge, Workspaces, And Private Roots
 
 Source anchors: `src/mindroom/agents.py`, `src/mindroom/memory/`, `src/mindroom/memory/auto_flush.py`, `src/mindroom/memory/config.py`, `src/mindroom/workspaces.py`, `src/mindroom/knowledge/manager.py`, `src/mindroom/knowledge/file_listing.py`, `src/mindroom/knowledge/utils.py`, `src/mindroom/api/knowledge.py`.
 
@@ -371,25 +371,16 @@ Expected outcome: Requester-local roots are created from the template without ov
 - [ ] `MEM-010` Configure `private.knowledge` for a private agent and compare chat behavior between the normal runtime and `/v1`.
 Expected outcome: Requester-private knowledge remains isolated to the private runtime path and is not exposed through the shared `/v1` API surface.
 
-- [ ] `MEM-011` Configure cultures in `automatic`, `agentic`, and `manual` modes and run agent conversations that should update shared practice knowledge.
-Expected outcome: Automatic cultures capture and update shared knowledge, agentic cultures expose culture-aware runtime behavior without automatic writes, and manual cultures stay read-only while still injecting the culture description into context.
-
-- [ ] `MEM-012` Assign multiple shared agents to the same culture and use them in separate conversations.
-Expected outcome: The agents share one persisted culture state so later runs observe the same evolving cultural context instead of diverging per agent.
-
-- [ ] `MEM-013` Exercise a private agent that belongs to a culture across two requester scopes.
-Expected outcome: Culture state for private agents is isolated by requester scope and does not leak across different private-instance roots.
-
-- [ ] `MEM-014` Configure `defaults.learning`, override one agent with `learning: false`, and compare runtime behavior plus persisted `learning/` state.
+- [ ] `MEM-011` Configure `defaults.learning`, override one agent with `learning: false`, and compare runtime behavior plus persisted `learning/` state.
 Expected outcome: Agents inherit learning from defaults unless explicitly disabled, disabled agents do not create or update learning state, and enabled agents persist learning data in their state roots.
 
-- [ ] `MEM-015` Compare `learning_mode: agentic` with the default always-on learning mode for an otherwise identical agent.
+- [ ] `MEM-012` Compare `learning_mode: agentic` with the default always-on learning mode for an otherwise identical agent.
 Expected outcome: Both modes keep learning enabled, but agentic mode follows the agentic learning profile instead of the always-on mode.
 
-- [ ] `MEM-016` Configure Mem0 with a local `sentence_transformers` embedder once with optional dependency auto-install enabled and once with it disabled or unavailable.
+- [ ] `MEM-013` Configure Mem0 with a local `sentence_transformers` embedder once with optional dependency auto-install enabled and once with it disabled or unavailable.
 Expected outcome: The runtime auto-installs required local embedder dependencies when allowed and otherwise fails clearly instead of silently degrading memory setup.
 
-- [ ] `MEM-017` Enable auto-flush for a private agent across multiple requester scopes and then change that agent back to a shared configuration.
+- [ ] `MEM-014` Enable auto-flush for a private agent across multiple requester scopes and then change that agent back to a shared configuration.
 Expected outcome: Dirty-session reprioritization and later flushes stay isolated to the original requester scope, stale private entries are purged when the agent stops being private, and persisted execution identity is reused for later writes.
 
 ## 11. Skills, Plugins, Tools, Workers, And Runtime Context
@@ -543,46 +534,43 @@ Expected outcome: Agent CRUD supports private settings, delegation, learning and
 - [ ] `UI-007` Perform create, edit, and delete flows on the Teams tab.
 Expected outcome: Team mode, room assignment, model override, and member selection persist correctly.
 
-- [ ] `UI-008` Perform create, edit, and delete flows on the Culture tab.
-Expected outcome: Culture assignment enforces one-culture-per-agent behavior and persists the chosen mode and description.
-
-- [ ] `UI-009` Perform create, edit, and delete flows on the Rooms tab.
+- [ ] `UI-008` Perform create, edit, and delete flows on the Rooms tab.
 Expected outcome: Room membership, descriptions, and room-model overrides persist correctly and stay aligned with backend config.
 
-- [ ] `UI-010` Use the Schedules tab after creating schedules through chat or API.
+- [ ] `UI-009` Use the Schedules tab after creating schedules through chat or API.
 Expected outcome: The page lists tasks, supports editing and cancellation, and renders schedule timing consistently with the runtime timezone.
 
-- [ ] `UI-011` Use the External Rooms tab after placing agents in unmanaged rooms.
+- [ ] `UI-010` Use the External Rooms tab after placing agents in unmanaged rooms.
 Expected outcome: The UI lists per-agent room memberships and single or bulk leave actions mutate the actual runtime state.
 
-- [ ] `UI-012` Use the Models tab for create, duplicate, edit, filter, and delete flows.
+- [ ] `UI-011` Use the Models tab for create, duplicate, edit, filter, and delete flows.
 Expected outcome: Provider-specific fields, model IDs, base URLs, advanced settings, and masked API-key state all behave consistently.
 
-- [ ] `UI-013` Use the Memory tab to switch backends and edit embedder or auto-flush settings.
+- [ ] `UI-012` Use the Memory tab to switch backends and edit embedder or auto-flush settings.
 Expected outcome: Memory settings persist correctly and provider-specific helper text or warnings match the active backend.
 
-- [ ] `UI-014` Use the Knowledge tab for local and Git-backed bases.
+- [ ] `UI-013` Use the Knowledge tab for local and Git-backed bases.
 Expected outcome: Base CRUD, upload, delete, status, file listing, and reindex flows all hit the expected backend state and guard against unsaved settings where required.
 
-- [ ] `UI-015` Use the Credentials tab for create, edit, save, delete, test, and copy flows.
+- [ ] `UI-014` Use the Credentials tab for create, edit, save, delete, test, and copy flows.
 Expected outcome: Service validation, masked values, raw JSON editing, and credential-status loading all match backend behavior.
 
-- [ ] `UI-016` Use the Voice tab to edit STT and command-intelligence settings.
+- [ ] `UI-015` Use the Voice tab to edit STT and transcript-normalization settings.
 Expected outcome: Enablement, router echo, host normalization, API key fields, and model settings all persist and display the effective current state.
 
-- [ ] `UI-017` Use the Tools or Integrations tab with agents across different execution scopes.
+- [ ] `UI-016` Use the Tools or Integrations tab with agents across different execution scopes.
 Expected outcome: Catalog filters, provider connect flows, setup gating, and scope-aware restrictions behave consistently with runtime capability rules.
 
-- [ ] `UI-018` Use the Skills tab to create, edit, save, switch, and delete skills.
+- [ ] `UI-017` Use the Skills tab to create, edit, save, switch, and delete skills.
 Expected outcome: Skill origin labeling, kebab-case name validation, unsaved-change prompts, and editable-versus-read-only behavior all work correctly.
 
-- [ ] `UI-019` Put the Agents and Teams editors into draft states where policy preview cannot be derived or a member becomes team-ineligible.
+- [ ] `UI-018` Put the Agents and Teams editors into draft states where policy preview cannot be derived or a member becomes team-ineligible.
 Expected outcome: Scoped tool previews fail closed when policy derivation is unavailable and team member pickers show explicit eligibility reasons instead of leaving blocked members selectable.
 
-- [ ] `UI-020` Use the External Rooms tab and trigger a bulk leave where at least one room succeeds and another fails.
+- [ ] `UI-019` Use the External Rooms tab and trigger a bulk leave where at least one room succeeds and another fails.
 Expected outcome: Partial failure does not present as full success, and the UI surfaces the current generic failure-count messaging for the rooms that could not be left.
 
-- [ ] `UI-021` Use the Tools or Integrations tab while switching between `shared`, `user`, and `user_agent` execution scopes during load.
+- [ ] `UI-020` Use the Tools or Integrations tab while switching between `shared`, `user`, and `user_agent` execution scopes during load.
 Expected outcome: Shared-only integrations are hidden from the catalog for non-shared scopes, dashboard-managed credential controls show the current unsupported or preview warnings, stale in-flight scope requests do not bleed status across selections, and unsaved draft scope overrides are treated as non-authoritative.
 
 ## 15. SaaS Platform

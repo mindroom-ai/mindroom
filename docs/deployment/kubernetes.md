@@ -269,7 +269,7 @@ See [Sandbox Proxy Isolation](sandbox-proxy.md) for the execution model, credent
 
 ## Secrets Management
 
-API keys are mounted as files at `/etc/secrets/` (not environment variables). MindRoom reads paths from `*_API_KEY_FILE` environment variables:
+The hosted instance chart mounts provider keys as files under `/etc/secrets/` and sets the matching `*_API_KEY_FILE` variables:
 
 ```yaml
 env:
@@ -278,6 +278,9 @@ env:
   - name: OPENROUTER_API_KEY_FILE
     value: "/etc/secrets/openrouter_key"
 ```
+
+The standalone runtime chart instead reads `providerCredentials` Secret keys into direct provider environment variables.
+Its `env` values shape is a map with `extra` and `envFrom`, not the list shown above for the hosted instance container.
 
 For production SaaS instance provisioning, the platform backend creates `mindroom-api-keys-{instance_id}` directly with Kubernetes before running Helm.
 The instance chart is then rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`, so tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.

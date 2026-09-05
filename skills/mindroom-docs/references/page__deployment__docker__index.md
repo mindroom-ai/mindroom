@@ -11,6 +11,10 @@ MindRoom ships as a single runtime container that serves:
 - the dashboard API at `http://localhost:8765/api`
 - the OpenAI-compatible API at `http://localhost:8765/v1`
 
+MindRoom may atomically rewrite `config.yaml` at startup when an automatic configuration migration is required.
+Before starting an upgraded container with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host because a single-file bind mount cannot be replaced atomically.
+Current configs can remain read-only as shown below.
+
 Run it with:
 
 ```bash
@@ -66,6 +70,7 @@ Key environment variables (set in `.env` or pass directly):
 | `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
 | `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | Relative to config file |
+| `MINDROOM_SESSION_STORAGE_PATH` | Dedicated root for agent and team session SQLite databases. Mount this path separately when sessions need their own persistent volume | `MINDROOM_STORAGE_PATH` |
 | `LOG_LEVEL` | Logging level | `INFO` |
 | `MINDROOM_LOGGER_LEVELS` | Optional per-logger overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING`; set `nio.crypto:WARNING` to inspect Matrix crypto decrypt warnings | - |
 | `MINDROOM_CONFIG_PATH` | Path to config.yaml | `./config.yaml`, then `~/.mindroom/config.yaml` |
@@ -98,15 +103,20 @@ A `Dockerfile.mindroom-minimal` variant is also available, which builds a smalle
 For development, run MindRoom alongside a local Matrix server:
 
 ```bash
-# Start Matrix (Synapse + Postgres + Redis)
-cd local/matrix && docker compose up -d
+# Start Matrix (Synapse + Postgres + Redis) without changing directories
+docker compose -f local/matrix/docker-compose.yml up -d
 
 # Verify Matrix is running
 curl -s http://localhost:8008/_matrix/client/versions
 
-# Start MindRoom using the docker-compose.yml you created above
+# Start MindRoom using the docker-compose.yml you created above.
+# Its MATRIX_HOMESERVER must resolve from inside the MindRoom container.
 docker compose up -d
 ```
+
+The two Compose projects do not share a network automatically.
+Either attach both services to one named external network and use the Synapse service name, such as `http://mindroom-synapse:8008`, or configure an explicit host-gateway address.
+Do not use `http://localhost:8008` inside the MindRoom container; there, `localhost` means the MindRoom container itself.
 
 The local Matrix stack includes:
 
@@ -131,13 +141,12 @@ curl http://localhost:8765/api/health
 
 ## Data Persistence
 
-MindRoom stores data in the `mindroom_data` directory:
+MindRoom stores data in the `mindroom_data` directory by default:
 
-- `sessions/` - Per-agent conversation history (SQLite)
+- `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite), optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
 - `learning/` - Per-agent Agno Learning state (SQLite, persistent across restarts)
 - `chroma/` - ChromaDB vector store for agent/team memories
 - `knowledge_db/` - Knowledge base vector stores
-- `culture/` - Shared culture state
 - `tracking/` - Durable response, callback-obligation, and lifecycle-hook state used to prevent duplicate work across restarts
 - `credentials/` - Synchronized secrets from `.env`
 - `logs/` - Application logs
@@ -145,6 +154,7 @@ MindRoom stores data in the `mindroom_data` directory:
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 
 Keep `tracking/` on persistent storage and include it in backups.
+When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
 Dispatch-obligation databases retain one compact terminal row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
 The retained terminal rows have no automatic retention window because deleting them weakens replay deduplication.
 Pending rows temporarily retain the full event replay payload and should represent only actively deferred or retry-owned work, not completed ignore paths.

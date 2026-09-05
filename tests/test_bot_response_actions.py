@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot, TeamBot
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
@@ -33,6 +33,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
     _hook_envelope,
@@ -40,6 +41,8 @@ from tests.bot_helpers import (
     _policy_dispatch,
     _runtime_bound_config,
     make_mock_agent_user,
+    make_test_agent_bot,
+    make_test_team_bot,
 )
 from tests.conftest import (
     TEST_PASSWORD,
@@ -71,15 +74,16 @@ class TestAgentBot(AgentBotTestBase):
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!dm:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!dm:localhost"]),
-                },
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "calculator": ["@alice:localhost"],
-                        "general": ["@bob:localhost"],
-                    },
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!dm:localhost"],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
+                    ),
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!dm:localhost"],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
+                    ),
                 },
             ),
             tmp_path,
@@ -105,7 +109,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with patch("mindroom.turn_policy.decide_team_formation", new_callable=MagicMock) as mock_decide:
             mock_decide.return_value = TeamResolution.none()
-            bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+            bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
             bot.orchestrator = MagicMock()
             bot.orchestrator.agent_bots = {"calculator": MagicMock()}
 
@@ -139,7 +143,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(own_user_id=bot.matrix_id.full_id, user_ids=[bot.matrix_id.full_id])
         context = MessageContext(
             am_i_mentioned=True,
@@ -190,6 +194,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_resolve_response_action_rejects_when_explicit_mentions_include_hidden_agent(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -199,20 +204,21 @@ class TestAgentBot(AgentBotTestBase):
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
-                },
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "calculator": ["@alice:localhost"],
-                        "general": ["@bob:localhost"],
-                    },
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!room:localhost"],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
+                    ),
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room:localhost"],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
+                    ),
                 },
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -257,17 +263,19 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Explicit rejects should not go silent when stale room members sort before the live fallback bot."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
-                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                        "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
+                        "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.orchestrator = MagicMock()
         bot.orchestrator.agent_bots = {"calculator": MagicMock()}
         room = _matrix_room(
@@ -315,16 +323,18 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Explicit team requests must treat stopped bots as unavailable."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "alpha": AgentConfig(display_name="AlphaAgent", rooms=["!room:localhost"]),
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "alpha": AgentConfig(display_name="AlphaAgent", rooms=["!room:localhost"]),
+                        "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.orchestrator = MagicMock()
         bot.orchestrator.agent_bots = {
             "alpha": MagicMock(running=False),
@@ -367,6 +377,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_resolve_response_action_skips_when_explicit_mentions_are_all_hidden(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -376,20 +387,21 @@ class TestAgentBot(AgentBotTestBase):
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
-                },
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "calculator": ["@bob:localhost"],
-                        "general": ["@bob:localhost"],
-                    },
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!room:localhost"],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
+                    ),
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room:localhost"],
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
+                    ),
                 },
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -433,20 +445,20 @@ class TestAgentBot(AgentBotTestBase):
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent"),
-                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
-                },
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "calculator": ["@bob:localhost"],
-                        "research": ["@alice:localhost"],
-                    },
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        access=ResponderAccessConfig(users=["@bob:localhost"]),
+                    ),
+                    "research": AgentConfig(
+                        display_name="ResearchAgent",
+                        rooms=["!room:localhost"],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
+                    ),
                 },
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -481,17 +493,19 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Explicit mentions must not let unconfigured bots answer in configured rooms."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent"),
-                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent"),
+                        "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -525,20 +539,22 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """External triggers may explicitly address one private agent in its bound room."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(
-                        display_name="CalculatorAgent",
-                        rooms=["!room:localhost"],
-                        private=AgentPrivateConfig(per="user", root="calculator_data"),
-                    ),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(
+                            display_name="CalculatorAgent",
+                            rooms=["!room:localhost"],
+                            private=AgentPrivateConfig(per="user", root="calculator_data"),
+                        ),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[entity_ids(config, runtime_paths)["calculator"].full_id],
@@ -575,19 +591,21 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Explicit team mentions must not let unconfigured teams answer in configured rooms."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent"),
-                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
-                },
-                teams={
-                    "ops": TeamConfig(
-                        display_name="Ops Team",
-                        role="Ops workflow",
-                        agents=["calculator"],
-                    ),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent"),
+                        "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                    },
+                    teams={
+                        "ops": TeamConfig(
+                            display_name="Ops Team",
+                            role="Ops workflow",
+                            agents=["calculator"],
+                        ),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -598,7 +616,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Ops Team",
             password=TEST_PASSWORD,
         )
-        bot = TeamBot(
+        bot = make_test_team_bot(
             team_user,
             tmp_path,
             config=config,
@@ -646,7 +664,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -726,7 +744,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -813,7 +831,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.orchestrator = MagicMock()
         bot.orchestrator.agent_bots = {"calculator": MagicMock(running=True)}
         room = _matrix_room(
@@ -867,7 +885,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = _matrix_room(own_user_id=bot.matrix_id.full_id, user_ids=[bot.matrix_id.full_id])
         context = MessageContext(
             am_i_mentioned=False,
@@ -922,7 +940,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         ids = entity_ids(config, runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1013,18 +1031,20 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Active response follow-ups must not widen configured rooms to unconfigured bots."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent"),
-                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent"),
+                        "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1091,18 +1111,20 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Degraded-history active follow-ups must still respect responder candidates."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent"),
-                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent"),
+                        "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1162,7 +1184,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         ids = entity_ids(config, runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1245,7 +1267,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         ids = entity_ids(config, runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1316,13 +1338,15 @@ class TestAgentBot(AgentBotTestBase):
     async def test_router_plan_ignores_stale_thread_owner_outside_responder_boundary(self, tmp_path: Path) -> None:
         """Router gating must not treat unconfigured prior participants as configured-room owners."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent"),
-                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
-                    "writer": AgentConfig(display_name="WriterAgent", rooms=["!room:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent"),
+                        "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                        "writer": AgentConfig(display_name="WriterAgent", rooms=["!room:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -1334,7 +1358,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Router",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = AsyncMock()
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1399,13 +1423,15 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Router pre-ingress skip must use the same configured-room responder boundary."""
         config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent"),
-                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
-                    "writer": AgentConfig(display_name="WriterAgent", rooms=["!room:localhost"]),
-                },
-                authorization={"default_room_access": True},
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "calculator": AgentConfig(display_name="CalculatorAgent"),
+                        "research": AgentConfig(display_name="ResearchAgent", rooms=["!room:localhost"]),
+                        "writer": AgentConfig(display_name="WriterAgent", rooms=["!room:localhost"]),
+                    },
+                    authorization={},
+                ),
             ),
             tmp_path,
         )
@@ -1417,7 +1443,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Router",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = AsyncMock()
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1491,7 +1517,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Synthesis",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1585,7 +1611,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Synthesis",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1649,7 +1675,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Synthesis",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1717,7 +1743,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Synthesis",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(bot_user, tmp_path, config=config, runtime_paths=runtime_paths)
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -1784,7 +1810,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Router",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         ids = entity_ids(config, runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
@@ -1854,7 +1880,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Router",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         ids = entity_ids(config, runtime_paths_for(config))
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import deque
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from pydantic import (
 )
 
 from mindroom import yaml_io
+from mindroom.access_policy import resolve_responder_access
 from mindroom.agent_policy import (
     build_agent_policy_seeds,
     get_agent_delegation_closure,
@@ -29,7 +31,14 @@ from mindroom.agent_policy import (
     resolve_private_knowledge_base_agent,
     unsupported_team_agent_message,
 )
-from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
+from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_user_ids
+from mindroom.config.access_migration import (
+    AccessMigrationError,
+    migrate_access_config_data,
+    persist_access_migration,
+    validate_access_migration_source,
+)
+from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile
@@ -38,7 +47,6 @@ from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import (
     EventJournalConfig,
-    MatrixRoomAccessConfig,
     MatrixSpaceConfig,
     MatrixSyncConfig,
     MindRoomUserConfig,
@@ -61,9 +69,14 @@ from mindroom.config.runtime_overlays import (
 )
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
-from mindroom.config.yaml_includes import ConfigIncludeError, attach_partial_source_files, load_yaml_config_source
+from mindroom.config.yaml_includes import (
+    ConfigIncludeError,
+    attach_partial_source_files,
+    load_yaml_config_source_with_digests,
+)
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+    OWNER_MATRIX_USER_ID_PLACEHOLDER,
     ROUTER_AGENT_NAME,
     RuntimePaths,
     config_relative_path,
@@ -84,6 +97,7 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
+from mindroom.room_model_overrides import resolve_room_model_override
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.thread_models import resolve_thread_model_override
@@ -100,7 +114,9 @@ if TYPE_CHECKING:
 # Keep synchronized with todo_poke._SAFE_ASSIGNEE_PATTERN without importing runtime tools into config.
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 _RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
-_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset({"delegate", "dynamic_tools", "external_trigger_manager", "self_config"})
+_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
+    {"delegate", "dynamic_tools", "external_trigger_manager", "invite_router", "self_config"},
+)
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",
     "coding",
@@ -140,14 +156,12 @@ def _persisted_entity_account_usernames(runtime_paths: RuntimePaths) -> dict[str
 
 _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
-    "cultures",
     "rooms",
     "room_models",
     "room_thread_summary_models",
     "knowledge_bases",
     "mcp_servers",
     "prompts",
-    "matrix_room_access",
     "matrix_space",
 )
 _OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "matrix_sync", "tool_approval")
@@ -162,9 +176,15 @@ class ConfigRuntimeValidationError(ValueError):
         return [{"loc": ("config",), "msg": str(self), "type": "value_error"}]
 
 
+type ConfigLoadUserError = (
+    ValidationError | ConfigRuntimeValidationError | AccessMigrationError | yaml.YAMLError | OSError | UnicodeError
+)
+
+
 CONFIG_LOAD_USER_ERROR_TYPES = (
     ValidationError,
     ConfigRuntimeValidationError,
+    AccessMigrationError,
     yaml.YAMLError,
     OSError,
     UnicodeError,
@@ -172,7 +192,7 @@ CONFIG_LOAD_USER_ERROR_TYPES = (
 
 
 def iter_config_validation_messages(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    exc: Exception,
 ) -> list[tuple[str, str]]:
     """Return user-facing validation messages from one config validation exception."""
     if isinstance(exc, ValidationError):
@@ -189,7 +209,7 @@ def iter_config_validation_messages(
 
 
 def format_invalid_config_message(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    exc: ConfigLoadUserError,
     *,
     footer: str | None = None,
 ) -> str:
@@ -388,9 +408,16 @@ class Config(BaseModel):
         "matrix_message": ("attachments", "matrix_room"),
     }
 
+    administrators: list[str] = Field(
+        default_factory=list,
+        description="Concrete Matrix user IDs with platform-wide administrative authority",
+    )
+    room_defaults: RoomDefaultsConfig = Field(
+        default_factory=RoomDefaultsConfig,
+        description="Desired Matrix state inherited by managed rooms",
+    )
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
-    cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
     rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
     room_thread_summary_models: dict[str, str] = Field(
@@ -441,10 +468,6 @@ class Config(BaseModel):
         default=None,
         description="Configuration for the internal MindRoom user account (omit for hosted/public profiles)",
     )
-    matrix_room_access: MatrixRoomAccessConfig = Field(
-        default_factory=MatrixRoomAccessConfig,
-        description="Managed Matrix room access/discoverability behavior",
-    )
     matrix_space: MatrixSpaceConfig = Field(
         default_factory=MatrixSpaceConfig,
         description="Optional root Matrix Space for grouping managed rooms",
@@ -457,6 +480,16 @@ class Config(BaseModel):
         default_factory=list,
         description="Matrix user IDs of non-MindRoom bots (e.g., bridge bots) that should be treated like agents for response logic — their messages won't trigger the multi-human-thread mention requirement",
     )
+
+    @field_validator("administrators")
+    @classmethod
+    def validate_administrators(cls, values: list[str]) -> list[str]:
+        """Require unique, concrete platform-administrator identities."""
+        return validate_concrete_matrix_user_ids(
+            values,
+            field_name="administrators",
+            allowed_placeholders=frozenset({OWNER_MATRIX_USER_ID_PLACEHOLDER}),
+        )
 
     @classmethod
     def _lazy_flag_prohibited_message(cls, *, tool_name: str, config_path: str) -> str | None:
@@ -487,6 +520,7 @@ class Config(BaseModel):
         normalized = normalized_config_data(data)
         if not isinstance(normalized, dict):
             return normalized
+        normalized = migrate_access_config_data(cast("dict[str, Any]", normalized)).data
 
         raw_data = cast("dict[object, object]", normalized)
         for entry in raw_tools_entries(raw_data, "defaults"):
@@ -628,13 +662,22 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_agent_reply_permissions(self) -> Config:
-        """Ensure per-agent reply permissions reference known entities."""
-        known_entities = set(self.agents) | set(self.teams) | {ROUTER_AGENT_NAME}
-        known_entities.add("*")
-        unknown_entities = sorted(set(self.authorization.agent_reply_permissions) - known_entities)
-        if unknown_entities:
-            msg = f"authorization.agent_reply_permissions contains unknown entities: {', '.join(unknown_entities)}"
+    def validate_membership_access_room_references(self) -> Config:
+        """Require membership grants to reference configured managed-room keys."""
+        configured_managed_room_keys = {
+            room_key for room_key in self.get_all_configured_rooms() if not room_key.startswith(("!", "#"))
+        }
+        responder_names = (*self.agents, *self.teams, ROUTER_AGENT_NAME)
+        invalid_room_references = sorted(
+            f"{entity_name} -> {room_key}"
+            for entity_name in responder_names
+            for room_key in resolve_responder_access(self, entity_name).members_of_rooms
+            if room_key not in configured_managed_room_keys
+        )
+        if invalid_room_references:
+            msg = "Responder access members_of_rooms must reference configured managed room keys: " + ", ".join(
+                invalid_room_references,
+            )
             raise ValueError(msg)
         return self
 
@@ -931,45 +974,6 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_culture_assignments(self) -> Config:
-        """Ensure culture assignments reference known agents and remain one-to-one."""
-        unknown_assignments = [
-            (culture_name, agent_name)
-            for culture_name, culture_config in self.cultures.items()
-            for agent_name in culture_config.agents
-            if agent_name not in self.agents
-        ]
-        if unknown_assignments:
-            formatted = ", ".join(
-                f"{culture_name} -> {agent_name}"
-                for culture_name, agent_name in sorted(unknown_assignments, key=lambda item: (item[0], item[1]))
-            )
-            msg = f"Cultures reference unknown agents: {formatted}"
-            raise ValueError(msg)
-
-        agent_to_culture: dict[str, str] = {}
-        duplicate_assignments: list[tuple[str, str, str]] = []
-        for culture_name, culture_config in self.cultures.items():
-            for agent_name in culture_config.agents:
-                existing_culture = agent_to_culture.get(agent_name)
-                if existing_culture is not None and existing_culture != culture_name:
-                    duplicate_assignments.append((agent_name, existing_culture, culture_name))
-                    continue
-                agent_to_culture[agent_name] = culture_name
-
-        if duplicate_assignments:
-            formatted = ", ".join(
-                f"{agent_name} -> {culture_a}, {culture_b}"
-                for agent_name, culture_a, culture_b in sorted(
-                    duplicate_assignments,
-                    key=lambda item: (item[0], item[1], item[2]),
-                )
-            )
-            msg = f"Agents cannot belong to multiple cultures: {formatted}"
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
     def validate_internal_user_username_not_reserved(self, info: ValidationInfo) -> Config:
         """Ensure the internal user localpart does not collide with bot accounts."""
         if self.mindroom_user is None:
@@ -1105,13 +1109,6 @@ class Config(BaseModel):
     def runtime_knowledge_base_overlay(self, base_id: str) -> KnowledgeBaseConfig | None:
         """Return one runtime-only knowledge base overlay, when present."""
         return self._runtime_knowledge_base_overlays.get(base_id)
-
-    def _agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
-        """Get the configured culture assignment for an agent, if any."""
-        for culture_name, culture_config in self.cultures.items():
-            if agent_name in culture_config.agents:
-                return culture_name, culture_config
-        return None
 
     def get_agent(self, agent_name: str) -> AgentConfig:
         """Get an agent configuration by name.
@@ -1282,6 +1279,19 @@ class Config(BaseModel):
             private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
         )
         return policy.effective_execution_scope
+
+    def agent_has_tool_at_execution_scope(
+        self,
+        agent_name: str,
+        tool_name: str,
+        execution_scope: WorkerScope | None,
+    ) -> bool:
+        """Return whether one agent can still reach a tool at an exact execution scope."""
+        return (
+            agent_name in self.agents
+            and tool_name in self.resolve_entity(agent_name).available_tools
+            and self._agent_execution_scope(agent_name) == execution_scope
+        )
 
     def _agent_scope_label(self, agent_name: str) -> str:
         """Return the user-facing authored scope label for one agent.
@@ -1865,8 +1875,8 @@ class Config(BaseModel):
     ) -> ResolvedRuntimeModel:
         """Resolve the active runtime model plus its configured context window.
 
-        Precedence: explicit `active_model_name`, then a persisted per-thread
-        override, then the room override, then the entity's authored model.
+        Precedence: explicit `active_model_name`, persisted thread override,
+        persisted room override, configured room override, then authored entity model.
         """
         resolved_model_name = active_model_name
         if resolved_model_name is None and thread_id is not None:
@@ -1887,9 +1897,17 @@ class Config(BaseModel):
                 if runtime_paths is None:
                     msg = "runtime_paths are required to resolve a room-specific runtime model"
                     raise ValueError(msg)
-                from mindroom.entity_resolution import effective_entity_model_name  # noqa: PLC0415
+                room_override = resolve_room_model_override(
+                    runtime_paths,
+                    room_id,
+                    configured_models=self.models,
+                ).active
+                if room_override is not None:
+                    resolved_model_name = room_override
+                else:
+                    from mindroom.entity_resolution import effective_entity_model_name  # noqa: PLC0415
 
-                resolved_model_name = effective_entity_model_name(self, entity_name, room_id, runtime_paths)
+                    resolved_model_name = effective_entity_model_name(self, entity_name, room_id, runtime_paths)
             else:
                 resolved_model_name = self._entity_model_name(entity_name)
 
@@ -1898,6 +1916,38 @@ class Config(BaseModel):
             resolved_context_window = self.get_model_context_window(resolved_model_name)
 
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
+
+
+def validate_loaded_config_source(
+    data: dict[str, Any],
+    source_digests: dict[Path, str],
+    original: bytes,
+    runtime_paths: RuntimePaths,
+    *,
+    tolerate_plugin_load_errors: bool = False,
+) -> tuple[Config, dict[Path, str]]:
+    """Validate and, when needed, persist one already-parsed config source."""
+    path = runtime_paths.config_path
+    source_files = frozenset(source_digests)
+
+    try:
+        validate_access_migration_source(data, source_files, path)
+        migration = migrate_access_config_data(data)
+        config = Config.validate_with_runtime(
+            migration.data,
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+        if migration.changed:
+            persisted = persist_access_migration(path, original, migration.data)
+            source_digests = {path.resolve(): hashlib.sha256(persisted).hexdigest()}
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        # Parsing succeeded, so the full file set is known; expose it the same
+        # way as parse-time failures so reload watchers keep covering it.
+        attach_partial_source_files(exc, source_files)
+        raise
+    config._source_files = frozenset(source_digests)
+    return config, source_digests
 
 
 def load_config(
@@ -1911,20 +1961,16 @@ def load_config(
         msg = f"Agent configuration file not found: {path}"
         raise FileNotFoundError(msg)
 
-    data, source_files = load_yaml_config_source(path)
-
-    try:
-        config = Config.validate_with_runtime(
-            data,
-            runtime_paths,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
-    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        # Parsing succeeded, so the full file set is known; expose it the same
-        # way as parse-time failures so reload watchers keep covering it.
-        attach_partial_source_files(exc, source_files)
-        raise
-    config._source_files = source_files
+    original = path.read_bytes()
+    data, source_digests = load_yaml_config_source_with_digests(path, source=original)
+    config, source_digests = validate_loaded_config_source(
+        data,
+        source_digests,
+        original,
+        runtime_paths,
+        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+    )
+    source_files = frozenset(source_digests)
     logger.info("loaded_agent_configuration", path=str(path), source_file_count=len(source_files))
     logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
     return config

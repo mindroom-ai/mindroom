@@ -18,6 +18,7 @@ from mindroom.credential_policy import (
     dashboard_may_edit_oauth_service,
     filter_oauth_credential_fields,
     is_oauth_client_config_service,
+    is_oauth_token_service,
     looks_like_oauth_credentials,
 )
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
@@ -39,6 +40,7 @@ class OAuthCredentialServiceMatch:
     token_service: bool
     tool_config_service: bool
     client_config_service: bool
+    oauth_fallback_fields: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -59,16 +61,21 @@ class OAuthCredentialServices:
                     token_service=token_service,
                     tool_config_service=tool_config_service,
                     client_config_service=client_config_service,
+                    oauth_fallback_fields=(
+                        frozenset(provider.tool_config_oauth_fallback_fields) if tool_config_service else frozenset()
+                    ),
                 )
         return None
 
     def reject_non_editable_services(self, services: tuple[str, ...]) -> None:
         """Reject direct dashboard access to non-editable OAuth credential services."""
         for service in services:
-            reject_oauth_token_service(self.match(service))
+            reject_oauth_token_service(service)
 
     def dashboard_may_show_service(self, service: str) -> bool:
         """Return whether a service may appear in dashboard credential listings."""
+        if is_oauth_token_service(service):
+            return False
         match = self.match(service)
         return match is None or dashboard_may_edit_oauth_match(match)
 
@@ -84,11 +91,9 @@ def oauth_service_match(request: Request, service: str) -> OAuthCredentialServic
     return oauth_services_for_request(request).match(service)
 
 
-def reject_oauth_token_service(
-    oauth_service_match: OAuthCredentialServiceMatch | None,
-) -> None:
+def reject_oauth_token_service(service: str) -> None:
     """Reject direct dashboard access to OAuth token credential services."""
-    if oauth_service_match is None or dashboard_may_edit_oauth_match(oauth_service_match):
+    if not is_oauth_token_service(service):
         return
     raise HTTPException(status_code=400, detail=_OAUTH_TOKEN_CREDENTIALS_ERROR)
 
@@ -187,11 +192,19 @@ def dashboard_credentials_for_save(
     config_values: dict[str, Any],
     *,
     strip_oauth_fields: bool,
+    oauth_fallback_fields: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Return user-submitted credentials normalized for dashboard storage."""
     credentials = dict(config_values)
     if strip_oauth_fields:
         credentials = filter_oauth_credential_fields(credentials)
+        credentials.update(
+            {
+                field_name: config_values[field_name]
+                for field_name in oauth_fallback_fields
+                if field_name in config_values
+            },
+        )
     credentials["_source"] = "ui"
     return credentials
 

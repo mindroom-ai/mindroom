@@ -12,7 +12,6 @@ import nio
 import pytest
 from pydantic import ValidationError
 
-from mindroom.bot import AgentBot
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -38,11 +37,15 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
-from mindroom.tool_system.runtime_context import ToolRuntimeContext
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
+from tests.bot_helpers import make_test_agent_bot
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from mindroom.bot import AgentBot
     from mindroom.event_journal import ConversationPage
 
 from tests.conftest import (
@@ -90,7 +93,7 @@ def _agent_bot(
     rooms: list[str] | None = None,
 ) -> AgentBot:
     """Construct an agent bot with the test config's bound runtime context."""
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         config=config,
         agent_user=agent_user,
         storage_path=storage_path,
@@ -466,8 +469,8 @@ class TestRouterHandoffThreadMode:
         assert _entity_thread_mode(bot.config, ROUTER_AGENT_NAME, room_id=room.room_id) == "thread"
 
         with (
-            patch("mindroom.turn_controller.suggest_responder_for_message", AsyncMock(return_value="assistant")),
-            patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send),
+            patch("mindroom.router_relay.suggest_responder_for_message", AsyncMock(return_value="assistant")),
+            patch("mindroom.delivery_gateway.send_message_outcome", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",
                 new_callable=AsyncMock,
@@ -503,8 +506,8 @@ class TestRouterHandoffThreadMode:
         room = _matrix_room("!room:localhost")
 
         with (
-            patch("mindroom.turn_controller.suggest_responder_for_message", AsyncMock(return_value="coder")),
-            patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send),
+            patch("mindroom.router_relay.suggest_responder_for_message", AsyncMock(return_value="coder")),
+            patch("mindroom.delivery_gateway.send_message_outcome", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",
                 new_callable=AsyncMock,
@@ -603,7 +606,7 @@ class TestCreateSessionIdWithNoneThread:
                 router=RouterConfig(model="default"),
             ),
         )
-        runtime_context = ToolRuntimeContext(
+        runtime_context = make_test_tool_runtime_context(
             agent_name="assistant",
             target=MessageTarget(
                 room_id="!room:localhost",
@@ -1155,7 +1158,7 @@ class TestSendResponseRoomMode:
             captured_content.update(content)
             return delivered_matrix_event("$response_event", content)
 
-        with patch("mindroom.delivery_gateway.send_message_result", side_effect=mock_send):
+        with patch("mindroom.delivery_gateway.send_message_outcome", side_effect=mock_send):
             target = bot._conversation_resolver.build_message_target(
                 room_id="!room:localhost",
                 thread_id=None,

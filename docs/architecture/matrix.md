@@ -85,35 +85,51 @@ Use `build_message_content()` from `message_builder.py` to construct thread-awar
 
 ### Sync Loop
 
-Each agent bot runs its own sync loop with a 30-second long-polling timeout.
+Each agent bot runs an owned Nio ingestion session with a five-second long-polling timeout.
 The default `matrix_sync.mode: classic` streams events through classic `/v3/sync` and backfills limited-timeline gaps from `/messages`.
 Set `matrix_sync.mode: sliding` to opt into MSC4186 Simplified Sliding Sync on homeservers that advertise `org.matrix.simplified_msc3575`.
 `matrix_sync.sliding_timeline_limit` (default 100) bounds the per-room timeline window of each sliding request.
-Sliding positions remain connection-scoped, while callback admission uses mindroom-nio's persisted per-event provenance.
+Nio owns transport cursors, crypto preparation, and persisted per-event provenance for both sync transports.
 Sliding Sync classifies its validated `num_live` tail as live, ordinary continuations without `num_live` as live, and initial or expanded timelines without `num_live` as history.
-Classic Sync classifies initial timelines and `/messages` recovery as history, while `since` continuations are live.
+Classic Sync distinguishes initial history, live continuations, and recovered gaps; MindRoom uses the provenance Nio supplies without reclassifying it.
 This provenance remains attached across recovery, restart, and decryption independently of journal checkpoint persistence.
-`matrix/journal_ingress.py` commits every inbound event to the event journal before nio treats it as delivered, and a refused write raises `nio.CallbackNotAcceptedError` so nio redelivers the event rather than advancing the checkpoint past it.
+`matrix/durable_ingestion.py` validates one immutable Nio batch and atomically commits its receipt, membership effects, semantic event, and conversation projection in the MindRoom journal before acknowledging that batch to Nio.
+An admission failure leaves the batch unsettled for retry, and replay after a committed admission returns the original receipt without duplicating semantic work.
+Typing and presence remain fresh best-effort notifications outside durable work; read receipts still pass through durable ingestion.
+The development lock pins the accompanying Nio implementation to the exact revision in `tool.uv.sources` in `pyproject.toml`.
 Admission is fail-closed at every provenance, not only for recovery, because an event the journal never accepted is one no later process would see again.
+Silent schedules use the custom `io.mindroom.scheduled.trigger` timeline event so clients do not render the task body as a room message.
+Ingress admits that hidden event only from a managed sender, leaves it out of the visible-message projection, and classifies cold-history copies as context-only.
+Journal dispatch validates and normalizes a live or recovered trigger into the existing formatted-message turn path, while an intentional no-report result records the turn and settles the trigger without a visible response.
 Conversation history is hydrated on demand rather than pre-warmed at join: a bounded backward walk fills one room or thread and records the membership epoch it filled under, so a rejoin rebuilds from what the new membership can see instead of merging two memberships into one conversation.
+Every derived conversation row, pending turn, and delivery outbox entry is tied to that membership epoch.
+A departure advances the epoch, removes old projected history, retires unsent old-membership delivery work, and prevents an in-flight response admitted before departure from being sent after rejoin.
+Attempted but unacknowledged deliveries retain their frozen transaction identity for exact reconciliation instead of being blindly resent.
 Changing `matrix_sync` restarts running entities on config hot reload.
 Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 
 An event reaches an agent through durable admission, never straight from the sync callback:
 
 1. Sync receives the event via long-polling, and nio states its provenance once.
-2. `JournalIngress._admit` runs first, as nio's event-admission callback, and commits the event and its projection row in one transaction before nio treats the event as delivered.
-3. Only after every admission callback succeeds do the ordinary event callbacks run, and they load already-persisted work rather than the parsed event they were handed.
+2. The owned ingestion pump validates and commits each batch through `PrincipalStore.admit_ingestion_batch()` before acknowledging it to Nio.
+3. Control-room departures and history loss revoke uncertain grants before admission; live membership grant changes run after the durable commit, before the next batch.
 4. `PendingEventWorker` drains what is still pending, so an event whose turn was interrupted is re-dispatched instead of lost.
 5. `TurnController` owns the turn and the agent responds in thread.
 
-Invites are the deliberate exception: an invite has no Matrix event ID to key a durable row on, and an unacted-on invite reappears in every sync response, so `_on_invite` is a plain background task relying on homeserver redelivery.
+Invites are the deliberate event-journal exception because an invite has no stable Matrix event ID to key a journal row on.
+`_on_invite_before_sync_certification` stores the pending room and inviter before starting plain background handling.
+The pending record wakes unfinished work, but it does not make Matrix repeat an already-checkpointed invite and does not grant authority.
+The stored inviter is not authorization evidence: routers and agents require nio's current invite sender after fence persistence and immediately before starting the Matrix join request.
+An authoritative departure clears nio's invited-room cache entry before asynchronous departure fencing, so a cancellation observed before the join starts revokes that sender evidence.
+A restart without current invite-cache evidence may require another invitation.
+All activity after joining uses ordinary responder conversation authorization.
 See [Bot Runtime](bot-runtime.md) for the full durable dispatch boundary.
 
 ### Streaming Responses
 
 Agents stream responses by progressively editing messages.
-Streaming is enabled only when the requesting user is online (checked via `should_use_streaming()`), saving API calls for offline users.
+When requester identity is available, `should_use_streaming()` enables streaming only while that requester is online, avoiding progressive Matrix edits for offline users.
+When requester identity is unavailable, the presence check cannot run and `should_use_streaming()` defaults to streaming.
 See [Streaming Responses](../streaming.md) for the full feature documentation.
 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
@@ -162,6 +178,13 @@ Messages exceeding the 64KB Matrix event limit are automatically handled by `pre
 - Preview event is compact (for example no inline `io.mindroom.tool_trace`), while the sidecar preserves full content fidelity
 - Encrypted rooms: sidecar JSON is encrypted before upload (`message-content.json.enc`)
 
+With `defaults.large_message_strategy: split`, an oversized final text response is instead delivered as several complete rich-text events by `segment_matrix_content()` in `matrix/segmented_messages.py`.
+The body is cut at paragraph or line boundaries, never inside a fenced code block, and concatenating the segment bodies reproduces the original exactly.
+The first segment stays a final `m.replace` of the streaming placeholder when there is one; continuations are plain messages that stay in the thread when there is one.
+Every segment is rendered as standalone Markdown with `m.mentions` attached to the segment whose body carries the mention.
+Continuation payloads are frozen in the local outbox row and sent under deterministic transaction IDs, so a retry or restart resends only the segments the room does not already hold.
+Non-text payloads, metadata that alone exceeds the budget, and a single code fence larger than one event still use the sidecar path.
+
 ## Response Tracking
 
 Duplicate responses are prevented at two durable layers, both in `tracking/event_journal.db` under `mindroom_data/`.
@@ -173,9 +196,11 @@ A settled row is retained for exactly that reason, with only its replay payload 
 It shares the journal's database, so a terminal turn record and the settlement of the journal sources it answers commit in one transaction instead of two substrates approximately agreeing.
 Its scope is the agent rather than the sync principal, because the proof that a message was already answered stays true across a re-login.
 
-Delivery itself is owned by the `response_outbox` table, keyed `(principal_id, turn_id, stage)` over an `INITIAL` placeholder and a `FINAL` answer.
-A row's payload is claimed before the first send attempt and its Matrix transaction ID is deterministic, so a crash between sending and recording resolves by resending the same row rather than by generating a second, different answer.
+Delivery itself is owned by the `matrix_delivery_outbox` table, keyed `(principal_id, delivery_id, stage)` over `INITIAL` and `FINAL` delivery stages.
+A `FINAL` stage edits an existing event when it has an edit target and otherwise publishes a standalone terminal event.
+Each row freezes its explicit Matrix event type, payload, and deterministic transaction ID before the first send attempt, so ordinary responses and tool-approval cards recover through the same worker after a crash between sending and recording.
 The claim also stores the sending device, because a transaction ID is only idempotent for the device that used it and a re-login would otherwise let a resend post a duplicate.
+After a device change, standalone deliveries that reply outside a journal turn reconcile by exact frozen content and retain their debt when history cannot prove which event won.
 
 ## Room Cleanup
 
@@ -214,9 +239,9 @@ matrix_space:
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
 The Space name is reconciled on each startup to match the configured value.
 Root Space admin power is granted before child links are written.
-The grant set is the concrete Matrix users in `authorization.global_users` plus the configured `mindroom_user` when that internal account exists.
-MindRoom does not remove existing Space admins during reconciliation, including manual Matrix admins or users removed from `authorization.global_users`.
-Room-scoped authorization entries are intentionally not used for root Space admin grants.
+Concrete users from effective managed-room `invite_users` policies are invited to the root Space without receiving Space admin power.
+Platform `administrators`, room `admins`, responder users, and credential managers are not root Space invitation sources.
+MindRoom does not remove existing Space admins during reconciliation.
 
 ## Delivery Policy
 
@@ -232,7 +257,7 @@ If the window expires the delivery is reported as failed, the placeholder settle
 ## End-to-End Encryption
 
 Agents fully participate in encrypted rooms: they decrypt inbound text and media, reply encrypted, and re-fetch and decrypt thread history from the homeserver.
-Managed rooms can be created encrypted via `rooms.<key>.encrypted: true` or `matrix_room_access.encrypt_managed_rooms: true`, and existing managed rooms are reconciled to encrypted on startup and config reload when so configured.
+Managed rooms can be created encrypted through `room_defaults.encrypted: true` or `rooms.<key>.encrypted: true`, and existing managed rooms are reconciled to encrypted on startup and config reload when so configured.
 Users can also enable encryption in any room with `!encrypt confirm` (room admin only), and `!e2ee` reports encryption diagnostics.
 Enabling encryption on a Matrix room is irreversible; MindRoom never disables it.
 

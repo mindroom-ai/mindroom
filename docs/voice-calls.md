@@ -47,7 +47,8 @@ Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_call
 `calls.profiles` defines reusable, complete voice pipelines.
 `calls.agents` maps each enabled agent to exactly one profile name.
 The `model` in a realtime profile is the provider-specific OpenAI realtime speech model ID.
-Cascaded profiles require complete STT and TTS settings, and each speech leg selects its own credential service.
+Cascaded profiles require complete STT and TTS settings.
+OpenAI speech legs require either `credentials_service` or `api_key`; OpenAI-compatible speech legs require `host` and may omit credentials.
 The optional `model` in a cascaded profile references a named entry from the top-level `models` mapping.
 An explicit cascaded call model takes precedence over room and agent models for the calls-enabled agent.
 Omitting it keeps the existing room and agent model resolution.
@@ -86,6 +87,7 @@ calls:
 MindRoom enforces at most one calls-enabled agent per room.
 Calls only join rooms configured for that agent and only while the sole caller passes the normal room and per-agent reply permissions.
 Calls-enabled agents also join calls in ad-hoc rooms they accepted through their normal authorized-invite policy. This lets Matrix clients create a private, temporary voice room and invite one agent without adding that room to `config.yaml` first.
+An explicit room assignment to one calls-enabled agent takes precedence over persisted invite records; invite-only ambiguity still fails closed.
 Calls-enabled agents advertise `📞 Voice calls` in their Matrix presence status only when their MatrixRTC runtime is available, so clients can show the call action only where it will be answered.
 Requester-private agents use the sole authorized caller's verified Matrix user ID to resolve their workspace, memory, credentials, history, knowledge, and tool execution scope.
 The same caller scope applies in configured rooms and authorized ad-hoc invite rooms.
@@ -159,7 +161,7 @@ calls:
     assistant: openai-cascaded
 ```
 
-Each speech component has its own `provider`, `model`, `credentials_service`, `host`, and `extra_kwargs`.
+Each speech component has its own `provider`, `model`, `credentials_service`, `api_key`, `host`, and `extra_kwargs`.
 The two speech legs may select the same named credential or different ones.
 The current OpenAI model catalog documents [`gpt-4o-transcribe`](https://developers.openai.com/api/docs/models/gpt-4o-transcribe) for transcription and [`tts-1`](https://developers.openai.com/api/docs/models/tts-1) for text-to-speech.
 

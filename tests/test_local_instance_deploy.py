@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
@@ -477,3 +478,40 @@ def test_get_actual_status_requires_matrix_runtime_container(monkeypatch: pytest
     monkeypatch.setattr(deploy.subprocess, "run", _run)
 
     assert deploy.get_actual_status("alpha") == (False, False)
+
+
+def test_telegram_bridge_compose_renders_configured_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bridge metadata must be the single image source for generated Compose."""
+    monkeypatch.setitem(sys.modules, "matty", ModuleType("matty"))
+    bridge_script = Path("local/instances/deploy/bridge.py")
+    bridge_spec = importlib.util.spec_from_file_location("mindroom_bridge_manager", bridge_script)
+    assert bridge_spec is not None
+    assert bridge_spec.loader is not None
+    bridge_manager = importlib.util.module_from_spec(bridge_spec)
+    bridge_spec.loader.exec_module(bridge_manager)
+    monkeypatch.setattr(bridge_manager, "BRIDGES_DIR", bridge_script.parent / "templates" / "bridges")
+    bridge = bridge_manager.BridgeConfig(
+        bridge_type=bridge_manager.BridgeType.TELEGRAM,
+        instance_name="alpha",
+        port=29317,
+        data_dir=str(tmp_path),
+    )
+    telegram_template = bridge_manager.BRIDGE_TEMPLATES[bridge_manager.BridgeType.TELEGRAM]
+    expected_image = "dock.mau.dev/mautrix/telegram:v0.15.3"
+
+    assert telegram_template["image"] == expected_image
+
+    compose_path = bridge_manager._create_bridge_docker_compose(bridge, telegram_template)
+    compose = yaml.safe_load(compose_path.read_text())
+    assert compose["services"]["telegram"]["image"] == expected_image
+
+    compose_path = bridge_manager._create_bridge_docker_compose(
+        bridge,
+        {"image": "registry.example/telegram:compatible"},
+    )
+
+    overridden_compose = yaml.safe_load(compose_path.read_text())
+    assert overridden_compose["services"]["telegram"]["image"] == "registry.example/telegram:compatible"

@@ -1,10 +1,10 @@
 # Matrix Bridges for Mindroom
 
-This directory contains Matrix bridge configurations and the automated bridge management tool for Mindroom instances.
+This directory contains Matrix bridge configurations and the bridge management tool for Mindroom instances.
 
 ## Quick Start with bridge.py
 
-We now have an automated bridge management tool that simplifies the entire process:
+The bridge manager generates local bridge files and controls bridge containers:
 
 ```bash
 # Add a Telegram bridge to an instance
@@ -25,8 +25,8 @@ We now have an automated bridge management tool that simplifies the entire proce
 
 ## Available Bridges
 
-### ✅ Telegram Bridge
-- **Status**: Fully automated and tested
+### ⚠️ Telegram Bridge
+- **Status**: Manager-assisted; homeserver registration requires the steps below
 - **Features**: Bidirectional messaging, media support, user puppeting
 - **Setup Time**: ~5 minutes with bridge.py
 
@@ -92,7 +92,8 @@ Generate the registration file:
 4. Verify with: `!admin appservices list`
 
 #### For Synapse:
-The registration is automatically added to the homeserver.yaml
+The manager updates `homeserver.yaml`, but the local Compose layout does not mount the generated registration file into the Synapse container.
+Manually expose the generated file at the configured `app_service_config_files` path, then restart Synapse.
 
 ### Step 4: Start the Bridge
 

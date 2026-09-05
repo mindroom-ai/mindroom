@@ -25,6 +25,7 @@ from mindroom.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
+from . import approvals
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
@@ -58,6 +59,12 @@ logger = get_logger(__name__)
 _JOURNAL_COLUMNS = """
     event_id, room_id, thread_id, kind, sender,
     origin_server_ts, source_json, receipt_order, semantic_consumer
+"""
+_EVENT_JOURNAL_COLUMNS = """
+    events.event_id AS event_id, events.room_id AS room_id,
+    events.thread_id AS thread_id, events.kind AS kind, events.sender AS sender,
+    events.origin_server_ts AS origin_server_ts, events.source_json AS source_json,
+    events.receipt_order AS receipt_order, events.semantic_consumer AS semantic_consumer
 """
 # Successful repair is hidden from callers but retained as the revision carrier,
 # so a later gap cannot reuse the identity of an old in-flight walk.
@@ -408,6 +415,7 @@ def _room_history_recovery_from_row(room_id: str, row: Row) -> RoomHistoryRecove
         room_id=room_id,
         state=HistoryRecoveryState(str(row["state"])),
         revision=int(row["revision"]),
+        attempted_policy_rank=int(row["attempted_policy_rank"]),
     )
 
 
@@ -419,7 +427,7 @@ def room_history_recovery(
     """Return one room's current history-recovery obligation, if any."""
     row = transaction.fetchone(
         """
-        SELECT state, revision FROM room_history_recovery
+        SELECT state, revision, attempted_policy_rank FROM room_history_recovery
         WHERE principal_id = ? AND room_id = ? AND state <> ?
         """,
         (principal_id, room_id, _REPAIRED_RECOVERY_STATE),
@@ -438,12 +446,15 @@ def _record_room_history_recovery_locked(
         return None
     row = transaction.fetchone(
         """
-        INSERT INTO room_history_recovery (principal_id, room_id, state, revision)
-        VALUES (?, ?, ?, 0)
+        INSERT INTO room_history_recovery (
+            principal_id, room_id, state, revision, attempted_policy_rank
+        )
+        VALUES (?, ?, ?, 0, 0)
         ON CONFLICT (principal_id, room_id) DO UPDATE SET
             state = excluded.state,
-            revision = room_history_recovery.revision + 1
-        RETURNING state, revision
+            revision = room_history_recovery.revision + 1,
+            attempted_policy_rank = 0
+        RETURNING state, revision, attempted_policy_rank
         """,
         (principal_id, room_id, HistoryRecoveryState.REPAIRABLE.value),
     )
@@ -478,6 +489,7 @@ def claim_room_history_recovery(
         """
         UPDATE room_history_recovery SET state = state
         WHERE principal_id = ? AND room_id = ? AND state = ? AND revision = ?
+          AND attempted_policy_rank = ?
         RETURNING room_id
         """,
         (
@@ -485,6 +497,7 @@ def claim_room_history_recovery(
             recovery.room_id,
             recovery.state.value,
             recovery.revision,
+            recovery.attempted_policy_rank,
         ),
     )
     return row is not None
@@ -496,6 +509,7 @@ def settle_room_history_recovery(
     recovery: RoomHistoryRecovery,
     *,
     exhausted_server: bool,
+    attempted_policy_rank: int,
 ) -> HistoryRecoveryOutcome:
     """Commit the terminal state of a previously claimed recovery obligation."""
     if exhausted_server:
@@ -509,10 +523,15 @@ def settle_room_history_recovery(
         return HistoryRecoveryOutcome.REPAIRED
     transaction.execute(
         """
-        UPDATE room_history_recovery SET state = ?
+        UPDATE room_history_recovery SET state = ?, attempted_policy_rank = ?
         WHERE principal_id = ? AND room_id = ?
         """,
-        (HistoryRecoveryState.TRUNCATED.value, principal_id, recovery.room_id),
+        (
+            HistoryRecoveryState.TRUNCATED.value,
+            attempted_policy_rank,
+            principal_id,
+            recovery.room_id,
+        ),
     )
     return HistoryRecoveryOutcome.TRUNCATED
 
@@ -602,40 +621,74 @@ def _advance_membership_epoch(
     # A delivery that was never attempted was written for the conversation this
     # bot was in before it left, and nothing outside this process has seen it.
     # Sending it now would answer the previous membership inside the new one.
+    # Keep its identity as a retired tombstone: a source-less stream may have
+    # enqueued INITIAL just before this fence and still be running, and deleting
+    # the row would let FINAL adopt the rejoined membership.
     #
     # An attempted delivery is a different object entirely, and deleting it was
     # the mistake worth naming. Its outcome is unknown: the homeserver may hold
     # it already. Dropping the row frees the turn to run again and post a second
     # answer, and re-deriving a fresh transaction for that answer guarantees the
-    # duplicate rather than preventing it. Keeping the row keeps the frozen
-    # payload and the transaction that goes with it, so the only thing a retry
-    # can do is present the same transaction again and collapse onto the same
-    # event. That converges on exactly one visible answer whether or not the
-    # first attempt landed, which is the property this table exists for.
+    # duplicate rather than preventing it. Keeping the row preserves the exact
+    # payload, transaction, and sending-device facts needed for recovery:
+    # same-device attempts reuse the transaction; changed-device attempts
+    # reconcile exact room history before their delivery-specific replay or
+    # retain decision. That durable identity is the property this table exists
+    # for.
+    # A terminal acknowledgement may have committed just before a crash that
+    # prevented its approval-domain row from being retired. Preserve the click
+    # tombstone before either side of the cross-principal relationship is
+    # fenced or deleted below.
+    approvals.retire_completed_cards_for_departure(
+        transaction,
+        principal_id,
+        room_id=room_id,
+    )
+    approvals.fail_continuations_for_departed_card_owner(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        reason="Approval transport left the room.",
+    )
     transaction.execute(
         """
-        DELETE FROM response_outbox
+        UPDATE matrix_delivery_outbox AS delivery SET retired = 1
         WHERE principal_id = ? AND room_id = ? AND acknowledged_event_id IS NULL AND attempted = 0
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = delivery.principal_id
+                AND cards.delivery_id = delivery.delivery_id
+          )
         """,
         (principal_id, room_id),
     )
-    # An approval card goes the other way from an attempted delivery, and the
-    # asymmetry is the same one the recovery pass already makes: a lost answer
-    # is unacceptable, so the outbox risks a duplicate; a card is a question,
-    # and asking it twice gets one answer to two prompts. Nothing here can
-    # duplicate anything either way, because the turn that would have posted a
-    # second card is settled just below rather than left to run again.
-    #
-    # So the only question is whether these rows are worth keeping, and they
-    # are not. Every read of a card is filtered to the room's current
-    # membership -- deliberately, because expiring or redelivering one would
-    # edit an event in a conversation this bot has already stopped trusting,
-    # answering a question nobody in the new membership asked. Kept, they are
-    # rows with no reader and no other remover, still answering writes keyed on
-    # the card's event rather than on the epoch. Dropped, they simply stop
-    # existing at the same moment they stopped meaning anything.
+    # Approval cards are authored by the router principal, while the paused
+    # run belongs to the responding entity principal. Preserve the router's
+    # terminal Matrix edit debt before this fence removes the continuation.
+    approvals.expire_cards_for_departed_continuations(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        reason="Requesting agent left the room.",
+    )
+    # A paused run owns exactly the source rows this fence is about to settle.
+    # Delete the aggregate first so no durable continuation survives with no
+    # runnable source. Its call and source rows cascade.
     transaction.execute(
-        "DELETE FROM approval_cards WHERE principal_id = ? AND room_id = ?",
+        """
+        DELETE FROM approval_continuations
+        WHERE principal_id = ?
+          AND EXISTS (
+              SELECT 1
+              FROM approval_continuation_sources AS sources
+              JOIN journal_events AS events
+                ON events.principal_id = sources.principal_id
+               AND events.event_id = sources.event_id
+              WHERE sources.principal_id = approval_continuations.principal_id
+                AND sources.approval_id = approval_continuations.approval_id
+                AND events.room_id = ?
+          )
+        """,
         (principal_id, room_id),
     )
     # Turn-backed work still pending from the membership that just ended can
@@ -650,12 +703,12 @@ def _advance_membership_epoch(
     # survive, as everything above does, because they are still the proof that
     # these events already had their one turn.
     #
-    # Only the turn-backed kinds. A redaction, a reaction, an approval reply
-    # and a decryption failure do not enqueue an answer, so the epoch predicate
-    # never blocks them and none of them is unanswerable. A redaction in
-    # particular still owes real cleanup -- removing the redacted request from
-    # durable turn and session state -- and sweeping it up here would drop that
-    # work silently and let the redacted content survive in later context.
+    # Only the turn-backed kinds and reactions already claimed by an interactive
+    # response. Other reactions do not enqueue an answer and still owe their
+    # hook work. A redaction in particular still owes real cleanup -- removing
+    # the redacted request from durable turn and session state -- and sweeping
+    # it up here would drop that work silently and let the redacted content
+    # survive in later context.
     turn_backed = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
     kind_placeholders = ", ".join("?" for _ in turn_backed)
     transaction.execute(
@@ -663,9 +716,19 @@ def _advance_membership_epoch(
         UPDATE journal_events
         SET state = ?, source_json = '', semantic_consumer = NULL
         WHERE principal_id = ? AND room_id = ? AND state = 'pending'
-          AND kind IN ({kind_placeholders})
+          AND (
+            kind IN ({kind_placeholders})
+            OR (kind = ? AND semantic_consumer = ?)
+          )
         """,  # noqa: S608 - placeholders are generated, values are still bound
-        (SETTLED_STATE, principal_id, room_id, *turn_backed),
+        (
+            SETTLED_STATE,
+            principal_id,
+            room_id,
+            *turn_backed,
+            EventKind.REACTION.value,
+            SemanticConsumer.INTERACTIVE_REACTION.value,
+        ),
     )
     return epoch
 
@@ -723,6 +786,7 @@ def fence_departure(
     room_id: str,
     *,
     source: DepartureSource,
+    report_observation_id: str | None = None,
 ) -> DepartureOutcome:
     """Invalidate a room's derived state once per departure, however often it is seen.
 
@@ -745,26 +809,185 @@ def fence_departure(
       of the same departure when the sync response gets there first.
 
     That asymmetry is in what each observation *records*, not in whether it may
-    fence a room that is already fenced. Neither may. A sync report is not a
-    once-only signal: a checkpoint that could not advance, an initial sync, a
-    resumed older token all present the same leave again, and a bot cannot
-    leave a room it has not rejoined. Fencing on the repeat deletes whatever
-    the membership after it has built -- the hydrated conversation, the answer
-    queued for it -- and settles the live message that provoked it as ignored
-    with its replay payload erased. A rejoin is what re-arms the fence, and
-    every path this bot takes back into a room reports one.
+    fence a room that is already fenced. Neither may. Matrix can replay an old
+    leave after the room has rejoined, and one ended membership can appear as
+    consecutive leave/ban observations. Each report's stable observation id is
+    therefore mapped durably to its contiguous departure run in this same
+    transaction. The run spends one owed local report; its aliases spend none.
+    The Matrix event id supplies identity when visible, otherwise the sync
+    response token does. A replay then remains a replay even after a join has
+    closed the run and re-armed the room for a genuinely new departure.
     """
     state = _claim_membership_state(transaction, principal_id, room_id)
-    return _fence_departure_from_state(
+    if source is DepartureSource.REPORTED and report_observation_id is not None:
+        repeated_report = transaction.fetchone(
+            """
+            SELECT room_id FROM reported_departures
+            WHERE principal_id = ? AND observation_id = ?
+            """,
+            (principal_id, report_observation_id),
+        )
+        if repeated_report is not None:
+            if repeated_report["room_id"] != room_id:
+                msg = f"Departure observation {report_observation_id!r} changed rooms"
+                raise ValueError(msg)
+            return DepartureOutcome(
+                observation=DepartureObservation.REPEATED_REPORT,
+                membership_epoch=state.membership_epoch,
+                owed_reports=state.owed_reports,
+            )
+
+        open_run = transaction.fetchone(
+            """
+            SELECT run_epoch FROM reported_departures
+            WHERE principal_id = ? AND room_id = ? AND run_closed = 0
+            ORDER BY report_order DESC
+            LIMIT 1
+            """,
+            (principal_id, room_id),
+        )
+        if open_run is not None:
+            run_epoch = int(open_run["run_epoch"])
+            _record_reported_departure(
+                transaction,
+                principal_id,
+                report_observation_id,
+                room_id,
+                run_epoch,
+            )
+            return DepartureOutcome(
+                observation=DepartureObservation.ALREADY_FENCED,
+                membership_epoch=state.membership_epoch,
+                owed_reports=state.owed_reports,
+            )
+
+    if source is DepartureSource.REPORTED and state.owed_reports > 0:
+        # Asked before the fenced check, not after: a local departure fences
+        # and *then* waits for its report, so the report always arrives at a
+        # fenced room. Reading that as a repeat would leave the debt standing
+        # forever, and it would absorb the next genuine departure instead.
+        owed_reports = state.owed_reports - 1
+        _write_departure_state(
+            transaction,
+            principal_id,
+            room_id,
+            membership_epoch=state.membership_epoch,
+            departure_fenced=state.departure_fenced,
+            owed_reports=owed_reports,
+        )
+        run_epoch = state.membership_epoch - state.owed_reports + 1
+        _record_reported_departure(
+            transaction,
+            principal_id,
+            report_observation_id,
+            room_id,
+            run_epoch,
+        )
+        return DepartureOutcome(
+            observation=DepartureObservation.OWED_REPORT_CONSUMED,
+            membership_epoch=state.membership_epoch,
+            owed_reports=owed_reports,
+        )
+    if state.departure_fenced:
+        # Whoever saw this departure first already fenced it, and nothing has
+        # put the bot back in the room, so there is no second departure here.
+        if source is DepartureSource.REPORTED:
+            _record_reported_departure(
+                transaction,
+                principal_id,
+                report_observation_id,
+                room_id,
+                state.membership_epoch,
+            )
+        return DepartureOutcome(
+            observation=DepartureObservation.ALREADY_FENCED,
+            membership_epoch=state.membership_epoch,
+            owed_reports=state.owed_reports,
+        )
+    if source is DepartureSource.LOCAL:
+        _close_open_reported_departure_runs(transaction, principal_id, room_id)
+    membership_epoch = _advance_membership_epoch(transaction, principal_id, room_id)
+    owed_reports = state.owed_reports + 1 if source is DepartureSource.LOCAL else state.owed_reports
+    _write_departure_state(
         transaction,
         principal_id,
         room_id,
-        source=source,
-        state=state,
+        membership_epoch=membership_epoch,
+        departure_fenced=True,
+        owed_reports=owed_reports,
+    )
+    if source is DepartureSource.REPORTED:
+        _record_reported_departure(
+            transaction,
+            principal_id,
+            report_observation_id,
+            room_id,
+            membership_epoch,
+        )
+    return DepartureOutcome(
+        observation=DepartureObservation.FENCED,
+        membership_epoch=membership_epoch,
+        owed_reports=owed_reports,
     )
 
 
-def note_membership_restarted(transaction: Transaction, principal_id: str, room_id: str) -> None:
+def _record_reported_departure(
+    transaction: Transaction,
+    principal_id: str,
+    observation_id: str | None,
+    room_id: str,
+    run_epoch: int,
+) -> None:
+    """Bind one stable observation id to its contiguous departure run."""
+    if observation_id is None:
+        return
+    exact_event = transaction.fetchone(
+        """
+        SELECT receipt_order FROM journal_events
+        WHERE principal_id = ? AND event_id = ? AND room_id = ?
+        """,
+        (principal_id, observation_id, room_id),
+    )
+    boundary = exact_event
+    if boundary is None:
+        boundary = transaction.fetchone(
+            """
+            SELECT COALESCE(MAX(receipt_order), 0) AS receipt_order
+            FROM journal_events WHERE principal_id = ? AND room_id = ?
+            """,
+            (principal_id, room_id),
+        )
+    assert boundary is not None
+    transaction.execute(
+        """
+        INSERT INTO reported_departures (
+            principal_id, observation_id, room_id, journal_order, run_epoch
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (principal_id, observation_id, room_id, int(boundary["receipt_order"]), run_epoch),
+    )
+
+
+def _close_open_reported_departure_runs(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+) -> None:
+    """Close the one contiguous reported-departure run a confirmed join ended."""
+    transaction.execute(
+        """
+        UPDATE reported_departures SET run_closed = 1
+        WHERE principal_id = ? AND room_id = ? AND run_closed = 0
+        """,
+        (principal_id, room_id),
+    )
+
+
+def _note_membership_restarted(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+) -> None:
     """Record that the bot is in a room again, so its next departure fences.
 
     Only the fenced mark is cleared. An owed sync report survives a rejoin on
@@ -775,6 +998,97 @@ def note_membership_restarted(transaction: Transaction, principal_id: str, room_
     transaction.execute(
         "UPDATE room_membership SET departure_fenced = 0 WHERE principal_id = ? AND room_id = ?",
         (principal_id, room_id),
+    )
+    _close_open_reported_departure_runs(transaction, principal_id, room_id)
+
+
+def note_membership_restarted(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    *,
+    expected_membership_epoch: int | None = None,
+) -> None:
+    """Atomically rearm one confirmed membership.
+
+    Without an expected epoch, clearing an unfenced flag is a harmless no-op.
+    With one, rearming applies only to that exact membership.
+    """
+    if expected_membership_epoch is not None and not _claim_departure_fence(
+        transaction,
+        principal_id,
+        room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
+        return
+    _note_membership_restarted(transaction, principal_id, room_id)
+
+
+def close_preceding_reported_departure(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    join_event_id: str,
+) -> None:
+    """Close only the reported departure immediately preceding one join."""
+    report = transaction.fetchone(
+        """
+        SELECT reported.run_epoch
+        FROM reported_departures AS reported
+        JOIN journal_events AS rejoin
+          ON rejoin.principal_id = reported.principal_id
+         AND rejoin.event_id = ?
+        WHERE reported.principal_id = ?
+          AND reported.room_id = ?
+          AND rejoin.room_id = ?
+          AND reported.journal_order < rejoin.receipt_order
+        ORDER BY reported.journal_order DESC, reported.report_order DESC
+        LIMIT 1
+        """,
+        (join_event_id, principal_id, room_id, room_id),
+    )
+    if report is None:
+        return
+    close_reported_departure_run(
+        transaction,
+        principal_id,
+        room_id,
+        int(report["run_epoch"]),
+    )
+
+
+def close_reported_departure_run(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    run_epoch: int,
+) -> None:
+    """Close one alias run, rearming only if it is still the current fence."""
+    state = _lock_membership_state(transaction, principal_id, room_id)
+    open_run = transaction.fetchone(
+        """
+        SELECT 1 FROM reported_departures
+        WHERE principal_id = ? AND room_id = ? AND run_epoch = ? AND run_closed = 0
+        LIMIT 1
+        """,
+        (principal_id, room_id, run_epoch),
+    )
+    if open_run is None:
+        return
+    if state.departure_fenced and state.membership_epoch == run_epoch:
+        transaction.execute(
+            """
+            UPDATE room_membership SET departure_fenced = 0
+            WHERE principal_id = ? AND room_id = ? AND membership_epoch = ?
+            """,
+            (principal_id, room_id, run_epoch),
+        )
+    transaction.execute(
+        """
+        UPDATE reported_departures SET run_closed = 1
+        WHERE principal_id = ? AND room_id = ? AND run_epoch = ?
+        """,
+        (principal_id, room_id, run_epoch),
     )
 
 
@@ -838,6 +1152,49 @@ def _claim_membership_state(
         membership_epoch=membership_epoch,
         departure_fenced=bool(departure_fenced),
         owed_reports=owed_reports,
+    )
+
+
+def _lock_membership_state(transaction: Transaction, principal_id: str, room_id: str) -> _DepartureState:
+    """Create and lock one room's membership row for a state transition."""
+    row = transaction.fetchone(
+        """
+        INSERT INTO room_membership (principal_id, room_id, membership_epoch)
+        VALUES (?, ?, 0)
+        ON CONFLICT (principal_id, room_id) DO UPDATE
+            SET departure_fenced = room_membership.departure_fenced
+        RETURNING membership_epoch, departure_fenced, owed_departure_reports
+        """,
+        (principal_id, room_id),
+    )
+    assert row is not None
+    return _DepartureState(
+        membership_epoch=int(row["membership_epoch"]),
+        departure_fenced=bool(row["departure_fenced"]),
+        owed_reports=int(row["owed_departure_reports"]),
+    )
+
+
+def _claim_departure_fence(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    *,
+    expected_membership_epoch: int | None = None,
+) -> bool:
+    """Lock one room's membership row and return its departure-fence state."""
+    row = transaction.fetchone(
+        """
+        UPDATE room_membership SET departure_fenced = departure_fenced
+        WHERE principal_id = ? AND room_id = ?
+        RETURNING departure_fenced, membership_epoch
+        """,
+        (principal_id, room_id),
+    )
+    return (
+        row is not None
+        and bool(row["departure_fenced"])
+        and (expected_membership_epoch is None or int(row["membership_epoch"]) == expected_membership_epoch)
     )
 
 
@@ -906,15 +1263,52 @@ def admit(
     )
     if row is None:
         return AdmissionResult.DUPLICATE
+    tombstoned_event_id = None
     if projected is not None:
-        project(
+        tombstoned_event_id = project(
             transaction,
             principal_id,
             projected,
             receipt_order=int(row["receipt_order"]),
             membership_epoch=epoch,
         )
+    if tombstoned_event_id is not None:
+        _settle_tombstoned_turn_source(
+            transaction,
+            principal_id,
+            room_id=event.room_id,
+            event_id=tombstoned_event_id,
+        )
     return AdmissionResult.ADMITTED
+
+
+def _settle_tombstoned_turn_source(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    event_id: str,
+) -> None:
+    """Retire tombstoned turn ingress unless a durable continuation owns it.
+
+    Approval continuations dispatch before event-kind ingress, so preserving
+    one cannot replay its source through a message or media callback.
+    """
+    kinds = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
+    kind_placeholders = ", ".join("?" for _ in kinds)
+    transaction.execute(
+        f"""
+        UPDATE journal_events
+        SET state = ?, source_json = '', semantic_consumer = NULL
+        WHERE principal_id = ? AND room_id = ? AND event_id = ? AND state = ?
+          AND kind IN ({kind_placeholders})
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_continuation_sources
+              WHERE principal_id = ? AND event_id = ?
+          )
+        """,  # noqa: S608 - placeholders are generated, values are still bound
+        (SETTLED_STATE, principal_id, room_id, event_id, PENDING_STATE, *kinds, principal_id, event_id),
+    )
 
 
 def admitted_thread_id(
@@ -945,12 +1339,12 @@ def admitted_thread_id(
     return True, decode_thread_id(row["thread_id"])
 
 
-def admitted_membership_epoch(
+def admitted_membership_owner(
     transaction: Transaction,
     principal_id: str,
     event_id: str,
-) -> int | None:
-    """Return the membership one event was admitted under, or nothing.
+) -> tuple[str, int] | None:
+    """Return the room and membership that admitted one event, or nothing.
 
     Nothing means no membership: the caller named something the journal never
     admitted -- a scheduled task, a hook-authored turn -- and there is no
@@ -960,10 +1354,10 @@ def admitted_membership_epoch(
     for as long as the turn it authorized can still be running.
     """
     row = transaction.fetchone(
-        "SELECT membership_epoch FROM journal_events WHERE principal_id = ? AND event_id = ?",
+        "SELECT room_id, membership_epoch FROM journal_events WHERE principal_id = ? AND event_id = ?",
         (principal_id, event_id),
     )
-    return None if row is None else int(row["membership_epoch"])
+    return None if row is None else (str(row["room_id"]), int(row["membership_epoch"]))
 
 
 def pending(
@@ -972,6 +1366,7 @@ def pending(
     *,
     limit: int,
     after_receipt_order: int | None = None,
+    runtime_generation: str = "unmanaged",
 ) -> PendingPage:
     """Return actionable events awaiting semantic work, in receipt order.
 
@@ -987,7 +1382,13 @@ def pending(
     nothing behind this page, and ``resume_after`` is where the next pass
     starts, counted in rows looked at rather than events returned.
     """
-    return _pending_page(transaction, principal_id, limit=limit, after_receipt_order=after_receipt_order)
+    return _pending_page(
+        transaction,
+        principal_id,
+        limit=limit,
+        after_receipt_order=after_receipt_order,
+        runtime_generation=runtime_generation,
+    )
 
 
 def _pending_page(
@@ -997,6 +1398,7 @@ def _pending_page(
     limit: int,
     after_receipt_order: int | None,
     kind: EventKind | None = None,
+    runtime_generation: str = "unmanaged",
 ) -> PendingPage:
     """Return whatever decoded from one page of at most ``limit`` raw rows.
 
@@ -1011,6 +1413,7 @@ def _pending_page(
         limit=limit,
         after_receipt_order=after_receipt_order,
         kind=kind,
+        runtime_generation=runtime_generation,
     )
     events = _decode_rows(rows)
     return PendingPage(
@@ -1033,20 +1436,61 @@ def _pending_rows(
     limit: int,
     after_receipt_order: int | None,
     kind: EventKind | None = None,
+    runtime_generation: str = "unmanaged",
 ) -> tuple[Row, ...]:
     """Return one raw page of pending rows, in receipt order."""
     cursor_clause = "" if after_receipt_order is None else " AND receipt_order > ?"
     cursor_params: tuple[object, ...] = () if after_receipt_order is None else (after_receipt_order,)
     kind_clause = "" if kind is None else " AND kind = ?"
     kind_params: tuple[object, ...] = () if kind is None else (kind.value,)
+    continuation_joins = """
+        LEFT JOIN approval_continuation_sources AS approval_sources
+          ON approval_sources.principal_id = events.principal_id
+         AND approval_sources.event_id = events.event_id
+        LEFT JOIN approval_continuations AS continuations
+         ON continuations.principal_id = approval_sources.principal_id
+         AND continuations.approval_id = approval_sources.approval_id
+    """
+    continuation_clause = """
+          AND (
+            approval_sources.approval_id IS NULL
+            OR (
+              approval_sources.source_ordinal = 0
+              AND (
+                continuations.state IN ('ready', 'failing')
+                OR (
+                  continuations.state = 'waiting'
+                  AND continuations.runtime_generation IS NOT NULL
+                  AND continuations.runtime_generation <> ?
+                )
+                OR (
+                  continuations.state = 'claimed'
+                  AND (
+                    continuations.runtime_generation IS NULL
+                    OR continuations.runtime_generation <> ?
+                    OR EXISTS (
+                      SELECT 1 FROM matrix_delivery_outbox AS approval_final
+                      WHERE approval_final.principal_id = events.principal_id
+                        AND approval_final.delivery_id = events.event_id
+                        AND approval_final.stage = 'final'
+                    )
+                  )
+                )
+              )
+            )
+          )
+    """
+    continuation_params = (runtime_generation, runtime_generation)
     return transaction.fetchall(
         f"""
-        SELECT {_JOURNAL_COLUMNS} FROM journal_events
-        WHERE principal_id = ? AND state = 'pending'{kind_clause}{cursor_clause}
-        ORDER BY receipt_order
+        SELECT {_EVENT_JOURNAL_COLUMNS} FROM journal_events AS events
+        {continuation_joins}
+        WHERE events.principal_id = ? AND events.state = 'pending'
+          {continuation_clause}{kind_clause}{cursor_clause}
+        ORDER BY events.receipt_order
         LIMIT ?
         """,  # noqa: S608 - a fixed column list and fixed clauses, not input
-        (principal_id, *kind_params, *cursor_params, limit),
+        (principal_id, *continuation_params, *kind_params, *cursor_params, limit),
     )
 
 
@@ -1074,10 +1518,12 @@ def pending_thread_events_after(
     derived from content for every kind alike -- ``inbound_event`` calls
     ``thread_root`` regardless of kind -- so a reaction, an approval, or an
     ``m.room.encrypted`` event this bot could not decrypt can all sit pending
-    in a thread under the requester's own sender. None of them will produce a
-    response, so counting one as a newer unanswered turn drops the older
-    message and answers neither. Only a message or a media event can become
-    the turn that legitimately supersedes another.
+    in a thread under the requester's own sender. An interactive reaction can
+    produce a response, but only as a continuation of its selected question;
+    it is not a newer conversation turn that supersedes older ingress.
+    Counting one as such can drop the older message without replacing it.
+    Only a message or a media event can become the turn that legitimately
+    supersedes another.
 
     Strictly newer. Two events stamped in the same millisecond are not ordered
     by their timestamps, and treating either as proof that the other is stale
@@ -1153,9 +1599,10 @@ def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
     that this event already produced its one turn, and it has to outlive the
     work it authorized.
 
-    Settled is the whole fact. Why the work ended -- answered, or deliberately
-    not answered -- was recorded for a while and never once read back, and a
-    durable column nothing consults is a claim nothing keeps honest.
+    Settled is the whole source fact. Why ordinary work ended -- answered, or
+    deliberately not answered -- was recorded for a while and never once read
+    back. An interactive prompt revision is different: its consumed-by source
+    remains on that immutable revision so projection repair cannot revive it.
     """
     transaction.execute(
         """
@@ -1164,6 +1611,10 @@ def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
         WHERE principal_id = ? AND event_id = ? AND state = 'pending'
         """,
         (SETTLED_STATE, principal_id, event_id),
+    )
+    transaction.execute(
+        "DELETE FROM interactive_selections WHERE principal_id = ? AND source_event_id = ?",
+        (principal_id, event_id),
     )
 
 
@@ -1211,8 +1662,8 @@ def claim_semantic_consumer(
     principal_id: str,
     event_id: str,
     consumer: SemanticConsumer,
-) -> SemanticConsumer:
-    """Record the sole consumer of one event, returning whoever holds it.
+) -> SemanticConsumer | None:
+    """Record the sole consumer, or retire a stale interactive reaction.
 
     First claim wins, durably. A replay after a crash therefore cannot let a
     second consumer act on the same reaction.
@@ -1222,14 +1673,22 @@ def claim_semantic_consumer(
         UPDATE journal_events
         SET semantic_consumer = COALESCE(semantic_consumer, ?)
         WHERE principal_id = ? AND event_id = ? AND state = 'pending'
-        RETURNING semantic_consumer
+        RETURNING semantic_consumer, room_id, kind, membership_epoch
         """,
         (consumer.value, principal_id, event_id),
     )
     if row is None:
         msg = f"Cannot claim a consumer for settled or missing event {event_id!r}"
         raise RuntimeError(msg)
-    return SemanticConsumer(row["semantic_consumer"])
+    claimed = SemanticConsumer(row["semantic_consumer"])
+    if (
+        claimed is SemanticConsumer.INTERACTIVE_REACTION
+        and EventKind(row["kind"]) is EventKind.REACTION
+        and int(row["membership_epoch"]) != current_membership_epoch(transaction, principal_id, row["room_id"])
+    ):
+        settle(transaction, principal_id, event_id)
+        return None
+    return claimed
 
 
 def _journal_event(row: Row) -> JournalEvent:

@@ -10,13 +10,16 @@ import mimetypes
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import nio
 
 from .attachment_ids import normalize_attachment_id
+from .background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from .constants import ATTACHMENT_IDS_KEY
 from .logging_config import get_logger
 from .matrix.media import (
@@ -47,6 +50,10 @@ _AttachmentKind = Literal["audio", "file", "image", "video"]
 _ATTACHMENT_RETENTION_DAYS = 30
 _CLEANUP_INTERVAL = timedelta(hours=1)
 _last_cleanup_time_by_storage_path: dict[Path, datetime] = {}
+_attachment_cleanup_lock = Lock()
+_attachment_cleanup_claim_tokens_by_storage_path: dict[Path, object] = {}
+_attachment_cleanup_scheduled_tokens_by_storage_path: dict[Path, object] = {}
+_ATTACHMENT_CLEANUP_TASK_OWNER = object()
 
 
 @dataclass(frozen=True)
@@ -339,6 +346,7 @@ def _collect_attachment_cleanup_state(
     *,
     cutoff: datetime,
 ) -> tuple[
+    int,
     set[Path],
     dict[Path, int],
     list[tuple[AttachmentRecord, Path]],
@@ -349,8 +357,10 @@ def _collect_attachment_cleanup_state(
     active_media_ref_counts: dict[Path, int] = {}
     expired_records: list[tuple[AttachmentRecord, Path]] = []
     stale_record_paths: list[Path] = []
+    metadata_files_scanned = 0
 
     for record_path in _attachments_dir(storage_path).glob("*.json"):
+        metadata_files_scanned += 1
         record = load_attachment(storage_path, record_path.stem)
         if record is None:
             record_mtime = _record_mtime(record_path)
@@ -367,7 +377,7 @@ def _collect_attachment_cleanup_state(
         active_media_paths.add(resolved_media_path)
         active_media_ref_counts[resolved_media_path] = active_media_ref_counts.get(resolved_media_path, 0) + 1
 
-    return active_media_paths, active_media_ref_counts, expired_records, stale_record_paths
+    return metadata_files_scanned, active_media_paths, active_media_ref_counts, expired_records, stale_record_paths
 
 
 def _remove_paths(paths: list[Path]) -> int:
@@ -375,7 +385,7 @@ def _remove_paths(paths: list[Path]) -> int:
     removed = 0
     for path in paths:
         try:
-            path.unlink(missing_ok=True)
+            path.unlink()
         except OSError:
             continue
         removed += 1
@@ -387,19 +397,17 @@ def _prune_expired_records_and_collect_removable_media_paths(
     *,
     expired_records: list[tuple[AttachmentRecord, Path]],
     active_media_ref_counts: dict[Path, int],
-) -> set[Path]:
+) -> tuple[set[Path], int]:
     """Delete expired metadata records and collect removable managed media files."""
     removable_media_paths: set[Path] = set()
-    for record, record_path in expired_records:
-        with contextlib.suppress(OSError):
-            record_path.unlink(missing_ok=True)
-
+    expired_records_deleted = _remove_paths([record_path for _record, record_path in expired_records])
+    for record, _record_path in expired_records:
         resolved_media_path = record.local_path.resolve()
         if not _is_managed_media_path(storage_path, resolved_media_path):
             continue
         if active_media_ref_counts.get(resolved_media_path, 0) == 0:
             removable_media_paths.add(resolved_media_path)
-    return removable_media_paths
+    return removable_media_paths, expired_records_deleted
 
 
 def _prune_orphan_incoming_media(
@@ -407,16 +415,18 @@ def _prune_orphan_incoming_media(
     *,
     cutoff: datetime,
     active_media_paths: set[Path],
-) -> int:
+) -> tuple[int, int]:
     """Delete old incoming-media files that are no longer referenced."""
     incoming_media_dir = _incoming_media_dir(storage_path)
     if not incoming_media_dir.is_dir():
-        return 0
+        return 0, 0
 
     removed = 0
+    incoming_media_files_scanned = 0
     for media_path in incoming_media_dir.iterdir():
         if not media_path.is_file():
             continue
+        incoming_media_files_scanned += 1
         resolved_media_path = media_path.resolve()
         if resolved_media_path in active_media_paths:
             continue
@@ -424,21 +434,22 @@ def _prune_orphan_incoming_media(
         if media_mtime is None or media_mtime >= cutoff:
             continue
         try:
-            media_path.unlink(missing_ok=True)
+            media_path.unlink()
         except OSError:
             continue
         removed += 1
-    return removed
+    return removed, incoming_media_files_scanned
 
 
 def _cleanup_attachment_storage(storage_path: Path) -> None:
     """Prune expired attachment metadata and managed media files."""
+    started = time.monotonic()
     attachments_dir = _attachments_dir(storage_path)
     if not attachments_dir.is_dir():
         return
 
     cutoff = datetime.now(UTC) - timedelta(days=_ATTACHMENT_RETENTION_DAYS)
-    active_media_paths, active_media_ref_counts, expired_records, stale_record_paths = (
+    metadata_files_scanned, active_media_paths, active_media_ref_counts, expired_records, stale_record_paths = (
         _collect_attachment_cleanup_state(
             storage_path,
             cutoff=cutoff,
@@ -446,13 +457,13 @@ def _cleanup_attachment_storage(storage_path: Path) -> None:
     )
     stale_records_removed = _remove_paths(stale_record_paths)
 
-    removable_media_paths = _prune_expired_records_and_collect_removable_media_paths(
+    removable_media_paths, expired_records_deleted = _prune_expired_records_and_collect_removable_media_paths(
         storage_path,
         expired_records=expired_records,
         active_media_ref_counts=active_media_ref_counts,
     )
     expired_media_removed = _remove_paths(list(removable_media_paths))
-    orphan_media_removed = _prune_orphan_incoming_media(
+    orphan_media_removed, incoming_media_files_scanned = _prune_orphan_incoming_media(
         storage_path,
         cutoff=cutoff,
         active_media_paths=active_media_paths,
@@ -461,24 +472,133 @@ def _cleanup_attachment_storage(storage_path: Path) -> None:
         "Attachment cleanup completed",
         stale_records_removed=stale_records_removed,
         expired_records_removed=len(expired_records),
+        expired_records_deleted=expired_records_deleted,
         expired_media_removed=expired_media_removed,
         orphan_media_removed=orphan_media_removed,
         active_media_paths=len(active_media_paths),
+        metadata_files_scanned=metadata_files_scanned,
+        incoming_media_files_scanned=incoming_media_files_scanned,
+        files_scanned=metadata_files_scanned + incoming_media_files_scanned,
+        files_deleted=(stale_records_removed + expired_records_deleted + expired_media_removed + orphan_media_removed),
+        total_cleanup_duration_ms=(time.monotonic() - started) * 1000,
     )
+
+
+def _claim_due_attachment_cleanup(storage_path: Path) -> tuple[Path, object, datetime] | None:
+    """Atomically claim one due storage path for attachment cleanup."""
+    resolved_storage_path = storage_path.resolve()
+    cleanup_started_at = datetime.now(UTC)
+    with _attachment_cleanup_lock:
+        if resolved_storage_path in _attachment_cleanup_claim_tokens_by_storage_path:
+            return None
+        last_cleanup_time = _last_cleanup_time_by_storage_path.get(resolved_storage_path)
+        if last_cleanup_time is not None and cleanup_started_at - last_cleanup_time < _CLEANUP_INTERVAL:
+            return None
+        claim_token = object()
+        _attachment_cleanup_claim_tokens_by_storage_path[resolved_storage_path] = claim_token
+    return resolved_storage_path, claim_token, cleanup_started_at
+
+
+def _release_attachment_cleanup_claim(storage_path: Path, claim_token: object) -> None:
+    """Release a cleanup claim only when it still belongs to this cleanup."""
+    with _attachment_cleanup_lock:
+        if _attachment_cleanup_claim_tokens_by_storage_path.get(storage_path) is claim_token:
+            del _attachment_cleanup_claim_tokens_by_storage_path[storage_path]
+
+
+def _claim_attachment_cleanup_schedule(storage_path: Path) -> object | None:
+    """Claim the cheap pre-worker scheduling slot for one storage path."""
+    now = datetime.now(UTC)
+    with _attachment_cleanup_lock:
+        if storage_path in _attachment_cleanup_scheduled_tokens_by_storage_path:
+            return None
+        if storage_path in _attachment_cleanup_claim_tokens_by_storage_path:
+            return None
+        last_cleanup_time = _last_cleanup_time_by_storage_path.get(storage_path)
+        if last_cleanup_time is not None and now - last_cleanup_time < _CLEANUP_INTERVAL:
+            return None
+        schedule_token = object()
+        _attachment_cleanup_scheduled_tokens_by_storage_path[storage_path] = schedule_token
+    return schedule_token
+
+
+def _release_attachment_cleanup_schedule(storage_path: Path, schedule_token: object) -> None:
+    """Release a pre-worker scheduling slot owned by this cleanup task."""
+    with _attachment_cleanup_lock:
+        if _attachment_cleanup_scheduled_tokens_by_storage_path.get(storage_path) is schedule_token:
+            del _attachment_cleanup_scheduled_tokens_by_storage_path[storage_path]
+
+
+def _claim_and_cleanup_attachment_storage(storage_path: Path) -> None:
+    """Resolve, claim, and clean one storage path in the calling worker."""
+    try:
+        cleanup_claim = _claim_due_attachment_cleanup(storage_path)
+    except Exception:
+        logger.exception("Failed to prune expired attachment storage")
+        return
+
+    if cleanup_claim is None:
+        return
+
+    resolved_storage_path, claim_token, cleanup_started_at = cleanup_claim
+    try:
+        _cleanup_attachment_storage(resolved_storage_path)
+    except Exception:
+        logger.exception("Failed to prune expired attachment storage")
+    else:
+        with _attachment_cleanup_lock:
+            if _attachment_cleanup_claim_tokens_by_storage_path.get(resolved_storage_path) is claim_token:
+                _last_cleanup_time_by_storage_path[resolved_storage_path] = cleanup_started_at
+    finally:
+        _release_attachment_cleanup_claim(resolved_storage_path, claim_token)
+
+
+async def _run_scheduled_attachment_cleanup(storage_path: Path, schedule_token: object) -> None:
+    """Run one claimed cleanup job and release its scheduling slot."""
+    try:
+        await run_blocking_until_complete(_claim_and_cleanup_attachment_storage, storage_path)
+    finally:
+        _release_attachment_cleanup_schedule(storage_path, schedule_token)
+
+
+def _finish_attachment_cleanup_task(task: asyncio.Task[object]) -> None:
+    """Log an unexpected scheduling failure after worker cleanup completes."""
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.exception("Attachment cleanup background task failed")
 
 
 def _maybe_cleanup_attachment_storage(storage_path: Path) -> None:
     """Run cleanup at most once per ``_CLEANUP_INTERVAL``."""
-    resolved_storage_path = storage_path.resolve()
-    now = datetime.now(UTC)
-    last_cleanup_time = _last_cleanup_time_by_storage_path.get(resolved_storage_path)
-    if last_cleanup_time is not None and now - last_cleanup_time < _CLEANUP_INTERVAL:
-        return
     try:
-        _cleanup_attachment_storage(resolved_storage_path)
-        _last_cleanup_time_by_storage_path[resolved_storage_path] = now
-    except Exception:
-        logger.exception("Failed to prune expired attachment storage")
+        asyncio.get_running_loop()
+    except RuntimeError:
+        _claim_and_cleanup_attachment_storage(storage_path)
+        return
+
+    scheduling_started = time.monotonic()
+    schedule_token = _claim_attachment_cleanup_schedule(storage_path)
+    if schedule_token is None:
+        return
+    cleanup_task = create_background_task(
+        _run_scheduled_attachment_cleanup(storage_path, schedule_token),
+        name="attachment_cleanup",
+        owner=_ATTACHMENT_CLEANUP_TASK_OWNER,
+        log_exceptions=False,
+    )
+    cleanup_task.add_done_callback(_finish_attachment_cleanup_task)
+    logger.debug(
+        "Attachment cleanup scheduled",
+        event_loop_scheduling_duration_ms=(time.monotonic() - scheduling_started) * 1000,
+    )
+
+
+async def wait_for_attachment_cleanup_tasks() -> bool:
+    """Drain attachment cleanup tasks during orderly process shutdown."""
+    return await wait_for_background_tasks(owner=_ATTACHMENT_CLEANUP_TASK_OWNER)
 
 
 def register_local_attachment(
@@ -590,19 +710,21 @@ async def _register_media_attachment(
     )
     if local_media_path is None:
         return None
-    return await asyncio.to_thread(
-        register_local_attachment,
-        storage_path,
-        local_media_path,
-        kind=kind,
-        attachment_id=_attachment_id_for_event(event_id),
-        filename=filename,
-        mime_type=mime_type,
-        room_id=room_id,
-        thread_id=thread_id,
-        source_event_id=event_id,
-        sender=sender,
-        event_timestamp=event_timestamp,
+    return await run_blocking_until_complete(
+        partial(
+            register_local_attachment,
+            storage_path,
+            local_media_path,
+            kind=kind,
+            attachment_id=_attachment_id_for_event(event_id),
+            filename=filename,
+            mime_type=mime_type,
+            room_id=room_id,
+            thread_id=thread_id,
+            source_event_id=event_id,
+            sender=sender,
+            event_timestamp=event_timestamp,
+        ),
     )
 
 

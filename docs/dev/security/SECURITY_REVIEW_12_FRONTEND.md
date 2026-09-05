@@ -2,6 +2,7 @@
 
 > **Audit note (2026-03-18):** CSP/headers are good, but the `NEXT_PUBLIC_DEV_AUTH` bypass still exists.
 > Re-authentication for sensitive operations is missing.
+> This is a historical repository review, not a deployment attestation.
 
 **Review Date:** 2025-09-11
 **Updated:** 2025-09-17
@@ -18,7 +19,7 @@ This security review examined the MindRoom SaaS Platform frontend for critical s
 ### Security Implementation Summary
 - ✅ **Content Security Policy (CSP) headers implemented** - Strong XSS protection
 - ✅ **Comprehensive security headers configured** - Multiple attack vectors secured
-- ✅ **Production logging sanitization implemented** - Zero sensitive data exposure
+- ✅ **Production frontend logger suppression implemented** - Backend and external-service exposure are outside this frontend-only claim.
 - ✅ **Secure cookie handling via Supabase SDK** - Session security maintained
 - ✅ **Excellent XSS protection practices in React components**
 - ✅ **Minimal external dependencies and secure routing**

@@ -252,6 +252,6 @@ def test_runtime_dependency_accepts_only_the_durable_nio_minor() -> None:
 
     assert requirement.name == "mindroom-nio"
     assert requirement.extras == {"e2e"}
-    assert Version("0.38.99") not in requirement.specifier
-    assert Version("0.39.0") in requirement.specifier
-    assert Version("0.40.0") not in requirement.specifier
+    assert Version("0.39.99") not in requirement.specifier
+    assert Version("0.40.0") in requirement.specifier
+    assert Version("0.41.0") not in requirement.specifier

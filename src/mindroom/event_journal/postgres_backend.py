@@ -14,8 +14,10 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
+from .migrations import finish_matrix_delivery_migration, prepare_matrix_delivery_migration
 from .offloading import ThreadOffload, settled
 from .schema import POSTGRES_DIALECT, render, schema_statements
+from .schema_migrations import pre_schema_migration_statements
 
 # An arbitrary constant that only this schema setup uses, so the lock it
 # takes cannot collide with an application advisory lock.
@@ -94,7 +96,11 @@ class PostgresBackend:
         """
         backend = cls(database_url=database_url)
         backend._writer = backend._connect()
-        backend._create_schema()
+        try:
+            backend._create_schema()
+        except BaseException:
+            backend._writer.close()
+            raise
         backend._pool = [backend._connect() for _ in range(_POOL_SIZE)]
         backend._recovery_reader = backend._connect()
         return backend
@@ -122,8 +128,46 @@ class PostgresBackend:
             # advisory lock costs nothing at steady state, because the
             # statements are all no-ops once the schema exists.
             cursor.execute(cast("LiteralString", f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK_KEY})"))
+            cursor.execute(
+                """
+                SELECT table_name, column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name IN (
+                      'approval_continuation_calls',
+                      'interactive_questions',
+                      'matrix_delivery_outbox',
+                      'room_history_recovery'
+                  )
+                """,
+            )
+            existing_columns = cursor.fetchall()
+            approval_continuation_call_columns = frozenset(
+                str(row["column_name"])
+                for row in existing_columns
+                if row["table_name"] == "approval_continuation_calls"
+            )
+            interactive_question_columns = frozenset(
+                str(row["column_name"]) for row in existing_columns if row["table_name"] == "interactive_questions"
+            )
+            matrix_delivery_outbox_columns = frozenset(
+                str(row["column_name"]) for row in existing_columns if row["table_name"] == "matrix_delivery_outbox"
+            )
+            room_history_recovery_columns = frozenset(
+                str(row["column_name"]) for row in existing_columns if row["table_name"] == "room_history_recovery"
+            )
+            for statement in pre_schema_migration_statements(
+                approval_continuation_call_columns=approval_continuation_call_columns,
+                interactive_question_columns=interactive_question_columns,
+                matrix_delivery_outbox_columns=matrix_delivery_outbox_columns,
+                room_history_recovery_columns=room_history_recovery_columns,
+            ):
+                cursor.execute(cast("LiteralString", statement))
+            transaction = _PostgresTransaction(cursor)
+            migration = prepare_matrix_delivery_migration(transaction, postgres=True)
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
+            finish_matrix_delivery_migration(transaction, migration=migration)
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:

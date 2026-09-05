@@ -21,6 +21,7 @@ from mindroom.tool_system.dynamic_toolkits import (
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.tool_system.dynamic_toolkits import DeferredToolCatalogEntry
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
@@ -39,12 +40,14 @@ class DynamicToolsToolkit(Toolkit):
         agent_name: str,
         config: Config,
         session_id: str | None,
+        worker_target: ResolvedWorkerTarget | None = None,
         stop_after_tool_call: bool = False,
         hidden_tool_names: frozenset[str] = frozenset(),
     ) -> None:
         self._agent_name = agent_name
         self._config = config
         self._session_id = session_id
+        self._worker_target = worker_target
         self._hidden_tool_names = hidden_tool_names
         super().__init__(
             name="dynamic_tools",
@@ -111,7 +114,11 @@ class DynamicToolsToolkit(Toolkit):
                 messages=tuple(unavailable_messages),
             )
 
-        collision_messages = manager.function_name_collision_messages_for_loaded_tools(self._agent_name, loaded_tools)
+        collision_messages = manager.function_name_collision_messages_for_loaded_tools(
+            self._agent_name,
+            loaded_tools,
+            worker_target=self._worker_target,
+        )
         if collision_messages:
             return LoadToolValidationFailure(
                 status="function_name_collision",

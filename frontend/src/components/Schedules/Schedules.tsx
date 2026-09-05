@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CalendarClock,
+  BellOff,
   Clock3,
   Loader2,
   MapPin,
@@ -24,6 +25,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -56,6 +58,7 @@ interface ScheduleDraft {
   schedule_type: ScheduleType;
   execute_at_input: string;
   cron_expression: string;
+  silent: boolean;
 }
 
 type DateParts = {
@@ -230,6 +233,7 @@ function toDraft(task: ScheduleTask, timezone: string): ScheduleDraft {
     schedule_type: task.schedule_type,
     execute_at_input: toTimezoneDateTimeInput(task.execute_at, timezone),
     cron_expression: task.cron_expression ?? "",
+    silent: task.silent,
   };
 }
 
@@ -357,6 +361,7 @@ export function Schedules() {
       message,
       description: description || message,
       schedule_type: draft.schedule_type,
+      silent: draft.silent,
     };
 
     if (draft.schedule_type === "once") {
@@ -450,6 +455,11 @@ export function Schedules() {
         content: nextRunLabel,
         variant: "secondary",
         icon: Clock3,
+      },
+      {
+        content: item.silent ? "Silent" : "Visible",
+        variant: item.silent ? "secondary" : "outline",
+        icon: item.silent ? BellOff : MessageSquare,
       },
     ];
 
@@ -639,6 +649,33 @@ export function Schedules() {
                   value={draft.schedule_type === "once" ? "One-time" : "Cron"}
                   readOnly
                 />
+              </FieldGroup>
+
+              <FieldGroup
+                label="Delivery Mode"
+                helperText="Silent schedules hide routine triggers and no-report results."
+              >
+                <div className="flex items-start gap-3 rounded-md border p-3">
+                  <Checkbox
+                    id="schedule-silent"
+                    checked={draft.silent}
+                    onCheckedChange={(checked) =>
+                      handleDraftChange("silent", checked === true)
+                    }
+                  />
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="schedule-silent"
+                      className="text-sm font-medium cursor-pointer"
+                    >
+                      Silent delivery
+                    </label>
+                    <p className="text-xs text-muted-foreground">
+                      Findings, failures, and independently sent tool messages
+                      remain visible.
+                    </p>
+                  </div>
+                </div>
               </FieldGroup>
 
               {draft.schedule_type === "once" ? (

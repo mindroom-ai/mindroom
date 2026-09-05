@@ -25,7 +25,7 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -356,7 +356,7 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
             scope,
             HistoryScopeState(force_compact_before_next_run=True, last_summary_model="summary-model"),
         )
-        first_storage.upsert_session(session)
+        seed_session(first_storage, session)
 
         persisted = second_storage.get_session("session-1", SessionType.TEAM)
 

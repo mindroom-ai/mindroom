@@ -20,7 +20,7 @@ Use these tools when you need local execution, coding-oriented file access, ligh
 - [`docker`] - Local Docker container, image, volume, and network management.
 - [`calculator`] - Exact arithmetic and small numeric helper functions.
 - [`reasoning`] - Internal `think` and `analyze` scratchpad tools for structured reasoning.
-- [`file_generation`] - JSON, CSV, PDF, and text file export helpers.
+- [`file_generation`] - JSON, CSV, PDF, DOCX, HTML, and text file export helpers.
 - [`visualization`] - Matplotlib-backed chart generation.
 - [`sleep`] - Intentional delays and pauses.
 
@@ -50,7 +50,7 @@ No extra configuration is required beyond that workspace root.
 `MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES` overrides the default 64 MiB per-output write cap for explicit and automatic saves.
 
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
-That matters most here for `docker`, `file_generation`, and `visualization`, which depend on Docker access, `reportlab`, and `matplotlib`.
+That matters most here for `docker`, `file_generation`, and `visualization`, which depend on Docker access, `reportlab`, `python-docx`, and `matplotlib`.
 
 ```yaml
 defaults:
@@ -87,10 +87,11 @@ agents:
 
 ### What It Does
 
-`file` exposes `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `read_file_chunk()`, and `replace_file_chunk()`.
-The underlying Agno toolkit resolves paths against `base_dir` and rejects paths that escape that root.
+`file` exposes `save_file()`, `read_file()`, `delete_file()`, `list_files()`, `search_files()`, `search_content()`, `read_file_chunk()`, and `replace_file_chunk()`.
+Paths resolve against `base_dir` and reject escapes by default; set `restrict_to_base_dir: false` to allow outside paths.
 `read_file()` enforces `max_file_length` and `max_file_lines`, and it tells the caller to use chunk reads when a file is too large.
 `search_files()` uses glob patterns relative to `base_dir` rather than full-text search.
+`search_content()` searches text-file contents and skips paths matching `exclude_patterns`.
 MindRoom marks `file` as worker-routed by default, so it usually executes in the sandboxed worker runtime unless you override `worker_tools`.
 
 ### Configuration
@@ -98,6 +99,7 @@ MindRoom marks `file` as worker-routed by default, so it usually executes in the
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working root when an agent workspace exists, otherwise the current directory. This field is not normally authored inline in `config.yaml`. |
+| `restrict_to_base_dir` | `boolean` | `no` | `true` | Keep file access inside `base_dir`; set to `false` to allow outside paths. |
 | `enable_save_file` | `boolean` | `no` | `true` | Enable `save_file()`. |
 | `enable_read_file` | `boolean` | `no` | `true` | Enable `read_file()`. |
 | `enable_delete_file` | `boolean` | `no` | `false` | Enable `delete_file()`. |
@@ -109,6 +111,7 @@ MindRoom marks `file` as worker-routed by default, so it usually executes in the
 | `max_file_length` | `number` | `no` | `10000000` | Maximum character count for `read_file()`. |
 | `max_file_lines` | `number` | `no` | `100000` | Maximum line count for `read_file()`. |
 | `line_separator` | `text` | `no` | `"\n"` | Separator used by the chunk helpers. |
+| `exclude_patterns` | `string[]` | `no` | `null` | Fnmatch-style path-component patterns excluded from content searches; `null` uses Agno defaults and `[]` disables exclusions. |
 | `all` | `boolean` | `no` | `false` | Enable every upstream `file` function at once. |
 
 ### Example
@@ -128,6 +131,7 @@ read_file_chunk("src/mindroom/tools/file.py", 0, 80)
 replace_file_chunk("docs/notes.md", 10, 12, "Updated text")
 list_files(directory="src")
 search_files("**/*.py")
+search_content("default_execution_target", directory="src/mindroom/tools")
 save_file("temporary notes\n", "scratch/notes.txt")
 ```
 
@@ -135,7 +139,7 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 - `file` is the compatibility-friendly general file toolkit, but `coding` is a better default for code-editing agents.
 - `delete_file()` is disabled by default, so destructive access is opt-in.
-- `search_files()` matches filesystem globs, not content inside files.
+- `search_files()` matches filesystem globs; use `search_content()` to search inside text files.
 
 ## [`shell`]
 
@@ -270,7 +274,7 @@ list_files()
 If exact matching fails, `edit_file()` falls back to whitespace-and-Unicode-normalized fuzzy matching.
 `grep()` prefers `rg` when available and falls back to Python regex search otherwise.
 `find_files()` filters hidden and gitignored paths, and `ls()` keeps dotfiles visible while adding `/` markers to directories.
-All path resolution stays inside `base_dir`.
+Path resolution stays inside `base_dir` by default; set `restrict_to_base_dir: false` to allow outside paths.
 MindRoom marks `coding` as worker-routed by default.
 
 ### Configuration
@@ -278,6 +282,7 @@ MindRoom marks `coding` as worker-routed by default.
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `base_dir` | `text` | `no` | `null` | Runtime-managed working directory for code operations when an agent workspace exists. This field is not normally authored inline in `config.yaml`. |
+| `restrict_to_base_dir` | `boolean` | `no` | `true` | Keep code operations inside `base_dir`; set to `false` to allow outside paths. |
 
 ### Example
 
@@ -437,15 +442,17 @@ analyze(
 
 ## [`file_generation`]
 
-`file_generation` creates export artifacts as JSON, CSV, PDF, or plain text and can optionally save them to disk.
+`file_generation` creates export artifacts as JSON, CSV, PDF, DOCX, HTML, or plain text and can optionally save them to disk.
 
 ### What It Does
 
-`file_generation` exposes `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, and `generate_text_file()`.
+`file_generation` exposes `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, `generate_docx_file()`, `generate_html_file()`, and `generate_text_file()`.
 Each function returns a `ToolResult` with a generated file artifact attached.
 If `output_directory` is set, the generated file is also written to disk and the result message includes that file path.
-If `output_directory` is unset, the file still exists in the tool result payload but is not persisted to disk by the toolkit itself.
+If `output_directory` is unset and `save_files` is `false`, the file exists only in the tool result payload.
+If `save_files` is `true` without `output_directory`, the toolkit writes generated files to its current working directory.
 PDF generation is automatically disabled when `reportlab` is unavailable, even if `enable_pdf_generation` is left on.
+DOCX generation is automatically disabled when `python-docx` is unavailable, even if `enable_docx_generation` is left on.
 `file_generation` defaults to primary execution.
 
 ### Configuration
@@ -456,7 +463,10 @@ PDF generation is automatically disabled when `reportlab` is unavailable, even i
 | `enable_json_generation` | `boolean` | `no` | `true` | Enable `generate_json_file()`. |
 | `enable_csv_generation` | `boolean` | `no` | `true` | Enable `generate_csv_file()`. |
 | `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `generate_pdf_file()` when `reportlab` is available. |
+| `enable_docx_generation` | `boolean` | `no` | `true` | Enable `generate_docx_file()` when `python-docx` is available. |
 | `enable_txt_generation` | `boolean` | `no` | `true` | Enable `generate_text_file()`. |
+| `enable_html_generation` | `boolean` | `no` | `true` | Enable `generate_html_file()`. |
+| `save_files` | `boolean` | `no` | `false` | Save generated files to disk; when `output_directory` is unset, use the current working directory. |
 | `all` | `boolean` | `no` | `false` | Enable all file-generation functions. |
 
 ### Example
@@ -474,6 +484,8 @@ agents:
 generate_json_file({"status": "ok", "items": 3}, filename="summary.json")
 generate_csv_file([{"name": "alpha", "value": 1}, {"name": "beta", "value": 2}], filename="data.csv")
 generate_pdf_file("Quarterly summary", filename="report.pdf", title="Q1 Report")
+generate_docx_file("Quarterly summary", filename="report.docx", title="Q1 Report")
+generate_html_file("<h1>Quarterly summary</h1>", filename="report.html")
 generate_text_file("Plain text export", filename="notes.txt")
 ```
 
@@ -481,7 +493,7 @@ generate_text_file("Plain text export", filename="notes.txt")
 
 - Filenames are auto-generated when omitted, and missing file extensions are appended automatically for the matching export type.
 - `generate_json_file()` accepts dicts, lists, or strings, and plain strings are wrapped into JSON when they are not already valid JSON.
-- Use a real `output_directory` if you want the artifact to remain on disk for later shell or file-tool access.
+- Set `output_directory` to persist artifacts at a predictable location for later shell or file-tool access.
 
 ## [`visualization`]
 

@@ -26,8 +26,8 @@ https://github.com/user-attachments/assets/1f121c89-5418-4f42-bdfe-fb9de0fecd03
 - **Persistent memory** — agents remember people, preferences, and context across conversations and platforms (Mem0 + ChromaDB, stored on your disk).
 - **100+ tool integrations** — Gmail, GitHub, Google Docs, Google Drive, Home Assistant, shell, Python, web search, and more, plus native Matrix tools and a per-thread `todo` planner, with sandboxed execution and per-tool approval rules.
 - **Knowledge bases (RAG)** — point an agent at a folder of files; MindRoom indexes it and can watch it for changes.
-- **Scheduling & automation** — cron or natural-language scheduled tasks (`!schedule`), background work with human escalation.
-- **Model routing** — a different model per agent, room, or thread (`!model`); route sensitive rooms to local Ollama and everything else to a cloud model.
+- **Scheduling & automation** — cron or natural-language scheduled tasks (`!schedule`), including silent checks that post only when they find something, plus [supervised background Python watchers](docs/tools/background-scripts.md) that can call governed agent tools and wake the agent only when something changes.
+- **Model routing** — a different model per agent, room, or thread (`!model` and `!room_model`); route sensitive rooms to local Ollama and everything else to a cloud model.
 - **Voice** — transcription of Matrix voice messages, and text-to-speech tools via OpenAI, Groq, ElevenLabs, and Cartesia.
 - **Streaming responses** — agents type into the room with progressive edits, visible tool traces, and cancellation.
 - **Plugins & hooks** — drop-in [plugins](docs/plugins.md) add custom tools, skills, and OAuth providers, and a typed [event-hook system](docs/hooks.md) (per-hook timeouts, fault isolation) lets them observe and transform messages; reload plugins at runtime with `!reload-plugins`.
@@ -190,6 +190,7 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!config <operation>` - Manage configuration
 - `!desktop [setup|status|confirm|rotate|disconnect]` - Manage your Desktop target
 - `!model [name|list|reset]` - Show or switch the model used in the current thread
+- `!room_model [name|list|reset]` - Show the room model default or switch it (set/reset require a room admin)
 - `!thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room (room admin only)
 - `!encrypt [confirm]` - Enable end-to-end encryption for this room (irreversible, room admin only)
 - `!e2ee` - Show encryption diagnostics for this room
@@ -211,7 +212,7 @@ agents:
     model: default
     rooms: [lobby]
     tools: [matrix_message]
-    accept_invites: true  # Optional: accept authorized ad-hoc room invites
+    accept_invites: true  # Accept all, none, or matching inviter ID patterns
     knowledge_bases: [engineering_docs]
 
 models:
@@ -234,9 +235,12 @@ mindroom_user:
   username: mindroom_user  # Immutable once the account is created on first run
   display_name: MindRoomUser
 
+administrators: ["@alice:example.com"]
+room_defaults:
+  invite_users: ["@alice:example.com"]
+
 authorization:
-  global_users: ["@alice:example.com"]
-  default_room_access: false
+  config_command_enabled: false
 ```
 
 Environment variables go in `.env` (or `~/.mindroom/.env` for the hosted path):
@@ -250,7 +254,7 @@ ANTHROPIC_API_KEY=your-key-here
 # MINDROOM_CONFIG_PATH=/path/to/config.yaml
 ```
 
-Teams, cultures, per-room models, context compaction, history controls, and memory backends are covered in the [configuration docs](docs/configuration/index.md) and at [docs.mindroom.chat](https://docs.mindroom.chat).
+Teams, per-room models, context compaction, history controls, and memory backends are covered in the [configuration docs](docs/configuration/index.md) and at [docs.mindroom.chat](https://docs.mindroom.chat).
 
 ## Deployment
 

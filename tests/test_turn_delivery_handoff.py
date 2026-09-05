@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -36,21 +36,22 @@ from mindroom.event_journal import (
 )
 from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.journal_ingress import inbound_event, projected_event
+from mindroom.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
 from mindroom.message_target import MessageTarget
 from mindroom.pending_event_worker import PendingEventWorker
-from mindroom.response_delivery import ResponseDelivery, TurnHandoff
 from mindroom.turn_record import canonicalize_turn_record
-from tests.conftest import CrashError, DiesAfterNextWriteCommit
+from tests.conftest import CrashError, DiesAfterNextWriteCommit, ignore_delivered_projection
 from tests.test_live_message_coalescing import _make_bot
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.event_journal import JournalEvent, OutboxDelivery, PrincipalStore
-    from mindroom.event_journal.views import OutboxView
-    from mindroom.journal_dispatch import _MessageCallback
+    from mindroom.event_journal import JournalEvent, MatrixDelivery, PrincipalStore
+    from mindroom.event_journal.views import MatrixDeliveryView
+    from mindroom.journal_dispatch import _MessageCallback, _RedactionCallback
 
 pytestmark = pytest.mark.asyncio
 
@@ -98,7 +99,10 @@ async def admit_redaction(store: PrincipalStore, event_id: str, *, redacts: str)
         },
     )
     assert isinstance(parsed, nio.Event)
-    await store.admit(inbound_event(ROOM, parsed, EventKind.REDACTION, EventClass.ACTIONABLE), None)
+    await store.admit(
+        inbound_event(ROOM, parsed, EventKind.REDACTION, EventClass.ACTIONABLE),
+        projected_event(ROOM, parsed, EventKind.REDACTION, self_sender=BOT),
+    )
 
 
 def journal(bot: AgentBot) -> PrincipalStore:
@@ -130,7 +134,7 @@ async def deliver_answer(
     body: str = "the answer",
     stage: DeliveryStage = DeliveryStage.FINAL,
     sends: list[str] | None = None,
-    outbox: OutboxView | None = None,
+    outbox: MatrixDeliveryView | None = None,
 ) -> str | None:
     """Run one delivery through the production outbox path and its handoff.
 
@@ -138,18 +142,19 @@ async def deliver_answer(
     one the gateway wires rather than one this test invented.
     """
 
-    async def send(claimed: OutboxDelivery) -> str:
+    async def send(claimed: MatrixDelivery) -> str:
         if sends is not None:
             sends.append(claimed.transaction_id)
         return f"$sent-{claimed.transaction_id}"
 
-    delivery = ResponseDelivery(
+    delivery = MatrixDeliveryWorker(
         store=outbox if outbox is not None else bot._delivery_gateway.deps.outbox,
         send=send,
+        observe_delivered=ignore_delivered_projection,
         handoff=bot._delivery_gateway.deps.turn_handoff,
     )
     return await delivery.deliver(
-        turn_id=turn_id,
+        delivery_id=turn_id,
         stage=stage,
         room_id=ROOM,
         thread_id=None,
@@ -161,6 +166,7 @@ def _dispatcher(
     bot: AgentBot,
     on_message: _MessageCallback,
     *,
+    on_redaction: _RedactionCallback | None = None,
     owner_is_live: bool = False,
 ) -> JournalDispatcher:
     """Return a dispatcher over this bot's journal with one watched callback.
@@ -185,8 +191,9 @@ def _dispatcher(
             on_reaction=cast("Any", unused),
             on_approval=cast("Any", unused),
             on_room_lifecycle=cast("Any", unused),
-            on_redaction=cast("Any", unused),
+            on_redaction=on_redaction if on_redaction is not None else cast("Any", unused),
             on_decryption_failure=cast("Any", unused),
+            on_approval_continuation=AsyncMock(return_value=None),
             source_has_live_owner=lambda _event_id: owner_is_live,
             turn_has_live_claim=lambda _event_id: False,
         ),
@@ -247,17 +254,18 @@ class TestTheHandoffIsTheDurableEnqueue:
         await adopt(bot, ["$cause"])
         pending_at_send: list[list[str]] = []
 
-        async def send(claimed: OutboxDelivery) -> str:
+        async def send(claimed: MatrixDelivery) -> str:
             pending_at_send.append(await pending_ids(bot))
             return f"$sent-{claimed.transaction_id}"
 
-        delivery = ResponseDelivery(
+        delivery = MatrixDeliveryWorker(
             store=bot._delivery_gateway.deps.outbox,
             send=send,
+            observe_delivered=ignore_delivered_projection,
             handoff=bot._delivery_gateway.deps.turn_handoff,
         )
         await delivery.deliver(
-            turn_id="$cause",
+            delivery_id="$cause",
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
@@ -371,18 +379,19 @@ class TestWhatARestartOwesAfterTheHandoff:
         await adopt(bot, ["$cause"])
         outbox = bot._delivery_gateway.deps.outbox
 
-        async def crash(_claimed: OutboxDelivery) -> str:
+        async def crash(_claimed: MatrixDelivery) -> str:
             msg = "crashed after the claim committed"
             raise RuntimeError(msg)
 
-        delivery = ResponseDelivery(
+        delivery = MatrixDeliveryWorker(
             store=outbox,
             send=crash,
+            observe_delivered=ignore_delivered_projection,
             handoff=bot._delivery_gateway.deps.turn_handoff,
         )
         with pytest.raises(RuntimeError, match="crashed after the claim committed"):
             await delivery.deliver(
-                turn_id="$cause",
+                delivery_id="$cause",
                 stage=DeliveryStage.FINAL,
                 room_id=ROOM,
                 thread_id=None,
@@ -392,11 +401,17 @@ class TestWhatARestartOwesAfterTheHandoff:
         assert await self._replayed_sources(bot) == []
         sends: list[str] = []
 
-        async def send(claimed: OutboxDelivery) -> str:
+        async def send(claimed: MatrixDelivery) -> str:
             sends.append(str(claimed.payload["body"]))
             return "$sent"
 
-        assert (await ResponseDelivery(store=outbox, send=send).recover()).recovered == 1
+        assert (
+            await MatrixDeliveryWorker(
+                store=outbox,
+                send=send,
+                observe_delivered=ignore_delivered_projection,
+            ).recover()
+        ).recovered == 1
         assert sends == ["the answer"]
 
     async def test_a_replayed_turn_deduplicates_onto_the_answer_it_already_wrote(
@@ -421,7 +436,10 @@ class TestWhatARestartOwesAfterTheHandoff:
 
         assert first == second
         assert len(set(transactions)) == 1
-        row = await bot._delivery_gateway.deps.outbox.load_delivery(turn_id="$cause", stage=DeliveryStage.FINAL)
+        row = await bot._delivery_gateway.deps.outbox.load_matrix_delivery(
+            delivery_id="$cause",
+            stage=DeliveryStage.FINAL,
+        )
         assert row is not None
         assert row.payload["body"] == "first answer"
 
@@ -565,11 +583,15 @@ class TestTheHandoffIsOneCommit:
             await run_turn(cast("Any", None))
 
         # The restart: nothing in memory survives, and both recoveries run.
-        async def send(claimed: OutboxDelivery) -> str:
+        async def send(claimed: MatrixDelivery) -> str:
             sends.append(claimed.transaction_id)
             return f"$sent-{claimed.transaction_id}"
 
-        await ResponseDelivery(store=bot._delivery_gateway.deps.outbox, send=send).recover()
+        await MatrixDeliveryWorker(
+            store=bot._delivery_gateway.deps.outbox,
+            send=send,
+            observe_delivered=ignore_delivered_projection,
+        ).recover()
         await PendingEventWorker(store=journal(bot), handle=run_turn).drain_once()
 
         assert model_runs == 1, "the journal replayed a turn the outbox already owned"
@@ -591,18 +613,19 @@ class TestTheHandoffIsOneCommit:
         handoff = bot._delivery_gateway.deps.turn_handoff
         commits_when_released: list[int] = []
 
-        async def send(claimed: OutboxDelivery) -> str:
+        async def send(claimed: MatrixDelivery) -> str:
             return f"$sent-{claimed.transaction_id}"
 
-        await ResponseDelivery(
+        await MatrixDeliveryWorker(
             store=EventJournalStore(backend=cast("Any", backend)).principal(bot._journal_principal_id),
             send=send,
+            observe_delivered=ignore_delivered_projection,
             handoff=TurnHandoff(
                 sources_for_turn=handoff.sources_for_turn,
                 released=lambda event_ids: commits_when_released.append(backend.commits) or handoff.released(event_ids),
             ),
         ).deliver(
-            turn_id="$cause",
+            delivery_id="$cause",
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
@@ -623,9 +646,12 @@ class TestTheGatewayWiresTheHandoff:
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
         await adopt(bot, ["$cause"])
-        delivered = MagicMock(event_id="$sent", content_sent={"msgtype": "m.text", "body": "answer"})
+        delivered = DeliveredMatrixEvent(
+            event_id="$sent",
+            content_sent={"msgtype": "m.text", "body": "answer"},
+        )
 
-        with patch("mindroom.delivery_gateway.send_message_result", AsyncMock(return_value=delivered)):
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
             sent = await bot._delivery_gateway.send_text(
                 SendTextRequest(
                     target=MessageTarget.resolve(ROOM, None, "$cause"),
@@ -636,6 +662,49 @@ class TestTheGatewayWiresTheHandoff:
 
         assert sent == "$sent"
         assert await pending_ids(bot) == []
+
+
+class TestRedactedPendingTurnSources:
+    """Projection tombstones retire pending turn ingress before replay can reach it."""
+
+    @pytest.mark.parametrize("source_first", [True, False], ids=["source-first", "redaction-first"])
+    async def test_only_redaction_cleanup_runs_for_a_tombstoned_source(
+        self,
+        tmp_path: Path,
+        *,
+        source_first: bool,
+    ) -> None:
+        """Both arrival orders retire message ingress while preserving cleanup."""
+        bot = _make_bot(tmp_path)
+        on_message = AsyncMock()
+        on_redaction = AsyncMock()
+        dispatcher = _dispatcher(bot, on_message, on_redaction=on_redaction)
+        source = text_event("$source")
+        if not source_first:
+            await admit_redaction(journal(bot), "$redaction", redacts="$source")
+        await dispatcher.admit_out_of_band(
+            nio.MatrixRoom(ROOM, BOT),
+            source,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+        )
+        if source_first:
+            await admit_redaction(journal(bot), "$redaction", redacts="$source")
+
+        assert await pending_ids(bot) == ["$redaction"]
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        on_redaction.assert_awaited_once()
+        assert await pending_ids(bot) == []
+        assert dispatcher._live_events == {}
+        assert (
+            await bot._delivery_gateway.deps.outbox.load_matrix_delivery(
+                delivery_id="$source",
+                stage=DeliveryStage.FINAL,
+            )
+            is None
+        )
 
 
 class TestAFenceRetiresWhatItMakesUnanswerable:
@@ -674,7 +743,7 @@ class TestAFenceRetiresWhatItMakesUnanswerable:
         bot = _make_bot(tmp_path)
         await admit(journal(bot), text_event("$cause"))
         await admit_redaction(journal(bot), "$redaction", redacts="$cause")
-        assert sorted(await pending_ids(bot)) == ["$cause", "$redaction"]
+        assert await pending_ids(bot) == ["$redaction"]
 
         await journal(bot).fence_departure(ROOM, source=DepartureSource.LOCAL)
 
@@ -715,18 +784,18 @@ class _RefusesTheFirstAttempts:
         _room_id: str,
         content: dict[str, Any],
         **_kwargs: object,
-    ) -> MagicMock | None:
+    ) -> DeliveredMatrixEvent | MatrixDeliveryFailure:
         self.attempts += 1
         if self.attempts <= self.refusals:
-            return None
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "test refusal")
         event_id = f"$visible{len(self.delivered)}"
         self.delivered.append(event_id)
-        return MagicMock(event_id=event_id, content_sent=content)
+        return DeliveredMatrixEvent(event_id, content)
 
 
-async def final_row(bot: AgentBot, turn_id: str) -> OutboxDelivery | None:
+async def final_row(bot: AgentBot, turn_id: str) -> MatrixDelivery | None:
     """Return the FINAL outbox row for one turn, without claiming it."""
-    return await bot._delivery_gateway.deps.outbox.load_delivery(turn_id=turn_id, stage=DeliveryStage.FINAL)
+    return await bot._delivery_gateway.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.FINAL)
 
 
 class TestAFailedFinalEditLeavesOneOwner:
@@ -752,11 +821,16 @@ class TestAFailedFinalEditLeavesOneOwner:
     ) -> None:
         """The notice stays the outbox's to deliver, and recovery delivers it once."""
         bot = _make_bot(tmp_path)
+        # Production records the authenticated device when the bot starts.
+        # This test constructs the runtime without login, but its recovery
+        # premise is specifically that the same device can safely reuse the
+        # frozen transaction ID.
+        bot._sending_device_id = bot.client.device_id
         await admit(journal(bot), text_event("$cause"))
         await adopt(bot, ["$cause"])
         homeserver = _RefusesTheFirstAttempts()
 
-        with patch("mindroom.delivery_gateway.send_message_result", homeserver):
+        with patch("mindroom.delivery_gateway.send_message_outcome", homeserver):
             resolution = await bot._turn_controller._finalize_dispatch_failure(
                 target=MessageTarget.resolve(ROOM, None, "$cause"),
                 error=RuntimeError("boom"),
@@ -788,7 +862,7 @@ class TestAFailedFinalEditLeavesOneOwner:
         await admit(journal(bot), text_event("$cause"))
         homeserver = _RefusesTheFirstAttempts(refusals=0)
 
-        with patch("mindroom.delivery_gateway.send_message_result", homeserver):
+        with patch("mindroom.delivery_gateway.send_message_outcome", homeserver):
             resolution = await bot._turn_controller._finalize_dispatch_failure(
                 target=MessageTarget.resolve(ROOM, None, "$cause"),
                 error=RuntimeError("boom"),

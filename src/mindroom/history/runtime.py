@@ -18,7 +18,7 @@ from mindroom.agent_storage import (
     get_agent_session,
     get_team_session,
 )
-from mindroom.constants import prompt_roles_for_history_storage
+from mindroom.constants import prompt_roles_for_history_storage, resolve_session_state_root
 from mindroom.history import agno_team_patch
 from mindroom.history.compaction import (
     compact_scope_history,
@@ -81,8 +81,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Applied at history-runtime import so every entry point that replays persisted
-# history gets the Team roleful-input and inline-media dedupe patch before any
-# Agno run; slim entry points that only read leaf history types skip it.
+# history gets the Team roleful-input and historical-media stripping patch
+# before any Agno run; slim entry points that only read leaf history types skip it.
 agno_team_patch.apply_patch()
 
 _TEAM_STATE_ROOT_DIRNAME = "teams"
@@ -995,9 +995,26 @@ def open_bound_scope_session_context(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     team_name: str | None = None,
+    scope: HistoryScope | None = None,
     create_session_if_missing: bool = False,
 ) -> Iterator[ScopeSessionContext | None]:
     """Open the canonical scope-backed session context for one bound team run."""
+    if scope is not None:
+        _owner_agent, owner_agent_name = _resolve_bound_history_owner(agents)
+        if owner_agent_name is None:
+            yield None
+            return
+        with open_resolved_scope_session_context(
+            agent_name=owner_agent_name,
+            scope=scope,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            create_session_if_missing=create_session_if_missing,
+        ) as scope_context:
+            yield scope_context
+        return
     if not agents and team_name is not None and team_name in config.teams:
         with open_resolved_scope_session_context(
             agent_name=team_name,
@@ -1052,7 +1069,10 @@ def create_scope_session_storage(
     storage_name = _scope_session_storage_name(scope)
     return create_state_storage(
         storage_name=storage_name,
-        state_root=_team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
+        state_root=resolve_session_state_root(
+            _team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
+            runtime_paths,
+        ),
         subdir="sessions",
         session_table=f"{storage_name}_sessions",
         prompt_roles=prompt_roles_for_history_storage(),
@@ -1237,8 +1257,8 @@ def _prepare_scope_state_for_run(
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
     state = read_scope_state(session, scope)
-    if prune_reintroduced_runs(session, state):
-        storage.upsert_session(session)
+    # Persists its own deletes; the session row has nothing new to write.
+    prune_reintroduced_runs(storage, session, state)
     if consume_pending_force_compaction_scope(session, scope):
         state = set_force_compaction_state(session, scope, state, force=True)
         storage.upsert_session(session)

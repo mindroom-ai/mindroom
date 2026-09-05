@@ -10,7 +10,7 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 ## Decision Table
 
 - Core dev against local Matrix + DB
-  - Commands: `just local-matrix-up|down|logs|reset`, then `mindroom run`
+  - Commands: `just local-matrix-up`, `just local-matrix-down`, `just local-matrix-logs`, or `just local-matrix-reset`, then `mindroom run`
   - `mindroom run` serves the bundled dashboard on `http://localhost:8765`
   - Optional frontend-only dev server for UI iteration: `run-frontend.sh`
   - Compose files: `local/matrix/docker-compose.yml`, assets in `local/matrix/docker/`
@@ -45,7 +45,7 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 Use kind to spin up a throwaway local K8s cluster and install the platform chart for smoke testing and development.
 
 - Prereqs: `kind`, `kubectl`, `helm`, and Docker.
-- With Nix: use the root dev shell (`nix-shell`) which now includes `kind`, or the focused one at `nix-shell cluster/k8s/kind/shell.nix`.
+- With Nix: use `nix-shell cluster/k8s/kind/shell.nix`, which includes `kind`, `kubectl`, and Helm.
 - Quickstart:
   - `just cluster-kind-up`
   - `just cluster-kind-build-load` (builds platform + MindRoom images and loads them into kind)
@@ -61,8 +61,8 @@ Notes:
 - Secrets (Supabase, Stripe, etc.) default to empty; the backend handles missing values for local smoke tests.
 
 - Platform app development
-  - Backend dev: `just platform-app-backend-dev`
-  - Frontend dev: `just platform-app-frontend-dev`
+  - Backend dev: `just start-saas-backend-dev`
+  - Frontend dev: `just start-saas-frontend-dev`
 
 ## Notes
 

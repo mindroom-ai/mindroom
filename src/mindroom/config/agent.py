@@ -1,4 +1,4 @@
-"""Agent, team, and culture configuration models."""
+"""Agent and team configuration models."""
 
 from __future__ import annotations
 
@@ -10,11 +10,18 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
 )
 
+from mindroom.config.access import (
+    InviteAcceptancePolicy,
+    ResponderAccessConfig,
+    RoomJoinPolicy,
+    validate_concrete_matrix_user_ids,
+)
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
 from mindroom.config.models import (
@@ -24,11 +31,11 @@ from mindroom.config.models import (
     validate_unique_tool_entries,
 )
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
+from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
-CultureMode = Literal["automatic", "agentic", "manual"]
 _PrivateWorkerScope = Literal["user", "user_agent"]
-_RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset({"sessions", "learning", "knowledge_db", "chroma", "culture"})
+_RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset({"sessions", "learning", "knowledge_db", "chroma"})
 
 
 def _validate_safe_relative_path(
@@ -173,6 +180,28 @@ class AgentPrivateConfig(BaseModel):
         return [_validate_safe_relative_path(path, field_name="private.context_files") for path in value]
 
 
+_PrivateThreadExportRoomScope = Literal["owner", "owner_and_agent"]
+
+
+class AgentThreadExportConfig(BaseModel):
+    """Continuous YAML thread exports into this agent's workspace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    invited_rooms: bool = Field(
+        default=True,
+        description=(
+            "Also export user-created rooms the agent joined through invites; current membership is always required"
+        ),
+    )
+    private_room_scope: _PrivateThreadExportRoomScope = Field(
+        default="owner_and_agent",
+        description=(
+            "Private agents only: require the owner alone, or both owner and agent, to be joined to an exported room"
+        ),
+    )
+
+
 class AgentConfig(BaseModel):
     """Configuration for a single agent."""
 
@@ -191,7 +220,18 @@ class AgentConfig(BaseModel):
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
-    accept_invites: bool = Field(default=True, description="Whether this agent accepts room invites")
+    access: ResponderAccessConfig | None = Field(
+        default=None,
+        description="Optional membership-based conversation access policy",
+    )
+    credential_managers: list[str] = Field(
+        default_factory=list,
+        description="Concrete Matrix user IDs allowed to manage this agent's credentials",
+    )
+    accept_invites: InviteAcceptancePolicy = Field(
+        default=True,
+        description="Whether this agent accepts all, no, or matching inviter room invites",
+    )
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
     learning: bool | None = Field(default=None, description="Enable Agno Learning (defaults to true when omitted)")
     learning_mode: AgentLearningMode | None = Field(
@@ -216,6 +256,13 @@ class AgentConfig(BaseModel):
     private: AgentPrivateConfig | None = Field(
         default=None,
         description="Optional requester-private state materialized per private.per partition",
+    )
+    thread_exports: AgentThreadExportConfig | None = Field(
+        default=None,
+        description=(
+            "Keep <workspace>/thread_exports/ current with YAML exports of every thread in rooms this agent is "
+            "joined to; true enables the defaults"
+        ),
     )
     knowledge_bases: list[str] = Field(
         default_factory=list,
@@ -349,6 +396,16 @@ class AgentConfig(BaseModel):
                 raise ValueError(msg)
         return data
 
+    @field_validator("thread_exports", mode="before")
+    @classmethod
+    def normalize_thread_exports(cls, value: object) -> object:
+        """Accept ``true``/``false`` as enable-with-defaults/disable."""
+        if value is True:
+            return AgentThreadExportConfig()
+        if value is False:
+            return None
+        return value
+
     @field_validator("tools")
     @classmethod
     def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
@@ -371,6 +428,12 @@ class AgentConfig(BaseModel):
         """Ensure configured context files stay inside the canonical workspace."""
         return [agent_workspace_relative_path(value).as_posix() for value in values]
 
+    @field_validator("credential_managers")
+    @classmethod
+    def validate_credential_managers(cls, values: list[str]) -> list[str]:
+        """Require unique, concrete credential-manager identities."""
+        return validate_concrete_matrix_user_ids(values, field_name="credential_managers")
+
 
 class TeamConfig(BaseModel):
     """Configuration for a team of agents."""
@@ -379,6 +442,14 @@ class TeamConfig(BaseModel):
     role: str = Field(description="Description of the team's purpose")
     agents: list[str] = Field(min_length=1, description="List of agent names that compose this team")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
+    access: ResponderAccessConfig | None = Field(
+        default=None,
+        description="Optional membership-based conversation access policy",
+    )
+    accept_invites: InviteAcceptancePolicy = Field(
+        default=True,
+        description="Whether this team accepts all, no, or matching inviter room invites",
+    )
     model: str | None = Field(default="default", description="Default model for this team (optional)")
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
     compaction: CompactionOverrideConfig | None = Field(
@@ -428,14 +499,31 @@ class RoomConfig(BaseModel):
 
     display_name: str | None = Field(default=None, description="Human-readable Matrix room name")
     description: str = Field(default="", description="Dashboard-facing room purpose")
+    join_policy: RoomJoinPolicy | None = Field(default=None, description="Room-specific join-policy override")
+    listed: bool | None = Field(default=None, description="Room-specific directory-listing override")
     encrypted: bool | None = Field(
         default=None,
         description=(
             "Whether this managed room should have Matrix end-to-end encryption enabled. "
-            "Unset inherits matrix_room_access.encrypt_managed_rooms. "
+            "Unset inherits room_defaults.encrypted. "
             "Enabling encryption on a Matrix room is irreversible; MindRoom never disables it."
         ),
     )
+    invite_users: list[str] | None = Field(default=None, description="Room-specific invitation roster override")
+    admins: list[str] | None = Field(default=None, description="Room-specific Matrix administrator override")
+
+    @field_validator("invite_users", "admins")
+    @classmethod
+    def validate_unique_access_entries(cls, values: list[str] | None, info: ValidationInfo) -> list[str] | None:
+        """Require concrete room-policy identities while preserving omitted lists."""
+        if values is None:
+            return None
+        assert info.field_name is not None
+        return validate_concrete_matrix_user_ids(
+            values,
+            field_name=info.field_name,
+            allowed_placeholders=frozenset({OWNER_MATRIX_USER_ID_PLACEHOLDER}),
+        )
 
     @field_validator("display_name")
     @classmethod
@@ -452,25 +540,7 @@ class RoomConfig(BaseModel):
             data.pop("display_name", None)
         if data.get("encrypted") is None:
             data.pop("encrypted", None)
+        for field_name in ("join_policy", "listed", "invite_users", "admins"):
+            if data.get(field_name) is None:
+                data.pop(field_name, None)
         return data
-
-
-class CultureConfig(BaseModel):
-    """Configuration for a shared culture."""
-
-    description: str = Field(default="", description="Description of shared principles and practices")
-    agents: list[str] = Field(default_factory=list, description="List of agent names assigned to this culture")
-    mode: CultureMode = Field(
-        default="automatic",
-        description="Culture update mode: automatic, agentic, or manual",
-    )
-
-    @field_validator("agents")
-    @classmethod
-    def validate_unique_agents(cls, agents: list[str]) -> list[str]:
-        """Ensure each agent is assigned at most once per culture."""
-        duplicates = duplicate_items(agents)
-        if duplicates:
-            msg = f"Duplicate agents are not allowed in a culture: {', '.join(duplicates)}"
-            raise ValueError(msg)
-        return agents

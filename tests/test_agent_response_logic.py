@@ -15,10 +15,11 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -29,7 +30,10 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamMode, TeamOutcome, TeamResolution
 from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, is_router_only_agent_mention
-from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps, _ResponderAvailability
+from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _ResponderAvailability
+from tests.authorization_helpers import (
+    make_test_turn_policy_deps,
+)
 from tests.conftest import (
     agent_response_should_respond,
     bind_runtime_paths,
@@ -71,17 +75,23 @@ class TestAgentResponseLogic:
         self.config = _bind_runtime_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["!room:localhost"]),
-                    "general": AgentConfig(display_name="General", rooms=["!room:localhost"]),
-                    "agent1": AgentConfig(display_name="Agent1", rooms=["!room:localhost"]),
-                    "research": AgentConfig(display_name="Research", rooms=["!room:localhost"]),
+                    name: AgentConfig(
+                        display_name=display_name,
+                        rooms=["!room:localhost"],
+                        access=ResponderAccessConfig(current_room_members=True, members_of_rooms=[]),
+                    )
+                    for name, display_name in (
+                        ("calculator", "Calculator"),
+                        ("general", "General"),
+                        ("agent1", "Agent1"),
+                        ("research", "Research"),
+                    )
                 },
                 teams={},
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
         )
-        self.config.authorization.default_room_access = True
         self.runtime_paths = runtime_paths_for(self.config)
         self.domain = self.config.get_domain(self.runtime_paths)
         self.sender = f"@user:{self.domain}"
@@ -104,11 +114,10 @@ class TestAgentResponseLogic:
         )
         assert should_respond is True
 
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     def test_mentioned_agent_blocked_by_reply_permissions(self) -> None:
         """Per-agent reply allowlist should block disallowed senders even when mentioned."""
-        self.config.authorization.agent_reply_permissions = {
-            "calculator": [f"@alice:{self.domain}"],
-        }
+        self.config.agents["calculator"].access = ResponderAccessConfig(users=[f"@alice:{self.domain}"])
         should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=True,
@@ -121,13 +130,12 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_mentioned_agent_reply_permissions_honor_aliases(self) -> None:
-        """Bridge aliases should inherit per-agent reply permissions."""
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    def test_mentioned_agent_access_honors_aliases(self) -> None:
+        """Bridge aliases should inherit per-agent access."""
         canonical_user = f"@alice:{self.domain}"
         alias_user = f"@telegram_111:{self.domain}"
-        self.config.authorization.agent_reply_permissions = {
-            "calculator": [canonical_user],
-        }
+        self.config.agents["calculator"].access = ResponderAccessConfig(users=[canonical_user])
         self.config.authorization.aliases = {canonical_user: [alias_user]}
         should_respond = agent_response_should_respond(
             agent_name="calculator",
@@ -162,7 +170,7 @@ class TestAgentResponseLogic:
         runtime.config = config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=runtime_paths,
@@ -216,7 +224,7 @@ class TestAgentResponseLogic:
         runtime.config = config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=runtime_paths,
@@ -273,7 +281,7 @@ class TestAgentResponseLogic:
         runtime.config = config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=runtime_paths,
@@ -312,7 +320,7 @@ class TestAgentResponseLogic:
         runtime.config = self.config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=self.runtime_paths,
@@ -354,8 +362,8 @@ class TestAgentResponseLogic:
 
         candidate_ids = entity_ids(self.config, self.runtime_paths)
         with patch(
-            "mindroom.turn_policy.responder_candidate_entities_for_room",
-            new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+            "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+            new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
         ):
             multiple_visible_action = await policy._resolve_response_action(
                 dispatch,
@@ -367,8 +375,8 @@ class TestAgentResponseLogic:
         assert multiple_visible_action.kind == "skip"
 
         with patch(
-            "mindroom.turn_policy.responder_candidate_entities_for_room",
-            new=AsyncMock(return_value=[candidate_ids["calculator"]]),
+            "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+            new=MagicMock(return_value=[candidate_ids["calculator"]]),
         ):
             single_visible_action = await policy._resolve_response_action(
                 dispatch,
@@ -389,7 +397,7 @@ class TestAgentResponseLogic:
         runtime.orchestrator = None
         logger = MagicMock()
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=logger,
                 runtime_paths=self.runtime_paths,
@@ -432,8 +440,8 @@ class TestAgentResponseLogic:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
             ),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -471,7 +479,7 @@ class TestAgentResponseLogic:
         runtime.orchestrator = None
         logger = MagicMock()
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=logger,
                 runtime_paths=self.runtime_paths,
@@ -514,8 +522,8 @@ class TestAgentResponseLogic:
         candidate_ids = entity_ids(self.config, self.runtime_paths)
 
         with patch(
-            "mindroom.turn_policy.responder_candidate_entities_for_room",
-            new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+            "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+            new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
         ):
             action = await policy._resolve_response_action(
                 dispatch,
@@ -541,7 +549,7 @@ class TestAgentResponseLogic:
         runtime.config = self.config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=self.runtime_paths,
@@ -593,8 +601,8 @@ class TestAgentResponseLogic:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
             ),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -631,7 +639,7 @@ class TestAgentResponseLogic:
         runtime.config = config
         runtime.orchestrator = None
         policy = TurnPolicy(
-            TurnPolicyDeps(
+            make_test_turn_policy_deps(
                 runtime=runtime,
                 logger=MagicMock(),
                 runtime_paths=runtime_paths,
@@ -658,11 +666,10 @@ class TestAgentResponseLogic:
         assert effective_action.kind == "reject"
         assert effective_action.rejection_message == "Team request includes no available members."
 
-    def test_mentioned_agent_reply_permissions_support_domain_pattern(self) -> None:
+    @pytest.mark.usefixtures("enforce_turn_authorization")
+    def test_mentioned_agent_access_supports_domain_pattern(self) -> None:
         """Per-agent reply patterns should allow domain-scoped sender matching."""
-        self.config.authorization.agent_reply_permissions = {
-            "calculator": [f"*:{self.domain}"],
-        }
+        self.config.agents["calculator"].access = ResponderAccessConfig(users=[f"*:{self.domain}"])
         should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=True,
@@ -675,14 +682,16 @@ class TestAgentResponseLogic:
         )
         assert should_respond is True
 
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     def test_single_visible_agent_can_respond_without_mentions(self) -> None:
         """When permissions hide other agents, the only visible agent should respond."""
-        self.config.authorization.agent_reply_permissions = {
-            "calculator": [f"@alice:{self.domain}"],
-            "general": [f"@bob:{self.domain}"],
-            "agent1": [f"@bob:{self.domain}"],
-            "research": [f"@bob:{self.domain}"],
-        }
+        for agent_name, user_name in (
+            ("calculator", "alice"),
+            ("general", "bob"),
+            ("agent1", "bob"),
+            ("research", "bob"),
+        ):
+            self.config.agents[agent_name].access = ResponderAccessConfig(users=[f"@{user_name}:{self.domain}"])
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
 
         should_respond_calculator = agent_response_should_respond(
@@ -978,6 +987,7 @@ class TestAgentResponseLogic:
             router_id,
             self.config,
             self.runtime_paths,
+            room=create_mock_room(config=self.config),
         )
 
         assert mentioned_agents == [router_id]
@@ -992,6 +1002,37 @@ class TestAgentResponseLogic:
             )
             is True
         )
+
+    def test_unsynced_member_cache_treats_any_human_mention_as_suppressing(self) -> None:
+        """A failed membership refresh must degrade to silence, not to an interjection."""
+        room = create_mock_room(config=self.config)
+        event_source = {
+            "content": {
+                "body": "@bob can you take this?",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": ["@bob:localhost"]},
+            },
+        }
+
+        room.members_synced = False
+        _, _, unsynced_has_non_agent_mentions = check_agent_mentioned(
+            event_source,
+            self.agent_id("calculator"),
+            self.config,
+            self.runtime_paths,
+            room=room,
+        )
+        room.members_synced = True
+        _, _, synced_has_non_agent_mentions = check_agent_mentioned(
+            event_source,
+            self.agent_id("calculator"),
+            self.config,
+            self.runtime_paths,
+            room=room,
+        )
+
+        assert unsynced_has_non_agent_mentions is True
+        assert synced_has_non_agent_mentions is False
 
     def test_explicit_target_agent_mention_still_works_in_multi_agent_thread(self) -> None:
         """Explicitly mentioning the target agent overrides multi-agent follow-up suppression."""
@@ -1019,12 +1060,11 @@ class TestAgentResponseLogic:
             is True
         )
 
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     def test_only_permitted_agent_in_thread_continues(self) -> None:
         """A permitted agent should continue when other thread participants are disallowed."""
-        self.config.authorization.agent_reply_permissions = {
-            "calculator": [f"@alice:{self.domain}"],
-            "general": [f"@bob:{self.domain}"],
-        }
+        self.config.agents["calculator"].access = ResponderAccessConfig(users=[f"@alice:{self.domain}"])
+        self.config.agents["general"].access = ResponderAccessConfig(users=[f"@bob:{self.domain}"])
         thread_history = [
             _message(sender=self.agent_id("calculator"), body="2+2=4"),
             _message(sender=self.agent_id("general"), body="I'll help too"),
@@ -1048,17 +1088,17 @@ class TestAgentResponseLogic:
         config = bind_runtime_paths(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator"),
-                    "research": AgentConfig(display_name="Research", rooms=["!room:localhost"]),
+                    "calculator": AgentConfig(
+                        display_name="Calculator",
+                        access=ResponderAccessConfig(users=[f"@bob:{self.domain}"]),
+                    ),
+                    "research": AgentConfig(
+                        display_name="Research",
+                        rooms=["!room:localhost"],
+                        access=ResponderAccessConfig(users=[f"@alice:{self.domain}"]),
+                    ),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "calculator": [f"@bob:{self.domain}"],
-                        "research": [f"@alice:{self.domain}"],
-                    },
-                },
             ),
             self.runtime_paths,
         )
@@ -1088,11 +1128,17 @@ class TestAgentResponseLogic:
         config = bind_runtime_paths(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator"),
-                    "research": AgentConfig(display_name="Research", rooms=["!room:localhost"]),
+                    "calculator": AgentConfig(
+                        display_name="Calculator",
+                        access=ResponderAccessConfig(current_room_members=True, members_of_rooms=[]),
+                    ),
+                    "research": AgentConfig(
+                        display_name="Research",
+                        rooms=["!room:localhost"],
+                        access=ResponderAccessConfig(current_room_members=True, members_of_rooms=[]),
+                    ),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
-                authorization={"default_room_access": True},
             ),
             self.runtime_paths,
         )
@@ -1463,7 +1509,11 @@ class TestAgentResponseLogic:
         """A bot_account posting in a thread should not count as a second human."""
         config = Config(
             agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["!room:localhost"]),
+                "calculator": AgentConfig(
+                    display_name="Calculator",
+                    rooms=["!room:localhost"],
+                    access=ResponderAccessConfig(current_room_members=True, members_of_rooms=[]),
+                ),
             },
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             bot_accounts=["@telegram:localhost"],
@@ -1471,7 +1521,6 @@ class TestAgentResponseLogic:
         config = bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
         persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
-        config.authorization.default_room_access = True
         room = create_mock_room("!room:localhost", ["calculator"], config)
 
         thread_with_bot = [

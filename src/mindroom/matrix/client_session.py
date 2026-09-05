@@ -11,15 +11,9 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import nio
 
-from mindroom.constants import (
-    CONFIG_CONFIRMATION_REACTION_KEY,
-    STREAM_STATUS_KEY,
-    VISIBLE_ROUTER_VOICE_ECHO_KEY,
-    RuntimePaths,
-    encryption_keys_dir,
-    runtime_matrix_ssl_verify,
-)
+from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
+from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.event_types import CALL_ENCRYPTION_KEYS_EVENT_TYPE
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
@@ -120,14 +114,7 @@ class MindRoomAsyncClient(nio.AsyncClient):
             message_type,
             content,
         )
-        stream_status = content.get(STREAM_STATUS_KEY)
-        if isinstance(stream_status, str):
-            encrypted_content[STREAM_STATUS_KEY] = stream_status
-        if content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True:
-            encrypted_content[VISIBLE_ROUTER_VOICE_ECHO_KEY] = True
-        config_reaction_id = content.get(CONFIG_CONFIRMATION_REACTION_KEY)
-        if isinstance(config_reaction_id, str):
-            encrypted_content[CONFIG_CONFIRMATION_REACTION_KEY] = config_reaction_id
+        encrypted_content.update(encryption_visible_metadata(content))
         return encrypted_message_type, encrypted_content
 
     def _handle_olm_events(

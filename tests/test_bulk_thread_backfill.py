@@ -11,12 +11,13 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.event_journal import replacement_target
+from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.room_history_reads import (
-    _MAX_APPROVAL_CARD_SCAN_PAGES,
+    _MAX_EXACT_DELIVERY_SCAN_PAGES,
     OpaqueEncryptedThreadHistoryError,
     fetch_thread_event_sources_via_room_messages,
     fetch_thread_messages_from_source,
-    find_approval_card_event_id_via_room_messages,
+    find_outbox_delivery_event_id_via_room_messages,
     find_response_event_ids_via_room_messages,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
@@ -274,6 +275,189 @@ async def test_response_recovery_scan_rejects_repeated_pagination_token() -> Non
         )
 
     assert client.room_messages.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_exact_outbox_scan_adopts_a_match_when_its_source_exceeds_the_bound() -> None:
+    """A recent frozen delivery remains proof even when its older reply target is out of range."""
+    source_event_id = "$old-response:localhost"
+    delivered = _message_event(
+        "$notice:localhost",
+        "Approval owner unavailable.",
+        timestamp=2000,
+        reply_to_event_id=source_event_id,
+        sender="@bot:localhost",
+        msgtype="m.notice",
+    )
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response([delivered], end="page-1"),
+            *[
+                _messages_response(
+                    [_message_event(f"$unrelated-{page}:localhost", "unrelated", timestamp=page)],
+                    end=f"page-{page}",
+                )
+                for page in range(2, _MAX_EXACT_DELIVERY_SCAN_PAGES + 1)
+            ],
+        ],
+    )
+
+    found = await find_outbox_delivery_event_id_via_room_messages(
+        client,
+        _ROOM_ID,
+        delivery_sender="@bot:localhost",
+        source_event_ids=(source_event_id,),
+        delivery_content=delivered.source["content"],
+        delivery_event_type="m.room.message",
+    )
+
+    assert found == "$notice:localhost"
+    assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
+
+
+@pytest.mark.asyncio
+async def test_exact_delivery_scan_refuses_to_guess_after_its_recent_history_bound() -> None:
+    """An absent delivery is unproven once recent history still has older pages."""
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response(
+                [_message_event(f"$unrelated-{page}:localhost", "unrelated", timestamp=page)],
+                end=f"page-{page + 1}",
+            )
+            for page in range(_MAX_EXACT_DELIVERY_SCAN_PAGES)
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match=r"exact delivery room scan.*absence is unproven"):
+        await find_response_event_ids_via_room_messages(
+            client,
+            _ROOM_ID,
+            response_sender="@bot:localhost",
+            source_event_ids=(),
+            response_content={
+                "msgtype": "m.text",
+                "body": "scheduled",
+                DURABLE_DELIVERY_ID_KEY: {
+                    "principal": "agent@@bot:localhost",
+                    "delivery_id": "scheduled-turn",
+                    "stage": "final",
+                },
+            },
+        )
+
+    assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
+
+
+@pytest.mark.asyncio
+async def test_exact_delivery_scan_continues_after_an_empty_page_with_a_cursor() -> None:
+    """A filtered empty page is not proof that older Matrix history is exhausted."""
+    marker = {
+        "principal": "agent@@bot:localhost",
+        "delivery_id": "scheduled-turn",
+        "stage": "final",
+    }
+    response_content = {
+        "msgtype": "m.text",
+        "body": "scheduled",
+        DURABLE_DELIVERY_ID_KEY: marker,
+    }
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response([], end="next-page"),
+            _messages_response(
+                [
+                    _message_event(
+                        "$scheduled:localhost",
+                        "scheduled",
+                        timestamp=1,
+                        sender="@bot:localhost",
+                        extra_content={DURABLE_DELIVERY_ID_KEY: marker},
+                    ),
+                ],
+                end=None,
+            ),
+        ],
+    )
+
+    response_event_ids = await find_response_event_ids_via_room_messages(
+        client,
+        _ROOM_ID,
+        response_sender="@bot:localhost",
+        source_event_ids=(),
+        response_content=response_content,
+    )
+
+    assert response_event_ids == frozenset({"$scheduled:localhost"})
+    assert client.room_messages.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_exact_delivery_scan_cannot_prove_absence_past_opaque_bot_ciphertext() -> None:
+    """An undecryptable event from the delivery sender could be the frozen payload."""
+    opaque = _opaque_reply_event("$opaque:localhost", replies_to="$unrelated:localhost", timestamp=2000)
+    opaque.source["sender"] = "@bot:localhost"
+    client = AsyncMock()
+    client.room_messages = AsyncMock(return_value=_messages_response([opaque], end=None))
+
+    with pytest.raises(OpaqueEncryptedThreadHistoryError, match="exact delivery"):
+        await find_response_event_ids_via_room_messages(
+            client,
+            _ROOM_ID,
+            response_sender="@bot:localhost",
+            source_event_ids=(),
+            response_content={
+                "msgtype": "m.text",
+                "body": "scheduled",
+                DURABLE_DELIVERY_ID_KEY: {
+                    "principal": "agent@@bot:localhost",
+                    "delivery_id": "scheduled-turn",
+                    "stage": "final",
+                },
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_delivery_bound_does_not_override_a_completed_source_scan() -> None:
+    """Reaching every source proves the delivery absent even on the final bounded page."""
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            *[
+                _messages_response(
+                    [_message_event(f"$unrelated-{page}:localhost", "unrelated", timestamp=page)],
+                    end=f"page-{page + 1}",
+                )
+                for page in range(_MAX_EXACT_DELIVERY_SCAN_PAGES - 1)
+            ],
+            _messages_response(
+                [_message_event("$source:localhost", "source", timestamp=1)],
+                end="older-history",
+            ),
+        ],
+    )
+
+    response_event_ids = await find_response_event_ids_via_room_messages(
+        client,
+        _ROOM_ID,
+        response_sender="@bot:localhost",
+        source_event_ids=("$source:localhost",),
+        response_content={
+            "msgtype": "m.text",
+            "body": "answer",
+            DURABLE_DELIVERY_ID_KEY: {
+                "principal": "agent@@bot:localhost",
+                "delivery_id": "$source:localhost",
+                "stage": "final",
+            },
+        },
+    )
+
+    assert response_event_ids == frozenset()
+    assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
 
 
 @pytest.mark.asyncio
@@ -830,12 +1014,13 @@ def _approval_card_event(
     timestamp: int,
     sender: str = "@router:localhost",
     replaces_event_id: str | None = None,
+    status: str = "pending",
 ) -> nio.Event:
     """Return one approval card, or the terminal edit that replaces one."""
     content: dict[str, Any] = {
         "msgtype": "io.mindroom.tool_approval",
         "approval_id": approval_id,
-        "status": "pending",
+        "status": status,
     }
     if replaces_event_id is not None:
         content["m.relates_to"] = {"rel_type": "m.replace", "event_id": replaces_event_id}
@@ -851,18 +1036,30 @@ def _approval_card_event(
     )
 
 
-@pytest.mark.asyncio
-async def test_approval_card_scan_finds_the_card_by_its_approval_id() -> None:
-    """The card is located by the id frozen into its body, never by a transaction.
+async def _find_approval_card(client: nio.AsyncClient, *, approval_id: str) -> str | None:
+    """Locate one exact frozen approval delivery through the generic outbox scanner."""
+    return await find_outbox_delivery_event_id_via_room_messages(
+        client,
+        _ROOM_ID,
+        delivery_sender="@router:localhost",
+        source_event_ids=(),
+        delivery_content={
+            "msgtype": "io.mindroom.tool_approval",
+            "approval_id": approval_id,
+            "status": "pending",
+        },
+        delivery_event_type="io.mindroom.tool_approval",
+    )
 
-    A transaction ID is scoped to the device that used it, which is the exact
-    reason this lookup is being made at all.
-    """
+
+@pytest.mark.asyncio
+async def test_approval_card_scan_finds_the_exact_frozen_payload() -> None:
+    """A changed-device lookup adopts the exact card frozen in the outbox."""
     client = AsyncMock()
     client.room_messages = AsyncMock(
         side_effect=[
             _messages_response(
-                [_approval_card_event("$other:localhost", approval_id="other", timestamp=3000)],
+                [_approval_card_event("$other:localhost", approval_id="wanted", status="denied", timestamp=3000)],
                 end="page-2",
             ),
             _messages_response(
@@ -872,12 +1069,7 @@ async def test_approval_card_scan_finds_the_card_by_its_approval_id() -> None:
         ],
     )
 
-    found = await find_approval_card_event_id_via_room_messages(
-        client,
-        _ROOM_ID,
-        card_sender="@router:localhost",
-        approval_id="wanted",
-    )
+    found = await _find_approval_card(client, approval_id="wanted")
 
     assert found == "$card:localhost"
     # Stops the moment it has the answer rather than walking the whole room.
@@ -895,14 +1087,29 @@ async def test_approval_card_scan_reports_absence_only_after_seeing_all_history(
         ),
     )
 
-    found = await find_approval_card_event_id_via_room_messages(
-        client,
-        _ROOM_ID,
-        card_sender="@router:localhost",
-        approval_id="wanted",
-    )
+    found = await _find_approval_card(client, approval_id="wanted")
 
     assert found is None
+
+
+@pytest.mark.asyncio
+async def test_approval_card_scan_continues_after_a_filtered_empty_page() -> None:
+    """A continuation token proves an empty filtered page is not exhaustion."""
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response([], end="page-2"),
+            _messages_response(
+                [_approval_card_event("$card:localhost", approval_id="wanted", timestamp=2000)],
+                end=None,
+            ),
+        ],
+    )
+
+    found = await _find_approval_card(client, approval_id="wanted")
+
+    assert found == "$card:localhost"
+    assert client.room_messages.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -923,12 +1130,7 @@ async def test_approval_card_scan_ignores_a_card_another_sender_wrote() -> None:
         ),
     )
 
-    found = await find_approval_card_event_id_via_room_messages(
-        client,
-        _ROOM_ID,
-        card_sender="@router:localhost",
-        approval_id="wanted",
-    )
+    found = await _find_approval_card(client, approval_id="wanted")
 
     assert found is None
 
@@ -956,12 +1158,7 @@ async def test_approval_card_scan_ignores_the_edit_that_replaces_the_card() -> N
         ),
     )
 
-    found = await find_approval_card_event_id_via_room_messages(
-        client,
-        _ROOM_ID,
-        card_sender="@router:localhost",
-        approval_id="wanted",
-    )
+    found = await _find_approval_card(client, approval_id="wanted")
 
     assert found == "$card:localhost"
 
@@ -970,9 +1167,9 @@ async def test_approval_card_scan_ignores_the_edit_that_replaces_the_card() -> N
 async def test_approval_card_scan_refuses_to_call_a_bounded_walk_an_absence() -> None:
     """Running out of pages establishes nothing, and must not read as "no card".
 
-    An unproven absence retires the row, and the card it belongs to then stays
-    clickable with nothing behind it forever. So the bound raises, the row is
-    kept, and the sweep comes back.
+    An unproven absence must not discard the retry debt, because the card it
+    belongs to would stay clickable with nothing behind it forever. So the
+    bound raises, the row is kept, and the sweep comes back.
     """
     client = AsyncMock()
     client.room_messages = AsyncMock(
@@ -986,14 +1183,9 @@ async def test_approval_card_scan_refuses_to_call_a_bounded_walk_an_absence() ->
     )
 
     with pytest.raises(RuntimeError, match="absence is unproven"):
-        await find_approval_card_event_id_via_room_messages(
-            client,
-            _ROOM_ID,
-            card_sender="@router:localhost",
-            approval_id="wanted",
-        )
+        await _find_approval_card(client, approval_id="wanted")
 
-    assert client.room_messages.await_count == _MAX_APPROVAL_CARD_SCAN_PAGES
+    assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
 
 
 @pytest.mark.asyncio
@@ -1008,12 +1200,7 @@ async def test_approval_card_scan_rejects_a_repeated_pagination_token() -> None:
     )
 
     with pytest.raises(RuntimeError, match="repeated pagination token"):
-        await find_approval_card_event_id_via_room_messages(
-            client,
-            _ROOM_ID,
-            card_sender="@router:localhost",
-            approval_id="wanted",
-        )
+        await _find_approval_card(client, approval_id="wanted")
 
 
 @pytest.mark.asyncio
@@ -1027,12 +1214,7 @@ async def test_approval_card_scan_asks_for_the_encrypted_wrapper_too() -> None:
     client = AsyncMock()
     client.room_messages = AsyncMock(return_value=_messages_response([], end=None))
 
-    await find_approval_card_event_id_via_room_messages(
-        client,
-        _ROOM_ID,
-        card_sender="@router:localhost",
-        approval_id="wanted",
-    )
+    await _find_approval_card(client, approval_id="wanted")
 
     message_filter = client.room_messages.await_args.kwargs["message_filter"]
     assert set(message_filter["types"]) == {"io.mindroom.tool_approval", "m.room.encrypted"}

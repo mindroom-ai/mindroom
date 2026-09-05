@@ -20,7 +20,6 @@ from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
 
 from mindroom import model_loading, scheduling_executor
-from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import build_hook_matrix_admin
 from mindroom.logging_config import bound_log_context, get_logger
@@ -31,6 +30,9 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookMatrixAdmin
@@ -119,6 +121,7 @@ class ScheduledWorkflow(BaseModel):
     thread_id: str | None = None
     room_id: str | None = None
     new_thread: bool = False
+    silent: bool = False
 
     @field_validator("execute_at")
     @classmethod
@@ -164,6 +167,7 @@ class ScheduledTaskReadModel:
     history_limit: int | None
     thread_id: str | None
     new_thread: bool
+    silent: bool
     created_by: str | None
     created_at: datetime | None
 
@@ -177,6 +181,8 @@ class SchedulingRuntime:
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
     conversation_reader: ConversationReader
+    agent_reply_memberships: AgentReplyMembershipIndex
+    responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     matrix_admin: HookMatrixAdmin | None = None
 
 
@@ -242,6 +248,7 @@ def build_scheduled_task_read_model(
         history_limit=workflow.history_limit,
         thread_id=workflow.thread_id,
         new_thread=workflow.new_thread,
+        silent=workflow.silent,
         created_by=workflow.created_by,
         created_at=task.created_at,
     )
@@ -263,6 +270,7 @@ def build_edited_scheduled_workflow(  # noqa: C901
     schedule_type: Literal["once", "cron"] | None = None,
     execute_at: datetime | None = None,
     cron_expression: str | None = None,
+    silent: bool | None = None,
 ) -> ScheduledWorkflow:
     """Build a validated patch-style workflow edit while preserving immutable metadata."""
     if schedule_type and schedule_type != existing_workflow.schedule_type:
@@ -313,6 +321,7 @@ def build_edited_scheduled_workflow(  # noqa: C901
         thread_id=existing_workflow.thread_id,
         room_id=room_id,
         new_thread=existing_workflow.new_thread,
+        silent=existing_workflow.silent if silent is None else silent,
     )
 
 
@@ -881,6 +890,7 @@ def _existing_task_parse_context(workflow: ScheduledWorkflow) -> str:
             "message": workflow.message,
             "description": workflow.description,
             "history_limit": workflow.history_limit,
+            "silent": workflow.silent,
         },
         ensure_ascii=False,
         indent=2,
@@ -1327,7 +1337,12 @@ def _scheduled_task_response_text(
     response_text += f"**Will post:** {workflow.message}\n"
     if workflow.history_limit is not None:
         response_text += f"**History:** {_history_limit_display(workflow.history_limit)}\n"
-    delivery = "New thread per fire" if new_thread else "Current room/thread scope"
+    mode = "Silent (hidden trigger; no-report final omitted)" if workflow.silent else "Visible"
+    response_text += f"**Mode:** {mode}\n"
+    if new_thread and workflow.silent:
+        delivery = "Room-level roots for findings/failures"
+    else:
+        delivery = "New thread per fire" if new_thread else "Current room/thread scope"
     response_text += f"**Delivery:** {delivery}\n"
     return response_text + f"\n**Task ID:** `{task_id}`"
 
@@ -1343,6 +1358,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     task_id: str | None = None,
     existing_task: ScheduledTaskRecord | None = None,
     history_limit: int | None = None,
+    silent: bool | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -1366,13 +1382,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
 
-    sender_visible_room_responders = await responder_candidate_entities_for_room(
-        client,
-        room,
-        scheduled_by,
-        config,
-        runtime_paths,
-    )
+    sender_visible_room_responders = await runtime.responder_candidates_for_room(room, scheduled_by)
 
     available_responders: list[MatrixID] = []
     if new_thread:
@@ -1387,6 +1397,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 scheduled_by,
                 config,
                 runtime_paths,
+                runtime.agent_reply_memberships,
                 available_responders_in_room=sender_visible_room_responders,
             )
 
@@ -1416,6 +1427,9 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         if workflow_result.suggestion:
             error_msg += f"\n\n💡 {workflow_result.suggestion}"
         return (None, error_msg)
+
+    if existing_task is not None and silent is None and "silent" not in workflow_result.model_fields_set:
+        workflow_result.silent = existing_task.workflow.silent
 
     # Validate that all mentioned agents or teams are accessible.
     validation_result = await _validate_agent_mentions(
@@ -1454,6 +1468,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     workflow_result.new_thread = new_thread
     if history_limit is not None:
         workflow_result.history_limit = history_limit
+    if silent is not None:
+        workflow_result.silent = silent
 
     # Create task ID for new tasks (or reuse existing ID when editing)
     task_id = task_id or (existing_task.task_id if existing_task else str(uuid.uuid4())[:8])
@@ -1509,6 +1525,7 @@ async def edit_scheduled_task(
     scheduled_by: str,
     thread_id: str | None = None,
     history_limit: int | None = None,
+    silent: bool | None = None,
 ) -> str:
     """Edit an existing scheduled task by replacing its workflow details."""
     client = runtime.client
@@ -1531,6 +1548,7 @@ async def edit_scheduled_task(
         task_id=task_id,
         existing_task=existing_task,
         history_limit=history_limit,
+        silent=silent,
     )
 
     if edited_task_id is None:
@@ -1598,6 +1616,7 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
             task_line = f'• `{record.task_id}` - {time_str}\n  {workflow.description}\n  Message: "{msg_preview}"'
             if workflow.history_limit is not None:
                 task_line += f"\n  History: {_history_limit_display(workflow.history_limit)}"
+            task_line += f"\n  Mode: {'Silent' if workflow.silent else 'Visible'}"
             lines.append(task_line)
 
     if tasks:

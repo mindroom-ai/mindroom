@@ -9,12 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.turn_controller import _PrecheckedEvent
+from tests.access_schema_support import with_current_room_member_access, with_responder_access
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     install_generate_response_mock,
@@ -37,7 +38,7 @@ def _runtime_config_and_paths(
         process_env={"MATRIX_HOMESERVER": "http://example.com"},
     )
     config = bind_runtime_paths(
-        Config(agents=agents or {}, authorization={"default_room_access": True}),
+        with_current_room_member_access(Config(agents=agents or {})),
         runtime_paths,
     )
     persist_entity_accounts(config, runtime_paths, usernames=usernames)
@@ -65,7 +66,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     )
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -131,7 +132,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
             "_precheck_dispatch_event",
             return_value=_PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com"),
         ),
-        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
     ):
         # Process the edit event - this should not re-enter normal dispatch.
@@ -154,7 +155,7 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
         tmp_path,
         usernames={ROUTER_AGENT_NAME: "router"},
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -220,6 +221,80 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) -> None:
+    """An edit prechecked before reload must not regenerate after its requester is revoked."""
+    sender_id = "@user:example.com"
+    agent_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.com",
+        display_name="Router",
+        password="test_password",  # noqa: S106
+    )
+    config, runtime_paths = _runtime_config_and_paths(
+        tmp_path,
+        usernames={ROUTER_AGENT_NAME: "router"},
+    )
+    with_responder_access(config, ROUTER_AGENT_NAME, users=[sender_id])
+    replacement_config = config.model_copy(deep=True)
+    with_responder_access(replacement_config, ROUTER_AGENT_NAME, users=[])
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=["!test:example.com"],
+    )
+    wrap_extracted_collaborators(bot)
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = agent_user.user_id
+    install_runtime_journal_support(bot)
+    bot.logger = MagicMock()
+    replace_turn_controller_deps(bot, logger=bot.logger)
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* Edited message",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Edited message", "msgtype": "m.text"},
+                "m.relates_to": {"event_id": "$original:example.com", "rel_type": "m.replace"},
+            },
+            "event_id": "$edit-during-reload:example.com",
+            "sender": sender_id,
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": room.room_id,
+        },
+    )
+    admission_gate = bot._runtime_view.response_admission_gate
+    assert admission_gate.close_if_idle()
+    gate_wait_started = asyncio.Event()
+
+    async def wait_for_replacement() -> bool:
+        gate_wait_started.set()
+        await admission_gate.wait_until_open()
+        return True
+
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_precheck_dispatch_event",
+            return_value=_PrecheckedEvent(event=edit_event, requester_user_id=sender_id),
+        ),
+        patch.object(bot._response_runner, "wait_for_admission_or_shutdown", side_effect=wait_for_replacement),
+        patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as handle_edit,
+    ):
+        edit_task = asyncio.create_task(bot._on_message(room, edit_event))
+        await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
+        bot.config = replacement_config
+        admission_gate.reopen()
+        await edit_task
+
+    handle_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     """Test that the bot ignores multiple consecutive edits."""
     # Create a mock agent user
@@ -236,7 +311,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     )
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -305,7 +380,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
                 _PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com") for edit_event in edit_events
             ],
         ),
-        patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
+        patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
     ):
         # Process all edit events
@@ -334,7 +409,7 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     )
 
     # Create the bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,

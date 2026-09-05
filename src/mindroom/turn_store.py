@@ -12,7 +12,7 @@ from agno.db.base import SessionType
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
-from mindroom.agent_storage import get_agent_session, get_team_session
+from mindroom.agent_storage import get_agent_session, get_team_session, replace_runs
 from mindroom.agents import remove_run_by_event_id
 from mindroom.handled_turns import (
     HandledTurnLedger,
@@ -76,6 +76,27 @@ class _FinalizedVisibleEcho:
 
     event_id: str
     is_fallback: bool
+
+
+async def record_deferred_outcome_response(
+    turn_store: TurnStore,
+    record: TurnRecord,
+    response_event_id: str,
+) -> None:
+    """Record one deferred visible outcome as the terminal responded turn."""
+    await turn_store.record_responded_turn(canonicalize_turn_record(record, response_event_id=response_event_id))
+
+
+async def record_user_stop_terminal(
+    turn_store: TurnStore,
+    record: TurnRecord,
+    response_event_id: str,
+    stop_receipt_order: int,
+) -> None:
+    """Record one settled user-stop as the terminal turn for the response owner."""
+    await turn_store.record_turn(
+        with_user_stop(record, response_event_id, stop_receipt_order, delivery_settled=True),
+    )
 
 
 @dataclass
@@ -807,11 +828,11 @@ class TurnStore:
             )
             if removed_summary_dependents:
                 assert session is not None
-                session.runs = []
+                replace_runs(storage, session, [])
             invalidated_summary = False
             if session is not None and (removed_run or scope_contains_source):
                 invalidated_summary = invalidate_compacted_replay(session, history_scope)
-                if invalidated_summary or removed_summary_dependents:
+                if invalidated_summary:
                     storage.upsert_session(session)
             return removed_run or removed_summary_dependents or invalidated_summary
         finally:

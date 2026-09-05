@@ -10,13 +10,13 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamOutcome
 from mindroom.thread_utils import get_agents_in_thread
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -137,10 +137,22 @@ class TestTeamFormation:
         # Create bots
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
-        research_bot = AgentBot(mock_research_agent, tmp_path, config, runtime_paths_for(config), rooms=[team_room_id])
+        research_bot = make_test_agent_bot(
+            mock_research_agent,
+            tmp_path,
+            config,
+            runtime_paths_for(config),
+            rooms=[team_room_id],
+        )
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
-        analyst_bot = AgentBot(mock_analyst_agent, tmp_path, config, runtime_paths_for(config), rooms=[team_room_id])
+        analyst_bot = make_test_agent_bot(
+            mock_analyst_agent,
+            tmp_path,
+            config,
+            runtime_paths_for(config),
+            rooms=[team_room_id],
+        )
 
         # Setup bots
         research_bot.client = AsyncMock()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -10,9 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom import interactive
-from mindroom.authorization import is_authorized_sender as real_is_authorized_sender
-from mindroom.bot import AgentBot
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -24,7 +23,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
-from mindroom.dispatch_handoff import DispatchIngressMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import DispatchIngressMetadata, PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.handled_turns import TurnRecord
@@ -59,6 +58,8 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -76,9 +77,12 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.turn_dispatch_helpers import dispatch_test_turn
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 def _config(tmp_path: Path) -> Config:
@@ -168,7 +172,7 @@ def _synthetic_envelope(*, agent_name: str = "code") -> MessageEnvelope:
 
 def _hook_bot(tmp_path: Path) -> AgentBot:
     config = _config(tmp_path)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="router",
             password=TEST_PASSWORD,
@@ -204,7 +208,8 @@ def _hook_bot(tmp_path: Path) -> AgentBot:
 
 def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     config = _config(tmp_path)
-    bot = AgentBot(
+    with_current_room_member_access(config)
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
             password=TEST_PASSWORD,
@@ -247,6 +252,17 @@ def _dispatch_context(bot: AgentBot) -> MessageContext:
         thread_history=[],
         mentioned_agents=[bot.matrix_id],
         has_non_agent_mentions=False,
+    )
+
+
+def _prepared_text_event(event: nio.RoomMessageFormatted) -> PreparedIngress:
+    """Return the typed normalizer result for one raw Matrix text event."""
+    return PreparedIngress(
+        sender=event.sender,
+        event_id=event.event_id,
+        body=event.body,
+        source=event.source,
+        server_timestamp=event.server_timestamp,
     )
 
 
@@ -603,6 +619,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
             "content": {
                 "msgtype": "m.text",
                 "body": "automation",
+                "m.mentions": {"user_ids": ["@mindroom_code:localhost"]},
                 SOURCE_KIND_KEY: "hook",
                 "com.mindroom.hook_source": "hook-plugin:message:received",
                 HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 1,
@@ -863,9 +880,15 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
     )
     bot._turn_policy.plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
 
-    await bot._turn_controller._dispatch_text_message(
+    await dispatch_test_turn(
+        bot._turn_controller,
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        ingress_metadata=DispatchIngressMetadata(
+            source_kind="hook",
+            hook_source="hook-plugin:message:received",
+            message_received_depth=1,
+        ),
     )
 
     bot._turn_policy.plan_turn.assert_awaited_once()
@@ -1058,7 +1081,8 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
     )
     bot._turn_policy.plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
 
-    await bot._turn_controller._dispatch_text_message(
+    await dispatch_test_turn(
+        bot._turn_controller,
         room,
         _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
     )
@@ -1072,7 +1096,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
 def test_build_message_envelope_uses_conversation_resolver_owner(tmp_path: Path) -> None:
     """Hook-envelope assembly should go through the extracted resolver owner."""
     bot = _agent_bot(tmp_path)
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@user:localhost",
         event_id="$event",
         body="hello",
@@ -1138,7 +1162,8 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.record_turn = AsyncMock()
 
-    await bot._turn_controller._dispatch_text_message(
+    await dispatch_test_turn(
+        bot._turn_controller,
         room,
         _PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
     )
@@ -1146,6 +1171,66 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     assert hook_calls == ["called"]
     bot._command_turn_executor.execute_if_owned.assert_not_awaited()
     turn_store.record_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_message_received_hook_waits_for_reload_and_rechecks_reply_authorization(tmp_path: Path) -> None:
+    """An ingress hook must not run after a reply-policy reload revokes its sender."""
+    sender_id = "@user:localhost"
+    bot = _agent_bot(tmp_path)
+    bot.config.agents[bot.agent_name].access = ResponderAccessConfig(users=[sender_id])
+    denied_config = bot.config.model_copy(deep=True)
+    denied_config.agents[bot.agent_name].access = ResponderAccessConfig(users=[])
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id=bot.matrix_id.full_id)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$hook-during-reload",
+            "sender": sender_id,
+            "origin_server_ts": 1234567890,
+            "content": {"msgtype": "m.text", "body": "hello"},
+        },
+    )
+    hook_calls: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED)
+    async def received(_ctx: MessageReceivedContext) -> None:
+        hook_calls.append("called")
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+
+    async def delayed_context(*_args: object, **_kwargs: object) -> object:
+        lookup_started.set()
+        await release_lookup.wait()
+        return dispatch_context_result(_dispatch_context(bot))
+
+    bot._conversation_resolver.extract_dispatch_context = AsyncMock(side_effect=delayed_context)
+    gate = bot._runtime_view.response_admission_gate
+    prepare_task = asyncio.create_task(
+        bot._turn_controller._prepare_dispatch(
+            room,
+            event,
+            sender_id,
+            event_label="message",
+            handled_turn=TurnRecord.create([event.event_id]),
+        ),
+    )
+    await asyncio.wait_for(lookup_started.wait(), timeout=1)
+    assert gate.close_if_idle()
+    bot.config = denied_config
+    release_lookup.set()
+    await asyncio.sleep(0)
+    try:
+        assert not prepare_task.done()
+        assert hook_calls == []
+    finally:
+        gate.reopen()
+        prepared = await prepare_task
+
+    assert prepared is None
+    assert hook_calls == []
 
 
 @pytest.mark.asyncio
@@ -1579,15 +1664,21 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
             },
         },
     )
-    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=event)
+    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=_prepared_text_event(event))
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
     bot._turn_policy.plan_turn = AsyncMock()
 
-    await bot._turn_controller._dispatch_text_message(
+    await dispatch_test_turn(
+        bot._turn_controller,
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        ingress_metadata=DispatchIngressMetadata(
+            source_kind="hook_dispatch",
+            hook_source="origin-plugin:message:before_response",
+            message_received_depth=2,
+        ),
     )
 
     bot._turn_policy.plan_turn.assert_not_awaited()
@@ -1618,7 +1709,17 @@ async def test_hook_dispatch_command_reply_preserves_original_envelope_metadata(
     bot._delivery_gateway.send_text = AsyncMock(return_value="$reply")
     replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
 
-    await bot._turn_controller._dispatch_text_message(room, event, "@mindroom_router:localhost")
+    await dispatch_test_turn(
+        bot._turn_controller,
+        room,
+        event,
+        "@mindroom_router:localhost",
+        ingress_metadata=DispatchIngressMetadata(
+            source_kind="hook_dispatch",
+            hook_source="origin-plugin:message:received",
+            message_received_depth=1,
+        ),
+    )
 
     request = bot._delivery_gateway.send_text.await_args.args[0]
     assert request.target.resolved_thread_id == "$hook-dispatch-command"
@@ -1644,29 +1745,21 @@ async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message
             },
         },
     )
-    interactive._active_questions.clear()
-    interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
-        room_id=room.room_id,
-        thread_id=None,
-        options={"1": "first"},
-        creator_agent=bot.agent_name,
-    )
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock()
+    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
     bot._turn_controller._precheck_dispatch_event = AsyncMock(
         return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
-    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=event)
+    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=_prepared_text_event(event))
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
-    bot._turn_controller._dispatch_text_message = AsyncMock()
-
-    try:
+    with patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch:
         await bot._on_message(room, event)
-    finally:
-        assert "$question123" in interactive._active_questions
-        interactive._active_questions.clear()
 
-    bot._turn_controller._dispatch_text_message.assert_not_awaited()
+    interactive_questions.claim_interactive_text.assert_not_awaited()
+    mock_dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1688,30 +1781,22 @@ async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_me
             },
         },
     )
-    interactive._active_questions.clear()
-    interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
-        room_id=room.room_id,
-        thread_id=None,
-        options={"1": "first"},
-        creator_agent=bot.agent_name,
-    )
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock()
+    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
     bot._turn_controller._precheck_dispatch_event = AsyncMock(
         return_value=_PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
     )
-    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=event)
+    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=_prepared_text_event(event))
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
-    bot._turn_controller._dispatch_text_message = AsyncMock()
-
-    try:
+    with patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch:
         await bot._on_message(room, event)
         await bot._coalescing_gate.drain_all()
-    finally:
-        assert "$question123" in interactive._active_questions
-        interactive._active_questions.clear()
 
-    bot._turn_controller._dispatch_text_message.assert_awaited_once()
+    interactive_questions.claim_interactive_text.assert_not_awaited()
+    mock_dispatch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1740,15 +1825,21 @@ async def test_first_hop_plain_hook_from_non_message_hook_still_dispatches(tmp_p
         hook_calls.append("called")
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
-    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=event)
+    bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=_prepared_text_event(event))
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
     bot._turn_policy.plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
 
-    await bot._turn_controller._dispatch_text_message(
+    await dispatch_test_turn(
+        bot._turn_controller,
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        ingress_metadata=DispatchIngressMetadata(
+            source_kind="hook",
+            hook_source="restart-notify:bot:ready",
+            message_received_depth=1,
+        ),
     )
 
     bot._turn_policy.plan_turn.assert_awaited_once()
@@ -1780,7 +1871,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             },
         },
     )
-    prepared_text_event = PreparedTextEvent(
+    prepared_text_event = PreparedIngress(
         sender="@mindroom_router:localhost",
         event_id="$sidecar-hook-dispatch",
         body="1",
@@ -1798,44 +1889,30 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
-    bot._turn_controller._dispatch_text_message = AsyncMock()
-    interactive._active_questions.clear()
-    interactive._active_questions["$question123"] = interactive._InteractiveQuestion(
-        room_id=room.room_id,
-        thread_id=None,
-        options={"1": "first"},
-        creator_agent=bot.agent_name,
-    )
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock()
+    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
+    with patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch:
+        assert isinstance(sidecar_event, nio.RoomMessageFile)
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
+            room,
+            "@mindroom_router:localhost",
+        )
+        handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+            room,
+            _PrecheckedEvent(
+                event=sidecar_event,
+                requester_user_id="@mindroom_router:localhost",
+            ),
+            reservation_owner=reservation_owner,
+            coalescing_thread_id=None,
+        )
+        await reservation_owner.release()
+        await bot._coalescing_gate.drain_all()
 
-    try:
-        with patch.object(
-            interactive,
-            "handle_text_response",
-            new=AsyncMock(return_value=None),
-        ) as mock_handle_text_response:
-            assert isinstance(sidecar_event, nio.RoomMessageFile)
-            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
-                room,
-                "@mindroom_router:localhost",
-            )
-            handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
-                room,
-                _PrecheckedEvent(
-                    event=sidecar_event,
-                    requester_user_id="@mindroom_router:localhost",
-                ),
-                reservation_owner=reservation_owner,
-                coalescing_thread_id=None,
-            )
-            await reservation_owner.release()
-            await bot._coalescing_gate.drain_all()
-
-        assert handled is _IngressAdmissionOutcome.ADMITTED
-        assert "$question123" in interactive._active_questions
-        mock_handle_text_response.assert_not_awaited()
-        bot._turn_controller._dispatch_text_message.assert_awaited_once()
-    finally:
-        interactive._active_questions.clear()
+    assert handled is _IngressAdmissionOutcome.DEFERRED
+    interactive_questions.claim_interactive_text.assert_not_awaited()
+    mock_dispatch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1861,7 +1938,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
             },
         },
     )
-    prepared_text_event = PreparedTextEvent(
+    prepared_text_event = PreparedIngress(
         sender="@mindroom_router:localhost",
         event_id="$sidecar-deep-hook-dispatch",
         body="follow-up",
@@ -1879,13 +1956,10 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
-    bot._turn_controller._dispatch_text_message = AsyncMock()
-
-    with patch.object(
-        interactive,
-        "handle_text_response",
-        new=AsyncMock(return_value=None),
-    ) as mock_handle_text_response:
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock()
+    replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
+    with patch("mindroom.turn_controller.dispatch_text_message", new_callable=AsyncMock) as mock_dispatch:
         assert isinstance(sidecar_event, nio.RoomMessageFile)
         reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
             room,
@@ -1903,8 +1977,8 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
         await reservation_owner.release()
 
     assert handled is _IngressAdmissionOutcome.CONSUMED
-    mock_handle_text_response.assert_not_awaited()
-    bot._turn_controller._dispatch_text_message.assert_not_awaited()
+    interactive_questions.claim_interactive_text.assert_not_awaited()
+    mock_dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1912,7 +1986,7 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
     """Prepared synthetic text should keep first-hop hook dispatch behavior."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@mindroom_router:localhost",
         event_id="$prepared-hook-dispatch",
         body="@mindroom_code:localhost follow up",
@@ -1931,9 +2005,15 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
     )
     bot._turn_policy.plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
 
-    await bot._turn_controller._dispatch_text_message(
+    await dispatch_test_turn(
+        bot._turn_controller,
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        ingress_metadata=DispatchIngressMetadata(
+            source_kind="hook_dispatch",
+            hook_source="origin-plugin:bot:ready",
+            message_received_depth=1,
+        ),
     )
 
     bot._turn_policy.plan_turn.assert_awaited_once()
@@ -1947,7 +2027,7 @@ async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: 
     """Prepared synthetic text should stop at the same deep-relay boundary as raw text."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
-    event = PreparedTextEvent(
+    event = PreparedIngress(
         sender="@mindroom_router:localhost",
         event_id="$prepared-deep-hook-dispatch",
         body="follow-up automation",
@@ -1966,9 +2046,15 @@ async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: 
     )
     bot._turn_policy.plan_turn = AsyncMock()
 
-    await bot._turn_controller._dispatch_text_message(
+    await dispatch_test_turn(
+        bot._turn_controller,
         room,
         _PrecheckedEvent(event=event, requester_user_id="@mindroom_router:localhost"),
+        ingress_metadata=DispatchIngressMetadata(
+            source_kind="hook_dispatch",
+            hook_source="origin-plugin:message:before_response",
+            message_received_depth=2,
+        ),
     )
 
     bot._turn_policy.plan_turn.assert_not_awaited()
@@ -2010,7 +2096,10 @@ async def test_prepare_dispatch_still_filters_plain_hook_without_mention(tmp_pat
         event,
         "@mindroom_router:localhost",
         event_label="message",
-        handled_turn=TurnRecord.create([event.event_id]),
+        handled_turn=TurnRecord.create(
+            [event.event_id],
+            requester_id="@mindroom_router:localhost",
+        ),
     )
 
     # Plain hook messages without mention should still be filtered
@@ -2069,6 +2158,7 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(tmp_path: Path) -> None:
     """hook_dispatch should enforce room authorization against the preserved requester."""
     bot = _hook_bot(tmp_path)
@@ -2092,8 +2182,7 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
         },
     )
 
-    with patch("mindroom.ingress_validation.is_authorized_sender", side_effect=real_is_authorized_sender):
-        prechecked = await bot._turn_controller._precheck_dispatch_event(room, event)
+    prechecked = await bot._turn_controller._precheck_dispatch_event(room, event)
 
     assert prechecked is None
     turn_store.record_turn.assert_called_once_with(

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from agno.agent._tools import parse_tools
 from agno.models.base import Model
 from agno.models.response import ModelResponse
 from agno.tools.function import Function
+from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
@@ -23,7 +25,7 @@ from mindroom.config.main import Config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, GOOGLE_DRIVE_READ_OAUTH_SCOPES
-from mindroom.tool_approval import tool_requires_approval_for_openai_compat
+from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
@@ -122,8 +124,16 @@ class _FakeDriveService:
         return self.files_resource
 
 
-class _ValidCredentials:
-    valid = True
+def _valid_credentials() -> GoogleOAuthCredentials:
+    return GoogleOAuthCredentials(
+        token="valid-access-token",  # noqa: S106
+        refresh_token="valid-refresh-token",  # noqa: S106
+        token_uri="https://oauth2.googleapis.com/token",  # noqa: S106
+        client_id="client-id",
+        client_secret="client-secret",  # noqa: S106
+        scopes=("scope",),
+        expiry=datetime(2100, 1, 1),  # noqa: DTZ001
+    )
 
 
 class _FakeMediaIoBaseDownload:
@@ -155,7 +165,7 @@ def _google_drive_download_tool(
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         download_file=True,
         tool_output_workspace_root=download_dir or tmp_path,
     )
@@ -174,7 +184,7 @@ def _google_drive_write_tool(
     tool = GoogleDriveTools(
         runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         tool_output_workspace_root=workspace_root,
     )
     service = _FakeDriveService()
@@ -269,6 +279,7 @@ def test_google_drive_model_functions_do_not_collide_with_local_file_tools(tmp_p
         "google_drive_search_files",
         "google_drive_read_file",
         "google_drive_upload_file",
+        "google_drive_update_file",
         "google_drive_create_folder",
         "google_drive_move_file",
         "google_drive_trash_file",
@@ -297,6 +308,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
     )
     write_functions = {
         "google_drive_upload_file",
+        "google_drive_update_file",
         "google_drive_create_folder",
         "google_drive_move_file",
         "google_drive_trash_file",
@@ -312,6 +324,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
 def test_google_drive_write_functions_can_require_approval() -> None:
     write_functions = (
         "google_drive_upload_file",
+        "google_drive_update_file",
         "google_drive_create_folder",
         "google_drive_move_file",
         "google_drive_trash_file",
@@ -324,7 +337,7 @@ def test_google_drive_write_functions_can_require_approval() -> None:
         },
     )
 
-    assert all(tool_requires_approval_for_openai_compat(config, name) for name in write_functions)
+    assert all(tool_may_require_approval(config, name) for name in write_functions)
 
 
 def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) -> None:
@@ -368,7 +381,7 @@ def test_google_drive_download_confines_truthy_non_bool_flag(tmp_path: Path) -> 
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         download_file="true",
         tool_output_workspace_root=tmp_path,
     )
@@ -418,7 +431,7 @@ def test_google_drive_credentials_restore_stored_expiry(tmp_path: Path) -> None:
     )
     expires_at = datetime(2030, 1, 1, tzinfo=UTC).timestamp()
 
-    creds = tool._credentials_from_token_data(
+    creds = tool._raw_credentials_from_token_data(
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
@@ -567,6 +580,7 @@ def test_google_drive_readonly_grant_blocks_direct_async_write_methods(tmp_path:
 
     results = (
         asyncio.run(tool._aupload_file("plan.txt")),
+        asyncio.run(tool.aupdate_file("file-id", "plan.txt")),
         asyncio.run(tool.acreate_folder("Plans")),
         asyncio.run(tool.amove_file("file-id", "parent-id")),
         asyncio.run(tool.atrash_file("file-id")),
@@ -575,6 +589,35 @@ def test_google_drive_readonly_grant_blocks_direct_async_write_methods(tmp_path:
     assert all(json.loads(result)["reason"] == "missing_write_scope" for result in results)
     assert service.files_resource.create_kwargs is None
     assert service.files_resource.update_kwargs is None
+
+
+def test_google_drive_async_write_scope_check_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = GoogleDriveTools(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+    )
+    event_loop_thread = threading.get_ident()
+    scope_check_threads: list[int] = []
+    expected_result = json.dumps({"reason": "missing_write_scope"})
+
+    def scope_upgrade_result() -> str:
+        scope_check_threads.append(threading.get_ident())
+        return expected_result
+
+    monkeypatch.setattr(tool, "_write_scope_upgrade_result", scope_upgrade_result)
+    entrypoint = tool.async_functions["google_drive_upload_file"].entrypoint
+    assert entrypoint is not None
+
+    result = asyncio.run(entrypoint("unused"))
+
+    assert result == expected_result
+    assert scope_check_threads
+    assert event_loop_thread not in scope_check_threads
 
 
 def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp_path: Path) -> None:
@@ -757,7 +800,7 @@ def test_google_drive_search_includes_shared_drive_parameters(tmp_path: Path) ->
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
     )
     service = _FakeDriveService()
     tool.service = service
@@ -776,10 +819,10 @@ def test_google_drive_search_includes_shared_drive_parameters(tmp_path: Path) ->
         "q": "('folder-id' in parents) and trashed=false",
         "pageSize": 3,
         "orderBy": "modifiedTime desc",
-        "fields": f"incompleteSearch, {tool.SEARCH_FIELDS}",
-        "includeItemsFromAllDrives": True,
-        "supportsAllDrives": True,
+        "fields": tool.SEARCH_FIELDS,
         "corpora": "allDrives",
+        "supportsAllDrives": True,
+        "includeItemsFromAllDrives": True,
         "pageToken": cursor,
     }
 
@@ -830,6 +873,63 @@ def test_google_drive_upload_rejects_workspace_escape(
     assert service.files_resource.create_kwargs is None
 
 
+def test_google_drive_update_replaces_binary_file_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    replacement = workspace_root / "reports" / "plan.md"
+    replacement.parent.mkdir()
+    replacement.write_text("revised plan")
+    service.files_resource.file_metadata = {
+        "id": "file-id",
+        "name": "plan.md",
+        "mimeType": "text/markdown",
+    }
+
+    result = json.loads(tool.update_file("file-id", "reports/plan.md"))
+
+    assert result == {"id": "file-id"}
+    assert service.files_resource.get_kwargs == {
+        "fileId": "file-id",
+        "fields": "id,name,mimeType",
+        "supportsAllDrives": True,
+    }
+    assert service.files_resource.update_kwargs is not None
+    media = service.files_resource.update_kwargs["media_body"]
+    assert isinstance(media, _FakeMediaFileUpload)
+    assert Path(media.filename) == replacement
+    assert media.mimetype == "text/markdown"
+    assert service.files_resource.update_kwargs == {
+        "fileId": "file-id",
+        "media_body": media,
+        "fields": "id,name,mimeType,modifiedTime,size,parents,trashed,webViewLink",
+        "supportsAllDrives": True,
+    }
+
+
+def test_google_drive_update_rejects_google_workspace_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    replacement = workspace_root / "plan.txt"
+    replacement.write_text("revised plan")
+    service.files_resource.file_metadata = {
+        "id": "file-id",
+        "name": "Plan",
+        "mimeType": "application/vnd.google-apps.document",
+    }
+
+    result = json.loads(tool.update_file("file-id", "plan.txt"))
+
+    assert result["error"] == (
+        "Google Drive content replacement only supports binary files; "
+        "application/vnd.google-apps.document requires its Google Workspace API"
+    )
+    assert service.files_resource.update_kwargs is None
+
+
 def test_google_drive_upload_rejects_absolute_workspace_escape(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -854,7 +954,7 @@ def test_google_drive_upload_requires_workspace(
     tool = GoogleDriveTools(
         runtime_paths=_runtime_paths_with_google_drive_client(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         tool_output_workspace_root=None,
     )
     service = _FakeDriveService()
@@ -932,7 +1032,7 @@ def test_google_drive_read_metadata_supports_shared_drive_files(tmp_path: Path) 
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
     )
     service = _FakeDriveService()
     tool.service = service
@@ -952,7 +1052,7 @@ def test_google_drive_read_media_supports_shared_drive_files(tmp_path: Path) -> 
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
     )
     service = _FakeDriveService()
     service.files_resource.file_metadata = {
@@ -979,7 +1079,7 @@ def test_google_drive_large_file_error_names_exposed_download_function(tmp_path:
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        creds=_ValidCredentials(),
+        creds=_valid_credentials(),
         max_read_size=4,
     )
     service = _FakeDriveService()

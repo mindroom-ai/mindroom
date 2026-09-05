@@ -22,13 +22,6 @@ if TYPE_CHECKING:
     icon_color="text-purple-600",  # Memory/brain theme
     config_fields=[
         ConfigField(
-            name="config",
-            label="Config",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="api_key",
             label="API Key",
             type="password",

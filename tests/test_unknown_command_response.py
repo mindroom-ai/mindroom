@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -44,7 +44,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     )
 
     # Create router bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         config=config,
         storage_path=tmp_path,
@@ -60,6 +60,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
+    room.members_synced = True
     room.canonical_alias = None
     room.name = "Test Room"
     room.users = {
@@ -105,7 +106,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message):
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
@@ -139,7 +140,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     )
 
     # Create router bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         config=config,
         storage_path=tmp_path,
@@ -155,6 +156,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
+    room.members_synced = True
     room.canonical_alias = None
     room.name = "Test Room"
     room.users = {
@@ -218,7 +220,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     bot.orchestrator.thread_specific_agents = {}
 
     with (
-        patch("mindroom.delivery_gateway.send_message_result", mock_send_message),
+        patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message),
     ):
         await bot._on_message(room, event)
         await drain_coalescing(bot)
@@ -251,7 +253,7 @@ async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -
     )
 
     # Create router bot
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         config=config,
         storage_path=tmp_path,
@@ -267,6 +269,7 @@ async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
+    room.members_synced = True
     room.canonical_alias = None
     room.name = "Test Room"
     room.users = {
@@ -315,7 +318,7 @@ async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -
     bot.orchestrator = MagicMock()
     bot.orchestrator.thread_specific_agents = {}
 
-    with patch("mindroom.delivery_gateway.send_message_result", mock_send_message):
+    with patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message):
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 

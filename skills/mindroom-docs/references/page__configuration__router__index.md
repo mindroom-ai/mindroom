@@ -10,7 +10,7 @@ router:
   # Model for routing decisions (defaults to "default")
   model: haiku
 
-  # Accept authorized room invites and preserve them across restarts (default: true)
+  # Accept all, none, or matching inviter ID patterns (default: true)
   accept_invites: true
 
 ```
@@ -20,7 +20,11 @@ The router has two configuration options:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model to use for routing decisions |
-| `accept_invites` | bool | `true` | When enabled, the router accepts authorized room invites, persists accepted room IDs, rejoins them after restart, and preserves them during room cleanup |
+| `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted room IDs are persisted, rejoined after restart, and preserved during room cleanup |
+
+Invitation patterns are matched after identity alias resolution and use the same case-sensitive wildcard semantics as responder `access.users`.
+Invitation acceptance grants room membership only and remains independent from responder access.
+The router applies its ordinary `access` policy to every interaction after joining.
 
 ## How Routing Works
 
@@ -44,7 +48,8 @@ The router is a special system agent that handles several important tasks beyond
 
 ### Command Handling
 
-The router exclusively handles all commands:
+The router owns commands by default.
+A requester-scoped `!desktop` command may instead be owned by an eligible private agent when the room contains exactly that requester and agent.
 
 - `!help [topic]` - Get help on commands or specific topics
 - `!hi` - Show the welcome message again
@@ -52,13 +57,20 @@ The router exclusively handles all commands:
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
+- `!reload-plugins` - Reload configured plugins (admin only)
 - `!config <operation>` - Manage configuration when explicitly enabled for global admins
+- `!desktop [setup|status|confirm|rotate|disconnect]` - Manage the requester's Desktop target
+- `!model [name|list|reset]` - Show or switch the current thread model
+- `!room_model [name|list|reset]` - Show the current room model default or switch it (set/reset require a room admin)
+- `!thread_mode [room|thread|reset|show]` - Manage room thread mode (room admin only)
+- `!encrypt [confirm]` - Enable room encryption (irreversible, room admin only)
+- `!e2ee` - Show room encryption diagnostics
 
-Even in single-responder rooms, commands are always processed by the router.
+Except for the requester-scoped `!desktop` case above, commands are processed by the router even in single-responder rooms.
 
 ### Welcome Messages
 
-When the router joins a room after an invite, it sends a requester-scoped welcome message.
+After accepting an invite, the router sends a requester-scoped welcome message only when the room has no existing message history.
 
 That welcome message lists:
 
@@ -67,7 +79,8 @@ That welcome message lists:
 - Quick command reference
 
 Startup welcomes with no requester list configured room responders when the room is statically configured.
-Startup welcomes for ad-hoc rooms send the general interaction guidance and quick command reference without an available-responder list.
+Startup does not send requester-less welcomes in persisted ad-hoc invite rooms because the original inviter cannot be re-authorized safely from persisted state.
+The live invite callback sends the requester-scoped welcome when the inviter currently has router reply access.
 
 Use `!hi` in any room to see the welcome message again.
 
@@ -79,14 +92,22 @@ The router creates and manages rooms:
 
 - Creates configured rooms that don't exist yet
 - Invites configured agents, teams, and users to their rooms
-- Applies `matrix_room_access` policy for managed rooms (when enabled)
+- Applies effective `room_defaults` and per-room policy for managed rooms
 - Reconciles managed room power levels so the custom thread-tags state event can be written at PL0
 - Generates AI-powered room topics based on configured agents and teams
 - Has admin privileges to manage room membership
 - Cleans up orphaned bots on startup
 
-By default (`matrix_room_access.mode: single_user_private`), rooms remain invite-only and private in the room directory.
-In `multi_user` mode, the router can set join rules (`public`/`knock`) and optionally publish rooms to the server directory.
+Every concrete Matrix agent operating in a room also receives a built-in zero-argument `invite_router` recovery tool.
+The tool can invite only the persisted router identity and only into the agent's current room.
+The router accepts the invite and persists the room only when `router.accept_invites` allows the current Matrix transport account's user ID.
+A team member therefore authorizes recovery through the team's Matrix account, not the member agent's account.
+The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
+This lets an agent recover router-backed approvals without adding persistent prompt instructions or exposing arbitrary invite targets.
+
+By default, `room_defaults.join_policy: invite` and `room_defaults.listed: false` keep managed rooms private.
+Set `room_defaults.join_policy` to `public` or `knock`, and use `room_defaults.listed` to control room-directory visibility.
+Per-room values replace these defaults when configured under `rooms.<key>`.
 That same reconciliation path also updates `m.room.power_levels` for managed rooms, so the router must be joined and able to edit room power levels when thread tags are enabled.
 
 ### Voice Message Processing
@@ -127,7 +148,10 @@ The rules are:
 2. **Non-thread messages** — a single eligible agent or team can auto-respond, regardless of how many humans are present.
 3. **Threads with one human** — normal auto-response behavior applies, so the agent or team continues the conversation.
 4. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
-5. **Mentioning a non-MindRoom user** — if a message tags only humans or unmanaged users, agents and teams stay silent.
+5. **Mentioning another joined room participant** — if a message tags only joined users who are neither managed entities nor configured bot accounts, agents and teams stay silent.
+
+Mentions of unmanaged user IDs that are absent from the room or merely invited do not suppress normal routing or automatic responses.
+Mentioning a configured agent that is not joined to the room still counts as an explicit mention for the other agents.
 
 #### Bot accounts
 

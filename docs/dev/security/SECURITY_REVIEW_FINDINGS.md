@@ -163,7 +163,7 @@ Remaining (high priority):
 ## Recommendations for Security Process
 
 1. **Set up Security Infrastructure**:
-   - Create security@mindroom.chat email
+   - Publish and verify a monitored responsible-disclosure channel.
    - Implement security.txt file
    - Set up vulnerability disclosure policy
 

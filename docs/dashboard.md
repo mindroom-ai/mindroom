@@ -4,7 +4,8 @@ icon: lucide/layout-dashboard
 
 # Web Dashboard
 
-MindRoom includes a web dashboard for configuring agents, teams, rooms, and integrations without editing YAML files. Changes are synchronized to `config.yaml` in real-time.
+MindRoom includes a web dashboard for configuring agents, teams, rooms, and integrations without editing YAML files.
+Editors keep local draft state and write `config.yaml` when you use their save action.
 
 ## Accessing the Dashboard
 
@@ -73,11 +74,10 @@ View and manage rooms that agents have joined but are not in the configuration:
 Configure AI model providers:
 
 - **Add/edit models** with provider, model ID, host URL, and advanced settings
-- **Provider filter** to show models by provider
-- **Test connection** to verify model accessibility
 - **Provider API keys** section for configuring credentials
 
-**Runtime-supported providers:** OpenAI, Codex CLI ChatGPT authentication (`codex`), Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
+**Runtime-supported providers:** Anthropic, Bedrock Claude, Azure OpenAI, OpenAI, Codex CLI ChatGPT authentication, Kimi Code, Google Gemini, Vertex AI Claude, Ollama, llama.cpp, Groq, OpenRouter, Cerebras, DeepSeek, Z.ai, and the internal synthetic provider.
+The dashboard preserves provider IDs already present in the configuration; not every runtime provider has a dedicated icon or preset in the add-model dropdown.
 
 ### Memory
 
@@ -126,20 +126,12 @@ Manage service credentials directly from the dashboard:
 - **Reuse credentials for Git knowledge sync** by setting `knowledge_bases.<id>.git.credentials_service` to the same service name
 - `GITHUB_TOKEN` auto-seeds `github_private` (`username: x-access-token`, `token: <GITHUB_TOKEN>`, `_source: env`) unless the service is UI-managed
 
-### Culture
-
-Configure shared culture rules that apply across agents:
-
-- **Create/edit/delete cultures** with description and mode
-- **Assign agents** to cultures
-- **Mode selection** - `automatic` (always active), `agentic` (agent decides when to update), or `manual` (read-only)
-
 ### Schedules
 
 View and manage scheduled tasks across rooms:
 
-- **List all schedules** with room, status, schedule type, and next run time
-- **Edit schedule timing** and description
+- **List all schedules** with room, status, schedule type, delivery mode, and next run time
+- **Edit schedule timing**, description, and visible or silent delivery
 - **Cancel schedules** by task ID
 
 ### Skills
@@ -158,7 +150,7 @@ Configure voice message handling:
 
 - **Enable/disable** voice message support
 - **Speech-to-Text** - OpenAI transcription or a self-hosted OpenAI-compatible service
-- **Command Intelligence** - Model selection for command recognition
+- **Transcript intelligence** - Model selection for mention normalization and light ASR cleanup
 
 ### Integrations
 
@@ -170,7 +162,7 @@ Connect external services to enable agent capabilities:
 
 ## Features
 
-### Real-time Sync
+### Save Status
 
 The sync status indicator in the header shows:
 
@@ -234,7 +226,10 @@ Credentials support scoping via query parameters:
 - `agent_name` — scope credentials to a specific agent
 - `execution_scope` — scope credentials to a specific worker scope (e.g., `shared`, `unscoped`)
 
-When `agent_name` is present, credential routes require the authenticated dashboard requester to be allowed by `authorization.agent_reply_permissions` for that agent.
+Agent-scoped credential routes for shared agents require the authenticated dashboard requester to be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+Requester-private agents allow authenticated requesters to manage OAuth connections in their own isolated scope.
+Deployment-global OAuth client configuration requires platform-administrator authority, with or without `agent_name`.
+Responder access and room membership never grant credential-management access.
 Unauthorized agent-scoped requests return HTTP 403.
 Trusted upstream deployments should provide a Matrix requester identity through the configured Matrix user ID header or email-to-Matrix template.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests manage credentials as the owner Matrix user.
@@ -264,8 +259,8 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/schedules` | List scheduled tasks (filterable by room) |
-| PUT | `/api/schedules/{task_id}` | Edit a scheduled task |
+| GET | `/api/schedules` | List scheduled tasks, including each task's `silent` delivery flag (filterable by room) |
+| PUT | `/api/schedules/{task_id}` | Edit a scheduled task, including the optional `silent` delivery flag |
 | DELETE | `/api/schedules/{task_id}` | Cancel a scheduled task |
 
 ### Workers
@@ -279,7 +274,7 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Returns `{"status": "healthy"}` when the HTTP server is running and Matrix sync is active. Returns `503` with `{"status": "unhealthy", "stale_sync_entities": [...]}` when Matrix sync has been stale for >180s (after watchdog recovery attempts) |
+| GET | `/api/health` | Liveness endpoint that returns `503` with `{"status": "unhealthy", "stale_sync_entities": [...]}` for stale Matrix sync after startup is ready, while `/api/ready` owns startup state before readiness. |
 | GET | `/api/ready` | Returns `{"status": "ready"}` when the orchestrator has finished startup. Returns `503` with `{"status": "<phase>", "detail": "..."}` otherwise |
 
 MindRoom tracks runtime phases internally:

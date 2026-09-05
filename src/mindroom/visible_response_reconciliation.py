@@ -144,6 +144,7 @@ class VisibleResponseReconciler:
         recovered_response_event_id: str | None,
         skip_mentions: bool = False,
         as_placeholder: bool = False,
+        delivery_turn_id: str | None = None,
     ) -> str | None:
         """Send and durably bind one non-model reply unless recovery already found it.
 
@@ -179,6 +180,9 @@ class VisibleResponseReconciler:
         before the model finished with nothing pending to replay and
         "Thinking..." in the room for good.
 
+        ``delivery_turn_id`` names a distinct admitted event when that event,
+        rather than the handled-turn anchor, authorized the room membership.
+
         A send that genuinely is not a turn -- a voice echo, a reconciliation
         notice -- has no identity a restart can resolve and does not belong
         here at all; it builds its own ``SendTextRequest`` and the gateway
@@ -191,7 +195,7 @@ class VisibleResponseReconciler:
                 target=target,
                 response_text=response_text,
                 skip_mentions=skip_mentions,
-                delivery_turn_id=handled_turn.anchor_event_id,
+                delivery_turn_id=delivery_turn_id or handled_turn.anchor_event_id,
                 delivery_stage=DeliveryStage.INITIAL if as_placeholder else DeliveryStage.FINAL,
             ),
         )

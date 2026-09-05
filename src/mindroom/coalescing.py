@@ -6,17 +6,18 @@ import asyncio
 import enum
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from .cancellation import request_task_cancel
 from .coalescing_batch import (
-    CoalescedBatch,
     CoalescingKey,
     PendingEvent,
+    PreparedTurn,
     TimestampFormatter,
     active_follow_up_coalescing_key,
-    build_coalesced_batch,
+    build_prepared_turn,
+    coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
 )
 from .coalescing_cleanup import (
@@ -34,7 +35,7 @@ from .coalescing_policy import (
 )
 from .dispatch_recovery_context import turn_dispatch_recovery_scope
 from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
-from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot
+from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot, ReceiptLaneKey
 from .logging_config import get_logger
 from .response_admission import ResponseAdmissionRefusedError
 from .runtime_shutdown import (
@@ -173,7 +174,7 @@ class _GateEntry:
 class _FlushDiagnostics:
     """Stable metadata for one flush attempt."""
 
-    batch: CoalescedBatch
+    turn: PreparedTurn
     pending_count: int
     timing_scope: str
     log_context: dict[str, object]
@@ -206,7 +207,7 @@ class CoalescingGate:
     def __init__(
         self,
         *,
-        dispatch_batch: Callable[[CoalescedBatch], Awaitable[None]],
+        dispatch_turn: Callable[[PreparedTurn], Awaitable[None]],
         debounce_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
         wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
@@ -217,7 +218,7 @@ class CoalescingGate:
         on_undelivered_source: Callable[[str], None] | None = None,
         on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        self._dispatch_batch = dispatch_batch
+        self._dispatch_turn = dispatch_turn
         self._debounce_seconds = debounce_seconds
         self._is_shutting_down = is_shutting_down
         self._wait_until_dispatch_allowed = wait_until_dispatch_allowed or _allow_dispatch
@@ -254,9 +255,8 @@ class CoalescingGate:
 
     def enter_lane(
         self,
+        lane_key: ReceiptLaneKey,
         *,
-        room_id: str,
-        sender_id: str,
         receipt_time: float | None = None,
     ) -> LaneSlot:
         """Reserve receipt order in one sender lane before resolution can finish."""
@@ -264,8 +264,8 @@ class CoalescingGate:
         if self._is_bounded_drain(drain_context):
             assert drain_context is not None
             drain_context.result.released_reservation_count += 1
-            return IngressLanes.closed_slot(room_id=room_id, sender_id=sender_id, receipt_time=receipt_time)
-        return self._lanes.enter(room_id=room_id, sender_id=sender_id, receipt_time=receipt_time)
+            return IngressLanes.closed_slot(lane_key, receipt_time=receipt_time)
+        return self._lanes.enter(lane_key, receipt_time=receipt_time)
 
     def submit_lane_slot(
         self,
@@ -344,6 +344,53 @@ class CoalescingGate:
             gate.drain_context = self._active_drain_context
             self._gates[key] = gate
         return gate
+
+    @staticmethod
+    def _queued_event_allows_room_scope_batching(queued: _QueuedEvent) -> bool:
+        return source_or_event_allows_room_scope_batching(
+            queued.source_kind,
+        ) or source_or_event_allows_room_scope_batching(
+            queued.pending_event.event.source_kind,
+            queued.pending_event.event,
+        )
+
+    @staticmethod
+    def _queued_event_is_thread_root_media(queued: _QueuedEvent, thread_id: str) -> bool:
+        return (
+            queued.source_event_id == thread_id
+            and CoalescingGate._queued_kind(queued) is QueueKind.NORMAL
+            and CoalescingGate._queued_event_allows_room_scope_batching(queued)
+        )
+
+    def _promote_pending_room_media(self, key: CoalescingKey) -> _GateEntry | None:
+        """Move one pending room media burst to the thread started on its upload."""
+        if key.thread_id is None:
+            return None
+        room_key = CoalescingKey(key.room_id, None, key.owner)
+        room_gate = self._gates.get(room_key)
+        if room_gate is None or room_gate.phase is not _GatePhase.DEBOUNCE or room_gate.claimed_admissions:
+            return None
+        candidate_count = self._front_normal_run_length(room_gate, coalesce_normal_events=True)
+        candidates = list(room_gate.queue)[:candidate_count]
+        if (
+            not candidates
+            or pending_event_is_text(candidates[-1].pending_event)
+            or not self._queued_event_allows_room_scope_batching(candidates[-1])
+            or not any(self._queued_event_is_thread_root_media(queued, key.thread_id) for queued in candidates)
+        ):
+            return None
+
+        thread_gate = self._get_or_create_gate(key)
+        for _ in range(candidate_count):
+            self._insert_queued_event(thread_gate, room_gate.queue.popleft())
+        self._schedule_drain(room_key, room_gate)
+        return thread_gate
+
+    def _gate_for_admission(self, key: CoalescingKey) -> _GateEntry:
+        """Return the gate that owns an admission, promoting a pending media root when needed."""
+        if (gate := self._gates.get(key)) is not None:
+            return gate
+        return self._promote_pending_room_media(key) or self._get_or_create_gate(key)
 
     def _current_drain_context(self, gate: _GateEntry | None = None) -> _DrainContext | None:
         if gate is not None and gate.drain_context is not None:
@@ -531,13 +578,13 @@ class CoalescingGate:
         *,
         enqueue_start: float,
         path: str,
-        source_kind: str,
+        source_kind: str | None,
     ) -> None:
         logger.debug(
             "coalescing_gate_enqueue",
             room_id=key.room_id,
             thread_id=key.thread_id,
-            requester_user_id=key.requester_user_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
             path=path,
             source_kind=source_kind,
             pending_count=self._gate_work_count(gate),
@@ -556,10 +603,10 @@ class CoalescingGate:
             "coalescing_gate_message_enqueued",
             room_id=key.room_id,
             thread_id=key.thread_id,
-            requester_user_id=key.requester_user_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
             event_id=pending_event.event.event_id,
             pending_count=pending_count,
-            source_kind=pending_event.source_kind,
+            source_kind=pending_event.event.source_kind,
             timing_scope=event_timing_scope(pending_event.event.event_id),
         )
 
@@ -568,17 +615,17 @@ class CoalescingGate:
         key: CoalescingKey,
         pending_events: list[PendingEvent],
     ) -> _FlushDiagnostics:
-        batch = build_coalesced_batch(key, pending_events, timestamp_formatter=self._timestamp_formatter)
+        turn = build_prepared_turn(key, pending_events, timestamp_formatter=self._timestamp_formatter)
         pending_count = len(pending_events)
-        timing_scope = event_timing_scope(batch.primary_event.event_id)
+        timing_scope = event_timing_scope(turn.event.event_id)
         return _FlushDiagnostics(
-            batch=batch,
+            turn=turn,
             pending_count=pending_count,
             timing_scope=timing_scope,
             log_context={
                 "room_id": key.room_id,
                 "thread_id": key.thread_id,
-                "requester_user_id": key.requester_user_id,
+                "requester_user_id": coalescing_owner_log_label(key.owner),
                 "pending_count": pending_count,
                 "oldest_pending_age_ms": self._oldest_pending_events_age_ms(pending_events),
                 "source_event_ids": self._source_event_ids(pending_events),
@@ -609,7 +656,7 @@ class CoalescingGate:
             return
         gate.drain_task = asyncio.create_task(
             self._drain_gate(key, gate),
-            name=f"coalescing_drain:{key.room_id}:{key.thread_id or 'room'}:{key.requester_user_id}",
+            name=f"coalescing_drain:{key.room_id}:{key.thread_id or 'room'}:{coalescing_owner_log_label(key.owner)}",
         )
 
     def _schedule_drain(self, key: CoalescingKey, gate: _GateEntry) -> None:
@@ -641,13 +688,13 @@ class CoalescingGate:
             gate,
             enqueue_start=enqueue_start,
             path=path,
-            source_kind=pending_event.source_kind,
+            source_kind=pending_event.event.source_kind,
         )
         emit_elapsed_timing(
             "coalescing_gate.enqueue",
             enqueue_start,
             path=path,
-            source_kind=pending_event.source_kind,
+            source_kind=pending_event.event.source_kind,
             pending_count=self._gate_work_count(gate),
             flush_outcome=flush_outcome,
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
@@ -659,11 +706,14 @@ class CoalescingGate:
         if is_active_follow_up_coalescing_key(key) or not self._conversation_is_busy(key):
             return key
         pending_event = ready_result.pending_event
-        if pending_event.dispatch_policy_source_kind is None and not is_coalescing_exempt_source_kind(
+        if pending_event.event.dispatch_policy_source_kind is None and not is_coalescing_exempt_source_kind(
             pending_event.event,
-            pending_event.source_kind,
+            pending_event.event.source_kind,
         ):
-            pending_event.dispatch_policy_source_kind = ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
+            pending_event.event = replace(
+                pending_event.event,
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            )
         return active_follow_up_coalescing_key(key.room_id, key.thread_id)
 
     async def admit(
@@ -684,7 +734,7 @@ class CoalescingGate:
         """
         enqueue_start = time.monotonic()
         key = self._busy_conversation_key(key, ready_result)
-        gate = self._get_or_create_gate(key)
+        gate = self._gate_for_admission(key)
         admission = _QueuedEvent(
             received_at=received_at if received_at is not None else time.time(),
             receipt_time=receipt_time if receipt_time is not None else time.monotonic(),
@@ -786,7 +836,7 @@ class CoalescingGate:
             if not await self._wait_for_deadline(gate, deadline):
                 return _DebounceWaitResult(quiet_deadline=quiet_deadline)
             coalesce = coalesce_normal_events()
-            if self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce):
+            if not gate.queue or self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce):
                 gate.deadline = time.monotonic()
                 return _DebounceWaitResult(quiet_deadline=gate.deadline)
             if (
@@ -811,12 +861,7 @@ class CoalescingGate:
         for queued in gate.queue:
             if CoalescingGate._queued_kind(queued) is not QueueKind.NORMAL:
                 return False
-            if source_or_event_allows_room_scope_batching(queued.source_kind):
-                return True
-            if source_or_event_allows_room_scope_batching(
-                queued.pending_event.source_kind,
-                queued.pending_event.event,
-            ):
+            if CoalescingGate._queued_event_allows_room_scope_batching(queued):
                 return True
         return False
 
@@ -839,7 +884,7 @@ class CoalescingGate:
             "Coalescing drain failed",
             room_id=key.room_id,
             thread_id=key.thread_id,
-            requester_user_id=key.requester_user_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
             pending_count=self._gate_work_count(gate),
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
             exception_type=error.__class__.__name__,
@@ -861,7 +906,7 @@ class CoalescingGate:
         log_context: dict[str, object] = {
             "room_id": key.room_id,
             "thread_id": key.thread_id,
-            "requester_user_id": key.requester_user_id,
+            "requester_user_id": coalescing_owner_log_label(key.owner),
             "pending_count": pending_count,
             "oldest_pending_age_ms": self._oldest_pending_events_age_ms(pending_events),
             "source_event_ids": self._source_event_ids(pending_events),
@@ -874,12 +919,12 @@ class CoalescingGate:
             timing_scope = diagnostics.timing_scope
             log_context = diagnostics.log_context
             logger.info("coalescing_gate_flush_started", **log_context)
-            dispatch_batch_start = time.monotonic()
-            await self._dispatch_batch(diagnostics.batch)
+            dispatch_turn_start = time.monotonic()
+            await self._dispatch_turn(diagnostics.turn)
             dispatched = True
             emit_elapsed_timing(
                 "coalescing_gate.flush.dispatch_batch",
-                dispatch_batch_start,
+                dispatch_turn_start,
                 pending_count=pending_count,
                 timing_scope=timing_scope,
             )
@@ -909,7 +954,9 @@ class CoalescingGate:
     ) -> bool:
         try:
             with turn_dispatch_recovery_scope(
-                active=any(event.turn_dispatch_recovery for event in segment_owner.pending_events),
+                active=any(
+                    pending_event.event.turn_dispatch_recovery for pending_event in segment_owner.pending_events
+                ),
             ):
                 await self._dispatch_events(key, gate, segment_owner.pending_events)
         except asyncio.CancelledError:
@@ -977,11 +1024,13 @@ class CoalescingGate:
         gate: _GateEntry,
         debounce_result: _DebounceWaitResult,
     ) -> None:
-        if not is_active_follow_up_coalescing_key(key):
+        # Follow-up owners have no receipt lane; only requester-owned bursts
+        # wait for same-sender lane work still resolving inside the window.
+        lane_key = ReceiptLaneKey.for_coalescing_owner(key.room_id, key.owner)
+        if lane_key is not None:
             admitted_lane_slot_ids = {id(queued.lane_slot) for queued in gate.queue if queued.lane_slot is not None}
             window_slots = self._lanes.undelivered_in_window(
-                key.room_id,
-                key.requester_user_id,
+                lane_key,
                 before_or_at_receipt_time=debounce_result.quiet_deadline,
                 exclude_slot_ids=admitted_lane_slot_ids,
             )
@@ -1074,7 +1123,7 @@ class CoalescingGate:
             "coalescing_drain_finish",
             room_id=key.room_id,
             thread_id=key.thread_id,
-            requester_user_id=key.requester_user_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
             outcome=outcome,
             pending_count=self._gate_work_count(current_gate) if current_gate is not None else 0,
             oldest_pending_age_ms=self._oldest_pending_age_ms(current_gate) if current_gate is not None else None,
@@ -1089,7 +1138,7 @@ class CoalescingGate:
             "coalescing_drain_start",
             room_id=key.room_id,
             thread_id=key.thread_id,
-            requester_user_id=key.requester_user_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
             pending_count=self._gate_work_count(gate),
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
         )

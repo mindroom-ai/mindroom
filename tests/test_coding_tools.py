@@ -1255,6 +1255,46 @@ class TestFileToolRestrictToBaseDir:
         assert "outside base_dir" in result
         assert "searching files" in result
 
+    def test_file_tool_search_content_blocks_parent_traversal_when_restricted(self, tmp_path: Path) -> None:
+        """Restricted search_content refuses a ../ directory instead of searching it."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("needle here\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir)
+        result = tool.search_content("needle", "../outside")
+
+        assert result.startswith("Error: search_content only searches inside the base directory")
+
+    def test_file_tool_search_content_searches_inside_base_dir(self, tmp_path: Path) -> None:
+        """Agno's content search runs unchanged inside base_dir, with base-relative paths."""
+        base_dir = tmp_path / "base"
+        (base_dir / "docs").mkdir(parents=True)
+        (base_dir / "docs" / "inside.txt").write_text("needle inside\n")
+        (base_dir / "other.txt").write_text("nothing here\n")
+
+        cls = file_tools()
+        result = json.loads(cls(base_dir=base_dir).search_content("needle", "docs"))
+
+        assert [match["file"] for match in result["files"]] == ["docs/inside.txt"]
+
+    def test_file_tool_search_content_refuses_outside_directories_even_when_unrestricted(self, tmp_path: Path) -> None:
+        """restrict_to_base_dir=False widens the other file operations, not content search."""
+        base_dir = tmp_path / "base"
+        outside_dir = tmp_path / "outside"
+        base_dir.mkdir()
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("needle outside\n")
+
+        cls = file_tools()
+        tool = cls(base_dir=base_dir, restrict_to_base_dir=False)
+
+        assert tool.search_content("needle", str(outside_dir)).startswith("Error: search_content only searches inside")
+        assert "needle outside" in tool.read_file(str(outside_dir / "secret.txt"))
+
     def test_file_tool_restrict_to_base_dir_false_allows_outside_and_relative_paths(self, tmp_path: Path) -> None:
         """File tools should allow outside absolute paths while keeping relative paths anchored."""
         base_dir = tmp_path / "base"

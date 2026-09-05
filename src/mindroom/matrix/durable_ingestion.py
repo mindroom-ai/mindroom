@@ -140,6 +140,7 @@ def _event_admission(
     digest: bytes,
     record: ingest.EventRecord,
     account_id: str,
+    schedule_trigger_sender_is_managed: Callable[[str], bool],
 ) -> ej.IngestionBatchAdmission:
     _require(type(record.record_id) is str and bool(record.record_id))
     _require(type(record.kind) is ingest.RecordKind)
@@ -179,6 +180,7 @@ def _event_admission(
             self_sender=account_id,
             provenance=cast("ingest.TimelineEventProvenance", provenance),
             expected_event_id=record.event_id,
+            schedule_trigger_sender_is_managed=schedule_trigger_sender_is_managed,
         )
         if views is not None:
             event, projected = views
@@ -360,6 +362,7 @@ def validate_ingestion_batch(
     *,
     account_id: str,
     device_id: str,
+    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> ej.IngestionBatchAdmission:
     """Authenticate and convert one exact Task 5 batch without writing."""
     try:
@@ -389,7 +392,13 @@ def validate_ingestion_batch(
         record = records[0]
         _require(type(record) in (ingest.EventRecord, ingest.LossRecord))
         if type(record) is ingest.EventRecord:
-            admission = _event_admission(batch, digest, record, account_id)
+            admission = _event_admission(
+                batch,
+                digest,
+                record,
+                account_id,
+                schedule_trigger_sender_is_managed,
+            )
         else:
             admission = _loss_admission(
                 batch,
@@ -404,12 +413,33 @@ def validate_ingestion_batch(
     return admission
 
 
-async def consume_one_ingestion_batch(session: _OwnedIngestionSession, admission: IngestionBatchAdmissionView, *, account_id: str, device_id: str) -> ej.AdmissionFacts | None:  # fmt: skip
+async def consume_one_ingestion_batch(
+    session: _OwnedIngestionSession,
+    admission: IngestionBatchAdmissionView,
+    *,
+    account_id: str,
+    device_id: str,
+    before_admission: Callable[[ej.IngestionBatchAdmission], None] | None = None,
+    after_admission: Callable[
+        [ej.IngestionBatchAdmission, ej.AdmissionFacts, ingest.TimelineEventProvenance | None],
+        Awaitable[None],
+    ]
+    | None = None,
+    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+) -> ej.AdmissionFacts | None:
     """Admit and then settle at most one authenticated batch."""
     batch = session.next_batch(max_records=1)
     if batch is None:
         return None
-    result = await admission.admit_ingestion_batch(validate_ingestion_batch(batch, account_id=account_id, device_id=device_id))  # fmt: skip
+    validated = validate_ingestion_batch(
+        batch,
+        account_id=account_id,
+        device_id=device_id,
+        schedule_trigger_sender_is_managed=schedule_trigger_sender_is_managed,
+    )
+    if before_admission is not None:
+        before_admission(validated)
+    result = await admission.admit_ingestion_batch(validated)
     if (
         type(result) is not ej.AdmissionFacts
         or type(result.receipt_new) is not bool
@@ -417,6 +447,14 @@ async def consume_one_ingestion_batch(session: _OwnedIngestionSession, admission
         or (result.semantic_event_new and not result.receipt_new)
     ):
         raise ej.IngestionBatchIntegrityError
+    if after_admission is not None:
+        record = batch.records[0]
+        provenance = (
+            record.provenance
+            if type(record) is ingest.EventRecord and record.kind is ingest.RecordKind.TIMELINE
+            else None
+        )
+        await after_admission(validated, result, provenance)
     await session._settle_batch(
         batch,
         receipt_new=result.receipt_new,
@@ -433,6 +471,13 @@ async def run_ingestion_pump(
     device_id: str,
     wait_for_work: Callable[[], Awaitable[None]],
     wake_semantic_dispatch: Callable[[], None],
+    before_admission: Callable[[ej.IngestionBatchAdmission], None] | None = None,
+    after_admission: Callable[
+        [ej.IngestionBatchAdmission, ej.AdmissionFacts, ingest.TimelineEventProvenance | None],
+        Awaitable[None],
+    ]
+    | None = None,
+    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> None:
     """Drain one-record batches until cancellation, waiting without polling."""
     while True:
@@ -442,6 +487,9 @@ async def run_ingestion_pump(
             admission,
             account_id=account_id,
             device_id=device_id,
+            before_admission=before_admission,
+            after_admission=after_admission,
+            schedule_trigger_sender_is_managed=schedule_trigger_sender_is_managed,
         )
         if facts is None:
             await wait_for_work()

@@ -40,7 +40,7 @@ async def test_eviction_never_evicts_a_target_holding_an_active_lock() -> None:
 
         assert len(coordinator._response_lifecycle_locks) == _LOCK_TABLE_CAP
         assert coordinator._response_lifecycle_lock(targets[0]) is protected_lock
-        assert coordinator._thread_key(targets[1]) not in coordinator._response_lifecycle_locks
+        assert targets[1].lifecycle_key not in coordinator._response_lifecycle_locks
     finally:
         protected_lock.release()
 
@@ -59,11 +59,11 @@ async def test_eviction_never_evicts_a_target_with_a_live_queued_signal(liveness
 
     coordinator._response_lifecycle_lock(_target(_LOCK_TABLE_CAP))
 
-    protected_key = coordinator._thread_key(targets[0])
+    protected_key = targets[0].lifecycle_key
     assert len(coordinator._response_lifecycle_locks) == _LOCK_TABLE_CAP
     assert protected_key in coordinator._response_lifecycle_locks
     assert coordinator._thread_queued_signals[protected_key] is protected_signal
-    assert coordinator._thread_key(targets[1]) not in coordinator._response_lifecycle_locks
+    assert targets[1].lifecycle_key not in coordinator._response_lifecycle_locks
 
 
 @pytest.mark.asyncio
@@ -79,5 +79,5 @@ async def test_eviction_drops_fully_idle_targets_to_keep_the_table_bounded() -> 
 
     assert len(coordinator._response_lifecycle_locks) == _LOCK_TABLE_CAP
     assert coordinator._response_lifecycle_lock(new_target) is new_lock
-    assert coordinator._thread_key(targets[0]) not in coordinator._response_lifecycle_locks
+    assert targets[0].lifecycle_key not in coordinator._response_lifecycle_locks
     assert coordinator._response_lifecycle_lock(targets[0]) is not idle_lock

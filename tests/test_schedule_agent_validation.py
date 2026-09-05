@@ -10,10 +10,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.scheduling import ScheduledWorkflow, SchedulingRuntime, schedule_task
+from tests.authorization_helpers import (
+    make_test_scheduling_runtime,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -59,7 +63,7 @@ def _scheduling_runtime(
     config: Config,
     room: nio.MatrixRoom,
 ) -> SchedulingRuntime:
-    return SchedulingRuntime(
+    return make_test_scheduling_runtime(
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -236,7 +240,7 @@ async def test_schedule_allows_agents_in_room() -> None:
 
         # Try to schedule in a thread where calculator is in the room
         task_id, response = await schedule_task(
-            runtime=SchedulingRuntime(
+            runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
@@ -369,7 +373,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
         mock_parse.return_value = mock_workflow
 
         task_id, response = await schedule_task(
-            runtime=SchedulingRuntime(
+            runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
@@ -395,6 +399,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_schedule_validation_respects_sender_reply_permissions() -> None:
     """Explicit mentions should validate against sender-permitted room agents, not raw membership."""
     config = _runtime_bound_config(
@@ -404,15 +409,16 @@ async def test_schedule_validation_respects_sender_reply_permissions() -> None:
                     display_name="Assistant",
                     role="General assistance",
                     rooms=["test_room"],
+                    access=ResponderAccessConfig(users=["@blocked:localhost"]),
                 ),
                 "calculator": AgentConfig(
                     display_name="Calculator",
                     role="Math calculations",
                     rooms=["test_room"],
+                    access=ResponderAccessConfig(users=["@allowed:localhost"]),
                 ),
             },
             router=RouterConfig(model="default"),
-            authorization={"agent_reply_permissions": {"calculator": ["@allowed:localhost"]}},
         ),
     )
 

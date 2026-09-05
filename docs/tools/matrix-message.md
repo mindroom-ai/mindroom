@@ -28,7 +28,7 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 - thread-list: List messages in a thread and include edit options keyed by event ID.
   It uses the current thread when one is active, otherwise you must pass `thread_id`.
 - edit: Edit a previously sent message identified by `target`.
-  It uses the current thread by default when editing from threaded context.
+  The required `target` selects the event; current thread context does not select or validate the edit target.
 - context: Return room, thread, reply target, requester, and agent metadata so you can plan a later tool call.
 
 ## Thread targeting
@@ -39,7 +39,7 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 - `thread_mode: room` disables implicit attachment auto-threading for room-level sends.
   Pass an explicit `thread_id` when you intentionally want threaded output from the tool.
 - `reply` and `thread-reply` inherit the current thread when possible.
-- `read`, `edit`, and `context` also inherit the current thread when possible.
+- `read` and `context` also inherit the current thread when possible.
 - `thread_id="room"` is a sentinel meaning "force room-level scope and do not inherit the current thread."
   Use it when you want the room timeline instead of the active thread.
 
@@ -59,6 +59,9 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 - The default `ignore_mentions=True` exists to prevent accidental infinite loops and noisy mutual paging between agents.
 - Set `ignore_mentions=False` only for intentional dispatch.
   Prefer one deliberate handoff message over repeated self-mentions or agent-to-agent pings.
+- Direct `send`, `reply`, `thread-reply`, and `edit` calls reject interactive prompt blocks; use normal agent response delivery for interactive prompts.
+- Calls are limited to 12 weighted actions per 30 seconds for each agent, requester, and room combination.
+  Each call costs one action, and each attachment on `send`, `reply`, or `thread-reply` costs one additional action.
 
 ## Attachments
 
@@ -72,8 +75,11 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 ## Message extras
 
 - `message_extras` adds collapsible MindRoom sections to send, reply, thread-reply, and edit events.
+- `message_extras` requires a non-empty `message`; attachment-only sends with extras are rejected.
 - Keep the visible `message` brief; put supporting evidence in extras.
 - Each section has `title`, `content`, optional `content_type`, and optional `collapsed`.
+- At most 8 sections are accepted; each title must be non-empty and at most 120 characters, and each content value may contain at most 16,384 characters.
+- `collapsed` must be a boolean and defaults to `true`.
 - Supported `content_type` values are `text/plain`, `text/markdown`, and `text/html`; default is `text/markdown`.
 - HTML content may use sanitized rich fragments: paragraphs, headings, lists, tables, blockquotes, code/pre blocks, basic inline formatting, and links.
   Do not include scripts, styles, images, forms, media, SVG/math, or interactive elements; links should use `http`, `https`, or `mailto`.

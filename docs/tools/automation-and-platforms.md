@@ -24,7 +24,8 @@ Use these tools when you need infrastructure automation, generic API access, rem
 ## Common Setup Notes
 
 All seven tools on this page default to the primary agent runtime instead of MindRoom's worker-routed execution set.
-`aws_lambda`, `airflow`, and `custom_api` are registered as `setup_type: none`, while `aws_ses`, `e2b`, `daytona`, and `composio` are marked `requires_config`.
+`aws_lambda`, `airflow`, and `custom_api` use `setup_type: none`.
+`aws_ses`, `e2b`, `daytona`, and `composio` have `status: requires_config` and `setup_type: api_key`.
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
 Password fields such as `api_key` and `password` must be stored through the dashboard or credential store instead of inline YAML.
 `aws_lambda` and `aws_ses` both rely on standard boto3 credential resolution, so normal AWS environment variables, shared config files, or instance-role credentials are the real authentication path.
@@ -32,7 +33,8 @@ That matters especially for `aws_ses`, because the current registry marks it as 
 `e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`.
 `daytona` accepts stored credentials or environment fallback through `DAYTONA_API_KEY`, and `api_url` can also fall back to `DAYTONA_API_URL`.
 `composio` can fall back to cached Composio user data or `COMPOSIO_API_KEY` when `api_key` is not stored directly.
-Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `sandbox_env_vars`, `sandbox_labels`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
+Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
+Daytona's `sandbox_env_vars` and `sandbox_labels` instead accept JSON objects that MindRoom validates and converts to upstream mappings.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## [`aws_lambda`]
@@ -209,7 +211,7 @@ run_server("python -m http.server 8000", port=8000)
 
 ## [`daytona`]
 
-`daytona` runs code and shell commands in a remote sandbox that can persist across agent sessions.
+`daytona` runs code and shell commands in a remote sandbox that can persist across calls within one agent session.
 
 ### What It Does
 
@@ -218,7 +220,8 @@ run_server("python -m http.server 8000", port=8000)
 The toolkit exposes `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`.
 When `persistent` is true, the tool stores the active sandbox ID in `agent.session_state` and tries to reuse that sandbox on later calls.
 It also tracks a working directory in `agent.session_state`, and `run_shell_command()` treats `cd ...` specially so later relative-path commands and file operations stay in that directory.
-If no reusable sandbox exists, the toolkit creates one automatically unless `auto_create_sandbox` is disabled.
+If no reusable sandbox exists, the toolkit creates one on the initial lookup path.
+`auto_create_sandbox: false` disables fallback creation after sandbox-management errors; it does not prevent initial creation when no sandbox is found.
 The bundled default instructions describe a code-write, execute, and show-results workflow, but those instructions are only added to the agent prompt when `add_instructions: true`.
 
 ### Configuration
@@ -228,18 +231,18 @@ The bundled default instructions describe a code-write, execute, and show-result
 | `api_key` | `password` | `no` | `null` | Daytona API key. The tool also falls back to `DAYTONA_API_KEY`. |
 | `api_url` | `url` | `no` | `null` | Daytona API URL. The tool also falls back to `DAYTONA_API_URL`. |
 | `sandbox_id` | `text` | `no` | `null` | Explicit sandbox ID to reuse instead of creating or looking up a session-backed sandbox. |
-| `sandbox_language` | `text` | `no` | `PYTHON` | Primary sandbox language, such as `PYTHON`, `JAVASCRIPT`, or `TYPESCRIPT`. |
+| `sandbox_language` | `text` | `no` | `python` | Primary sandbox language: `python`, `javascript`, or `typescript`. |
 | `sandbox_target` | `text` | `no` | `null` | Daytona target passed into `DaytonaConfig`. |
 | `sandbox_os` | `text` | `no` | `null` | Declared sandbox OS field. The current creation path stores this value but does not pass it into `CreateSandboxFromSnapshotParams`. |
 | `auto_stop_interval` | `number` | `no` | `60` | Auto-stop interval in minutes for created sandboxes. |
 | `sandbox_os_user` | `text` | `no` | `null` | OS user for the sandbox. |
-| `sandbox_env_vars` | `text` | `no` | `null` | Advanced raw environment-variable mapping for the sandbox. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
-| `sandbox_labels` | `text` | `no` | `{}` | Advanced raw label mapping for the sandbox. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
+| `sandbox_env_vars` | `text` | `no` | `null` | JSON object of string environment-variable names and values; MindRoom validates and converts it to the upstream mapping. |
+| `sandbox_labels` | `text` | `no` | `{}` | JSON object of string label names and values; MindRoom validates and converts it to the upstream mapping. |
 | `organization_id` | `text` | `no` | `null` | Daytona organization ID. |
 | `timeout` | `number` | `no` | `300` | Timeout in seconds for sandbox operations. |
-| `auto_create_sandbox` | `boolean` | `no` | `true` | Create a new sandbox automatically when lookup or reuse fails. |
+| `auto_create_sandbox` | `boolean` | `no` | `true` | Permit fallback creation after a sandbox-management error; initial no-match creation still occurs when false. |
 | `verify_ssl` | `boolean` | `no` | `false` | Verify Daytona SSL certificates. The default `false` path monkey-patches the Daytona client to disable SSL verification warnings and checks. |
-| `persistent` | `boolean` | `no` | `true` | Reuse the same sandbox across agent-session calls instead of creating a fresh sandbox each time. |
+| `persistent` | `boolean` | `no` | `true` | Reuse the same sandbox across calls in the current agent session; use `sandbox_id` for cross-session reuse. |
 | `sandbox_public` | `boolean` | `no` | `null` | Whether created sandboxes should be public. |
 | `instructions` | `text` | `no` | `null` | Custom toolkit instructions that replace the bundled default instructions. |
 | `add_instructions` | `boolean` | `no` | `false` | Add the toolkit instructions into the agent prompt. |
@@ -252,7 +255,7 @@ agents:
     tools:
       - daytona:
           api_url: https://api.daytona.io
-          sandbox_language: PYTHON
+          sandbox_language: python
           auto_stop_interval: 30
           persistent: true
           add_instructions: true
@@ -267,7 +270,7 @@ create_file("main.py", "print('ok')")
 
 ### Notes
 
-- `sandbox_env_vars` and `sandbox_labels` are advanced constructor inputs rather than convenient hand-authored YAML fields.
+- `sandbox_env_vars` and `sandbox_labels` accept validated JSON objects rather than raw upstream constructor objects.
 - `verify_ssl: false` is not a cosmetic flag here, because the current implementation actively patches the Daytona client to skip certificate verification.
 - Use `sandbox_id` when you want to pin the tool to a known sandbox instead of letting session-state reuse choose one.
 

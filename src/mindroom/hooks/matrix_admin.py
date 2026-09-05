@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import nio
 
@@ -63,6 +65,28 @@ class _BoundHookMatrixAdmin:
         """Invite one user into one room."""
         return await invite_to_room(self.client, room_id, user_id)
 
+    async def force_join_user(self, room_id: str, user_id: str) -> bool:
+        """Join one local user through the Synapse-compatible admin API."""
+        if not self.client.access_token:
+            return False
+        # Tuwunel's Synapse-compatible endpoint performs the join on the
+        # user's behalf, but still enforces the room's join rules.  Restore an
+        # invite first so a user who left an invite-only room can rejoin.
+        await invite_to_room(self.client, room_id, user_id)
+        path = f"/_synapse/admin/v1/join/{quote(room_id, safe='')}"
+        response = await self.client.send(
+            "POST",
+            path,
+            data=json.dumps({"user_id": user_id}),
+            headers={
+                "Authorization": f"Bearer {self.client.access_token}",
+                "Content-Type": "application/json",
+            },
+        )
+        succeeded = 200 <= response.status < 300
+        response.release()
+        return succeeded
+
     async def kick_user(self, room_id: str, user_id: str, *, reason: str | None = None) -> bool:
         """Kick one joined user from one room."""
         response = await self.client.room_kick(room_id, user_id, reason=reason)
@@ -71,6 +95,27 @@ class _BoundHookMatrixAdmin:
     async def get_room_members(self, room_id: str) -> set[str] | None:
         """Return the current joined members for one room, or ``None`` when the fetch fails."""
         return await get_room_members(self.client, room_id)
+
+    async def get_profile_avatar(self, user_id: str) -> str | None:
+        """Return one user's Matrix avatar content URI, or ``None`` when unavailable."""
+        response = await self.client.get_profile(user_id)
+        if isinstance(response, nio.ProfileGetResponse):
+            return response.avatar_url or None
+        return None
+
+    async def get_room_state_event(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Return one state event while distinguishing missing from unreadable."""
+        response = await self.client.room_get_state_event(room_id, event_type, state_key)
+        if isinstance(response, nio.RoomGetStateEventResponse) and isinstance(response.content, dict):
+            return True, response.content
+        if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+            return True, None
+        return False, None
 
     async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
         """Link one room under an existing Matrix Space."""

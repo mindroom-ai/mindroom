@@ -96,7 +96,7 @@ def cleanup_old_usage_metrics(retention_days: int = 365) -> dict:
     sb = ensure_supabase()
     cutoff_date = datetime.now(UTC) - timedelta(days=retention_days)
 
-    result = sb.table("usage_metrics").delete().lt("date", cutoff_date.isoformat()).execute()
+    result = sb.table("usage_metrics").delete().lt("metric_date", cutoff_date.date().isoformat()).execute()
 
     metrics_deleted = len(result.data or [])
 

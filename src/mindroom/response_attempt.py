@@ -14,6 +14,7 @@ from mindroom.cancellation import (
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.presence import is_user_online
 from mindroom.orchestration.runtime import cancel_failure_reason, classify_cancel_source, log_cancelled_response
+from mindroom.streaming import StreamingLifecycleSuspensionError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -134,7 +135,7 @@ class ResponseAttemptRunner:
                 error=str(error),
             )
 
-    async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:
+    async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:  # noqa: C901
         """Run one response coroutine under visible message tracking."""
         with bound_log_context(**request.target.log_context):
             message_id = request.existing_event_id
@@ -184,6 +185,8 @@ class ResponseAttemptRunner:
                 )
                 if process_shutdown:
                     raise
+            except StreamingLifecycleSuspensionError:
+                raise
             except Exception as error:
                 self.deps.logger.exception("Error during response generation", error=str(error))
                 raise

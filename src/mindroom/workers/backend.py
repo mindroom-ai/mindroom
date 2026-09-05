@@ -38,6 +38,7 @@ class WorkerBackend(Protocol):
     """Backend contract for realizing persistent workers."""
 
     backend_name: str
+    cleanup_locator: str | None
     idle_timeout_seconds: float
 
     def shutdown(self) -> None:

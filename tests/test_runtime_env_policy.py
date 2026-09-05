@@ -28,6 +28,7 @@ _PYTHON_STRING_LITERAL_RE = re.compile(
 )
 _PROJECTION_MATRIX_ENV_NAMES = (
     runtime_env_policy.CONTROL_STATE_PATH_ENV,
+    runtime_env_policy.SESSION_STORAGE_PATH_ENV,
     runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV,
     *runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY.values(),
     "GOOGLE_APPLICATION_CREDENTIALS",
@@ -65,6 +66,13 @@ _PROJECTION_MATRIX_EXPECTATIONS = {
         "shell_passthrough_env": False,
     },
     runtime_env_policy.CONTROL_STATE_PATH_ENV: {
+        "public_worker_startup_env": False,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
+        "execution_tool_runtime_paths": False,
+        "shell_passthrough_env": False,
+    },
+    runtime_env_policy.SESSION_STORAGE_PATH_ENV: {
         "public_worker_startup_env": False,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": False,

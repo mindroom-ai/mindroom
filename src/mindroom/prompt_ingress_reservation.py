@@ -12,6 +12,7 @@ from mindroom.coalescing import (
     ReadyPendingEvent,
     close_ready_task_result_metadata,
 )
+from mindroom.ingress_lanes import ReceiptLaneKey
 
 if TYPE_CHECKING:
     from mindroom.coalescing_batch import CoalescingKey
@@ -102,4 +103,6 @@ class PromptIngressReservationOwner:
         the time the wait returns. It re-enters at the back of the lane rather
         than reusing a released slot, which no worker would ever deliver.
         """
-        self.slot = self.gate.enter_lane(room_id=self.slot.room_id, sender_id=self.slot.sender_id)
+        self.slot = self.gate.enter_lane(
+            ReceiptLaneKey(room_id=self.slot.room_id, sender_id=self.slot.sender_id),
+        )

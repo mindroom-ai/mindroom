@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -49,6 +50,7 @@ from mindroom.hooks import (
     EVENT_COMPACTION_BEFORE,
     CompactionHookContext,
     HookRegistry,
+    HookRegistryState,
     build_hook_matrix_admin,
     hook,
 )
@@ -56,12 +58,16 @@ from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_na
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     FakeModel,
     make_conversation_reader_mock,
     make_relation_lookup,
     prepare_history_for_run_for_test,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
@@ -621,12 +627,17 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     observed: list[tuple[str, list[str], int, int | None, str | None]] = []
+    active_states: list[bool] = []
 
     @hook(EVENT_COMPACTION_BEFORE, priority=10)
     async def before_first(ctx: CompactionHookContext) -> None:
+        active_states.append(ctx.is_active())
+        registry_state.registry = HookRegistry.empty()
+        active_states.append(ctx.is_active())
+        registry_state.registry = registry
         persisted = get_agent_session(storage, "session-1")
         assert persisted is not None
         assert [run.run_id for run in persisted.runs or []] == ["run-1", "run-2"]
@@ -659,12 +670,16 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
         )
 
     registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before_first, before_second, after])])
+    registry_state = HookRegistryState(registry)
     agent = _agent(db=storage)
-    runtime_context = _hook_runtime_context(
-        config=config,
-        runtime_paths=runtime_paths,
-        registry=registry,
-        session_id="session-1",
+    runtime_context = replace(
+        _hook_runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            registry=registry,
+            session_id="session-1",
+        ),
+        hook_registry_state=registry_state,
     )
 
     with (
@@ -710,6 +725,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
     )
     assert observed[0][3] == prepared.compaction_outcomes[0].before_tokens
     assert observed[2][3] == prepared.compaction_outcomes[0].before_tokens
+    assert active_states == [True, False]
 
 
 @pytest.mark.asyncio
@@ -733,7 +749,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         ],
     )
     session = _session("session-1", runs=[first_run, second_run])
-    storage.upsert_session(session)
+    seed_session(storage, session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
@@ -834,7 +850,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_for_no_op_
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1")])
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     observed: list[str] = []
 
@@ -998,7 +1014,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     observed: list[str] = []
 
@@ -1066,7 +1082,7 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
 
     registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [matching])])
     client = AsyncMock()
-    runtime_context = ToolRuntimeContext(
+    runtime_context = make_test_tool_runtime_context(
         agent_name="router",
         target=MessageTarget(
             room_id="!room:localhost",
@@ -1118,7 +1134,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     observed: list[str] = []
 
@@ -1567,7 +1583,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             remaining_run,
         ],
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
     summary_text = "merged summary " * 40
     summary_input_budget = next(
         budget
@@ -1647,7 +1663,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         ],
     )
     working_session = _session("session-1", runs=[first_run, second_run])
-    storage.upsert_session(working_session)
+    seed_session(storage, working_session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,

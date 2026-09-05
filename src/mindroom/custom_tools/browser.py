@@ -1,6 +1,6 @@
 """Browser tool for MindRoom.
 
-This exposes a single ``browser`` function with an ``action`` parameter.
+This exposes a single ``browser_control`` function with an ``action`` parameter.
 """
 # ruff: noqa: N803, A002
 
@@ -37,6 +37,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -532,6 +533,7 @@ class BrowserTools(Toolkit):
         timeout_seconds: float = 90.0,
     ) -> None:
         super().__init__(name="browser", tools=[self.browser])
+        apply_toolkit_function_aliases(self, {"browser": "browser_control"})
         self._runtime_paths = runtime_paths
         self._allow_private_networks = allow_private_networks
         self._default_target = self._validated_default_target(default_target)
@@ -559,7 +561,7 @@ class BrowserTools(Toolkit):
 
     def _describe_browser_schema(self) -> None:
         """Attach explicit model-facing descriptions for browser action routing."""
-        function = self.async_functions.get("browser")
+        function = self.async_functions.get("browser_control")
         if function is None:
             raise _BrowserFunctionNotRegisteredError
         function.process_entrypoint(strict=False)

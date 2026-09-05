@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.db.base import BaseDb, SessionType
+from agno.db.base import BaseDb
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
@@ -29,7 +29,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
-from tests.conftest import make_turn_context
+from tests.conftest import make_turn_context, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -143,7 +143,7 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
             created_at=1,
             updated_at=1,
         )
-        storage.upsert_session(session)
+        seed_session(storage, session)
         scope_context = ScopeSessionContext(
             scope=HistoryScope(kind="agent", scope_id="general"),
             storage=storage,
@@ -154,7 +154,6 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
             scope_context=scope_context,
             session_id="session-1",
             run_id="run-empty",
-            session_type=SessionType.AGENT,
             entity_name="general",
             output_tokens=2,
         )
@@ -167,6 +166,50 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
         assert [run.run_id for run in persisted.runs] == ["run-good"]
     finally:
         storage.close()
+
+
+def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tmp_path: Path) -> None:
+    """Agno persists the run through its own session object; the scope session loaded before it lacks the run."""
+    storage = create_state_storage(
+        "general",
+        tmp_path,
+        subdir="sessions",
+        session_table="general_sessions",
+    )
+    try:
+        live_session = seed_session(
+            storage,
+            AgentSession(
+                session_id="session-1",
+                agent_id="general",
+                runs=[_completed_run("run-good", "First response")],
+                metadata={},
+                created_at=1,
+                updated_at=1,
+            ),
+        )
+        # What agno's run does behind the live session's back.
+        storage.upsert_run(run=_completed_run("run-empty", None), session_id="session-1")
+
+        discard_empty_completed_run(
+            scope_context=ScopeSessionContext(
+                scope=HistoryScope(kind="agent", scope_id="general"),
+                storage=storage,
+                session=live_session,
+            ),
+            session_id="session-1",
+            run_id="run-empty",
+            entity_name="general",
+            output_tokens=2,
+        )
+
+        assert [run.run_id for run in live_session.runs or []] == ["run-good"]
+        persisted = get_agent_session(storage, "session-1")
+    finally:
+        storage.close()
+
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs or []] == ["run-good"]
 
 
 def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(tmp_path: Path) -> None:
@@ -184,12 +227,13 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
             runs=[
                 _completed_team_run_output("run-good", "First response"),
                 _completed_team_run_output("run-empty", None),
+                RunOutput(run_id="member-of-empty", agent_id="general", parent_run_id="run-empty"),
             ],
             metadata={},
             created_at=1,
             updated_at=1,
         )
-        storage.upsert_session(session)
+        seed_session(storage, session)
         scope_context = ScopeSessionContext(
             scope=HistoryScope(kind="team", scope_id="team_general"),
             storage=storage,
@@ -200,7 +244,6 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
             scope_context=scope_context,
             session_id="session-1",
             run_id="run-empty",
-            session_type=SessionType.TEAM,
             entity_name="team_general",
             output_tokens=2,
         )
@@ -265,11 +308,14 @@ async def test_ai_response_closes_spent_agent_state_dbs_before_empty_retry(tmp_p
 
 @pytest.mark.asyncio
 async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_path: Path) -> None:
-    """Two consecutive empty responses should surface a visible notice, never a blank reply."""
+    """Two consecutive empty responses surface a visible notice, and neither empty run is kept."""
     first_agent = _mock_agent(_completed_run("run-empty-1", None))
     second_agent = _mock_agent(_completed_run("run-empty-2", ""))
 
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
+    with (
+        patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+        patch("mindroom.ai.ai_runtime.discard_empty_completed_run") as mock_discard,
+    ):
         mock_prepare.side_effect = [
             _prepared_prompt_result(first_agent),
             _prepared_prompt_result(second_agent),
@@ -285,6 +331,8 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_
     assert result == EMPTY_RESPONSE_NOTICE
     first_agent.arun.assert_called_once()
     second_agent.arun.assert_called_once()
+    # The retry's empty run is discarded too; the notice is delivery-only.
+    assert [call.kwargs["run_id"] for call in mock_discard.call_args_list] == ["run-empty-1", "run-empty-2"]
 
 
 @pytest.mark.asyncio

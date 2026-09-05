@@ -40,6 +40,7 @@ from tests.threading_helpers import (
     seed_unhydrated_room_event,
     thread_history_result,
 )
+from tests.turn_dispatch_helpers import dispatch_test_turn
 
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot
@@ -1509,11 +1510,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             patch.object(bot.client, "room_get_event", AsyncMock(return_value=root_response)),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock(side_effect=fake_plan)),
         ):
-            await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
+            await dispatch_test_turn(bot._turn_controller, room, event, "@user:localhost")
 
         assert observed_targets
         assert observed_targets[0].source_thread_id is None
-        assert observed_targets[0].resolved_thread_id is None
+        assert observed_targets[0].resolved_thread_id == event.event_id
 
     @pytest.mark.asyncio
     async def test_degraded_dispatch_history_uses_strict_history_before_policy(
@@ -1583,7 +1584,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock(side_effect=fake_plan)),
         ):
-            await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
+            await dispatch_test_turn(bot._turn_controller, room, event, "@user:localhost")
 
         assert observed_policy_targets[0].resolved_thread_id == "$thread_root:localhost"
 

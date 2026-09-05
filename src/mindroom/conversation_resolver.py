@@ -8,10 +8,11 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
-from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedIngress
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
     content_owns_per_fire_thread_root,
     per_fire_thread_root_event_id_from_content,
@@ -227,6 +228,15 @@ class DispatchContextResult:
 
 
 @dataclass(frozen=True)
+class _PreHydrationPolicyFacts:
+    """Policy facts available without resolving thread history."""
+
+    origin: TurnOrigin
+    am_i_mentioned: bool
+    mentioned_agents: tuple[MatrixID, ...]
+
+
+@dataclass(frozen=True)
 class ConversationResolverDeps:
     """Explicit collaborators for conversation resolution."""
 
@@ -255,6 +265,31 @@ class ConversationResolver:
     def _matrix_id(self) -> MatrixID:
         return self.deps.matrix_id
 
+    def _mention_facts(
+        self,
+        event_source: dict[str, Any],
+        *,
+        room: nio.MatrixRoom,
+    ) -> tuple[list[MatrixID], bool, bool]:
+        """Return mention facts from one already-normalized event source."""
+        if _should_skip_mentions(event_source):
+            return [], False, False
+        return check_agent_mentioned(
+            event_source,
+            self._matrix_id(),
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room=room,
+        )
+
+    def _mentioned_agent_names(self, mentioned_agents: Sequence[MatrixID]) -> tuple[str, ...]:
+        """Return canonical entity names for mentioned managed users."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return tuple(
+            registry.current_entity_name_for_user_id(agent_id.full_id) or agent_id.username
+            for agent_id in mentioned_agents
+        )
+
     def _envelope_ingress_metadata(  # noqa: C901
         self,
         *,
@@ -269,7 +304,7 @@ class ConversationResolver:
             source_kind
             if source_kind is not None
             else event.source_kind_override
-            if isinstance(event, PreparedTextEvent)
+            if isinstance(event, PreparedIngress)
             else None
         )
         source_kind_sender_is_trusted = self._sender_is_managed_entity(event.sender)
@@ -325,6 +360,39 @@ class ConversationResolver:
             trusted_user_relay=trusted_human_relay,
         )
 
+    def pre_hydration_policy_facts(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        event: DispatchEvent,
+        requester_user_id: str,
+        payload_metadata: DispatchPayloadMetadata | None = None,
+        source_kind: str | None = None,
+        original_sender: str | None = None,
+        trusted_user_relay: bool = False,
+    ) -> _PreHydrationPolicyFacts:
+        """Classify mention and origin policy without reading conversation history."""
+        event_source = _source_with_payload_metadata(event.source, payload_metadata)
+        mentioned_agents, am_i_mentioned, _has_non_agent_mentions = self._mention_facts(
+            event_source,
+            room=room,
+        )
+        resolved_source_kind, _hook_source, _message_received_depth = self._envelope_ingress_metadata(
+            event=event,
+            source_kind=source_kind,
+        )
+        return _PreHydrationPolicyFacts(
+            origin=self._turn_origin_for_event(
+                event=event,
+                requester_user_id=requester_user_id,
+                source_kind=resolved_source_kind,
+                original_sender=original_sender,
+                trusted_user_relay=trusted_user_relay,
+            ),
+            am_i_mentioned=am_i_mentioned,
+            mentioned_agents=tuple(mentioned_agents),
+        )
+
     def _sender_is_managed_entity(self, user_id: str) -> bool:
         """Return whether one Matrix user ID belongs to a managed entity."""
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
@@ -358,6 +426,22 @@ class ConversationResolver:
             return event_info.thread_id
         return fallback_root_event_id if event_info.can_be_thread_root else None
 
+    def _is_trusted_room_level_silent_schedule(
+        self,
+        event_source: dict[str, Any],
+        event_info: EventInfo,
+        *,
+        thread_id: str | None,
+    ) -> bool:
+        """Return whether a hidden schedule trigger must stay at room level."""
+        if thread_id is not None or event_info.thread_id is not None:
+            return False
+        content = event_source.get("content")
+        if not isinstance(content, dict) or source_kind_from_content(content) != SILENT_SCHEDULE_SOURCE_KIND:
+            return False
+        sender = event_source.get("sender")
+        return isinstance(sender, str) and self._sender_is_managed_entity(sender)
+
     def build_message_target(
         self,
         *,
@@ -376,9 +460,15 @@ class ConversationResolver:
         )
         thread_start_root_event_id = None
         automation_fire_root = False
+        room_level_silent_schedule = False
         if event_source is not None:
             event_info = EventInfo.from_event(event_source)
-            if event_info.can_be_thread_root and reply_to_event_id is not None:
+            room_level_silent_schedule = self._is_trusted_room_level_silent_schedule(
+                event_source,
+                event_info,
+                thread_id=thread_id,
+            )
+            if event_info.can_be_thread_root and reply_to_event_id is not None and not room_level_silent_schedule:
                 thread_start_root_event_id = reply_to_event_id
             automation_root_event_id = self._trusted_automation_fire_root_event_id(
                 event_source,
@@ -391,9 +481,9 @@ class ConversationResolver:
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
+            reply_to_event_id=None if room_level_silent_schedule else reply_to_event_id,
             thread_start_root_event_id=thread_start_root_event_id,
-            room_mode=effective_thread_mode == "room" and not automation_fire_root,
+            room_mode=room_level_silent_schedule or (effective_thread_mode == "room" and not automation_fire_root),
         )
 
     def build_message_envelope(
@@ -416,15 +506,12 @@ class ConversationResolver:
         """Build the normalized inbound envelope consumed by message hooks."""
         from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
 
-        config = self.deps.runtime.config
         resolved_source_kind, hook_source, message_received_depth = self._envelope_ingress_metadata(
             event=event,
             source_kind=source_kind,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
         )
-        registry = entity_identity_registry(config, self.deps.runtime_paths)
-
         return MessageEnvelope(
             source_event_id=event.event_id,
             target=target,
@@ -432,10 +519,7 @@ class ConversationResolver:
             attachment_ids=tuple(
                 attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
             ),
-            mentioned_agents=tuple(
-                registry.current_entity_name_for_user_id(agent_id.full_id) or agent_id.username
-                for agent_id in context.mentioned_agents
-            ),
+            mentioned_agents=self._mentioned_agent_names(context.mentioned_agents),
             agent_name=agent_name or self.deps.agent_name,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
@@ -462,6 +546,7 @@ class ConversationResolver:
         dispatch_policy_source_kind: str | None = None,
         hook_source: str | None = None,
         message_received_depth: int | None = None,
+        mentioned_agents: Sequence[MatrixID] = (),
         original_sender: str | None = None,
         trusted_user_relay: bool = False,
     ) -> MessageEnvelope:
@@ -481,7 +566,7 @@ class ConversationResolver:
             attachment_ids=tuple(
                 attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
             ),
-            mentioned_agents=(),
+            mentioned_agents=self._mentioned_agent_names(mentioned_agents),
             agent_name=agent_name or self.deps.agent_name,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
@@ -812,17 +897,10 @@ class ConversationResolver:
         resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
         config = self.deps.runtime.config
 
-        if _should_skip_mentions(resolved_event_source):
-            mentioned_agents: list[MatrixID] = []
-            am_i_mentioned = False
-            has_non_agent_mentions = False
-        else:
-            mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-                resolved_event_source,
-                self._matrix_id(),
-                config,
-                self.deps.runtime_paths,
-            )
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(
+            resolved_event_source,
+            room=room,
+        )
 
         if am_i_mentioned:
             self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
@@ -886,17 +964,10 @@ class ConversationResolver:
         resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
         config = self.deps.runtime.config
 
-        if _should_skip_mentions(resolved_event_source):
-            mentioned_agents: list[MatrixID] = []
-            am_i_mentioned = False
-            has_non_agent_mentions = False
-        else:
-            mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-                resolved_event_source,
-                self._matrix_id(),
-                config,
-                self.deps.runtime_paths,
-            )
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(
+            resolved_event_source,
+            room=room,
+        )
 
         if am_i_mentioned:
             self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)

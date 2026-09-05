@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -46,29 +47,45 @@ import mindroom.bot  # noqa: F401
 import mindroom.handled_turns as handled_turns_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingDrainResult
+from mindroom.coalescing_batch import PendingEvent
 from mindroom.command_turn_executor import CommandTurnExecutor
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
+from mindroom.dispatch_handoff import (
+    MediaDispatchEvent,
+    PendingDispatchMetadata,
+    PreparedIngress,
+    prepare_media_ingress,
+)
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.event_journal import (
+    AdmissionResult,
     ConversationPage,
     DeliveryAcknowledgement,
     DeliveryStage,
+    EventClass,
+    EventKind,
+    InboundEvent,
     JournalEvent,
-    OutboxDelivery,
-    OutboxView,
+    MatrixDelivery,
+    MatrixDeliveryView,
     PendingTurnView,
+    PrincipalStore,
+    ProjectedEvent,
     RelationView,
     TerminalTurnWrite,
     VisibleMessage,
 )
+from mindroom.event_journal import reads as journal_reads
+from mindroom.event_journal.outbox import _legacy_delivery_result, matrix_delivery_payload
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.history.runtime import (
@@ -89,17 +106,19 @@ from mindroom.history.types import (
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
+from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.media_fallback import reset_model_media_capability_cache
+from mindroom.matrix_delivery import TurnHandoff
 from mindroom.message_target import MessageTarget
+from mindroom.provider_media_fallback import reset_model_media_capability_cache
 from mindroom.reaction_dispatch import ReactionDispatcher
-from mindroom.response_delivery import TurnHandoff
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -293,6 +312,96 @@ def _configure_uncached_structlog(
     )
 
 
+async def activate_interactive_prompt(
+    store: PrincipalStore,
+    *,
+    question_event_id: str,
+    room_id: str,
+    sender: str,
+    creator_agent: str,
+    thread_id: str | None = None,
+    revision_event_id: str | None = None,
+    question_text: str = "Choose",
+    options: Mapping[str, str] | None = None,
+    option_labels: Mapping[str, str] | None = None,
+    source_event_id: str | None = None,
+) -> AdmissionResult:
+    """Admit and settle one self-authored Matrix revision carrying a prompt."""
+    prompt_source_event_id = source_event_id or f"{question_event_id}-source"
+    await store.admit(
+        InboundEvent(
+            event_id=prompt_source_event_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.CONTEXT_ONLY,
+            sender="@user:localhost",
+            origin_server_ts=500,
+            source={},
+        ),
+    )
+    prompt = InteractivePrompt(
+        creator_agent=creator_agent,
+        question_text=question_text,
+        options=dict(options or {"1": "one"}),
+        option_labels=dict(option_labels or {"1": "One"}),
+        source_event_id=prompt_source_event_id,
+    )
+    installed_content: dict[str, object] = {
+        "msgtype": "m.text",
+        "body": question_text,
+        **interactive_prompt_content(prompt),
+    }
+    event_id = revision_event_id or question_event_id
+    content = installed_content
+    if revision_event_id is not None:
+        content = {
+            "msgtype": "m.text",
+            "body": f"* {question_text}",
+            "m.new_content": installed_content,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": question_event_id},
+            **interactive_prompt_content(prompt),
+        }
+    inbound = InboundEvent(
+        event_id=event_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        kind=EventKind.MESSAGE,
+        event_class=EventClass.ACTIONABLE,
+        sender=sender,
+        origin_server_ts=1_000,
+        source={"event_id": event_id, "content": content},
+    )
+    result = await store.admit(
+        inbound,
+        ProjectedEvent(
+            event_id=event_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            sender=sender,
+            origin_server_ts=1_000,
+            content=content,
+            replaces_event_id=question_event_id if revision_event_id is not None else None,
+            redacts_event_id=None,
+        ),
+    )
+    await store.settle(event_id)
+    return result
+
+
+async def membership_epoch_is_active(store: PrincipalStore, room_id: str, epoch: int) -> bool:
+    """Probe the journal's row-locked active-membership predicate."""
+    # This is deliberately white-box: production callers use higher-level store guards.
+    return await store._backend.write(
+        lambda transaction: journal_reads.claim_membership_epoch(
+            transaction,
+            store._principal_id,
+            room_id=room_id,
+            expected_membership_epoch=epoch,
+        ),
+    )
+
+
 _configure_quiet_structlog()
 
 
@@ -300,6 +409,7 @@ __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
     "FakeCredentialsManager",
+    "activate_interactive_prompt",
     "agent_response_should_respond",
     "aioresponse",
     "bind_mock_config_event_journal",
@@ -311,6 +421,7 @@ __all__ = [
     "delivered_matrix_side_effect",
     "dispatch_context_result",
     "drain_coalescing",
+    "enforce_turn_authorization",
     "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
@@ -320,6 +431,7 @@ __all__ = [
     "load_config_yaml",
     "make_matrix_client_mock",
     "make_visible_message",
+    "membership_epoch_is_active",
     "message_origin",
     "normalize_console_output",
     "orchestrator_runtime_paths",
@@ -483,6 +595,7 @@ def agent_response_should_respond(
         thread_history,
         config,
         runtime_paths,
+        AgentReplyMembershipIndex(),
         mentioned_agents,
         has_non_agent_mentions,
         sender_id=sender_id,
@@ -537,6 +650,58 @@ def request_envelope(
         agent_name=agent_name,
         origin=message_origin(sender_id=resolved_user_id, requester_id=resolved_user_id, source_kind=source_kind),
     )
+
+
+def make_pending_event(
+    event: PreparedIngress | nio.RoomMessageFormatted | MediaDispatchEvent,
+    room: nio.MatrixRoom,
+    *,
+    source_kind: str,
+    dispatch_policy_source_kind: str | None = None,
+    hook_source: str | None = None,
+    message_received_depth: int = 0,
+    trust_internal_payload_metadata: bool = False,
+    requester_user_id: str | None = None,
+    discovery_event_id: str | None = None,
+    turn_dispatch_recovery: bool = False,
+    enqueue_time: float | None = None,
+    dispatch_metadata: tuple[PendingDispatchMetadata, ...] = (),
+) -> PendingEvent:
+    """Build one PendingEvent with per-source evidence stamped on its PreparedIngress.
+
+    Mirrors the pre-refactor PendingEvent constructor: raw nio text events are
+    normalized into PreparedIngress form and raw nio media events are wrapped
+    with their caption and retained protocol reference.
+    """
+    if isinstance(event, PreparedIngress):
+        prepared = event
+    elif is_matrix_media_dispatch_event(event):
+        prepared = prepare_media_ingress(event)
+    elif isinstance(event, nio.RoomMessageFormatted):
+        prepared = PreparedIngress(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=event.body,
+            source=event.source,
+            server_timestamp=event.server_timestamp,
+        )
+    else:
+        msg = f"Unsupported pending event type: {type(event).__name__}"
+        raise TypeError(msg)
+    prepared = replace(
+        prepared,
+        source_kind=source_kind,
+        dispatch_policy_source_kind=dispatch_policy_source_kind,
+        hook_source=hook_source,
+        message_received_depth=message_received_depth,
+        trust_internal_payload_metadata=trust_internal_payload_metadata,
+        requester_user_id=requester_user_id,
+        discovery_event_id=discovery_event_id,
+        turn_dispatch_recovery=turn_dispatch_recovery,
+    )
+    if enqueue_time is None:
+        return PendingEvent(event=prepared, room=room, dispatch_metadata=dispatch_metadata)
+    return PendingEvent(event=prepared, room=room, enqueue_time=enqueue_time, dispatch_metadata=dispatch_metadata)
 
 
 def requires_linux(
@@ -895,13 +1060,18 @@ async def _empty_async_iterator() -> AsyncGenerator[object, None]:
         yield None
 
 
-def _make_room_get_event_response(event_id: str) -> nio.RoomGetEventResponse:
+def _make_room_get_event_response(
+    event_id: str,
+    *,
+    sender: str = "@user:localhost",
+) -> nio.RoomGetEventResponse:
     """Return a minimal RoomGetEventResponse containing one visible text event."""
     event = MagicMock(spec=nio.RoomMessageText)
     event.event_id = event_id
-    event.sender = "@user:localhost"
+    event.sender = sender
     event.body = event_id
     event.server_timestamp = 0
+    event.transaction_id = None
     event.source = {
         "type": "m.room.message",
         "content": {
@@ -980,7 +1150,9 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     # A logged-in client always has one, and delivery records it on every claim
     # so a resend can tell whether its frozen transaction ID still deduplicates.
     client.device_id = "TESTDEVICE"
+    client.olm = None
     client.rooms = _AutoRoomCache(user_id)
+    client.invited_rooms = {}
     client.next_batch = "s_test_token"
     client.loaded_sync_token = ""
     presence_response = MagicMock()
@@ -990,7 +1162,9 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.add_event_callback = MagicMock()
     client.add_response_callback = MagicMock()
     client.get_presence = AsyncMock(return_value=presence_response)
-    client.room_get_event = AsyncMock(side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id))
+    client.room_get_event = AsyncMock(
+        side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id, sender=user_id),
+    )
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
     client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
@@ -1089,31 +1263,45 @@ class FakeOutbox:
     """
 
     def __init__(self) -> None:
-        self.rows: dict[tuple[str, str], OutboxDelivery] = {}
+        self.rows: dict[tuple[str, str], MatrixDelivery] = {}
         # What each acknowledgement carried alongside it, so a test can
         # assert the terminal record and the acknowledgement are one write.
         self.acknowledged_terminal_turns: list[tuple[str, TerminalTurnWrite | None]] = []
+        self.acknowledged_projections: list[tuple[ProjectedEvent, ...]] = []
         self.attempted: set[tuple[str, str]] = set()
         # Turns whose membership has ended, as the journal would report it.
         self.ended_membership_turn_ids: set[str] = set()
         # The journal sources each FINAL enqueue handed over, in order.
         self.handed_over: list[tuple[str, ...]] = []
+        self.room_membership_epochs: dict[str, int] = {}
+
+    @property
+    def principal_id(self) -> str:
+        """Return the principal this in-memory delivery store represents."""
+        return "agent@alice"
+
+    async def membership_epoch(self, room_id: str) -> int:
+        """Return the fake room's current membership epoch."""
+        return self.room_membership_epochs.get(room_id, 0)
 
     async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
         """Return whether a turn still speaks for the room's current membership."""
         del room_id
         return turn_id not in self.ended_membership_turn_ids
 
-    async def enqueue_delivery(
+    async def enqueue_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, leaving an already-attempted row's payload alone.
 
@@ -1136,51 +1324,80 @@ class FakeOutbox:
         """
         if settle_source_event_ids:
             self.handed_over.append(settle_source_event_ids)
-        key = (turn_id, stage.value)
+        membership_epoch = await self.membership_epoch(room_id)
+        existing_owner = next(
+            (
+                delivery
+                for (existing_delivery_id, _stage), delivery in self.rows.items()
+                if existing_delivery_id == delivery_id
+            ),
+            None,
+        )
+        if existing_owner is not None and (
+            existing_owner.retired
+            or existing_owner.room_id != room_id
+            or existing_owner.membership_epoch != membership_epoch
+        ):
+            return None
+        key = (delivery_id, stage.value)
         existing = self.rows.get(key)
         if existing is not None:
-            if key in self.attempted:
+            if key in self.attempted or existing.permanently_failed:
                 return existing.transaction_id
             self.rows[key] = replace(
                 existing,
                 room_id=room_id,
                 thread_id=thread_id,
-                payload=dict(payload),
+                payload=matrix_delivery_payload(self.principal_id, delivery_id, stage, payload),
+                result=dict(result) if result is not None else _legacy_delivery_result(payload),
+                event_type=event_type,
                 edits_event_id=edits_event_id,
+                permanent_failure_reason=permanent_failure_reason,
             )
             return existing.transaction_id
-        if turn_id in self.ended_membership_turn_ids:
+        if delivery_id in self.ended_membership_turn_ids:
             return None
-        transaction_id = f"tx-{turn_id}-{stage.value}"
-        self.rows[key] = OutboxDelivery(
-            turn_id=turn_id,
+        transaction_id = f"tx-{delivery_id}-{stage.value}"
+        self.rows[key] = MatrixDelivery(
+            delivery_id=delivery_id,
             stage=stage,
+            event_type=event_type,
             room_id=room_id,
+            membership_epoch=membership_epoch,
             thread_id=thread_id,
             transaction_id=transaction_id,
-            payload=dict(payload),
+            payload=matrix_delivery_payload(self.principal_id, delivery_id, stage, payload),
+            result=dict(result) if result is not None else _legacy_delivery_result(payload),
             edits_event_id=edits_event_id,
             acknowledged_event_id=None,
             created_at_ns=len(self.rows),
+            permanent_failure_reason=permanent_failure_reason,
         )
         return transaction_id
 
-    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def claim_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
         """Freeze one delivery before any network call, returning its prior state.
 
-        The pre-claim row is what comes back, exactly as the real outbox does:
-        a caller has to be able to see whether *someone else* attempted this
-        and from which device, and reading after the mark would report this
-        attempt back to itself. The device is not written here -- claiming does
-        not mean this device is going to send.
+        The prior attempted state comes back while the first device intent is
+        committed atomically, exactly as the real outbox does.
         """
-        key = (turn_id, stage.value)
+        key = (delivery_id, stage.value)
         row = self.rows.get(key)
-        if row is None:
+        if row is None or row.retired or row.permanently_failed:
             return None
-        if stage is DeliveryStage.INITIAL and not row.attempted and (turn_id, DeliveryStage.FINAL.value) in self.rows:
+        if (
+            stage is DeliveryStage.INITIAL
+            and not row.attempted
+            and (delivery_id, DeliveryStage.FINAL.value) in self.rows
+        ):
             return None
-        initial = self.rows.get((turn_id, DeliveryStage.INITIAL.value))
+        initial = self.rows.get((delivery_id, DeliveryStage.INITIAL.value))
         if (
             stage is DeliveryStage.FINAL
             and row.edits_event_id is None
@@ -1190,31 +1407,75 @@ class FakeOutbox:
         ):
             return None
         self.attempted.add(key)
-        self.rows[key] = replace(row, attempted=True)
-        return row
+        claimed = replace(
+            row,
+            attempted=True,
+            sending_device_id=sending_device_id if not row.attempted else row.sending_device_id,
+        )
+        self.rows[key] = claimed
+        return replace(claimed, attempted=row.attempted)
 
-    async def record_sending_device(
+    async def record_matrix_delivery_device(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         device_id: str | None,
     ) -> None:
         """Record the device namespace this delivery is about to send under."""
-        key = (turn_id, stage.value)
+        key = (delivery_id, stage.value)
         if key in self.rows:
             self.rows[key] = replace(self.rows[key], sending_device_id=device_id)
 
-    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
-        return self.rows.get((turn_id, stage.value))
+        return self.rows.get((delivery_id, stage.value))
 
-    async def acknowledge_delivery(
+    async def record_permanent_matrix_delivery_failure(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        if not reason:
+            msg = "A permanent Matrix delivery failure requires a reason"
+            raise ValueError(msg)
+        key = (delivery_id, stage.value)
+        row = self.rows.get(key)
+        if row is None or row.acknowledged_event_id is not None:
+            return None if row is None else row.acknowledged_event_id
+        if not row.retired and not row.permanently_failed:
+            self.rows[key] = replace(row, permanent_failure_reason=reason)
+        return None
+
+    async def retire_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        membership_epoch: int,
+    ) -> str | None:
+        """Retain one obsolete row as an in-memory identity tombstone."""
+        key = (delivery_id, stage.value)
+        row = self.rows.get(key)
+        if row is None:
+            return None
+        assert (row.room_id, row.membership_epoch) == (room_id, membership_epoch)
+        if row.acknowledged_event_id is not None:
+            return row.acknowledged_event_id
+        self.rows[key] = replace(row, retired=True)
+        return None
+
+    async def acknowledge_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
         stage: DeliveryStage,
         event_id: str,
+        delivered_projections: tuple[ProjectedEvent, ...],
         terminal_turn: TerminalTurnWrite | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, and the turn it completes.
@@ -1223,23 +1484,29 @@ class FakeOutbox:
         it travelled *with* the acknowledgement. Dropping it here would let the
         two drift apart again without anything noticing.
         """
-        key = (turn_id, stage.value)
+        key = (delivery_id, stage.value)
         already = self.rows[key].acknowledged_event_id
         if already is not None:
             # First-writer-wins, like the real store: a loser is told the event
             # the row already names rather than its own, and told it bound
             # nothing -- which stays true even when the two events are equal.
             return DeliveryAcknowledgement(settled_event_id=already, bound=False)
-        self.rows[key] = replace(self.rows[key], acknowledged_event_id=event_id)
-        self.acknowledged_terminal_turns.append((turn_id, terminal_turn))
+        self.rows[key] = replace(
+            self.rows[key],
+            acknowledged_event_id=event_id,
+            permanent_failure_reason=None,
+        )
+        self.acknowledged_terminal_turns.append((delivery_id, terminal_turn))
+        self.acknowledged_projections.append(delivered_projections)
         return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
 
-    async def unacknowledged_deliveries(
+    async def unacknowledged_matrix_deliveries(
         self,
         *,
+        event_type: str = "m.room.message",
         limit: int = 256,
         after: tuple[int, str, str] | None = None,
-    ) -> tuple[OutboxDelivery, ...]:
+    ) -> tuple[MatrixDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first.
 
         The cursor is honoured, because recovery relies on it to make
@@ -1248,17 +1515,26 @@ class FakeOutbox:
         page, or the scan never ends.
         """
         pending = sorted(
-            (row for row in self.rows.values() if row.acknowledged_event_id is None),
-            key=lambda row: (row.created_at_ns, row.turn_id, row.stage.value),
+            (
+                row
+                for row in self.rows.values()
+                if (
+                    row.event_type == event_type
+                    and row.acknowledged_event_id is None
+                    and not row.retired
+                    and not row.permanently_failed
+                )
+            ),
+            key=lambda row: (row.created_at_ns, row.delivery_id, row.stage.value),
         )
         if after is not None:
-            pending = [row for row in pending if (row.created_at_ns, row.turn_id, row.stage.value) > after]
+            pending = [row for row in pending if (row.created_at_ns, row.delivery_id, row.stage.value) > after]
         return tuple(pending[:limit])
 
 
-def make_outbox_mock() -> OutboxView:
+def make_outbox_mock() -> MatrixDeliveryView:
     """Return an outbox a delivery test can actually send through."""
-    return cast("OutboxView", FakeOutbox())
+    return cast("MatrixDeliveryView", FakeOutbox())
 
 
 class CrashError(RuntimeError):
@@ -1310,78 +1586,144 @@ class DiesAfterAcknowledgement:
     ``DiesAfterNextWriteCommit`` instead.
     """
 
-    inner: OutboxView
+    inner: MatrixDeliveryView
 
-    async def enqueue_delivery(
+    @property
+    def principal_id(self) -> str:
+        """Return the wrapped delivery principal."""
+        return self.inner.principal_id
+
+    async def membership_epoch(self, room_id: str) -> int:
+        """Return the wrapped room membership epoch."""
+        return await self.inner.membership_epoch(room_id)
+
+    async def enqueue_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
         stage: DeliveryStage,
         room_id: str,
         thread_id: str | None,
         payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record delivery intent."""
-        return await self.inner.enqueue_delivery(
-            turn_id=turn_id,
+        return await self.inner.enqueue_matrix_delivery(
+            delivery_id=delivery_id,
             stage=stage,
             room_id=room_id,
             thread_id=thread_id,
             payload=payload,
+            result=result,
+            event_type=event_type,
             edits_event_id=edits_event_id,
             settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
         )
 
     async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
         """Return whether a turn still speaks for the room's current membership."""
         return await self.inner.turn_membership_is_current(turn_id=turn_id, room_id=room_id)
 
-    async def claim_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
-        """Freeze one delivery before network I/O and return what to send."""
-        return await self.inner.claim_delivery(turn_id=turn_id, stage=stage)
-
-    async def record_sending_device(
+    async def claim_matrix_delivery(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
+        """Freeze one delivery before network I/O and return what to send."""
+        return await self.inner.claim_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=stage,
+            sending_device_id=sending_device_id,
+        )
+
+    async def record_matrix_delivery_device(
+        self,
+        *,
+        delivery_id: str,
         stage: DeliveryStage,
         device_id: str | None,
     ) -> None:
         """Record the device namespace this delivery is about to send under."""
-        await self.inner.record_sending_device(turn_id=turn_id, stage=stage, device_id=device_id)
+        await self.inner.record_matrix_delivery_device(
+            delivery_id=delivery_id,
+            stage=stage,
+            device_id=device_id,
+        )
 
-    async def load_delivery(self, *, turn_id: str, stage: DeliveryStage) -> OutboxDelivery | None:
+    async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
-        return await self.inner.load_delivery(turn_id=turn_id, stage=stage)
+        return await self.inner.load_matrix_delivery(delivery_id=delivery_id, stage=stage)
 
-    async def acknowledge_delivery(
+    async def record_permanent_matrix_delivery_failure(
         self,
         *,
-        turn_id: str,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        return await self.inner.record_permanent_matrix_delivery_failure(
+            delivery_id=delivery_id,
+            stage=stage,
+            reason=reason,
+        )
+
+    async def retire_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        membership_epoch: int,
+    ) -> str | None:
+        """Retain an obsolete delivery as an identity tombstone."""
+        return await self.inner.retire_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=stage,
+            room_id=room_id,
+            membership_epoch=membership_epoch,
+        )
+
+    async def acknowledge_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
         stage: DeliveryStage,
         event_id: str,
+        delivered_projections: tuple[ProjectedEvent, ...],
         terminal_turn: TerminalTurnWrite | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix outcome, then die before anything else can run."""
-        await self.inner.acknowledge_delivery(
-            turn_id=turn_id,
+        await self.inner.acknowledge_matrix_delivery(
+            delivery_id=delivery_id,
             stage=stage,
             event_id=event_id,
+            delivered_projections=delivered_projections,
             terminal_turn=terminal_turn,
         )
         msg = "crashed the instant the outcome was recorded"
         raise CrashError(msg)
 
-    async def unacknowledged_deliveries(
+    async def unacknowledged_matrix_deliveries(
         self,
         *,
+        event_type: str = "m.room.message",
         limit: int = 256,
         after: tuple[int, str, str] | None = None,
-    ) -> tuple[OutboxDelivery, ...]:
+    ) -> tuple[MatrixDelivery, ...]:
         """Return deliveries whose Matrix outcome is unknown, oldest first."""
-        return await self.inner.unacknowledged_deliveries(limit=limit, after=after)
+        return await self.inner.unacknowledged_matrix_deliveries(
+            event_type=event_type,
+            limit=limit,
+            after=after,
+        )
 
 
 # Drops contract 2's journal handoff, for tests that are not about it. Named
@@ -1392,6 +1734,14 @@ ignore_final_delivery_handoff = TurnHandoff(
     sources_for_turn=lambda _turn_id: (),
     released=lambda _event_ids: None,
 )
+
+
+async def ignore_delivered_projection(
+    _delivery: MatrixDelivery,
+    _event_id: str,
+) -> tuple[ProjectedEvent, ...]:
+    """Return no projection for outbox-only tests."""
+    return ()
 
 
 @dataclass
@@ -1536,6 +1886,17 @@ def make_conversation_reader_mock() -> ConversationReader:
     )
 
 
+def make_membership_stub() -> PrincipalStore:
+    """Return the narrow membership view used by runtime test collaborators."""
+    return cast(
+        "PrincipalStore",
+        SimpleNamespace(
+            membership_epoch=AsyncMock(return_value=0),
+            interactive_prompt_is_current=AsyncMock(return_value=True),
+        ),
+    )
+
+
 def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
     """Install the durable-runtime stand-ins used by lightweight bot tests.
 
@@ -1562,6 +1923,9 @@ def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
             ):
                 return True
             outcome = await client_room_admin_module.join_room(client, room_id)
+            if outcome in {RoomJoinOutcome.ACCESS_DENIED, RoomJoinOutcome.RETRYABLE_FAILURE}:
+                msg = "Failed to join invited room"
+                raise RuntimeError(msg)
             return outcome is RoomJoinOutcome.JOINED or outcome is True
         if target_membership == "leave":
             return await matrix_rooms_module.leave_room(client, room_id)
@@ -1805,7 +2169,8 @@ def create_mock_room(
     room.room_id = room_id
     if agents:
         domain = config.get_domain(runtime_paths_for(config)) if config is not None else "localhost"
-        room.users = {f"@mindroom_{agent}:{domain}": None for agent in agents}
+        user_ids = [f"@mindroom_{agent}:{domain}" for agent in agents]
+        room.users = {user_id: nio.MatrixUser(user_id) for user_id in user_ids}
     else:
         room.users = {}
     return room
@@ -2050,6 +2415,20 @@ def replace_reaction_dispatcher_deps(bot: RuntimeBot, **changes: object) -> Reac
     return rebuilt
 
 
+def replace_interactive_selection_handlers(
+    bot: RuntimeBot,
+    *,
+    handle: Callable[..., Awaitable[bool]] | None = None,
+    start: Callable[..., Awaitable[None]] | None = None,
+) -> None:
+    """Replace controller-owned interactive handlers for one test bot."""
+    controller = unwrap_extracted_collaborator(bot._turn_controller)
+    if handle is not None:
+        controller._handle_interactive_selection = handle  # type: ignore[method-assign]
+    if start is not None:
+        controller._start_interactive_selection = start  # type: ignore[method-assign]
+
+
 def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnController:
     """Rebuild the turn controller after swapping collaborators captured at construction."""
     sync_bot_runtime_state(bot)
@@ -2180,7 +2559,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         ingress=rebuilt.deps.ingress,
         stop_manager=bot.stop_manager,
         reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,
-        handle_interactive_selection=rebuilt.handle_interactive_selection,
+        enqueue_interactive_selection=rebuilt.enqueue_interactive_selection,
         config_confirmation=replace(
             reaction_dispatcher.deps.config_confirmation,
             runtime=rebuilt.deps.runtime,
@@ -2527,9 +2906,54 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
     if "test_authorization" in request.node.parent.name:
         yield
     else:
-        with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
-            patch("mindroom.reaction_dispatch.is_authorized_sender", return_value=True),
-        ):
+        with ExitStack() as stack:
+            if "enforce_turn_authorization" not in request.fixturenames:
+                stack.enter_context(patch("mindroom.authorization.is_sender_allowed_for_responder", return_value=True))
+                stack.enter_context(
+                    patch(
+                        "mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room",
+                        return_value=True,
+                    ),
+                )
+                stack.enter_context(
+                    patch("mindroom.approval_inbound.is_sender_allowed_for_responder", return_value=True),
+                )
+                stack.enter_context(
+                    patch(
+                        "mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder",
+                        return_value=True,
+                    ),
+                )
+                stack.enter_context(
+                    patch("mindroom.custom_tools.delegate.is_sender_allowed_for_responder", return_value=True),
+                )
             yield
+
+
+@pytest.fixture
+def enforce_turn_authorization() -> None:
+    """Keep final TurnPolicy authorization active for tests that exercise it."""
+
+
+def seed_session[SessionT: "AgentSession | TeamSession"](storage: "BaseDb", session: SessionT) -> SessionT:
+    """Persist a session row and every run it holds, in order, and return the session.
+
+    Production code writes runs explicitly (``save_runs``/``replace_runs``);
+    tests seed whole histories with this instead.
+    """
+    storage.upsert_session(session)
+    for run in session.runs or []:
+        storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
+    return session
+
+
+def create_agno_2_sessions_db(path: "Path") -> "Path":
+    """Write the agno 2.6.12 ``code_sessions`` fixture database to ``path`` and return it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fixture = Path(__file__).parent / "fixtures" / "agno_2_6_12_code_sessions.sql"
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(fixture.read_text(encoding="utf-8"))
+    finally:
+        connection.close()
+    return path

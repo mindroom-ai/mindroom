@@ -247,6 +247,89 @@ def test_primary_runtime_defers_heavy_optional_dependencies() -> None:
     _assert_probe_clean("mindroom.orchestrator", _HEAVY_OPTIONAL_RUNTIME_ROOTS)
 
 
+def test_worker_retirement_is_a_standard_library_leaf() -> None:
+    """The retirement boundary exposes two operations without loading another MindRoom module."""
+    probe = """
+import importlib
+import json
+import sys
+
+import mindroom.workers
+
+baseline = set(sys.modules)
+module = importlib.import_module("mindroom.workers.worker_retirement")
+loaded = sorted(name for name in set(sys.modules) - baseline if name.startswith("mindroom"))
+print(json.dumps({"exports": module.__all__, "loaded": loaded}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "exports": ["open_worker_state_root", "remove_directory_tree_at"],
+        "loaded": ["mindroom.workers.worker_retirement"],
+    }
+
+
+def test_background_approval_transactions_have_a_focused_module_boundary() -> None:
+    """Background rows depend on shared card state without owning its lifecycle."""
+    probe = """
+import importlib
+import json
+
+card_state = importlib.import_module("mindroom.event_journal.approval_card_state")
+background = importlib.import_module("mindroom.event_journal.background_approvals")
+dispatcher = importlib.import_module("mindroom.event_journal.approvals")
+print(json.dumps({
+    "background_exports": background.__all__,
+    "background_resolve_owner": background.resolve.__module__,
+    "card_state_exports": card_state.__all__,
+    "card_reserve_owner": card_state.reserve_delivery.__module__,
+    "dispatcher_owner": dispatcher.resolve_card.__module__,
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "background_exports": [
+            "BackgroundApprovalDecision",
+            "background_identity",
+            "decision",
+            "prune_calls",
+            "reserve_delivery",
+            "resolve",
+            "resolve_call",
+            "resolve_pending_calls",
+        ],
+        "background_resolve_owner": "mindroom.event_journal.background_approvals",
+        "card_state_exports": [
+            "TIMEOUT_REASON",
+            "ApprovalCardReservation",
+            "RecordedApprovalDecision",
+            "decode_object_payload",
+            "decode_resolution",
+            "enqueue_resolution",
+            "reserve_delivery",
+            "stored_resolution",
+            "terminal_content",
+        ],
+        "card_reserve_owner": "mindroom.event_journal.approval_card_state",
+        "dispatcher_owner": "mindroom.event_journal.approvals",
+    }
+
+
 def test_openai_wire_models_import_only_the_openai_sdk() -> None:
     """Agno's azure package init pulls the anthropic SDK; only the azure branch should pay that."""
     non_openai_roots = tuple(root for root in _PROVIDER_SDK_ROOTS if root != "openai")

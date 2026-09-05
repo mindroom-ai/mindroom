@@ -11,7 +11,7 @@ from mindroom.dispatch_source import is_voice_event
 if TYPE_CHECKING:
     import structlog
 
-    from mindroom.dispatch_handoff import TextDispatchEvent
+    from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.event_journal import JournalEvent, PendingTurnView
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
@@ -21,7 +21,7 @@ type _VisibleRouterVoiceEchoLookup = Callable[[str, object], bool]
 
 
 def has_newer_unresponded_in_thread(
-    event: TextDispatchEvent,
+    event: PreparedIngress,
     requester_user_id: str,
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -117,7 +117,7 @@ def _unresponded_requester_event_id(
 async def has_newer_unresponded_journal_thread_event(
     *,
     room_id: str,
-    event: TextDispatchEvent,
+    event: PreparedIngress,
     requester_user_id: str,
     thread_id: str | None,
     may_be_superseded_by_newer_requester_turn: bool,

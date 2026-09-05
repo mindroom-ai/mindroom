@@ -54,7 +54,7 @@ def normalize_mcp_server_id(server_id: str) -> str:
 
 
 class MCPOAuthConfig(BaseModel):
-    """OAuth settings for requester-scoped remote MCP servers."""
+    """OAuth settings for worker-scoped remote MCP servers."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -126,7 +126,7 @@ class MCPServerConfig(BaseModel):
     url: str | None = Field(default=None, description="Remote URL for SSE or streamable HTTP")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers for remote transports")
     tool_prefix: str | None = Field(default=None, description="Prefix for model-visible function names")
-    auth: MCPOAuthConfig | None = Field(default=None, description="Optional requester-scoped MCP auth")
+    auth: MCPOAuthConfig | None = Field(default=None, description="Optional worker-scoped MCP auth")
     include_tools: list[str] = Field(default_factory=list, description="Optional remote tool allowlist")
     exclude_tools: list[str] = Field(default_factory=list, description="Optional remote tool denylist")
     startup_timeout_seconds: float = Field(default=20.0, gt=0, description="Startup timeout")

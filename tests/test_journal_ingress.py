@@ -6,12 +6,15 @@ import asyncio
 import contextlib
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
 from structlog.testing import capture_logs
 
 from mindroom.constants import (
+    SILENT_SCHEDULE_EVENT_TYPE,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -21,10 +24,12 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
-    DepartureSource,
     EventClass,
     EventKind,
+    PendingPage,
     SemanticConsumer,
     VisibleMessage,
 )
@@ -32,12 +37,13 @@ from mindroom.journal_dispatch import _BINDINGS, _LIFECYCLE_PAGE_SIZE, JournalCa
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_visible_messages import is_visible_room_message
 from mindroom.matrix.conversation_hydration import _projected_from_event
+from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
     _event_class_for,
     _event_kind,
-    _JournalIngress,
     inbound_event,
+    ingestion_timeline_views,
     parse_journal_event,
     projected_event,
 )
@@ -47,7 +53,7 @@ from tests.test_event_journal_store import corrupt
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sized
 
-    from mindroom.event_journal import EventJournalStore, JournalEvent, PendingPage, PrincipalStore
+    from mindroom.event_journal import EventJournalStore, JournalEvent, PrincipalStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -83,6 +89,34 @@ def text_event(
         },
     )
     assert isinstance(event, nio.Event)
+    return event
+
+
+def schedule_trigger_event(
+    event_id: str,
+    body: object = "Run the scheduled task",
+    *,
+    event_type: str = SILENT_SCHEDULE_EVENT_TYPE,
+    sender: str = BOT,
+    extra_content: dict[str, Any] | None = None,
+    ts: int = 1_000,
+) -> nio.UnknownEvent:
+    """Return a parsed silent scheduled trigger."""
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": sender,
+            "origin_server_ts": ts,
+            "type": event_type,
+            "content": {
+                "msgtype": "m.text",
+                "body": body,
+                SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                **(extra_content or {}),
+            },
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
     return event
 
 
@@ -365,6 +399,25 @@ class TestAdmissionAdapter:
         inbound = inbound_event(ROOM, text_event("$m"), EventKind.MESSAGE, EventClass.ACTIONABLE)
         assert inbound.thread_id is None
 
+    async def test_a_delivery_echo_keeps_its_matrix_transaction_id(self) -> None:
+        """Projection can identify an owned echo before outbox acknowledgement."""
+        event = nio.Event.parse_event(
+            {
+                "event_id": "$echo",
+                "sender": BOT,
+                "origin_server_ts": 1,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "answer"},
+                "unsigned": {"transaction_id": "tx-final"},
+            },
+        )
+        assert isinstance(event, nio.Event)
+
+        projected = projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT)
+
+        assert projected is not None
+        assert projected.transaction_id == "tx-final"
+
     async def test_a_reaction_does_not_touch_the_projection(self) -> None:
         """A reaction does not touch the projection."""
         event = nio.Event.parse_event(
@@ -593,9 +646,14 @@ class TestEchoOrdering:
         one goes through `_admit` so that a sender filter added there fails
         here, because the echo route depends on there not being one.
         """
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), bot_event("$answer", "the answer"), provenance)
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=bot_event("$answer", "the answer").source,
+            self_sender=BOT,
+            provenance=provenance,
+        )
+        assert views is not None
+        await alice.admit(*views)
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [message.logical_event_id for message in page.messages] == ["$answer"]
@@ -643,9 +701,16 @@ class TestStreamingProgressIsTransport:
     """
 
     @staticmethod
-    async def _admit_live(ingress: _JournalIngress, *events: nio.Event) -> None:
+    async def _admit_live(store: PrincipalStore, *events: nio.Event) -> None:
         for event in events:
-            await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
+            views = ingestion_timeline_views(
+                room_id=ROOM,
+                source=event.source,
+                self_sender=BOT,
+                provenance=nio.TimelineEventProvenance.LIVE,
+            )
+            assert views is not None
+            await store.admit(*views)
 
     @staticmethod
     async def _one_visible(store: PrincipalStore) -> VisibleMessage:
@@ -660,10 +725,8 @@ class TestStreamingProgressIsTransport:
         status: str,
     ) -> None:
         """A self-authored in-flight revision must not move the visible row."""
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event("$progress", "half an ans", status, replaces=PLACEHOLDER_ID, ts=1_100),
         )
@@ -685,7 +748,6 @@ class TestStreamingProgressIsTransport:
         one. The prompt then differed by nothing but whether the bot had
         restarted, which is the divergence the projection exists to remove.
         """
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
         summary = nio.Event.parse_event(
             {
                 "event_id": "$summary",
@@ -701,7 +763,7 @@ class TestStreamingProgressIsTransport:
         )
         assert isinstance(summary, nio.Event)
 
-        await self._admit_live(ingress, summary)
+        await self._admit_live(alice, summary)
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [message.logical_event_id for message in page.messages] == ["$summary"]
@@ -720,7 +782,6 @@ class TestStreamingProgressIsTransport:
         any member can set, so if it could promote a notice to work, decorating
         one would be a way to make the bot answer something it should not.
         """
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
         foreign = nio.Event.parse_event(
             {
                 "event_id": "$theirs",
@@ -736,9 +797,9 @@ class TestStreamingProgressIsTransport:
         )
         assert isinstance(foreign, nio.Event)
 
-        await self._admit_live(ingress, foreign)
+        await self._admit_live(alice, foreign)
 
-        assert ingress._admission_kind(foreign) is EventKind.MESSAGE
+        assert _event_kind(foreign) is EventKind.MESSAGE
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [message.logical_event_id for message in page.messages] == ["$theirs"]
         # Admitted, projected, and never work.
@@ -756,10 +817,8 @@ class TestStreamingProgressIsTransport:
         terminal edit had no original, parked in `unresolved_edits`, and the
         conversation this projection exists to serve never saw the answer.
         """
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event(
                 "$progress",
@@ -797,10 +856,8 @@ class TestStreamingProgressIsTransport:
         replays from. Dropping the event instead of only its projection would
         make nio's redelivery of it look like something new.
         """
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event(
                 "$progress",
@@ -829,9 +886,7 @@ class TestStreamingProgressIsTransport:
         terminal edit with no logical message to revise, and the answer would
         never become visible at all.
         """
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
-        await self._admit_live(ingress, placeholder_event())
+        await self._admit_live(alice, placeholder_event())
 
         visible = await self._one_visible(alice)
         assert visible.logical_event_id == PLACEHOLDER_ID
@@ -859,10 +914,8 @@ class TestStreamingProgressIsTransport:
         to resume a partial reply, so a rule that kept only ``completed`` would
         strand an interrupted answer on its placeholder.
         """
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event("$progress", "half an ans", STREAM_STATUS_STREAMING, replaces=PLACEHOLDER_ID, ts=1_100),
             stream_event("$terminal", "the whole answer", status, replaces=PLACEHOLDER_ID, ts=1_200),
@@ -885,10 +938,8 @@ class TestStreamingProgressIsTransport:
         revisions are transport, so a user's edit reduces whatever it says —
         otherwise a correction could be suppressed by spelling it right.
         """
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             text_event("$ask", "frist question", ts=1_000),
             stream_event("$fix", "first question", status, sender=ALICE, replaces="$ask", ts=1_100),
         )
@@ -908,7 +959,6 @@ class TestStreamingProgressIsTransport:
         terminal status, and that echo reduces like any other terminal edit —
         which is what makes skipping progress safe rather than lossy.
         """
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
         progress = [
             stream_event(
                 f"$progress{index}",
@@ -920,14 +970,14 @@ class TestStreamingProgressIsTransport:
             for index in range(1, 6)
         ]
 
-        await self._admit_live(ingress, placeholder_event(), *progress)
+        await self._admit_live(alice, placeholder_event(), *progress)
 
         crashed = await self._one_visible(alice)
         assert crashed.content["body"] == PLACEHOLDER_BODY
         assert crashed.revision_event_id == PLACEHOLDER_ID
 
         await self._admit_live(
-            ingress,
+            alice,
             stream_event(
                 "$cleanup",
                 "partial 5 [interrupted]",
@@ -962,10 +1012,8 @@ class TestStreamingProgressIsTransport:
         decision belonged all along, rather than resting on a
         notification-semantics choice made on the delivery side.
         """
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event(
                 "$notice",
@@ -1114,139 +1162,6 @@ class TestReplayFidelity:
             parse_journal_event(corrupted)
 
 
-class TestDurableAdmission:
-    """nio hears "accepted" only after the transaction commits."""
-
-    async def test_an_admitted_event_becomes_pending_work(self, alice: PrincipalStore) -> None:
-        """An admitted event becomes pending work."""
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
-
-        assert [event.event_id for event in await alice.pending()] == ["$m"]
-
-    async def test_cold_history_populates_context_without_work(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Cold history populates context without work."""
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), text_event("$m", "old"), nio.TimelineEventProvenance.HISTORY)
-
-        assert await alice.pending() == ()
-        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
-        assert [m.content["body"] for m in page.messages] == ["old"]
-
-    async def test_a_failed_compatibility_admission_preserves_the_store_error(self) -> None:
-        """A compatibility caller receives the exact durable-store refusal."""
-
-        class Failing:
-            principal_id = "agent@alice"
-
-            async def admit(self, *_args: object, **_kwargs: object) -> None:
-                msg = "disk is full"
-                raise RuntimeError(msg)
-
-        ingress = _JournalIngress(store=Failing(), self_sender=BOT)  # type: ignore[arg-type]
-
-        with pytest.raises(RuntimeError, match="disk is full"):
-            await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
-
-    async def test_redelivery_after_a_crash_creates_one_turn(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Nio redelivers what it was never told was accepted."""
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-        event = text_event("$m")
-
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
-
-        assert [journal.event_id for journal in await alice.pending()] == ["$m"]
-
-    async def _retired_a_settled_event_redelivered_is_not_kept_for_a_run_that_cannot_come(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Held parsed events are released by the run that uses them, and nothing else.
-
-        An event whose work is already settled is never handed to the worker
-        again, so nothing releases a parsed object kept for it. A checkpoint
-        replayed from further back redelivers a whole window of them, and every
-        distinct one stays held for the life of the process.
-        """
-        event = text_event("$m")
-        await alice.admit(
-            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
-        )
-        await alice.settle(event.event_id)
-        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
-
-        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
-
-        assert dispatcher._live_events == {}
-
-    async def _retired_a_live_event_is_kept_for_the_run_it_still_owes(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Replaying from the payload instead would discard nio's decryption state."""
-        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
-        event = text_event("$m")
-
-        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
-
-        assert set(dispatcher._live_events) == {"$m"}
-
-    async def _retired_an_event_the_fence_settled_before_its_run_is_not_kept_forever(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A row can stop being pending with no run, and the run is the only release.
-
-        A message and the departure that fences its room arrive in one sync
-        response. The fence settles the turn-backed work it has just made
-        unanswerable, so the worker is never handed that event -- and the
-        parsed object kept for the run it was going to get stays held for the
-        life of the process, message text and all.
-        """
-        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
-        event = text_event("$m")
-        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
-
-        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
-        assert await alice.pending() == (), "the fence settled the work it made unanswerable"
-
-        await dispatcher.drain_once()
-
-        assert dispatcher._live_events == {}
-
-    async def test_an_unowned_event_is_neither_admitted_nor_rejected(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """An unowned event is neither admitted nor rejected."""
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-        topic = nio.Event.parse_event(
-            {
-                "event_id": "$topic",
-                "sender": ALICE,
-                "origin_server_ts": 1,
-                "type": "m.room.topic",
-                "state_key": "",
-                "content": {"topic": "hi"},
-            },
-        )
-        assert isinstance(topic, nio.Event)
-
-        await ingress._admit(room(), topic, nio.TimelineEventProvenance.LIVE)
-
-        assert await alice.pending() == ()
-
-
 class TestPendingEventWorker:
     """Execution order, failure isolation, and crash behavior."""
 
@@ -1391,6 +1306,120 @@ class TestPendingEventWorker:
         assert handled == ["$first", "$second", "$third"]
         assert peak_concurrent == 1
         assert await alice.unsettled_event_ids() == frozenset()
+
+    async def test_stop_prevents_a_waiting_recovery_drain_from_starting_a_late_lane(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A drain already waiting on a lane cannot outlive worker shutdown."""
+        existing_lane_started = asyncio.Event()
+        existing_lane_cancelled = asyncio.Event()
+        finish_cancellation = asyncio.Event()
+        late_lane_started = asyncio.Event()
+
+        async def handle(event: JournalEvent) -> bool:
+            del event
+            late_lane_started.set()
+            await asyncio.Event().wait()
+            return True
+
+        async def existing_lane() -> None:
+            existing_lane_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                existing_lane_cancelled.set()
+                await finish_cancellation.wait()
+                raise
+
+        await self._admit(alice, text_event("$message"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        lane = asyncio.create_task(existing_lane())
+        worker._lanes[ROOM] = lane
+        await existing_lane_started.wait()
+
+        draining = asyncio.create_task(worker.drain_once())
+        await asyncio.sleep(0)
+        stopping = asyncio.create_task(worker.stop())
+        try:
+            await existing_lane_cancelled.wait()
+            finish_cancellation.set()
+
+            await stopping
+            await asyncio.wait_for(draining, timeout=1.0)
+            await asyncio.sleep(0)
+
+            assert not late_lane_started.is_set()
+            assert worker._lanes == {}
+        finally:
+            finish_cancellation.set()
+            draining.cancel()
+            for tracked_lane in worker._lanes.values():
+                tracked_lane.cancel()
+            await asyncio.gather(stopping, draining, *worker._lanes.values(), return_exceptions=True)
+
+    async def test_a_pre_stop_recovery_drain_cannot_dispatch_after_restart(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Restarting does not make an old drain current again."""
+        first_read_started = asyncio.Event()
+        release_first_read = asyncio.Event()
+        handled = asyncio.Event()
+
+        @dataclass
+        class BlockingFirstRead:
+            inner: PrincipalStore
+            pending_calls: int = 0
+
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                self.pending_calls += 1
+                if self.pending_calls == 1:
+                    page = await self.inner.pending(
+                        limit=limit,
+                        after_receipt_order=after_receipt_order,
+                        runtime_generation=runtime_generation,
+                    )
+                    first_read_started.set()
+                    await release_first_read.wait()
+                    return page
+                return PendingPage((), resume_after=None, reached_end=True, unreadable_rows=0)
+
+            async def is_pending(self, event_id: str) -> bool:
+                return await self.inner.is_pending(event_id)
+
+            async def settle(self, event_id: str) -> None:
+                await self.inner.settle(event_id)
+
+        async def handle(event: JournalEvent) -> bool:
+            del event
+            handled.set()
+            return True
+
+        await self._admit(alice, text_event("$message"))
+        worker = PendingEventWorker(store=BlockingFirstRead(alice), handle=handle)
+        stale_drain = asyncio.create_task(worker.drain_once())
+        await first_read_started.wait()
+
+        await worker.stop()
+        worker.start()
+        try:
+            release_first_read.set()
+            await asyncio.wait_for(stale_drain, timeout=1.0)
+            await asyncio.sleep(0)
+
+            assert not handled.is_set()
+        finally:
+            release_first_read.set()
+            await worker.stop()
+            stale_drain.cancel()
+            await asyncio.gather(stale_drain, return_exceptions=True)
 
     async def test_one_stalled_room_does_not_block_another(
         self,
@@ -1803,6 +1832,7 @@ class TestOutOfBandDispatch:
                 on_room_lifecycle=on_room_lifecycle,
                 on_redaction=cast("Any", noop),
                 on_decryption_failure=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
             ),
@@ -1892,6 +1922,7 @@ class TestDeferralOwnership:
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
                 on_decryption_failure=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda _event_id: turn_claimed,
             ),
@@ -1919,6 +1950,25 @@ class TestDeferralOwnership:
 
         assert dispatcher._deferral_is_live(reaction) is True
 
+    async def test_approval_owned_source_bypasses_normal_ingress(self, alice: PrincipalStore) -> None:
+        """A prepared paused run resumes before hooks, routing, or ignore settlement can reinterpret it."""
+        dispatcher = self._dispatcher(alice)
+        continuation = AsyncMock(return_value=False)
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher.callbacks = replace(
+            dispatcher.callbacks,
+            on_message=on_message,
+            on_approval_continuation=continuation,
+        )
+        dispatcher.release_turn_replay()
+        message = await self._admitted(alice, text_event("$approval-source"), EventKind.MESSAGE)
+
+        assert not await dispatcher._run_event(message)
+
+        continuation.assert_awaited_once_with("$approval-source")
+        on_message.assert_not_awaited()
+        assert await alice.is_pending("$approval-source")
+
     async def test_replay_parked_on_the_fleet_is_not_a_lost_owner(self, alice: PrincipalStore) -> None:
         """Turn replay waits for responders to exist, and is released by draining.
 
@@ -1930,6 +1980,28 @@ class TestDeferralOwnership:
         message = await self._admitted(alice, text_event("$m"), EventKind.MESSAGE)
 
         assert dispatcher._deferral_is_live(message) is True
+
+    async def test_interactive_reaction_replay_waits_for_fleet_recovery(self, alice: PrincipalStore) -> None:
+        """A claimed selection needs the same startup boundary as the turn it resumes."""
+        recovered: list[bool] = []
+
+        async def on_reaction(_room: nio.MatrixRoom, _event: nio.Event) -> TurnDispatchOutcome:
+            recovered.append(turn_dispatch_recovery_active())
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = self._dispatcher(alice)
+        dispatcher.callbacks = replace(dispatcher.callbacks, on_reaction=on_reaction)
+        await self._admitted(alice, reaction_event("$r"), EventKind.REACTION)
+        await alice.claim_semantic_consumer("$r", SemanticConsumer.INTERACTIVE_REACTION)
+        reaction = await alice.load_event("$r")
+        assert reaction is not None
+
+        assert await dispatcher._run_event(reaction) is False
+        assert recovered == []
+
+        dispatcher.release_turn_replay()
+        assert await dispatcher._run_event(reaction) is True
+        assert recovered == [True]
 
     async def test_a_source_the_coalescing_gate_still_holds_is_owned(self, alice: PrincipalStore) -> None:
         """A batch still debouncing has no turn claim yet, and is not abandoned."""
@@ -1975,6 +2047,7 @@ class TestUnsettledLifecycleIdentities:
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
                 on_decryption_failure=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
             ),
@@ -2412,8 +2485,13 @@ class _FlakyReplayView:
         *,
         limit: int = 256,
         after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
     ) -> PendingPage:
-        return await self.inner.pending(limit=limit, after_receipt_order=after_receipt_order)
+        return await self.inner.pending(
+            limit=limit,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
 
     async def is_pending(self, event_id: str) -> bool:
         if event_id in self.fail_is_pending:
@@ -2527,6 +2605,7 @@ class TestRecoveryDoesNotReenterALiveTurn:
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
                 on_decryption_failure=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda event_id: event_id in live_claims,
             ),
@@ -2680,57 +2759,6 @@ def member_event(event_id: str, *, user_id: str = ALICE) -> nio.RoomMemberEvent:
     return event
 
 
-class TestTimelineMemberProvenance:
-    """A consumer that runs after the timeline still gets nio's verdict."""
-
-    @pytest.mark.parametrize(
-        ("provenance", "expected"),
-        [
-            (nio.TimelineEventProvenance.LIVE, EventClass.ACTIONABLE),
-            (nio.TimelineEventProvenance.RECOVERED, EventClass.ACTIONABLE),
-            (nio.TimelineEventProvenance.HISTORY, EventClass.CONTEXT_ONLY),
-        ],
-    )
-    async def test_a_declined_member_event_still_states_its_class(
-        self,
-        alice: PrincipalStore,
-        provenance: nio.TimelineEventProvenance,
-        expected: EventClass,
-    ) -> None:
-        """Declining to admit is exactly when a later consumer needs the verdict."""
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-        event = member_event("$join")
-
-        await ingress._admit(room(), event, provenance)
-
-        assert ingress._admission_kind(event) is None
-        assert ingress._timeline_member_event_class(event) is expected
-
-    async def test_an_event_nio_never_offered_has_no_class(self, alice: PrincipalStore) -> None:
-        """Nio skips admission for an event it accepted earlier, and silence is the answer."""
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
-        assert ingress._timeline_member_event_class(member_event("$join")) is None
-
-    async def test_only_member_events_are_recorded(self, alice: PrincipalStore) -> None:
-        """Nothing else has a consumer that runs later, so nothing else is kept."""
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
-
-        assert ingress.timeline_member_provenance.get("$m") is None
-
-    async def test_clearing_forgets_the_response_that_produced_it(self, alice: PrincipalStore) -> None:
-        """The verdict is about one delivery, so it cannot answer for the next."""
-        ingress = _JournalIngress(store=alice, self_sender=BOT)
-        event = member_event("$join")
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
-
-        ingress.timeline_member_provenance.clear()
-
-        assert ingress._timeline_member_event_class(event) is None
-
-
 def message_event(
     event_id: str,
     msgtype: str,
@@ -2767,25 +2795,6 @@ _ROOM_MESSAGE_MSGTYPES = [
     # `body` for a turn to answer.
     ("m.location", {"geo_uri": "geo:51.5,-0.1"}),
 ]
-
-
-class _AdmissionClient:
-    """The one nio surface ``JournalDispatcher.register`` uses.
-
-    Registering rather than reaching for the dispatcher's private ingress is
-    what makes these tests exercise the real admission callback: the same
-    function nio calls, with the provenance nio supplies.
-    """
-
-    def __init__(self) -> None:
-        self.admit: Callable[[nio.MatrixRoom, nio.Event, nio.TimelineEventProvenance], Awaitable[None]] | None = None
-
-    def add_event_admission_callback(
-        self,
-        callback: Callable[[nio.MatrixRoom, nio.Event, nio.TimelineEventProvenance], Awaitable[None]],
-    ) -> None:
-        """Capture the callback the dispatcher installs."""
-        self.admit = callback
 
 
 @dataclass(frozen=True)
@@ -2828,10 +2837,12 @@ class TestAdmittedWorkReachesItsCallback:
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
                 on_decryption_failure=cast("Any", noop),
+                on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
             ),
             room_for_id=lambda _room_id: room(),
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
         )
 
     async def _deliver(
@@ -2848,10 +2859,15 @@ class TestAdmittedWorkReachesItsCallback:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
         dispatcher = self._dispatcher(store, on_message)
-        client = _AdmissionClient()
-        dispatcher.register(cast("nio.AsyncClient", client))
-        assert client.admit is not None
-        await client.admit(room(), event, provenance)
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=provenance,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )
+        if views is not None:
+            await store.admit(*views)
         # Read before draining: "was this committed as work?" and "did anything
         # run for it?" are different questions, and a context-only event has to
         # answer no to both. Work that is committed and then refused by the
@@ -2866,7 +2882,7 @@ class TestAdmittedWorkReachesItsCallback:
         page = await store.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         return [message.logical_event_id for message in page.messages]
 
-    async def _retired_a_live_emote_reaches_the_message_callback(self, alice: PrincipalStore) -> None:
+    async def test_a_live_emote_reaches_the_message_callback(self, alice: PrincipalStore) -> None:
         """`/me asks the bot to X` is a user turn and must be answered like one."""
         emote = message_event("$emote", "m.emote", "asks the bot to summarise the thread")
 
@@ -2882,7 +2898,7 @@ class TestAdmittedWorkReachesItsCallback:
         assert delivered.body == "asks the bot to summarise the thread"
         assert await alice.unsettled_event_ids() == frozenset()
 
-    async def _retired_a_live_notice_is_context_and_never_a_turn(self, alice: PrincipalStore) -> None:
+    async def test_a_live_notice_is_context_and_never_a_turn(self, alice: PrincipalStore) -> None:
         """`m.notice` means "automated, do not react", at any provenance.
 
         Without this the widened binding would have agents answering each
@@ -2897,7 +2913,7 @@ class TestAdmittedWorkReachesItsCallback:
         assert await alice.unsettled_event_ids() == frozenset()
         assert await self._projected_ids(alice) == ["$notice"]
 
-    async def _retired_an_emote_from_cold_history_is_context_and_never_a_turn(
+    async def test_an_emote_from_cold_history_is_context_and_never_a_turn(
         self,
         alice: PrincipalStore,
     ) -> None:
@@ -2911,7 +2927,7 @@ class TestAdmittedWorkReachesItsCallback:
         assert await alice.unsettled_event_ids() == frozenset()
         assert await self._projected_ids(alice) == ["$old-emote"]
 
-    async def _retired_a_msgtype_nio_cannot_type_is_context_rather_than_dropped_work(
+    async def test_a_msgtype_nio_cannot_type_is_context_rather_than_dropped_work(
         self,
         alice: PrincipalStore,
     ) -> None:
@@ -3020,3 +3036,302 @@ class TestAdmittedWorkReachesItsCallback:
         assert mismatches[0]["kind"] == EventKind.MESSAGE.value
         assert mismatches[0]["payload_type"] == "ReactionEvent"
         assert await alice.unsettled_event_ids() == frozenset()
+
+    async def test_live_call_event_reaches_its_durable_callback(self, alice: PrincipalStore) -> None:
+        """A supported call event stays pending until its callback completes."""
+        handled: list[nio.UnknownEvent] = []
+
+        async def on_call_event(_room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+            handled.append(event)
+
+        dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
+        dispatcher.callbacks = replace(
+            dispatcher.callbacks,
+            on_rtc=on_call_event,
+        )
+        source = {
+            "event_id": "$call",
+            "sender": ALICE,
+            "origin_server_ts": 1,
+            "type": CALL_MEMBER_EVENT_TYPE,
+            "state_key": "_call",
+            "content": {},
+        }
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+        assert views is not None
+        await alice.admit(*views)
+
+        await dispatcher.drain_once()
+
+        assert [event.event_id for event in handled] == ["$call"]
+        assert not await alice.is_pending("$call")
+
+    async def test_failed_call_callback_replays_from_durable_work(self, alice: PrincipalStore) -> None:
+        """A callback failure keeps the RTC event pending for a later pass."""
+        failure = RuntimeError("call reconciliation failed")
+        on_rtc = AsyncMock(side_effect=[failure, None])
+        dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
+        dispatcher.callbacks = replace(dispatcher.callbacks, on_rtc=on_rtc)
+        source = {
+            "event_id": "$call-retry",
+            "sender": ALICE,
+            "origin_server_ts": 1,
+            "type": CALL_MEMBER_EVENT_TYPE,
+            "state_key": "_call",
+            "content": {},
+        }
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+        assert views is not None
+        await alice.admit(*views)
+
+        await dispatcher.drain_once()
+        assert await alice.is_pending("$call-retry")
+
+        await dispatcher.drain_once()
+        assert on_rtc.await_count == 2
+        assert not await alice.is_pending("$call-retry")
+
+
+class TestScheduleTriggerDispatch:
+    """Silent schedule work uses the ordinary formatted-message turn path."""
+
+    @staticmethod
+    def _dispatcher(
+        store: PrincipalStore,
+        on_message: Callable[[nio.MatrixRoom, nio.Event], Awaitable[TurnDispatchOutcome]],
+    ) -> JournalDispatcher:
+        return TestAdmittedWorkReachesItsCallback._dispatcher(store, on_message)
+
+    @staticmethod
+    async def _admit(
+        store: PrincipalStore,
+        event: nio.Event,
+        *,
+        event_class: EventClass = EventClass.ACTIONABLE,
+        kind: EventKind = EventKind.SCHEDULE_TRIGGER,
+    ) -> None:
+        """Store one already-classified event for dispatcher-focused tests."""
+        await store.admit(
+            inbound_event(ROOM, event, kind, event_class),
+            projected_event(ROOM, event, kind, self_sender=BOT),
+        )
+
+    async def test_schedule_trigger_dispatch_preserves_the_admitted_event(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Dropping metadata or crypto state would make live and replayed turns differ."""
+        handled: list[nio.Event] = []
+
+        async def on_message(_room: nio.MatrixRoom, event: nio.Event) -> TurnDispatchOutcome:
+            handled.append(event)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        event = schedule_trigger_event(
+            "$schedule-live",
+            "Inspect the durable queue",
+            extra_content={
+                "msgtype": "m.notice",
+                SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+                "com.example.request": {"history_limit": 4, "requester": ALICE},
+            },
+            ts=7_654,
+        )
+        event.decrypted = True
+        event.verified = False
+        event.sender_key = "sender-key"
+        event.session_id = "session-id"
+        dispatcher = self._dispatcher(alice, on_message)
+
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
+
+        assert len(handled) == 1
+        delivered = handled[0]
+        assert isinstance(delivered, nio.RoomMessageFormatted)
+        assert delivered.event_id == event.event_id
+        assert delivered.sender == event.sender
+        assert delivered.server_timestamp == event.server_timestamp
+        assert delivered.body == "Inspect the durable queue"
+        assert delivered.source["type"] == "m.room.message"
+        assert delivered.source["content"] == {
+            "msgtype": "m.text",
+            "body": "Inspect the durable queue",
+            SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND,
+            "com.example.request": {"history_limit": 4, "requester": ALICE},
+        }
+        assert delivered.decrypted is True
+        assert delivered.verified is False
+        assert delivered.sender_key == "sender-key"
+        assert delivered.session_id == "session-id"
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_replay_uses_the_same_message_callback(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A process restart must not strand a valid trigger as an unknown event."""
+        event = schedule_trigger_event(
+            "$schedule-replay",
+            extra_content={SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND},
+        )
+        await self._admit(alice, event)
+        handled: list[nio.Event] = []
+
+        async def on_message(_room: nio.MatrixRoom, message: nio.Event) -> TurnDispatchOutcome:
+            assert turn_dispatch_recovery_active()
+            handled.append(message)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = self._dispatcher(alice, on_message)
+
+        await dispatcher.drain_once()
+
+        assert [message.event_id for message in handled] == [event.event_id]
+        assert isinstance(handled[0], nio.RoomMessageFormatted)
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_whitespace_schedule_trigger_replay_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Recovered whitespace-only trigger bodies are malformed, not actionable prompts."""
+        event = schedule_trigger_event(
+            "$schedule-whitespace-replay",
+            " \n\t",
+            extra_content={SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND},
+        )
+        await self._admit(alice, event)
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_from_ordinary_user_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An otherwise authorized human cannot manufacture automation work."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-human", sender=ALICE)
+
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )
+        assert views is None
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_with_mismatched_marker_settles_without_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The custom event type alone cannot promote a differently marked payload."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event(
+            "$schedule-wrong-marker",
+            extra_content={SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND},
+        )
+
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_deferred_callback_keeps_the_source_pending(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Settling on callback return would lose the turn before its response is durable."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-deferred")
+
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
+
+        on_message.assert_awaited_once()
+        delivered = on_message.await_args.args[1]
+        assert isinstance(delivered, nio.RoomMessageFormatted)
+        assert await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_from_cold_history_never_reaches_message_dispatch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Cold history must remain inert even though the custom payload is convertible."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-cold")
+
+        await self._admit(alice, event, event_class=EventClass.CONTEXT_ONLY)
+        await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        assert not await alice.is_pending(event.event_id)
+
+    @pytest.mark.parametrize("body", ["", None, 7])
+    async def test_malformed_schedule_trigger_settles_without_body_logging(
+        self,
+        alice: PrincipalStore,
+        body: object,
+    ) -> None:
+        """A bad durable row must not poison later recovery or leak its body."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event("$schedule-malformed", body)
+
+        with capture_logs() as logs:
+            await self._admit(alice, event)
+            await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        invalid = [entry for entry in logs if entry["event"] == "schedule_trigger_invalid"]
+        assert [entry["event_id"] for entry in invalid] == [event.event_id]
+        assert "body" not in invalid[0]
+        assert not await alice.is_pending(event.event_id)
+
+    async def test_schedule_trigger_binding_rejects_the_wrong_custom_type(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A corrupt kind label must not promote an unrelated custom event to a message."""
+        on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+        dispatcher = self._dispatcher(alice, cast("Any", on_message))
+        event = schedule_trigger_event(
+            "$schedule-wrong-type",
+            "private-body-marker",
+            event_type="com.example.unrelated",
+        )
+
+        with capture_logs() as logs:
+            await self._admit(alice, event)
+            await dispatcher.drain_once()
+
+        on_message.assert_not_awaited()
+        invalid = [entry for entry in logs if entry["event"] == "schedule_trigger_invalid"]
+        assert [entry["event_id"] for entry in invalid] == [event.event_id]
+        assert "private-body-marker" not in str(logs)
+        assert not await alice.is_pending(event.event_id)

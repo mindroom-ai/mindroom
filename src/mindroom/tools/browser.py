@@ -100,7 +100,7 @@ if TYPE_CHECKING:
             description="Matrix and local Playwright MCP timeout from 1 to 120 seconds.",
         ),
     ],
-    function_names=("browser",),
+    function_names=("browser_control",),
 )
 def browser_tools() -> type[BrowserTools]:
     """Return Browser tools with OpenClaw-style action routing."""

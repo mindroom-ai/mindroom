@@ -37,7 +37,7 @@ def decode_thread_id(stored_thread_id: str) -> str | None:
     return None if stored_thread_id == _UNTHREADED_STORAGE_VALUE else stored_thread_id
 
 
-def delivery_transaction_id(principal_id: str, turn_id: str, stage: str) -> str:
+def delivery_transaction_id(principal_id: str, delivery_id: str, stage: str) -> str:
     """Return the deterministic Matrix transaction ID for one delivery stage.
 
     Derived rather than random so that a retry after a crash reuses the exact
@@ -50,8 +50,8 @@ def delivery_transaction_id(principal_id: str, turn_id: str, stage: str) -> str:
     collapse back onto the same event. Deriving a fresh identity per epoch
     would post the answer a second time instead.
     """
-    if not principal_id or not turn_id or not stage:
-        msg = "A delivery transaction requires a principal, turn, and stage"
+    if not principal_id or not delivery_id or not stage:
+        msg = "A delivery transaction requires a principal, delivery, and stage"
         raise ValueError(msg)
-    name = f"{principal_id}:{turn_id}:{stage}"
+    name = f"{principal_id}:{delivery_id}:{stage}"
     return f"mindroom-{uuid.uuid5(_TRANSACTION_NAMESPACE, name)}"

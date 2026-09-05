@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -36,7 +37,9 @@ from mindroom.matrix.thread_mutation_impact import (
     resolve_redaction_thread_impact_for_client,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.runtime_context import ToolRuntimeContext
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -44,6 +47,9 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _message_event_info(content: dict[str, object]) -> EventInfo:
@@ -161,7 +167,7 @@ def _tool_context(
         Config(agents={"general": AgentConfig(display_name="General Agent")}),
         test_runtime_paths(runtime_root),
     )
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
             room_id=room_id,

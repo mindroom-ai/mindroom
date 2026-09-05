@@ -8,7 +8,7 @@ import stat
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
@@ -266,71 +266,6 @@ async def test_process_shutdown_transport_fence_stops_send_after_header_preparat
     with pytest.raises(RuntimeError, match="transport is fenced for process shutdown"):
         await asyncio.wait_for(request, timeout=1.0)
     assert replacement_sessions == []
-
-
-@pytest.mark.asyncio
-async def _retired_unrecovered_timeline_gap_survives_client_restart(tmp_path: Path) -> None:
-    """Nio must durably retain a gap when MindRoom advances its own sync token."""
-    room_id = "!room:example.org"
-    user_id = "@mindroom_agent:example.org"
-    device_id = "AGENTDEVICE"
-    config = matrix_client_config()
-
-    def sync_response(next_batch: str, *, limited: bool) -> nio.SyncResponse:
-        joined_rooms = (
-            {
-                room_id: nio.RoomInfo(
-                    nio.Timeline([], limited=True, prev_batch="p_before_gap"),
-                    state=[],
-                    ephemeral=[],
-                    account_data=[],
-                ),
-            }
-            if limited
-            else {}
-        )
-        return nio.SyncResponse(
-            next_batch,
-            nio.Rooms(invite={}, join=joined_rooms, leave={}),
-            nio.DeviceOneTimeKeyCount(None, None),
-            nio.DeviceList(changed=[], left=[]),
-            to_device_events=[],
-            presence_events=[],
-        )
-
-    def load_client() -> MindRoomAsyncClient:
-        client = MindRoomAsyncClient(
-            "https://example.org",
-            user_id,
-            device_id=device_id,
-            store_path=str(tmp_path),
-            config=config,
-        )
-        client.restore_login(user_id, device_id, "access-token")
-        client.load_store()
-        return client
-
-    client = load_client()
-    client.next_batch = "s_before_gap"
-    client._recovery_room_messages = AsyncMock(side_effect=OSError("temporary failure"))
-
-    limited_response = sync_response("s_limited", limited=True)
-    await client.receive_response(limited_response)
-    later_response = sync_response("s_later", limited=False)
-    await client.receive_response(later_response)
-    await client.close()
-
-    assert limited_response.unrecovered_room_ids == {room_id}
-    assert later_response.unrecovered_room_ids == {room_id}
-
-    restarted = load_client()
-    try:
-        recovery = cast("Any", restarted)._recovery
-        assert restarted.loaded_sync_token == "s_later"  # noqa: S105
-        assert tuple(recovery.gaps) == (room_id,)
-        assert recovery.gaps[room_id][0].cursor_token == "s_before_gap"  # noqa: S105
-    finally:
-        await restarted.close()
 
 
 @pytest.mark.skipif(

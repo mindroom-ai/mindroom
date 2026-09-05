@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
+
+import pytest
 
 from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
@@ -11,6 +14,9 @@ from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.external_trigger_manager import ExternalTriggerManagerTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
@@ -35,6 +41,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 def _config(
     *,
     admin_users: list[str] | None = None,
+    platform_administrators: list[str] | None = None,
     private_watcher: bool = False,
     private_other: bool = False,
 ) -> Config:
@@ -47,22 +54,23 @@ def _config(
                     "role": "Watch external systems.",
                     "model": "default",
                     "rooms": ["lobby"],
+                    "access": {
+                        "users": ["@owner:example.org", "@other-owner:example.org", "@admin:example.org"],
+                    },
                 },
                 "other": {
                     "display_name": "Other",
                     "role": "Other agent.",
                     "model": "default",
                     "rooms": ["other-room"],
+                    "access": {
+                        "users": ["@owner:example.org", "@other-owner:example.org", "@admin:example.org"],
+                    },
                 },
             },
             "rooms": {"lobby": {"display_name": "Lobby"}, "other-room": {"display_name": "Other"}},
             "external_trigger_policy": {"admin_users": admin_users or []},
-            "authorization": {
-                "global_users": ["@owner:example.org", "@other-owner:example.org", "@admin:example.org"],
-                "agent_reply_permissions": {
-                    "*": ["@owner:example.org", "@other-owner:example.org", "@admin:example.org"],
-                },
-            },
+            "administrators": platform_administrators or [],
         },
     )
     if private_watcher:
@@ -79,7 +87,7 @@ def _context(
     room_id: str = "lobby",
     config: Config | None = None,
 ) -> ToolRuntimeContext:
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="watcher",
         target=MessageTarget.resolve(
             room_id=room_id,
@@ -123,6 +131,32 @@ def test_create_trigger_uses_current_context_and_hides_public_key(tmp_path: Path
     }
     assert "public_key" not in payload["trigger"]
     assert payload["public_key_fingerprint"].startswith("sha256:")
+
+
+@pytest.mark.parametrize("administrator_source", ["trigger", "platform"])
+def test_external_trigger_admin_uses_current_policy(tmp_path: Path, administrator_source: str) -> None:
+    """A long-lived tool context must not retain either revoked admin grant."""
+    old_config = _config(
+        admin_users=["@admin:example.org"] if administrator_source == "trigger" else None,
+        platform_administrators=["@admin:example.org"] if administrator_source == "platform" else None,
+    )
+    current_config = _config(admin_users=[])
+    context = replace(
+        _context(tmp_path, requester_id="@admin:example.org", config=old_config),
+        config_provider=lambda: current_config,
+    )
+
+    with tool_runtime_context(context):
+        payload = _payload(
+            ExternalTriggerManagerTools().create_trigger(
+                "revoked-admin",
+                public_key=_PUBLIC_KEY,
+                target_agent="other",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "Only external trigger admins" in payload["message"]
 
 
 def test_private_agent_create_trigger_uses_owner_as_scope_owner(tmp_path: Path) -> None:
@@ -349,6 +383,73 @@ def test_admin_can_create_trigger_for_configured_cross_target(tmp_path: Path) ->
         "room_id": "other-room",
         "thread_id": "$target-thread",
     }
+
+
+def test_platform_admin_can_create_trigger_for_configured_cross_target(tmp_path: Path) -> None:
+    """Platform administrators must receive trigger administration without a second allowlist."""
+    requester = "@platform-admin:example.org"
+    config = _config(platform_administrators=[requester])
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(_context(tmp_path, requester_id=requester, config=config)):
+        payload = _payload(
+            tool.create_trigger(
+                "platform-admin-target",
+                public_key=_PUBLIC_KEY,
+                target_agent="other",
+                target_room_id="other-room",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["trigger"]["owner_user_id"] == requester
+    assert payload["trigger"]["target"]["agent"] == "other"
+
+
+def test_external_trigger_admin_alias_has_canonical_authority(tmp_path: Path) -> None:
+    """A configured bridge alias must receive its canonical trigger administrator authority."""
+    canonical_admin = "@trigger-admin:example.org"
+    alias_admin = "@bridge-trigger-admin:example.org"
+    config = _config(admin_users=[canonical_admin])
+    config.authorization.aliases = {canonical_admin: [alias_admin]}
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(_context(tmp_path, requester_id=alias_admin, config=config)):
+        payload = _payload(
+            tool.create_trigger(
+                "alias-admin-target",
+                public_key=_PUBLIC_KEY,
+                target_agent="other",
+                target_room_id="other-room",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["trigger"]["owner_user_id"] == alias_admin
+    assert payload["trigger"]["target"]["agent"] == "other"
+
+
+def test_bot_alias_cannot_inherit_trigger_admin_authority(tmp_path: Path) -> None:
+    """A configured bot alias must not inherit a human trigger-admin grant."""
+    canonical_admin = "@trigger-admin:example.org"
+    bot_alias = "@bridgebot:example.org"
+    config = _config(admin_users=[canonical_admin])
+    config.bot_accounts = [bot_alias]
+    config.authorization.aliases = {canonical_admin: [bot_alias]}
+    tool = ExternalTriggerManagerTools()
+
+    with tool_runtime_context(_context(tmp_path, requester_id=bot_alias, config=config)):
+        payload = _payload(
+            tool.create_trigger(
+                "bot-alias-admin-target",
+                public_key=_PUBLIC_KEY,
+                target_agent="other",
+                target_room_id="other-room",
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert "Only external trigger admins" in payload["message"]
 
 
 def test_admin_create_trigger_for_private_cross_target_keeps_admin_owner(tmp_path: Path) -> None:

@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from mindroom.authorization import get_effective_sender_id_for_reply_permissions, is_authorized_sender
+from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
-from mindroom.dispatch_handoff import PreparedTextEvent, is_text_dispatch_event
+from mindroom.dispatch_handoff import PreparedIngress, is_text_dispatch_event
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
@@ -22,10 +22,11 @@ from mindroom.dispatch_source import (
     source_kind_bypasses_coalescing,
     source_kind_from_content,
 )
-from mindroom.entity_resolution import entity_identity_registry, is_human_requester_id
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.event_info import reply_to_event_id_from_content
 from mindroom.matrix.media import is_audio_message_event
+from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 
 if TYPE_CHECKING:
@@ -38,7 +39,6 @@ if TYPE_CHECKING:
         DispatchEvent,
         DispatchIngressMetadata,
         DispatchPayloadMetadata,
-        TextDispatchEvent,
     )
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
@@ -48,8 +48,8 @@ if TYPE_CHECKING:
 class _SenderReplyPolicy(Protocol):
     """Minimal reply-permission surface needed at the ingress boundary."""
 
-    def can_reply_to_sender(self, sender_id: str) -> bool:
-        """Return whether this agent may reply to one effective requester."""
+    def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
+        """Return whether this agent may reply to one requester in a room."""
         ...
 
 
@@ -79,36 +79,42 @@ class IngressValidator:
         """Return the effective requester for reply-permission checks."""
         source_dict = cast("dict[str, Any] | None", source if isinstance(source, dict) else None)
         content = source_dict.get("content") if source_dict is not None else None
+        requester_id: str
         if isinstance(content, dict):
             original_sender = content.get(ORIGINAL_SENDER_KEY)
             if not isinstance(original_sender, str):
-                return get_effective_sender_id_for_reply_permissions(
+                requester_id = get_effective_sender_id_for_reply_permissions(
                     sender,
                     source_dict,
                     self.deps.runtime.config,
                     self.deps.runtime_paths,
                 )
-            source_kind = source_kind_from_content(content)
-            trusted_requester = requester_id_from_trusted_original_sender(
-                original_sender=original_sender,
-                original_sender_entity_name=self.managed_entity_name_for_sender(original_sender),
-                original_sender_is_human=is_human_requester_id(
-                    original_sender,
-                    self.deps.runtime.config,
-                    self.deps.runtime_paths,
-                ),
-                source_kind=source_kind,
-                sender_trusts_original_sender=self._should_trust_original_sender_metadata(
-                    sender=sender,
+            else:
+                source_kind = source_kind_from_content(content)
+                trusted_requester = requester_id_from_trusted_original_sender(
+                    original_sender=original_sender,
+                    original_sender_entity_name=self.managed_entity_name_for_sender(original_sender),
+                    original_sender_is_human=is_human_requester_id(
+                        original_sender,
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                    ),
                     source_kind=source_kind,
-                ),
+                    sender_trusts_original_sender=self._should_trust_original_sender_metadata(
+                        sender=sender,
+                        source_kind=source_kind,
+                    ),
+                )
+                requester_id = trusted_requester if trusted_requester is not None else sender
+        else:
+            requester_id = get_effective_sender_id_for_reply_permissions(
+                sender,
+                source_dict,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
             )
-            if trusted_requester is not None:
-                return trusted_requester
-            return sender
-        return get_effective_sender_id_for_reply_permissions(
-            sender,
-            source_dict,
+        return resolve_human_requester_alias(
+            requester_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
@@ -138,7 +144,7 @@ class IngressValidator:
     @staticmethod
     def event_source_kind(event: DispatchEvent, content: dict[str, Any]) -> str | None:
         """Return canonical source-kind metadata for one dispatch event."""
-        source_kind = event.source_kind_override if isinstance(event, PreparedTextEvent) else None
+        source_kind = event.source_kind_override if isinstance(event, PreparedIngress) else None
         return source_kind if source_kind is not None else source_kind_from_content(content)
 
     def trusted_human_original_sender_for_event(self, event: DispatchEvent) -> str | None:
@@ -289,22 +295,13 @@ class IngressValidator:
         if not is_edit and self.deps.turn_store.is_handled(event.event_id):
             return None
 
-        if not is_authorized_sender(
-            requester_user_id,
-            self.deps.runtime.config,
-            room.room_id,
-            self.deps.runtime_paths,
-        ):
-            await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
-            return None
-
-        if not self.deps.turn_policy.can_reply_to_sender(requester_user_id):
+        if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
             return None
 
         return requester_user_id
 
-    def command_control_input(self, event: TextDispatchEvent, *, source_kind: str) -> Command | None:
+    def command_control_input(self, event: PreparedIngress, *, source_kind: str) -> Command | None:
         """Return the parsed command when one text event is a control input, not conversation."""
         if source_kind_bypasses_coalescing(source_kind):
             return None

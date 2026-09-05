@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, TextIO
+
+import pytest
 
 from mindroom.workers.backend import effective_idle_status, filter_and_sort_worker_handles
+from mindroom.workers.backends import _metadata_store as metadata_store_module
 from mindroom.workers.backends import local as local_module
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
@@ -170,3 +175,34 @@ def test_local_backend_touch_revives_idle_worker_and_clears_failure(tmp_path: Pa
     assert touched is not None
     assert touched.status == "ready"
     assert touched.failure_reason is None
+
+
+def test_worker_metadata_replace_preserves_previous_document_when_serialization_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed keepalive write must not truncate the identity used for worker retirement."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    paths = local_module._local_worker_state_paths("v1:t:shared:a", worker_root=backend.worker_root)
+    original = SimpleNamespace(worker_key="v1:t:shared:a", last_used_at=1.0)
+    save_worker_metadata(paths, original, ensure_root=True)
+    original_bytes = paths.metadata_file.read_bytes()
+
+    def fail_after_partial_write(_payload: object, stream: TextIO, **_kwargs: object) -> None:
+        stream.write("{")
+        msg = "serialization interrupted"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(json, "dump", fail_after_partial_write)
+
+    with pytest.raises(RuntimeError, match="serialization interrupted"):
+        metadata_store_module.save_worker_metadata(
+            paths,
+            SimpleNamespace(worker_key="v1:t:shared:a", last_used_at=2.0),
+        )
+
+    assert paths.metadata_file.read_bytes() == original_bytes

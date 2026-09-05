@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +16,7 @@ from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom import ai_runtime
+from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -22,7 +24,7 @@ from mindroom.teams import TeamMode, team_response, team_response_stream
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
 from tests.test_team_dynamic_continuation import _dynamic_tool_team_output
-from tests.test_team_media_fallback import _build_test_config, _make_test_agent, _make_test_team
+from tests.test_team_response import _build_test_config, _make_test_agent, _make_test_team
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -83,6 +85,57 @@ async def test_team_response_retries_once_after_empty_completed_run() -> None:
 
     assert "Recovered answer" in response
     assert mock_team.arun.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_quiet_team_response_returns_no_reply_without_visible_team_chrome() -> None:
+    """A silent schedule acknowledgment must reach final delivery as the exact token."""
+    orchestrator, _config = _make_orchestrator()
+    mock_team = _make_test_team()
+    mock_team.arun = AsyncMock(return_value=_completed_team_run(SILENT_SCHEDULE_NO_REPLY_TOKEN))
+    recorder = TurnRecorder(user_message="Check for updates.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Check for updates.",
+            turn_recorder=recorder,
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=replace(make_turn_context(session_id="session-1"), allow_no_report_response=True),
+        )
+
+    assert response == SILENT_SCHEDULE_NO_REPLY_TOKEN
+    assert recorder.assistant_text == SILENT_SCHEDULE_NO_REPLY_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_quiet_team_response_preserves_member_finding_when_leader_returns_no_reply() -> None:
+    """A leader acknowledgment must not hide a finding contributed by a team member."""
+    orchestrator, _config = _make_orchestrator()
+    mock_team = _make_test_team()
+    team_run = _completed_team_run(SILENT_SCHEDULE_NO_REPLY_TOKEN)
+    team_run.member_responses = [RunOutput(agent_name="GeneralAgent", content="Queue depth is elevated.")]
+    mock_team.arun = AsyncMock(return_value=team_run)
+    recorder = TurnRecorder(user_message="Check for updates.")
+
+    patches = _team_patches(mock_team)
+    with patches[0], patches[1], patches[2]:
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Check for updates.",
+            turn_recorder=recorder,
+            orchestrator=orchestrator,
+            execution_identity=None,
+            ctx=replace(make_turn_context(session_id="session-1"), allow_no_report_response=True),
+        )
+
+    assert "Queue depth is elevated." in response
+    assert response != SILENT_SCHEDULE_NO_REPLY_TOKEN
+    assert recorder.assistant_text == response
 
 
 @pytest.mark.asyncio
@@ -329,7 +382,7 @@ async def test_team_response_stream_records_interrupted_turn_when_stream_errors(
     orchestrator, config = _make_orchestrator()
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
         yield TeamRunErrorEvent(content="provider exploded")
 
     mock_team = _make_test_team()
@@ -365,7 +418,7 @@ async def test_team_response_stream_records_interrupted_turn_on_errored_run_outp
     errored_run.status = RunStatus.error
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
         yield errored_run
 
     mock_team = _make_test_team()
@@ -429,7 +482,7 @@ async def test_team_response_stream_records_interrupted_turn_when_stream_raises(
     stream_error = "transport died"
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
         raise RuntimeError(stream_error)
 
     mock_team = _make_test_team()

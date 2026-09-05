@@ -1,1716 +1,250 @@
-"""Tests for user authorization mechanism."""
+"""Tests for membership-based responder and authority checks."""
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 
-import nio
 import pytest
 
-import mindroom.authorization
-from mindroom import constants
-from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, resolve_runtime_paths
-from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
-from mindroom.entity_resolution import mindroom_user_id
-from mindroom.matrix.identity import managed_account_key
-from mindroom.matrix.state import MatrixRoom, MatrixState
-from tests.conftest import TEST_PASSWORD
-from tests.identity_helpers import entity_ids, entity_names_for_ids, persist_entity_accounts
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.authorization import (
+    get_effective_sender_id_for_reply_permissions,
+    is_platform_administrator,
+    is_sender_allowed_for_agent_credential_management,
+    is_sender_allowed_for_agent_reply_in_room,
+    is_sender_allowed_for_responder,
+)
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from tests.access_schema_support import membership_config, membership_index, unresolved_membership_index
+from tests.conftest import runtime_paths_for
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from mindroom.matrix.identity import MatrixID
-
-_BOUND_RUNTIME_PATHS: dict[int, constants.RuntimePaths] = {}
+    from pathlib import Path
 
 
-def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
-    runtime_root = path.parent if path is not None else Path(tempfile.mkdtemp())
-    runtime_paths = constants.resolve_runtime_paths(
-        config_path=(path or runtime_root / "config.yaml"),
-        storage_path=runtime_root / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "https://example.com",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
-    bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
-    persist_entity_accounts(bound, runtime_paths)
-    if bound.mindroom_user is not None:
-        state = MatrixState.load(runtime_paths=runtime_paths)
-        state.add_account(
-            managed_account_key("user"),
-            bound.mindroom_user.username,
-            TEST_PASSWORD,
-            requested_username=bound.mindroom_user.username,
-            domain=bound.get_domain(runtime_paths),
-        )
-        state.save(runtime_paths=runtime_paths)
-    _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
-    return bound
-
-
-def _runtime_paths_for(config: Config) -> constants.RuntimePaths:
-    runtime_paths = _BOUND_RUNTIME_PATHS.get(id(config))
-    if runtime_paths is None:
-        msg = "Test config is missing bound RuntimePaths"
-        raise KeyError(msg)
-    return runtime_paths
-
-
-def _entity_names(config: Config, matrix_ids: list[MatrixID]) -> list[str | None]:
-    runtime_paths = _runtime_paths_for(config)
-    return entity_names_for_ids(matrix_ids, config, runtime_paths)
-
-
-def is_authorized_sender(
+def _allowed(
     sender_id: str,
-    config: Config,
-    room_id: str,
+    config: object,
+    memberships: AgentReplyMembershipIndex,
+    *,
+    room_id: str = "!current:example.com",
 ) -> bool:
-    """Run sender authorization with the test config's bound runtime context."""
-    return mindroom.authorization.is_authorized_sender(
+    from mindroom.config.main import Config  # noqa: PLC0415
+
+    assert isinstance(config, Config)
+    return is_sender_allowed_for_responder(
         sender_id,
-        config,
+        "talent",
         room_id,
-        _runtime_paths_for(config),
-    )
-
-
-def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: Config) -> bool:
-    """Run reply-permission checks with the test config's bound runtime context."""
-    return mindroom.authorization.is_sender_allowed_for_agent_reply(
-        sender_id,
-        agent_name,
         config,
-        _runtime_paths_for(config),
+        runtime_paths_for(config),
+        memberships,
     )
 
 
-def is_sender_allowed_for_agent_credential_management(sender_id: str, agent_name: str, config: Config) -> bool:
-    """Run credential-management permission checks with the test config's bound runtime context."""
-    return mindroom.authorization.is_sender_allowed_for_agent_credential_management(
-        sender_id,
-        agent_name,
-        config,
-    )
+def test_explicit_user_and_alias_can_use_responder(tmp_path: Path) -> None:
+    """Static grants must resolve bridge aliases before matching."""
+    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config.authorization.aliases = {"@owner:example.com": ["@bridge-owner:example.com"]}
+    memberships = AgentReplyMembershipIndex()
 
+    assert _allowed("@owner:example.com", config, memberships)
+    assert _allowed("@bridge-owner:example.com", config, memberships)
+    assert not _allowed("@outsider:example.com", config, memberships)
 
-def get_effective_sender_id_for_reply_permissions(
-    sender_id: str,
-    event_source: dict[str, object] | None,
-    config: Config,
-) -> str:
-    """Resolve effective sender IDs with the test config's bound runtime context."""
-    return mindroom.authorization.get_effective_sender_id_for_reply_permissions(
-        sender_id,
-        event_source,
-        config,
-        _runtime_paths_for(config),
-    )
 
+def test_explicit_user_glob_can_use_responder(tmp_path: Path) -> None:
+    """Static responder grants must retain glob matching."""
+    config = membership_config(tmp_path, access={"users": ["@partner_*:example.com"]})
+    memberships = AgentReplyMembershipIndex()
 
-def _config(**kwargs: object) -> Config:
-    return _bind_runtime_paths(Config(**kwargs))
+    assert _allowed("@partner_42:example.com", config, memberships)
+    assert not _allowed("@partner_42:other.example", config, memberships)
 
 
-def _isolated_config(tmp_path: Path, **kwargs: object) -> Config:
-    runtime_paths = constants.resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "https://example.com",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
-    bound = Config.validate_with_runtime(Config(**kwargs).authored_model_dump(), runtime_paths)
-    persist_entity_accounts(bound, runtime_paths)
-    _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
-    return bound
+def test_administrator_bypasses_responder_policy(tmp_path: Path) -> None:
+    """Platform administrators must be able to use every responder."""
+    config = membership_config(tmp_path, administrators=["@admin:example.com"], access={"users": []})
 
+    assert _allowed("@admin:example.com", config, AgentReplyMembershipIndex())
+    assert is_platform_administrator("@admin:example.com", config, runtime_paths_for(config))
 
-async def responder_candidate_entities_for_room(
-    client: nio.AsyncClient,
-    room: nio.MatrixRoom,
-    sender_id: str,
-    config: Config,
-) -> list[MatrixID]:
-    """Run responder candidate resolution with the test config's bound runtime context."""
-    return await mindroom.authorization.responder_candidate_entities_for_room(
-        client,
-        room,
-        sender_id,
-        config,
-        _runtime_paths_for(config),
-    )
 
-
-@pytest.fixture
-def mock_config_no_restrictions() -> Config:
-    """Config with no authorized users (defaults to only internal system user)."""
-    return _bind_runtime_paths(
-        Config(
-            agents={
-                "assistant": {
-                    "display_name": "Assistant",
-                    "role": "Test assistant",
-                    "rooms": ["test_room"],
-                },
-            },
-            teams={
-                "test_team": {
-                    "display_name": "Test Team",
-                    "role": "Test team",
-                    "agents": ["assistant"],
-                    "rooms": ["test_room"],
-                },
-            },
-            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-            # No authorization field means default empty authorization
-        ),
-    )
-
-
-@pytest.fixture
-def mock_config_with_restrictions() -> Config:
-    """Config with authorization restrictions."""
-    return _bind_runtime_paths(
-        Config(
-            agents={
-                "assistant": {
-                    "display_name": "Assistant",
-                    "role": "Test assistant",
-                    "rooms": ["test_room"],
-                },
-                "analyst": {
-                    "display_name": "Analyst",
-                    "role": "Test analyst",
-                    "rooms": ["test_room"],
-                },
-            },
-            teams={
-                "test_team": {
-                    "display_name": "Test Team",
-                    "role": "Test team",
-                    "agents": ["assistant"],
-                    "rooms": ["test_room"],
-                },
-            },
-            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-            authorization={
-                "global_users": ["@alice:example.com", "@bob:example.com"],
-                "room_permissions": {},
-                "default_room_access": False,
-            },
-        ),
-    )
-
-
-def test_no_restrictions_only_allows_internal_user(
-    mock_config_no_restrictions: Config,
-) -> None:
-    """Test that empty authorized_users list only allows internal system user and agents."""
-    # Random users should NOT be allowed
-    assert not is_authorized_sender("@random_user:example.com", mock_config_no_restrictions, "!test:server")
-    assert not is_authorized_sender("@another_user:different.com", mock_config_no_restrictions, "!test:server")
-
-    # Agents should still be allowed
-    assert is_authorized_sender(
-        entity_ids(mock_config_no_restrictions, _runtime_paths_for(mock_config_no_restrictions))["assistant"].full_id,
-        mock_config_no_restrictions,
-        "!test:server",
-    )
-
-    # Internal system user should always be allowed
-    assert is_authorized_sender(
-        mindroom_user_id(mock_config_no_restrictions, _runtime_paths_for(mock_config_no_restrictions)),
-        mock_config_no_restrictions,
-        "!test:server",
-    )
-
-
-def test_authorized_users_allowed(mock_config_with_restrictions: Config) -> None:
-    """Test that users in the authorized_users list are allowed."""
-    assert is_authorized_sender("@alice:example.com", mock_config_with_restrictions, "!test:server")
-    assert is_authorized_sender("@bob:example.com", mock_config_with_restrictions, "!test:server")
-
-
-def test_unauthorized_users_blocked(mock_config_with_restrictions: Config) -> None:
-    """Test that users NOT in the authorized_users list are blocked."""
-    assert not is_authorized_sender("@charlie:example.com", mock_config_with_restrictions, "!test:server")
-    assert not is_authorized_sender("@random_user:example.com", mock_config_with_restrictions, "!test:server")
-
-
-def test_agents_always_allowed(mock_config_with_restrictions: Config) -> None:
-    """Test that configured agents are always allowed regardless of authorized_users."""
-    # Configured agents should be allowed
-    assert is_authorized_sender(
-        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
-            "assistant"
-        ].full_id,
-        mock_config_with_restrictions,
-        "!test:server",
-    )
-    assert is_authorized_sender(
-        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))["analyst"].full_id,
-        mock_config_with_restrictions,
-        "!test:server",
-    )
-
-    # Non-configured agent should be blocked
-    assert not is_authorized_sender("@mindroom_unknown:example.com", mock_config_with_restrictions, "!test:server")
-
-
-def test_teams_always_allowed(mock_config_with_restrictions: Config) -> None:
-    """Test that configured teams are always allowed regardless of authorized_users."""
-    # Configured team should be allowed
-    assert is_authorized_sender(
-        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
-            "test_team"
-        ].full_id,
-        mock_config_with_restrictions,
-        "!test:server",
-    )
-
-    # Non-configured team should be blocked
-    assert not is_authorized_sender("@mindroom_unknown_team:example.com", mock_config_with_restrictions, "!test:server")
-
-
-@pytest.mark.asyncio
-async def test_responder_candidates_refresh_empty_cached_ad_hoc_room() -> None:
-    """Responder candidate lookup should recover from empty cached room membership."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-    )
-    client = AsyncMock()
-    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
-    room.add_member("@mindroom_router:example.com", "Router", None)
-    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
-        {
-            "joined": {
-                "@mindroom_router:example.com": {"display_name": "Router"},
-                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
-            },
-        },
-        room_id="!test:server",
-    )
-
-    available = await responder_candidate_entities_for_room(
-        client,
-        room,
-        "@alice:example.com",
-        config,
-    )
-
-    assert _entity_names(config, available) == ["assistant"]
-    client.joined_members.assert_awaited_once_with("!test:server")
-
-
-@pytest.mark.asyncio
-async def test_responder_candidates_skip_refresh_when_cache_has_hidden_agents() -> None:
-    """Responder candidate lookup should not refetch when membership is present but sender visibility is empty."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-            "general": {
-                "display_name": "General",
-                "role": "Test generalist",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "agent_reply_permissions": {
-                "assistant": ["@alice:example.com"],
-                "general": ["@alice:example.com"],
-            },
-        },
-    )
-    client = AsyncMock()
-    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
-    room.add_member("@mindroom_assistant:example.com", "Assistant", None)
-    room.add_member("@mindroom_general:example.com", "General", None)
-    room.members_synced = True
-
-    available = await responder_candidate_entities_for_room(
-        client,
-        room,
-        "@bob:example.com",
-        config,
-    )
-
-    assert available == []
-    client.joined_members.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_responder_candidates_refresh_partial_unsynced_ad_hoc_cache() -> None:
-    """Responder candidate lookup should refresh when cached membership is present but unsynced."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-            "general": {
-                "display_name": "General",
-                "role": "Test generalist",
-                "rooms": ["test_room"],
-            },
-        },
-    )
-    client = AsyncMock()
-    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
-    room.add_member("@mindroom_router:example.com", "Router", None)
-    room.add_member("@mindroom_general:example.com", "General", None)
-    room.members_synced = False
-    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
-        {
-            "joined": {
-                "@mindroom_router:example.com": {"display_name": "Router"},
-                "@mindroom_general:example.com": {"display_name": "General"},
-                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
-            },
-        },
-        room_id="!test:server",
-    )
-
-    available = await responder_candidate_entities_for_room(
-        client,
-        room,
-        "@alice:example.com",
-        config,
-    )
-
-    assert _entity_names(config, available) == [
-        "assistant",
-        "general",
-    ]
-    client.joined_members.assert_awaited_once_with("!test:server")
-
-
-@pytest.mark.asyncio
-async def test_responder_candidates_fall_back_to_cached_visible_agents_on_refresh_error() -> None:
-    """Responder candidate lookup should keep usable cached agents when joined_members fails."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-    )
-    client = AsyncMock()
-    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
-    room.add_member("@mindroom_router:example.com", "Router", None)
-    room.add_member("@mindroom_assistant:example.com", "Assistant", None)
-    room.members_synced = False
-    client.joined_members.return_value = nio.JoinedMembersError(
-        "M_FORBIDDEN",
-        "forbidden",
-        room_id="!test:server",
-    )
-
-    available = await responder_candidate_entities_for_room(
-        client,
-        room,
-        "@alice:example.com",
-        config,
-    )
-
-    assert _entity_names(config, available) == ["assistant"]
-    assert room.members_synced is False
-    client.joined_members.assert_awaited_once_with("!test:server")
-
-
-@pytest.mark.asyncio
-async def test_responder_candidates_update_room_cache_after_refresh() -> None:
-    """Authoritative refresh should hydrate room membership so repeated calls stay local."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-    )
-    client = AsyncMock()
-    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
-    room.add_member("@mindroom_router:example.com", "Router", None)
-    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
-        {
-            "joined": {
-                "@mindroom_router:example.com": {"display_name": "Router"},
-                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
-            },
-        },
-        room_id="!test:server",
-    )
-
-    first = await responder_candidate_entities_for_room(
-        client,
-        room,
-        "@alice:example.com",
-        config,
-    )
-    second = await responder_candidate_entities_for_room(
-        client,
-        room,
-        "@alice:example.com",
-        config,
-    )
-
-    assert _entity_names(config, first) == ["assistant"]
-    assert _entity_names(config, second) == ["assistant"]
-    assert "@mindroom_assistant:example.com" in room.users
-    client.joined_members.assert_awaited_once_with("!test:server")
-
-
-@pytest.mark.asyncio
-async def test_responder_candidates_preserve_invited_members() -> None:
-    """Authoritative refresh should not delete invited users from the cached room."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-    )
-    client = AsyncMock()
-    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
-    room.add_member("@mindroom_router:example.com", "Router", None)
-    room.add_member("@guest:example.com", "Guest", None, invited=True)
-    room.members_synced = False
-    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
-        {
-            "joined": {
-                "@mindroom_router:example.com": {"display_name": "Router"},
-                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
-            },
-        },
-        room_id="!test:server",
-    )
-
-    available = await responder_candidate_entities_for_room(
-        client,
-        room,
-        "@alice:example.com",
-        config,
-    )
-
-    assert _entity_names(config, available) == ["assistant"]
-    assert "@guest:example.com" in room.users
-    assert "@guest:example.com" in room.invited_users
-
-
-@pytest.mark.asyncio
-async def test_responder_candidates_exclude_invited_managed_members_after_refresh() -> None:
-    """Invited managed responders must not become ad-hoc candidates after joined-member refresh."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-            "analyst": {
-                "display_name": "Analyst",
-                "role": "Test analyst",
-                "rooms": ["test_room"],
-            },
-        },
-    )
-    client = AsyncMock()
-    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
-    room.add_member("@mindroom_router:example.com", "Router", None)
-    room.add_member("@mindroom_analyst:example.com", "Analyst", None, invited=True)
-    room.members_synced = False
-    client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
-        {
-            "joined": {
-                "@mindroom_router:example.com": {"display_name": "Router"},
-                "@mindroom_assistant:example.com": {"display_name": "Assistant"},
-            },
-        },
-        room_id="!test:server",
-    )
-
-    first = await responder_candidate_entities_for_room(
-        client,
-        room,
-        "@alice:example.com",
-        config,
-    )
-    second = await responder_candidate_entities_for_room(
-        client,
-        room,
-        "@alice:example.com",
-        config,
-    )
-
-    assert _entity_names(config, first) == ["assistant"]
-    assert _entity_names(config, second) == ["assistant"]
-    assert "@mindroom_analyst:example.com" in room.users
-    assert "@mindroom_analyst:example.com" in room.invited_users
-    client.joined_members.assert_awaited_once_with("!test:server")
-
-
-def test_router_always_allowed(mock_config_with_restrictions: Config) -> None:
-    """Test that the router agent is always allowed."""
-    # Router should always be allowed
-    assert is_authorized_sender(
-        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
-            ROUTER_AGENT_NAME
-        ].full_id,
-        mock_config_with_restrictions,
-        "!test:server",
-    )
-
-
-def test_internal_system_user_always_allowed(
-    mock_config_with_restrictions: Config,
-) -> None:
-    """Test that configured internal user on the current domain is always allowed."""
-    runtime_paths = _runtime_paths_for(mock_config_with_restrictions)
-    internal_user_id = mindroom_user_id(mock_config_with_restrictions, runtime_paths)
-    assert internal_user_id is not None
-
-    # Internal system user should always be allowed, even with restrictions
-    assert is_authorized_sender(
-        internal_user_id,
-        mock_config_with_restrictions,
-        "!test:server",
-    )
-
-    # Same username from a different domain should NOT be allowed
-    current_domain = mock_config_with_restrictions.get_domain(runtime_paths)
-    wrong_domain_id = internal_user_id.replace(f":{current_domain}", ":different.com")
-    assert not is_authorized_sender(wrong_domain_id, mock_config_with_restrictions, "!test:server")
-
-
-def test_custom_internal_system_user_always_allowed() -> None:
-    """Test that custom configured internal user is always allowed."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        mindroom_user={
-            "username": "alice_internal",
-            "display_name": "Alice Internal",
-        },
-        authorization={
-            "global_users": [],
-            "room_permissions": {},
-            "default_room_access": False,
-        },
-    )
-    runtime_paths = _runtime_paths_for(config)
-    internal_user_id = mindroom_user_id(config, runtime_paths)
-    assert internal_user_id is not None
-    assert is_authorized_sender(internal_user_id, config, "!test:server")
-    assert not is_authorized_sender("@mindroom_user:example.com", config, "!test:server")
-
-
-def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config) -> None:
-    """Test various mixed authorization scenarios."""
-    # Authorized users - allowed
-    assert is_authorized_sender("@alice:example.com", mock_config_with_restrictions, "!test:server")
-
-    # Unauthorized users - blocked
-    assert not is_authorized_sender("@eve:example.com", mock_config_with_restrictions, "!test:server")
-
-    # Agents - allowed
-    assert is_authorized_sender(
-        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
-            "assistant"
-        ].full_id,
-        mock_config_with_restrictions,
-        "!test:server",
-    )
-
-    # Teams - allowed
-    assert is_authorized_sender(
-        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
-            "test_team"
-        ].full_id,
-        mock_config_with_restrictions,
-        "!test:server",
-    )
-
-    # Router - allowed
-    assert is_authorized_sender(
-        entity_ids(mock_config_with_restrictions, _runtime_paths_for(mock_config_with_restrictions))[
-            ROUTER_AGENT_NAME
-        ].full_id,
-        mock_config_with_restrictions,
-        "!test:server",
-    )
-
-    # Unknown agent - blocked
-    assert not is_authorized_sender("@mindroom_fake_agent:example.com", mock_config_with_restrictions, "!test:server")
-
-
-@pytest.fixture
-def mock_config_with_room_permissions() -> Config:
-    """Config with room-specific permissions."""
-    return _bind_runtime_paths(
-        Config(
-            agents={
-                "assistant": {
-                    "display_name": "Assistant",
-                    "role": "Test assistant",
-                    "rooms": ["test_room"],
-                },
-            },
-            authorization={
-                "global_users": ["@alice:example.com"],  # Alice has global access
-                "room_permissions": {
-                    "!room1:example.com": ["@bob:example.com", "@charlie:example.com"],
-                    "!room2:example.com": ["@charlie:example.com"],
-                },
-                "default_room_access": False,
-            },
-        ),
-    )
-
-
-def test_room_specific_permissions(mock_config_with_room_permissions: Config) -> None:
-    """Test room-specific permission system."""
-    # Alice has global access - allowed everywhere
-    assert is_authorized_sender("@alice:example.com", mock_config_with_room_permissions, "!room1:example.com")
-    assert is_authorized_sender("@alice:example.com", mock_config_with_room_permissions, "!room2:example.com")
-    assert is_authorized_sender("@alice:example.com", mock_config_with_room_permissions, "!room3:example.com")
-
-    # Bob only has access to room1
-    assert is_authorized_sender("@bob:example.com", mock_config_with_room_permissions, "!room1:example.com")
-    assert not is_authorized_sender("@bob:example.com", mock_config_with_room_permissions, "!room2:example.com")
-    assert not is_authorized_sender("@bob:example.com", mock_config_with_room_permissions, "!room3:example.com")
-
-    # Charlie has access to room1 and room2
-    assert is_authorized_sender("@charlie:example.com", mock_config_with_room_permissions, "!room1:example.com")
-    assert is_authorized_sender("@charlie:example.com", mock_config_with_room_permissions, "!room2:example.com")
-    assert not is_authorized_sender("@charlie:example.com", mock_config_with_room_permissions, "!room3:example.com")
-
-    # Dave has no access anywhere
-    assert not is_authorized_sender("@dave:example.com", mock_config_with_room_permissions, "!room1:example.com")
-    assert not is_authorized_sender("@dave:example.com", mock_config_with_room_permissions, "!room2:example.com")
-    assert not is_authorized_sender("@dave:example.com", mock_config_with_room_permissions, "!room3:example.com")
-
-
-def test_room_specific_permissions_support_full_alias(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Room permissions should allow using a full Matrix room alias key."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["lobby"],
-            },
-        },
-        authorization={
-            "room_permissions": {
-                "#lobby:example.com": ["@bob:example.com"],
-            },
-            "default_room_access": False,
-        },
-    )
-    state = MatrixState(
-        rooms={
-            "lobby": MatrixRoom(
-                room_id="!lobby:example.com",
-                alias="#lobby:example.com",
-                name="Lobby",
-            ),
-        },
-    )
-    monkeypatch.setattr("mindroom.authorization.matrix_state_for_runtime", lambda *_args, **_kwargs: state)
-
-    assert is_authorized_sender(
-        "@bob:example.com",
-        config,
-        "!lobby:example.com",
-    )
-    assert not is_authorized_sender(
-        "@eve:example.com",
-        config,
-        "!lobby:example.com",
-    )
-
-
-def test_room_specific_permissions_ignore_unmanaged_alias_permissions(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unmanaged room IDs must not resolve alias or room-key permission entries."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["lobby"],
-            },
-        },
-        authorization={
-            "room_permissions": {
-                "#lobby:example.com": ["@bob:example.com"],
-                "lobby": ["@charlie:example.com"],
-            },
-            "default_room_access": False,
-        },
-    )
-    state = MatrixState(
-        rooms={
-            "lobby": MatrixRoom(
-                room_id="!lobby:example.com",
-                alias="#lobby:example.com",
-                name="Lobby",
-            ),
-        },
-    )
-    monkeypatch.setattr("mindroom.authorization.matrix_state_for_runtime", lambda *_args, **_kwargs: state)
-
-    assert not is_authorized_sender(
-        "@bob:example.com",
-        config,
-        "!attacker:example.com",
-    )
-    assert not is_authorized_sender(
-        "@charlie:example.com",
-        config,
-        "!attacker:example.com",
-    )
-
-
-def test_room_specific_permissions_support_explicit_alias_target() -> None:
-    """Direct alias targets should remain usable as operator-authored permission keys."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["lobby"],
-            },
-        },
-        authorization={
-            "room_permissions": {
-                "#lobby:example.com": ["@bob:example.com"],
-            },
-            "default_room_access": False,
-        },
-    )
-
-    assert is_authorized_sender("@bob:example.com", config, "#lobby:example.com")
-    assert not is_authorized_sender("@eve:example.com", config, "#lobby:example.com")
-
-
-def test_room_specific_permissions_support_managed_room_key(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Room permissions should allow using a managed room key alias."""
-    config = _config_with_runtime_paths(
+def test_bot_alias_cannot_inherit_human_authority(tmp_path: Path) -> None:
+    """A configured bot alias must not become its canonical human principal."""
+    human_id = "@owner:example.com"
+    bot_id = "@bridgebot:example.com"
+    config = membership_config(
         tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["lobby"],
-            },
-        },
-        authorization={
-            "room_permissions": {
-                "lobby": ["@bob:example.com"],
-            },
-            "default_room_access": False,
-        },
+        administrators=[human_id],
+        access={"users": [human_id]},
+        credential_managers=[human_id],
     )
-
-    state = MatrixState(
-        rooms={
-            "lobby": MatrixRoom(
-                room_id="!lobby:example.com",
-                alias="#lobby:example.com",
-                name="Lobby",
-            ),
-        },
-    )
-    monkeypatch.setattr("mindroom.authorization.matrix_state_for_runtime", lambda *_args, **_kwargs: state)
-
-    assert is_authorized_sender("@bob:example.com", config, "!lobby:example.com")
-    assert not is_authorized_sender("@eve:example.com", config, "!lobby:example.com")
-
-
-def test_default_room_access() -> None:
-    """Test default_room_access setting."""
-    config_allow_default = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "global_users": ["@alice:example.com"],
-            "room_permissions": {
-                "!room1:example.com": ["@bob:example.com"],
-            },
-            "default_room_access": True,  # Allow by default
-        },
-    )
-
-    # Alice has global access
-    assert is_authorized_sender("@alice:example.com", config_allow_default, "!room1:example.com")
-    assert is_authorized_sender("@alice:example.com", config_allow_default, "!room2:example.com")
-
-    # Bob has explicit access to room1
-    assert is_authorized_sender("@bob:example.com", config_allow_default, "!room1:example.com")
-
-    # For room2 (not in room_permissions), Bob gets default access (True)
-    assert is_authorized_sender("@bob:example.com", config_allow_default, "!room2:example.com")
-
-    # Charlie has no explicit permissions but gets default access
-    assert not is_authorized_sender(
-        "@charlie:example.com",
-        config_allow_default,
-        "!room1:example.com",
-    )  # Explicit empty list
-    assert is_authorized_sender("@charlie:example.com", config_allow_default, "!room2:example.com")  # Default access
-
-
-@pytest.fixture
-def mock_config_with_aliases() -> Config:
-    """Config with bridge aliases mapping."""
-    return _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "global_users": ["@alice:example.com"],
-            "room_permissions": {
-                "!room1:example.com": ["@bob:example.com"],
-            },
-            "default_room_access": False,
-            "aliases": {
-                "@alice:example.com": ["@telegram_111:example.com", "@signal_111:example.com"],
-                "@bob:example.com": ["@telegram_222:example.com"],
-            },
-        },
-    )
-
-
-def test_bridge_alias_global_user(mock_config_with_aliases: Config) -> None:
-    """Test that a bridge alias of a global user gets global access."""
-    # Alice's Telegram alias should have global access
-    assert is_authorized_sender("@telegram_111:example.com", mock_config_with_aliases, "!room1:example.com")
-    assert is_authorized_sender("@telegram_111:example.com", mock_config_with_aliases, "!any_room:example.com")
-
-    # Alice's Signal alias should also work
-    assert is_authorized_sender("@signal_111:example.com", mock_config_with_aliases, "!room1:example.com")
-
-
-def test_bridge_alias_room_permission(mock_config_with_aliases: Config) -> None:
-    """Test that a bridge alias inherits room-specific permissions."""
-    # Bob's Telegram alias should have access to room1
-    assert is_authorized_sender("@telegram_222:example.com", mock_config_with_aliases, "!room1:example.com")
-
-    # But not to other rooms
-    assert not is_authorized_sender("@telegram_222:example.com", mock_config_with_aliases, "!room2:example.com")
-
-
-def test_unknown_bridge_alias_rejected(mock_config_with_aliases: Config) -> None:
-    """Test that an unknown alias is not authorized."""
-    assert not is_authorized_sender("@telegram_999:example.com", mock_config_with_aliases, "!room1:example.com")
-
-
-def test_canonical_user_still_works_with_aliases(mock_config_with_aliases: Config) -> None:
-    """Test that the canonical user ID still works when aliases are configured."""
-    assert is_authorized_sender("@alice:example.com", mock_config_with_aliases, "!room1:example.com")
-    assert is_authorized_sender("@bob:example.com", mock_config_with_aliases, "!room1:example.com")
-
-
-def test_agent_reply_permissions_with_aliases() -> None:
-    """Per-agent reply allowlists should use canonical IDs after alias resolution."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-            "analyst": {
-                "display_name": "Analyst",
-                "role": "Test analyst",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "default_room_access": True,
-            "aliases": {
-                "@alice:example.com": ["@telegram_111:example.com"],
-            },
-            "agent_reply_permissions": {
-                "assistant": ["@alice:example.com"],
-            },
-        },
-    )
-
-    assert is_sender_allowed_for_agent_reply("@alice:example.com", "assistant", config)
-    assert is_sender_allowed_for_agent_reply("@telegram_111:example.com", "assistant", config)
-    assert not is_sender_allowed_for_agent_reply("@bob:example.com", "assistant", config)
-    assert is_sender_allowed_for_agent_reply("@bob:example.com", "analyst", config)
-
-
-def test_agent_reply_permissions_do_not_bypass_bot_accounts() -> None:
-    """Bridge bot accounts should still respect per-agent reply allowlists."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        bot_accounts=["@bridgebot:example.com"],
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {
-                "assistant": ["@alice:example.com"],
-            },
-        },
-    )
-
-    assert not is_sender_allowed_for_agent_reply("@bridgebot:example.com", "assistant", config)
-
-
-def test_agent_reply_permissions_do_not_bypass_cross_domain_agent_like_ids() -> None:
-    """Only configured internal IDs may bypass reply permissions."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {
-                "assistant": ["@alice:example.com"],
-            },
-        },
-    )
-
-    assert not is_sender_allowed_for_agent_reply("@mindroom_assistant:evil.com", "assistant", config)
-
-
-def test_agent_reply_permissions_wildcard_entity_applies_to_all() -> None:
-    """A '*' entity key should act as default allowlist for all entities."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-            "analyst": {
-                "display_name": "Analyst",
-                "role": "Test analyst",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {
-                "*": ["@alice:example.com"],
-            },
-        },
-    )
-
-    assert is_sender_allowed_for_agent_reply("@alice:example.com", "assistant", config)
-    assert is_sender_allowed_for_agent_reply("@alice:example.com", "analyst", config)
-    assert not is_sender_allowed_for_agent_reply("@bob:example.com", "assistant", config)
-    assert not is_sender_allowed_for_agent_reply("@bob:example.com", "analyst", config)
-
-
-def test_agent_reply_permissions_entity_override_beats_wildcard() -> None:
-    """An explicit entity entry should override the '*' entity default."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-            "analyst": {
-                "display_name": "Analyst",
-                "role": "Test analyst",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {
-                "*": ["@alice:example.com"],
-                "analyst": ["@bob:example.com"],
-            },
-        },
-    )
-
-    assert is_sender_allowed_for_agent_reply("@alice:example.com", "assistant", config)
-    assert not is_sender_allowed_for_agent_reply("@alice:example.com", "analyst", config)
-    assert is_sender_allowed_for_agent_reply("@bob:example.com", "analyst", config)
-
-
-def test_agent_reply_permissions_wildcard_user_allows_everyone() -> None:
-    """A '*' user entry should disable sender restriction for that entity."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-            "analyst": {
-                "display_name": "Analyst",
-                "role": "Test analyst",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {
-                "*": ["@alice:example.com"],
-                "analyst": ["*"],
-            },
-        },
-    )
-
-    assert not is_sender_allowed_for_agent_reply("@bob:example.com", "assistant", config)
-    assert is_sender_allowed_for_agent_reply("@bob:example.com", "analyst", config)
-
-
-def test_agent_reply_permissions_support_domain_pattern() -> None:
-    """Allowlist entries should support glob patterns like '*:example.com'."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {
-                "assistant": ["*:example.com"],
-            },
-        },
-    )
-
-    assert is_sender_allowed_for_agent_reply("@alice:example.com", "assistant", config)
-    assert not is_sender_allowed_for_agent_reply("@alice:other.com", "assistant", config)
-
-
-def test_agent_reply_permissions_domain_pattern_after_alias_resolution() -> None:
-    """Domain patterns should match after aliases resolve to canonical IDs."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "default_room_access": True,
-            "aliases": {
-                "@alice:example.com": ["@telegram_111:example.com"],
-            },
-            "agent_reply_permissions": {
-                "assistant": ["*:example.com"],
-            },
-        },
-    )
-
-    assert is_sender_allowed_for_agent_reply("@telegram_111:example.com", "assistant", config)
-
-
-def test_agent_reply_permissions_reject_unknown_entity() -> None:
-    """Unknown keys in agent_reply_permissions should fail config validation."""
-    with pytest.raises(ValueError, match=r"authorization\.agent_reply_permissions contains unknown entities"):
-        Config(
-            agents={
-                "assistant": {
-                    "display_name": "Assistant",
-                    "role": "Test assistant",
-                    "rooms": ["test_room"],
-                },
-            },
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {
-                    "missing_agent": ["@alice:example.com"],
-                },
-            },
-        )
-
-
-def test_effective_sender_uses_voice_original_sender_for_router_messages() -> None:
-    """Router transcriptions should use embedded original sender for permission checks."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-
-    event_source = {
-        "content": {
-            "body": "🎤 help me",
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
-            SOURCE_KIND_KEY: "voice",
-        },
-    }
-
-    assert get_effective_sender_id_for_reply_permissions(
-        entity_ids(config, _runtime_paths_for(config))[ROUTER_AGENT_NAME].full_id,
-        event_source,
-        config,
-    ) == ("@alice:example.com")
-
-
-def test_effective_sender_ignores_voice_original_sender_for_non_internal_messages() -> None:
-    """Only trusted internal MindRoom senders may override requester identity."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-
-    event_source = {
-        "content": {
-            "body": "spoof attempt",
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
-        },
-    }
-
-    assert get_effective_sender_id_for_reply_permissions("@bob:example.com", event_source, config) == "@bob:example.com"
-
-
-def test_effective_sender_uses_original_sender_for_internal_agent_messages() -> None:
-    """Internal agent relays should respect embedded original sender metadata."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-            "helper": {
-                "display_name": "Helper",
-                "role": "Test helper",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-
-    event_source = {
-        "content": {
-            "body": "automated task",
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
-            SOURCE_KIND_KEY: "trusted_internal_relay",
-        },
-    }
-
-    assert get_effective_sender_id_for_reply_permissions(
-        entity_ids(config, _runtime_paths_for(config))["assistant"].full_id,
-        event_source,
-        config,
-    ) == ("@alice:example.com")
-
-
-def test_effective_sender_ignores_original_sender_without_trusted_source_kind() -> None:
-    """Internal senders need trusted source-kind metadata before requester promotion."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-
-    sender = entity_ids(config, _runtime_paths_for(config))["assistant"].full_id
-    event_source = {
-        "content": {
-            "body": "plain message",
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
-        },
-    }
-
-    assert get_effective_sender_id_for_reply_permissions(sender, event_source, config) == sender
-
-
-def test_effective_sender_ignores_external_trigger_metadata_from_human_sender() -> None:
-    """Human-authored Matrix content cannot spoof trusted trigger owner metadata."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-    sender = "@mallory:example.com"
-    event_source = {
-        "content": {
-            "body": "spoof attempt",
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
-            SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND,
-        },
-    }
-
-    assert get_effective_sender_id_for_reply_permissions(sender, event_source, config) == sender
-
-
-def test_effective_sender_does_not_trust_cross_domain_router_like_ids() -> None:
-    """Router sender override must require exact configured router ID."""
-    config = _config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-
-    spoofed_router = "@mindroom_router:evil.com"
-    event_source = {
-        "content": {
-            "body": "spoof attempt",
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
-        },
-    }
-
-    assert get_effective_sender_id_for_reply_permissions(spoofed_router, event_source, config) == spoofed_router
-
-
-def test_effective_sender_does_not_trust_removed_persisted_internal_accounts(tmp_path: Path) -> None:
-    """Removed historical bot usernames must not stay trusted for relay authorization."""
-    config = _isolated_config(
+    config.bot_accounts = [bot_id]
+    config.authorization.aliases = {human_id: [bot_id]}
+
+    assert not _allowed(bot_id, config, AgentReplyMembershipIndex())
+    runtime_paths = runtime_paths_for(config)
+    assert not is_platform_administrator(bot_id, config, runtime_paths)
+    assert not is_sender_allowed_for_agent_credential_management(bot_id, "talent", config, runtime_paths)
+
+
+def test_managed_entity_alias_cannot_inherit_human_administration(tmp_path: Path) -> None:
+    """A managed entity alias must not inherit human control-plane authority."""
+    human_id = "@owner:example.com"
+    config = membership_config(
         tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": True},
+        administrators=[human_id],
+        credential_managers=[human_id],
     )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_removed", "mindroom_removed", "pw", domain="legacy.example.com")
-    state.save(runtime_paths=runtime_paths)
+    runtime_paths = runtime_paths_for(config)
+    managed_id = entity_ids(config, runtime_paths)["talent"].full_id
+    config.authorization.aliases = {human_id: [managed_id]}
 
-    event_source = {
-        "content": {
-            "body": "stale relay",
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
-        },
-    }
-
-    assert (
-        get_effective_sender_id_for_reply_permissions(
-            "@mindroom_removed:legacy.example.com",
-            event_source,
-            config,
-        )
-        == "@mindroom_removed:legacy.example.com"
-    )
+    assert not is_platform_administrator(managed_id, config, runtime_paths)
+    assert not is_sender_allowed_for_agent_credential_management(managed_id, "talent", config, runtime_paths)
 
 
-def test_effective_sender_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
-    """Current managed accounts should stay trusted even when their stored username drifts."""
-    config = _isolated_config(
+@pytest.mark.asyncio
+async def test_current_room_member_can_use_responder(tmp_path: Path) -> None:
+    """Current-room membership must grant access only when explicitly enabled."""
+    sender_id = "@member:example.com"
+    config = membership_config(
         tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": True},
+        agent_rooms=["talent"],
+        access={"current_room_members": True, "members_of_rooms": []},
     )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
+    memberships = await membership_index(config, {"talent": {sender_id}})
 
+    assert _allowed(sender_id, config, memberships, room_id="!talent:example.com")
+    assert not _allowed(sender_id, config, memberships, room_id="!other:example.com")
+
+
+@pytest.mark.asyncio
+async def test_grant_room_member_can_use_responder_elsewhere(tmp_path: Path) -> None:
+    """A configured grant-room membership must authorize other conversation rooms."""
+    sender_id = "@member:example.com"
+    config = membership_config(
+        tmp_path,
+        agent_rooms=["grant"],
+        access={"current_room_members": False, "members_of_rooms": ["grant"]},
+    )
+    memberships = await membership_index(config, {"grant": {sender_id}})
+
+    assert _allowed(sender_id, config, memberships)
+
+
+def test_unresolved_grant_room_fails_closed(tmp_path: Path) -> None:
+    """An unresolved managed grant room must never authorize a sender."""
+    config = membership_config(
+        tmp_path,
+        agent_rooms=["grant"],
+        access={"members_of_rooms": ["grant"]},
+    )
+
+    assert not _allowed(
+        "@member:example.com",
+        config,
+        unresolved_membership_index(config),
+    )
+
+
+def test_internal_identity_bypasses_responder_policy(tmp_path: Path) -> None:
+    """Current runtime-owned identities must remain trusted participants."""
+    config = membership_config(tmp_path, access={"users": []})
+    sender_id = entity_ids(config, runtime_paths_for(config))["talent"].full_id
+
+    assert _allowed(sender_id, config, AgentReplyMembershipIndex())
+
+
+def test_credential_authority_is_separate_from_conversation_access(tmp_path: Path) -> None:
+    """Credential managers must not gain responder access and vice versa."""
+    config = membership_config(
+        tmp_path,
+        access={"users": ["@member:example.com"]},
+        credential_managers=["@manager:example.com"],
+    )
+
+    runtime_paths = runtime_paths_for(config)
+    assert is_sender_allowed_for_agent_credential_management("@manager:example.com", "talent", config, runtime_paths)
+    assert not _allowed("@manager:example.com", config, AgentReplyMembershipIndex())
+    assert _allowed("@member:example.com", config, AgentReplyMembershipIndex())
+    assert not is_sender_allowed_for_agent_credential_management("@member:example.com", "talent", config, runtime_paths)
+
+
+def test_unknown_agent_credential_management_fails_closed(tmp_path: Path) -> None:
+    """Credential checks for stale or unknown agent names must deny instead of raising."""
+    config = membership_config(tmp_path, administrators=["@admin:example.com"])
+
+    assert not is_sender_allowed_for_agent_credential_management(
+        "@admin:example.com",
+        "missing",
+        config,
+        runtime_paths_for(config),
+    )
+
+
+@pytest.mark.asyncio
+async def test_room_reply_check_uses_same_responder_policy(tmp_path: Path) -> None:
+    """Room-scoped reply checks must not apply a second authorization model."""
+    sender_id = "@member:example.com"
+    config = membership_config(
+        tmp_path,
+        agent_rooms=["talent"],
+        access={"current_room_members": True, "members_of_rooms": []},
+    )
+    memberships = await membership_index(config, {"talent": {sender_id}})
+
+    assert is_sender_allowed_for_agent_reply_in_room(
+        sender_id,
+        "talent",
+        config,
+        "!talent:example.com",
+        runtime_paths_for(config),
+        memberships,
+    )
+
+
+def test_effective_sender_uses_trusted_internal_relay_metadata(tmp_path: Path) -> None:
+    """A current internal sender may relay the original requester identity."""
+    config = membership_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    internal_sender = entity_ids(config, runtime_paths)["talent"].full_id
     event_source = {
         "content": {
-            "body": "current relay",
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
+            ORIGINAL_SENDER_KEY: "@owner:example.com",
             SOURCE_KIND_KEY: "trusted_internal_relay",
         },
     }
 
     assert (
         get_effective_sender_id_for_reply_permissions(
-            "@mindroom_assistant_oldns:example.com",
+            internal_sender,
             event_source,
             config,
+            runtime_paths,
         )
-        == "@alice:example.com"
+        == "@owner:example.com"
     )
 
 
-def test_reply_permissions_bypass_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
-    """Current managed accounts should bypass reply allowlists even when their username drifted."""
-    config = _isolated_config(
-        tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "default_room_access": False,
-            "agent_reply_permissions": {"assistant": ["@alice:example.com"]},
-        },
-    )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
-
-    assert is_sender_allowed_for_agent_reply("@mindroom_assistant_oldns:example.com", "assistant", config) is True
-
-
-def test_credential_management_does_not_bypass_agent_allowlist_for_internal_accounts(tmp_path: Path) -> None:
-    """Dashboard credential management is user-initiated and should not inherit reply-time internal trust."""
-    config = _isolated_config(
-        tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "default_room_access": False,
-            "agent_reply_permissions": {"assistant": ["@alice:example.com"]},
-        },
-    )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
-
-    assert is_sender_allowed_for_agent_reply("@mindroom_assistant_oldns:example.com", "assistant", config) is True
-    assert (
-        is_sender_allowed_for_agent_credential_management(
-            "@mindroom_assistant_oldns:example.com",
-            "assistant",
-            config,
-        )
-        is False
-    )
-    assert is_sender_allowed_for_agent_credential_management("@alice:example.com", "assistant", config) is True
-
-
-def test_sender_authorization_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
-    """Current managed accounts should stay authorized for room ingress when their username drifted."""
-    config = _isolated_config(
-        tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": False},
-    )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
-
-    assert is_authorized_sender("@mindroom_assistant_oldns:example.com", config, "!room:example.com") is True
-
-
-def test_reply_permissions_do_not_trust_configured_id_after_username_drift(tmp_path: Path) -> None:
-    """Config-derived IDs should stop bypassing allowlists after a persisted username drift."""
-    config = _isolated_config(
-        tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={
-            "default_room_access": False,
-            "agent_reply_permissions": {"assistant": ["@alice:example.com"]},
-        },
-    )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
-
-    assert is_sender_allowed_for_agent_reply("@actual_assistant:example.com", "assistant", config) is False
-
-
-def test_sender_authorization_does_not_trust_configured_id_after_username_drift(tmp_path: Path) -> None:
-    """Config-derived IDs should stop bypassing room auth after a persisted username drift."""
-    config = _isolated_config(
-        tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": False},
-    )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
-
-    assert is_authorized_sender("@actual_assistant:example.com", config, "!room:example.com") is False
-
-
-def test_sender_authorization_uses_actual_persisted_id_without_generated_fallback(tmp_path: Path) -> None:
-    """Sender classification should trust only the persisted actual Matrix ID after username drift."""
-    config = _isolated_config(
-        tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": False},
-    )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_assistant", "actual_assistant", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
-
-    assert is_authorized_sender("@actual_assistant:example.com", config, "!room:example.com") is True
-    assert is_authorized_sender("@mindroom_assistant:example.com", config, "!room:example.com") is False
-
-
-def test_effective_sender_trusts_persisted_current_internal_accounts_with_nondefault_domain(tmp_path: Path) -> None:
-    """Relay authorization should trust the actual persisted account domain."""
-    config = _isolated_config(
-        tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="legacy.example.com")
-    state.save(runtime_paths=runtime_paths)
-
+def test_human_sender_cannot_spoof_original_requester(tmp_path: Path) -> None:
+    """Original-sender metadata from a human sender must be ignored."""
+    config = membership_config(tmp_path)
     event_source = {
         "content": {
-            "body": "current relay",
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
+            ORIGINAL_SENDER_KEY: "@owner:example.com",
             SOURCE_KIND_KEY: "trusted_internal_relay",
         },
     }
 
     assert (
         get_effective_sender_id_for_reply_permissions(
-            "@mindroom_assistant_oldns:legacy.example.com",
+            "@human:example.com",
             event_source,
             config,
+            runtime_paths_for(config),
         )
-        == "@alice:example.com"
+        == "@human:example.com"
     )
-
-
-def test_available_responders_in_room_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
-    """Room responder discovery should keep current managed entities visible after username drift."""
-    config = _isolated_config(
-        tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
-
-    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
-    room.add_member("@mindroom_assistant_oldns:example.com", "Assistant", None)
-
-    available_responders = mindroom.authorization.get_available_responders_in_room(room, config, runtime_paths)
-    assert [responder.full_id for responder in available_responders] == ["@mindroom_assistant_oldns:example.com"]
-
-
-def test_configured_responder_candidates_use_persisted_current_account_ids(tmp_path: Path) -> None:
-    """Configured-room responders should resolve through live persisted account usernames."""
-    config = _isolated_config(
-        tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["!test:server"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
-
-    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
-    room.add_member("@mindroom_assistant_oldns:example.com", "Assistant", None)
-
-    candidates = mindroom.authorization.responder_candidate_entities_from_cached_room(
-        room,
-        "@alice:example.com",
-        config,
-        runtime_paths,
-    )
-
-    assert [candidate.full_id for candidate in candidates] == ["@mindroom_assistant_oldns:example.com"]
-    assert _entity_names(config, candidates) == ["assistant"]
-
-
-def test_configured_team_responder_candidates_use_persisted_current_account_ids(tmp_path: Path) -> None:
-    """Team responder candidates should resolve through live persisted account usernames."""
-    config = _isolated_config(
-        tmp_path,
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-            },
-        },
-        teams={
-            "ops": {
-                "display_name": "Ops",
-                "role": "Operations team",
-                "agents": ["assistant"],
-                "rooms": ["!test:server"],
-            },
-        },
-        authorization={"default_room_access": True},
-    )
-    runtime_paths = _runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_ops", "mindroom_ops_oldns", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
-
-    room = nio.MatrixRoom("!test:server", "@mindroom_test:example.com")
-    room.add_member("@mindroom_ops_oldns:example.com", "Ops", None)
-
-    candidates = mindroom.authorization.responder_candidate_entities_from_cached_room(
-        room,
-        "@alice:example.com",
-        config,
-        runtime_paths,
-    )
-
-    assert [candidate.full_id for candidate in candidates] == ["@mindroom_ops_oldns:example.com"]
-    assert _entity_names(config, candidates) == ["ops"]
-
-
-def test_resolve_alias_method() -> None:
-    """Test the resolve_alias helper directly."""
-    auth = AuthorizationConfig(
-        aliases={
-            "@alice:example.com": ["@telegram_111:example.com"],
-        },
-    )
-    assert auth.resolve_alias("@telegram_111:example.com") == "@alice:example.com"
-    assert auth.resolve_alias("@alice:example.com") == "@alice:example.com"
-    assert auth.resolve_alias("@unknown:example.com") == "@unknown:example.com"
-
-
-def test_duplicate_bridge_alias_rejected() -> None:
-    """Test that aliases cannot be mapped to multiple canonical users."""
-    with pytest.raises(ValueError, match="Duplicate bridge aliases are not allowed"):
-        AuthorizationConfig(
-            aliases={
-                "@alice:example.com": ["@telegram_111:example.com"],
-                "@bob:example.com": ["@telegram_111:example.com"],
-            },
-        )
-
-
-def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
-    config_path = tmp_path / "config.yaml"
-    storage_path = tmp_path / "mindroom_data"
-    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env={})
-    bound = Config.validate_with_runtime(_config(**config_data).authored_model_dump(), runtime_paths)
-    persist_entity_accounts(bound, runtime_paths)
-    _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
-    return bound

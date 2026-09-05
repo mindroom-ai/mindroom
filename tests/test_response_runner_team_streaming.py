@@ -41,6 +41,7 @@ from mindroom.response_runner import (
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
+from tests.access_schema_support import with_current_room_member_access
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config,
@@ -322,15 +323,17 @@ async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_
     """ResponseRunner preflight should not reject direct private members before team_response."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
-        Config(
-            agents={
-                "private_worker": AgentConfig(
-                    display_name="PrivateWorker",
-                    private=AgentPrivateConfig(per="user", root="private_worker_data"),
-                ),
-                "calculator": AgentConfig(display_name="Calculator"),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "private_worker": AgentConfig(
+                        display_name="PrivateWorker",
+                        private=AgentPrivateConfig(per="user", root="private_worker_data"),
+                    ),
+                    "calculator": AgentConfig(display_name="Calculator"),
+                },
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
         ),
         runtime_paths,
     )
@@ -486,8 +489,8 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_preserves_retry_model_prompt(tmp_path: Path) -> None:
-    """Team retry runs should keep the model-facing prompt that Agno persisted."""
+async def test_generate_team_response_preserves_model_prompt(tmp_path: Path) -> None:
+    """Team runs should keep the model-facing prompt that Agno persisted."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")

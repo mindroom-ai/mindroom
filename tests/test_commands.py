@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom.commands.handler import CommandHandlerContext, generate_welcome_message_for_room, handle_command
+from mindroom.authorization import (
+    ensure_room_membership_synced,
+    responder_candidate_entities_from_cached_room,
+)
+from mindroom.commands.handler import generate_welcome_message_for_room, handle_command
 from mindroom.commands.parsing import (
     _COMMAND_DOCS,
     Command,
@@ -23,6 +27,10 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
+from tests.authorization_helpers import (
+    isolated_membership_index,
+    make_test_command_handler_context,
+)
 from tests.conftest import make_conversation_reader_mock
 from tests.identity_helpers import persist_entity_accounts
 
@@ -277,6 +285,11 @@ def test_get_command_help() -> None:
     assert "in 5 minutes" in schedule_help
     assert "Requires an explicit recurring polling cadence" in schedule_help
     assert "Automatically converts to smart polling" not in schedule_help
+    assert "silently" in schedule_help
+    assert "quietly" in schedule_help
+    assert "hide their trigger" in schedule_help
+    assert "NO_REPLY" in schedule_help
+    assert "visible by default" in schedule_help
 
     list_schedules_help = get_command_help("list_schedules")
     assert "List Schedules Command" in list_schedules_help
@@ -288,6 +301,9 @@ def test_get_command_help() -> None:
     edit_help = get_command_help("edit_schedule")
     assert "Edit Schedule Command" in edit_help
     assert "edit_schedule" in edit_help
+    assert "make this schedule silent" in edit_help
+    assert "make this schedule visible" in edit_help
+    assert "silent-delivery mode" in edit_help
 
     reload_help = get_command_help("reload-plugins")
     assert "Reload Plugins Command" in reload_help
@@ -313,6 +329,13 @@ def test_compact_command_entries_characterize_welcome_subset() -> None:
     )
 
 
+def _synced_client() -> AsyncMock:
+    """A Matrix client whose member lookup reports an empty, already-synced room."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_members = AsyncMock(return_value=nio.JoinedMembersResponse(members=[], room_id="!room:localhost"))
+    return client
+
+
 @pytest.mark.asyncio
 async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None:
     """The welcome quick commands should match the parser-owned compact docs."""
@@ -321,11 +344,12 @@ async def test_welcome_message_uses_compact_command_docs(tmp_path: Path) -> None
     config = Config()
     persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router_oldns"})
     welcome_message = await generate_welcome_message_for_room(
-        None,
+        _synced_client(),
         room,
         "@alice:localhost",
         config,
         runtime_paths,
+        isolated_membership_index(),
     )
 
     quick_command_block = "\u26a1 **Quick commands:**\n" + "\n".join(WELCOME_QUICK_COMMAND_LINES)
@@ -360,11 +384,12 @@ async def test_welcome_message_lists_configured_teams(tmp_path: Path) -> None:
         },
     )
     welcome_message = await generate_welcome_message_for_room(
-        None,
+        _synced_client(),
         room,
         "@alice:localhost",
         config,
         runtime_paths,
+        isolated_membership_index(),
     )
 
     assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
@@ -411,11 +436,12 @@ async def test_senderless_welcome_lists_configured_room_responders(tmp_path: Pat
     )
 
     welcome_message = await generate_welcome_message_for_room(
-        None,
+        _synced_client(),
         room,
         None,
         config,
         runtime_paths,
+        isolated_membership_index(),
     )
 
     assert "\U0001f9e0 **Available agents and teams in this room:**" in welcome_message
@@ -452,7 +478,7 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
         body="!hi",
         source={"content": {"body": "!hi"}},
     )
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths,
@@ -506,7 +532,7 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     send_response = AsyncMock(return_value="$welcome")
     candidate_resolver = AsyncMock(return_value=[MatrixID.parse("@mindroom_code:localhost")])
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths,
@@ -536,6 +562,68 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
     response_text = send_response.await_args.args[0]
     assert "\u2022 **@code**: Writes code" in response_text
     assert "@research" not in response_text
+
+
+@pytest.mark.asyncio
+async def test_schedule_command_reuses_failed_boundary_membership_snapshot(tmp_path: Path) -> None:
+    """Live scheduling must not retry a failed membership refresh from the same turn."""
+    config = Config()
+    runtime_paths = _test_runtime_paths(tmp_path)
+    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router"})
+    membership_index = isolated_membership_index()
+    room = nio.MatrixRoom(room_id="!adhoc:localhost", own_user_id="@mindroom_router:localhost")
+    room.add_member("@mindroom_router:localhost", "Router", None)
+    room.add_member("@alice:localhost", "Alice", None)
+    client = AsyncMock()
+    client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+    send_response = AsyncMock(return_value="$schedule-response")
+    command = Command(
+        type=CommandType.SCHEDULE,
+        args={"full_text": "in 5 minutes check logs"},
+        raw_text="!schedule in 5 minutes check logs",
+    )
+    event = SimpleNamespace(
+        sender="@alice:localhost",
+        event_id="$schedule",
+        body=command.raw_text,
+        source={"content": {"body": command.raw_text}},
+    )
+
+    async def cached_responder_candidates(candidate_room: nio.MatrixRoom, sender_id: str) -> list[MatrixID]:
+        return responder_candidate_entities_from_cached_room(
+            candidate_room,
+            sender_id,
+            config,
+            runtime_paths,
+            membership_index,
+        )
+
+    context = make_test_command_handler_context(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(room.room_id, None, event.event_id),
+        record_handled_turn=AsyncMock(),
+        record_command_result=AsyncMock(),
+        send_response=send_response,
+        responder_candidates_for_room=cached_responder_candidates,
+        agent_reply_memberships=membership_index,
+    )
+
+    assert not await ensure_room_membership_synced(client, room, sender_id=event.sender)
+
+    await handle_command(
+        context=context,
+        room=room,
+        event=event,
+        command=command,
+        requester_user_id=event.sender,
+    )
+
+    assert client.joined_members.await_count == 1
+    assert "No agents or teams" in send_response.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -575,7 +663,7 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
     controller_identity = MagicMock()
     desktop_handler = MagicMock(return_value="desktop status")
     monkeypatch.setattr("mindroom.commands.handler.handle_desktop_command", desktop_handler)
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths,

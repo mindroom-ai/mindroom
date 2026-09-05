@@ -15,11 +15,14 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
 from mindroom import constants
+from mindroom.config.access_migration import validate_access_migration_source
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
     Config,
+    ConfigLoadUserError,
     ConfigRuntimeValidationError,
     iter_config_validation_messages,
+    validate_loaded_config_source,
 )
 from mindroom.config.yaml_includes import (
     load_yaml_config_source,
@@ -34,9 +37,12 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
+    from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
 _UNSET = object()
@@ -97,6 +103,9 @@ class ExternalTriggerRuntime:
     conversation_reader: object
     config_generation: int
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
+    agent_reply_memberships: AgentReplyMembershipIndex
+    response_admission_gate: ResponseAdmissionGate
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
 
 
 @dataclass
@@ -109,6 +118,7 @@ class _MindroomAppState:
     knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
+    script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
 
 
 def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:
@@ -140,7 +150,7 @@ def require_api_state(api_app: FastAPI) -> ApiState:
 
 
 def _config_error_detail(
-    exc: ValidationError | ConfigRuntimeValidationError | yaml.YAMLError | OSError | UnicodeError,
+    exc: ConfigLoadUserError,
 ) -> list[dict[str, object]]:
     """Return one shared API error payload for invalid current config."""
     return [
@@ -173,11 +183,15 @@ def _load_config_result(
         data, source_digests = load_yaml_config_source_with_digests(runtime_paths.config_path, source=source_bytes)
         source_files = frozenset(source_digests)
         source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
-        runtime_config = Config.validate_with_runtime(
+        runtime_config, source_digests = validate_loaded_config_source(
             data,
+            source_digests,
+            source_bytes,
             runtime_paths,
             tolerate_plugin_load_errors=True,
         )
+        source_files = frozenset(source_digests)
+        source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
         validated_payload = runtime_config.authored_model_dump()
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         detail = _config_error_detail(exc)
@@ -430,6 +444,13 @@ def bind_current_request_snapshot(request: Request) -> ApiSnapshot:
         return store_request_snapshot(request, app_state.snapshot)
 
 
+def rebind_current_request_snapshot(request: Request) -> ApiSnapshot:
+    """Replace a request's pinned snapshot with the app's current publication."""
+    app_state = require_api_state(request.app)
+    with app_state.config_lock:
+        return store_request_snapshot(request, app_state.snapshot)
+
+
 def _request_or_current_snapshot(request: Request) -> ApiSnapshot:
     """Return the request-bound snapshot when present, else the current app snapshot."""
     bound_snapshot = request_snapshot(request)
@@ -579,9 +600,11 @@ def _validate_raw_config_source(
         runtime_paths.config_path,
         source=source.encode("utf-8"),
     )
+    source_files = frozenset(source_digests)
+    validate_access_migration_source(data, source_files, runtime_paths.config_path)
     runtime_config = Config.validate_with_runtime(data, runtime_paths)
     source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
-    return runtime_config, runtime_config.authored_model_dump(), frozenset(source_digests), source_fingerprint
+    return runtime_config, runtime_config.authored_model_dump(), source_files, source_fingerprint
 
 
 def _commit_replaced_snapshot(

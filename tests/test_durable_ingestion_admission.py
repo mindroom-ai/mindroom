@@ -34,6 +34,7 @@ from nio.ingest import (
 )
 from nio.ingest.serialization import _loss_id, batch_from_records
 
+from mindroom.constants import SILENT_SCHEDULE_EVENT_TYPE
 from mindroom.event_journal import (
     AdmissionFacts,
     AdmissionResult,
@@ -57,6 +58,7 @@ from mindroom.matrix.durable_ingestion import (
     consume_one_ingestion_batch,
     validate_ingestion_batch,
 )
+from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from tests.conftest import (
     CrashError,
@@ -880,7 +882,16 @@ def _complete_record_cases() -> tuple[
         ),
         _record_with(
             RecordKind.EPHEMERAL,
-            {"content": {"user_ids": [SENDER]}, "type": "m.typing"},
+            {
+                "content": {
+                    EVENT_ID: {
+                        "m.read": {
+                            SENDER: {"ts": 1000},
+                        },
+                    },
+                },
+                "type": "m.receipt",
+            },
             room_id=ROOM_ID,
             membership_epoch=0,
             room_sequence=10,
@@ -895,14 +906,6 @@ def _complete_record_cases() -> tuple[
         _record_with(
             RecordKind.GLOBAL_ACCOUNT_DATA,
             {"content": {"value": True}, "type": "org.example.global"},
-        ),
-        _record_with(
-            RecordKind.PRESENCE,
-            {
-                "content": {"presence": "online"},
-                "sender": SENDER,
-                "type": "m.presence",
-            },
         ),
         _record_with(
             RecordKind.TO_DEVICE,
@@ -1098,7 +1101,6 @@ def _complete_record_cases() -> tuple[
         "ephemeral",
         "room-account-data",
         "global-account-data",
-        "presence",
         "to-device",
         "transport-loss",
         "system-loss",
@@ -1173,30 +1175,15 @@ def test_validation_maps_every_durable_record_to_one_admission_disposition(
         assert admission.room_id is None
 
 
-@pytest.mark.parametrize(
-    "source",
-    (
-        {
-            "event_id": "$member",
-            "sender": SENDER,
-            "origin_server_ts": 1,
-            "type": "m.room.member",
-            "state_key": SENDER,
-            "content": {"membership": "join"},
-        },
-        {
-            "event_id": "$topic",
-            "sender": SENDER,
-            "origin_server_ts": 1,
-            "type": "m.room.topic",
-            "state_key": "",
-            "content": {"topic": "unsupported"},
-        },
-    ),
-)
-def test_conversion_classifies_membership_and_unsupported_events_as_compatibility(
-    source: dict[str, object],
-) -> None:
+def test_conversion_classifies_unsupported_timeline_events_as_compatibility() -> None:
+    source = {
+        "event_id": "$topic",
+        "sender": SENDER,
+        "origin_server_ts": 1,
+        "type": "m.room.topic",
+        "state_key": "",
+        "content": {"topic": "unsupported"},
+    }
     assert (
         ingestion_timeline_views(
             room_id=ROOM_ID,
@@ -1206,6 +1193,185 @@ def test_conversion_classifies_membership_and_unsupported_events_as_compatibilit
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("provenance", "event_class"),
+    (
+        (TimelineEventProvenance.LIVE, EventClass.ACTIONABLE),
+        (TimelineEventProvenance.RECOVERED, EventClass.ACTIONABLE),
+        (TimelineEventProvenance.HISTORY, EventClass.CONTEXT_ONLY),
+    ),
+)
+def test_conversion_keeps_member_events_with_authenticated_provenance(
+    provenance: TimelineEventProvenance,
+    event_class: EventClass,
+) -> None:
+    source = {
+        "event_id": "$member",
+        "sender": SENDER,
+        "origin_server_ts": 1,
+        "type": "m.room.member",
+        "state_key": SENDER,
+        "content": {"membership": "join"},
+        "unsigned": {"prev_content": {"membership": "leave"}},
+    }
+
+    views = ingestion_timeline_views(
+        room_id=ROOM_ID,
+        source=source,
+        self_sender=ACCOUNT_ID,
+        provenance=provenance,
+    )
+
+    assert views is not None
+    event, projected = views
+    assert event.kind is EventKind.ROOM_LIFECYCLE
+    assert event.event_class is event_class
+    assert event.source == source
+    assert projected is None
+
+
+@pytest.mark.parametrize(
+    ("trusted", "disposition"),
+    ((True, IngestionRecordDisposition.SEMANTIC_EVENT), (False, IngestionRecordDisposition.COMPATIBILITY_ONLY)),
+)
+def test_validation_admits_only_trusted_silent_schedule_senders(
+    trusted: bool,
+    disposition: IngestionRecordDisposition,
+) -> None:
+    source = {
+        "event_id": "$schedule",
+        "sender": SENDER,
+        "origin_server_ts": 3,
+        "type": SILENT_SCHEDULE_EVENT_TYPE,
+        "content": {"body": "run", "io.mindroom.source_kind": "silent_scheduled"},
+    }
+    batch = _batch_with(
+        _record_with(
+            RecordKind.TIMELINE,
+            source,
+            room_id=ROOM_ID,
+            membership_epoch=0,
+            room_sequence=0,
+            event_id="$schedule",
+            provenance=TimelineEventProvenance.LIVE,
+        ),
+    )
+
+    admission = validate_ingestion_batch(
+        batch,
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+        schedule_trigger_sender_is_managed=lambda sender: trusted and sender == SENDER,
+    )
+
+    assert admission.disposition is disposition
+    if trusted:
+        assert admission.event is not None
+        assert admission.event.kind is EventKind.SCHEDULE_TRIGGER
+    else:
+        assert admission.event is None
+
+
+def test_conversion_preserves_matrix_transaction_id_in_projection() -> None:
+    source = {
+        "event_id": "$echo",
+        "sender": ACCOUNT_ID,
+        "origin_server_ts": 4,
+        "type": "m.room.message",
+        "content": {"body": "sent", "msgtype": "m.text"},
+        "unsigned": {"transaction_id": "tx-final"},
+    }
+
+    views = ingestion_timeline_views(
+        room_id=ROOM_ID,
+        source=source,
+        self_sender=ACCOUNT_ID,
+        provenance=TimelineEventProvenance.LIVE,
+    )
+
+    assert views is not None
+    _, projected = views
+    assert projected is not None
+    assert projected.transaction_id == "tx-final"
+
+
+@pytest.mark.parametrize("event_type", [CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE])
+@pytest.mark.parametrize(
+    ("provenance", "event_class"),
+    [
+        (TimelineEventProvenance.LIVE, EventClass.ACTIONABLE),
+        (TimelineEventProvenance.RECOVERED, EventClass.ACTIONABLE),
+        (TimelineEventProvenance.HISTORY, EventClass.CONTEXT_ONLY),
+    ],
+)
+def test_validation_keeps_supported_call_events_as_semantic_work(
+    event_type: str,
+    provenance: TimelineEventProvenance,
+    event_class: EventClass,
+) -> None:
+    source = {
+        "event_id": "$call",
+        "sender": SENDER,
+        "origin_server_ts": 5,
+        "type": event_type,
+        "state_key": "_call" if event_type == CALL_MEMBER_EVENT_TYPE else "",
+        "content": {},
+    }
+    batch = _batch_with(
+        _record_with(
+            RecordKind.TIMELINE,
+            source,
+            room_id=ROOM_ID,
+            membership_epoch=0,
+            room_sequence=0,
+            event_id="$call",
+            provenance=provenance,
+        ),
+    )
+
+    admission = validate_ingestion_batch(
+        batch,
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+    )
+
+    assert admission.disposition is IngestionRecordDisposition.SEMANTIC_EVENT
+    assert admission.event is not None
+    assert admission.event.kind is EventKind.RTC
+    assert admission.event.event_class is event_class
+    assert admission.projected is None
+
+
+def test_validation_does_not_promote_unknown_custom_events_to_rtc_work() -> None:
+    source = {
+        "event_id": "$custom",
+        "sender": SENDER,
+        "origin_server_ts": 6,
+        "type": "org.example.rtc.unknown",
+        "state_key": "",
+        "content": {},
+    }
+    batch = _batch_with(
+        _record_with(
+            RecordKind.TIMELINE,
+            source,
+            room_id=ROOM_ID,
+            membership_epoch=0,
+            room_sequence=0,
+            event_id="$custom",
+            provenance=TimelineEventProvenance.LIVE,
+        ),
+    )
+
+    admission = validate_ingestion_batch(
+        batch,
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+    )
+
+    assert admission.disposition is IngestionRecordDisposition.COMPATIBILITY_ONLY
 
 
 def test_conversion_uses_the_existing_media_parser() -> None:
@@ -3099,6 +3265,7 @@ async def test_postgres_loser_waits_then_classifies(
 class _AdapterSession:
     batch: SyncBatch | None
     settlement_error: BaseException | None = None
+    trace: list[str] | None = None
     next_calls: list[dict[str, object]] = field(default_factory=list)
     ack_attempts: list[BatchRef] = field(default_factory=list)
     settlement_attempts: list[tuple[SyncBatch, bool, bool]] = field(
@@ -3106,6 +3273,8 @@ class _AdapterSession:
     )
 
     def next_batch(self, **limits: object) -> SyncBatch | None:
+        if self.trace is not None:
+            self.trace.append("next")
         self.next_calls.append(limits)
         return self.batch
 
@@ -3121,6 +3290,8 @@ class _AdapterSession:
         receipt_new: bool,
         semantic_event_new: bool,
     ) -> None:
+        if self.trace is not None:
+            self.trace.append("settle")
         self.settlement_attempts.append(
             (batch, receipt_new, semantic_event_new),
         )
@@ -3134,12 +3305,15 @@ class _AdapterSession:
 class _AdapterAdmission:
     result: object = FRESH_FACTS
     error: BaseException | None = None
+    trace: list[str] | None = None
     calls: list[IngestionBatchAdmission] = field(default_factory=list)
 
     async def admit_ingestion_batch(
         self,
         admission: IngestionBatchAdmission,
     ) -> AdmissionFacts:
+        if self.trace is not None:
+            self.trace.append("admit")
         self.calls.append(admission)
         if self.error is not None:
             raise self.error
@@ -3204,6 +3378,102 @@ async def test_adapter_empty_session_is_noop() -> None:
     assert admission.calls == []
     assert session.ack_attempts == []
     assert session.settlement_attempts == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_runs_control_hooks_around_commit_before_settlement() -> None:
+    trace: list[str] = []
+    batch = _batch()
+    session = _AdapterSession(batch, trace=trace)
+    admission = _AdapterAdmission(trace=trace)
+    observed: list[IngestionBatchAdmission] = []
+
+    def before_admission(candidate: IngestionBatchAdmission) -> None:
+        trace.append("before")
+        observed.append(candidate)
+
+    async def after_admission(
+        candidate: IngestionBatchAdmission,
+        facts: AdmissionFacts,
+        provenance: TimelineEventProvenance | None,
+    ) -> None:
+        trace.append("after")
+        assert candidate is observed[0]
+        assert facts is FRESH_FACTS
+        assert provenance is TimelineEventProvenance.LIVE
+
+    result = await consume_one_ingestion_batch(
+        session,  # type: ignore[arg-type]
+        admission,
+        account_id=ACCOUNT_ID,
+        device_id=DEVICE_ID,
+        before_admission=before_admission,
+        after_admission=after_admission,
+    )
+
+    assert result is FRESH_FACTS
+    assert trace == ["next", "before", "admit", "after", "settle"]
+    assert observed == [_expected_admission()]
+
+
+@pytest.mark.asyncio
+async def test_adapter_pre_admission_failure_prevents_commit_and_settlement() -> None:
+    trace: list[str] = []
+    error = RuntimeError("control fence failed")
+    batch = _batch()
+    session = _AdapterSession(batch, trace=trace)
+    admission = _AdapterAdmission(trace=trace)
+
+    def fail_before_admission(_candidate: IngestionBatchAdmission) -> None:
+        trace.append("before")
+        raise error
+
+    with pytest.raises(RuntimeError) as raised:
+        await consume_one_ingestion_batch(
+            session,  # type: ignore[arg-type]
+            admission,
+            account_id=ACCOUNT_ID,
+            device_id=DEVICE_ID,
+            before_admission=fail_before_admission,
+        )
+
+    assert raised.value is error
+    assert trace == ["next", "before"]
+    assert admission.calls == []
+    assert session.settlement_attempts == []
+    assert session.batch is batch
+
+
+@pytest.mark.asyncio
+async def test_adapter_post_admission_failure_leaves_owned_batch_unsettled() -> None:
+    trace: list[str] = []
+    error = RuntimeError("post-admission control effect failed")
+    batch = _batch()
+    session = _AdapterSession(batch, trace=trace)
+    admission = _AdapterAdmission(trace=trace)
+
+    async def fail_after_admission(
+        _candidate: IngestionBatchAdmission,
+        _facts: AdmissionFacts,
+        _provenance: TimelineEventProvenance | None,
+    ) -> None:
+        trace.append("after")
+        raise error
+
+    with pytest.raises(RuntimeError) as raised:
+        await consume_one_ingestion_batch(
+            session,  # type: ignore[arg-type]
+            admission,
+            account_id=ACCOUNT_ID,
+            device_id=DEVICE_ID,
+            after_admission=fail_after_admission,
+        )
+
+    assert raised.value is error
+    assert trace == ["next", "admit", "after"]
+    assert admission.calls == [_expected_admission()]
+    assert session.settlement_attempts == []
+    assert session.batch is batch
 
 
 @pytest.mark.asyncio
@@ -3371,6 +3641,7 @@ async def test_adapter_invalid_matrix_never_admits_or_acks(
     _resign(batch)
     session = _AdapterSession(batch)
     admission = _AdapterAdmission()
+    pre_admissions: list[IngestionBatchAdmission] = []
 
     with pytest.raises(IngestionBatchValidationError):
         await consume_one_ingestion_batch(
@@ -3378,8 +3649,10 @@ async def test_adapter_invalid_matrix_never_admits_or_acks(
             admission,
             account_id=ACCOUNT_ID,
             device_id=DEVICE_ID,
+            before_admission=pre_admissions.append,
         )
 
+    assert pre_admissions == []
     assert admission.calls == []
     assert session.ack_attempts == []
     assert session.settlement_attempts == []

@@ -476,14 +476,14 @@ async def prove_deterministic_retry(
     """
     client = account.client
     turn_id = f"live-{secrets.token_hex(4)}"
-    await store.enqueue_delivery(
-        turn_id=turn_id,
+    await store.enqueue_matrix_delivery(
+        delivery_id=turn_id,
         stage=DeliveryStage.FINAL,
         room_id=room_id,
         thread_id=None,
         payload=_text("deterministic delivery"),
     )
-    claimed = await store.claim_delivery(turn_id=turn_id, stage=DeliveryStage.FINAL)
+    claimed = await store.claim_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.FINAL)
     assert claimed is not None
     first = await _send(client, room_id, dict(claimed.payload), transaction_id=claimed.transaction_id)
     second = await _send(client, room_id, dict(claimed.payload), transaction_id=claimed.transaction_id)

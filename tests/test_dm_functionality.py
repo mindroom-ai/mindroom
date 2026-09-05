@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
@@ -17,6 +16,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     agent_response_should_respond,
@@ -61,7 +61,7 @@ class TestDMResponseLogic:
         room.room_id = "!dm:localhost"
         # Use the actual MatrixID from config to ensure domain matches
         agent_matrix_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
-        room.users = {agent_matrix_id: None}
+        room.users = {agent_matrix_id: nio.MatrixUser(agent_matrix_id)}
 
         # In DM mode, agent should respond when no one else has
         should_respond = agent_response_should_respond(
@@ -92,7 +92,7 @@ class TestDMResponseLogic:
         room.room_id = "!dm:localhost"
         # Use the actual MatrixID from config to ensure domain matches
         agent_matrix_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
-        room.users = {agent_matrix_id: None}
+        room.users = {agent_matrix_id: nio.MatrixUser(agent_matrix_id)}
 
         # When mentioned, always respond
         should_respond = agent_response_should_respond(
@@ -125,7 +125,7 @@ class TestDMResponseLogic:
         room.room_id = "!dm:localhost"
         test_agent_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
         other_agent_id = entity_ids(config, runtime_paths_for(config))["other_agent"].full_id
-        room.users = {test_agent_id: None, other_agent_id: None}
+        room.users = {test_agent_id: nio.MatrixUser(test_agent_id), other_agent_id: nio.MatrixUser(other_agent_id)}
 
         # Another agent is mentioned, not this one
         should_respond = agent_response_should_respond(
@@ -161,7 +161,7 @@ class TestDMResponseLogic:
         room.room_id = "!dm:localhost"
         test_agent_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
         other_agent_id = entity_ids(config, runtime_paths_for(config))["other_agent"].full_id
-        room.users = {test_agent_id: None, other_agent_id: None}
+        room.users = {test_agent_id: nio.MatrixUser(test_agent_id), other_agent_id: nio.MatrixUser(other_agent_id)}
 
         # No mentions - agents should not respond individually (team formation happens at a higher level)
         should_respond_test = agent_response_should_respond(
@@ -214,7 +214,7 @@ class TestDMMessageContext:
             display_name="Test Agent",
             password=TEST_PASSWORD,
         )
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -276,7 +276,7 @@ class TestDMIntegration:
             password=TEST_PASSWORD,
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -291,19 +291,20 @@ class TestDMIntegration:
 
         # Mock join_room to return success
         with (
-            patch("mindroom.bot_room_lifecycle.is_authorized_sender", return_value=True),
+            patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room", return_value=True),
             patch(
                 "mindroom.matrix.client_room_admin.join_room",
                 return_value=RoomJoinOutcome.JOINED,
             ) as mock_join,
         ):
-            room = MagicMock()
-            room.room_id = "!dm:localhost"
-            room.canonical_alias = None
             event = MagicMock()
             event.sender = "@user:localhost"
+            room = nio.MatrixInvitedRoom("!dm:localhost", bot.agent_user.user_id)
+            room.inviter = event.sender
+            bot.client.invited_rooms = {room.room_id: room}
 
-            await bot._on_invite(room, event)
+            bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
+            await bot._room_lifecycle.handle_recorded_invite(room, event.sender)
 
             mock_join.assert_called_once()
             bot.logger.info.assert_any_call("Joined room", room_id="!dm:localhost")
@@ -331,7 +332,7 @@ class TestDMIntegration:
         )
 
         # Important: bot is NOT configured for the DM room
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -349,10 +350,6 @@ class TestDMIntegration:
         generate_response = AsyncMock()
         install_generate_response_mock(bot, generate_response)
 
-        # Mock helper functions
-        async def mock_handle(*args: object, **kwargs: object) -> None:
-            pass
-
         with (
             patch.object(
                 bot._conversation_resolver,
@@ -363,7 +360,6 @@ class TestDMIntegration:
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
             patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=True),  # This is a DM room
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
             mock_thread_info.return_value = EventInfo(
@@ -392,7 +388,7 @@ class TestDMIntegration:
                 if "researcher" in entity_ids(config, runtime_paths_for(config))
                 else "@mindroom_researcher:localhost"
             )
-            room.users = {researcher_id: None}  # Single agent in room
+            room.users = {researcher_id: nio.MatrixUser(researcher_id)}  # Single agent in room
 
             event = MagicMock(spec=nio.RoomMessageText)
             event.body = "Hello researcher, can you help?"
@@ -433,7 +429,7 @@ class TestDMIntegration:
         )
 
         # Agent is NOT configured for any rooms
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -447,9 +443,6 @@ class TestDMIntegration:
         generate_response = AsyncMock()
         install_generate_response_mock(bot, generate_response)
 
-        async def mock_handle(*args: object, **kwargs: object) -> None:
-            pass
-
         with (
             patch.object(
                 bot._conversation_resolver,
@@ -460,7 +453,6 @@ class TestDMIntegration:
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
             patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=True),  # This is a DM room
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
             mock_thread_info.return_value = EventInfo(
@@ -485,7 +477,7 @@ class TestDMIntegration:
             room.name = "DM Room"
             # Use the correct MatrixID from config
             test_agent_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
-            room.users = {test_agent_id: None}  # Single agent in room
+            room.users = {test_agent_id: nio.MatrixUser(test_agent_id)}  # Single agent in room
 
             event = MagicMock(spec=nio.RoomMessageText)
             event.body = "Hello agent!"

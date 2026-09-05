@@ -43,6 +43,7 @@ from tests.conftest import (
     ignore_final_delivery_handoff,
     make_conversation_reader_mock,
     make_matrix_client_mock,
+    make_membership_stub,
     make_outbox_mock,
     message_origin,
     runtime_paths_for,
@@ -636,8 +637,8 @@ async def test_persistent_sync_recovery_barrier_settles_placeholder_as_delivery_
     durable_edit = AsyncMock(side_effect=barrier_error)
     failure_edit = AsyncMock(return_value=None)
     with (
-        patch("mindroom.delivery_gateway.send_message_result", new=durable_edit),
-        patch("mindroom.delivery_gateway.edit_message_result", new=failure_edit),
+        patch("mindroom.delivery_gateway.send_message_outcome", new=durable_edit),
+        patch("mindroom.delivery_gateway.edit_message_outcome", new=failure_edit),
     ):
         outcome = await gateway.deliver_final(
             FinalDeliveryRequest(
@@ -670,7 +671,7 @@ async def test_persistent_sync_recovery_barrier_returns_new_send_delivery_failur
     gateway = _delivery_gateway(tmp_path)
     barrier_error = nio.SendRetryError("Room timeline recovery is still pending.")
     with patch(
-        "mindroom.delivery_gateway.send_message_result",
+        "mindroom.delivery_gateway.send_message_outcome",
         new=AsyncMock(side_effect=barrier_error),
     ) as send:
         outcome = await gateway.deliver_final(
@@ -869,12 +870,17 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             response_stream=interactive_stream(),
             existing_event_id="$displayed-root",
             adopt_existing_placeholder=True,
+            interactive_creator_agent="code",
+            interactive_source_event_id="$source",
         )
 
     assert stream_outcome.last_physical_stream_event_id == "$displayed-root"
     assert stream_outcome.rendered_body == formatted_interactive.formatted_text
     assert stream_outcome.canonical_final_body_candidate == raw_interactive
+    assert len(captured_stream_edits) >= 2
+    assert all("io.mindroom.interactive" not in content for content in captured_stream_edits[:-1])
     assert captured_stream_edits[-1]["body"] == formatted_interactive.formatted_text
+    assert captured_stream_edits[-1]["io.mindroom.interactive"]["source_event_id"] == "$source"
 
     envelope = _envelope()
     response_hooks = SimpleNamespace(
@@ -940,38 +946,31 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
         _room_send_response("$reaction-no"),
         _room_send_response("$reaction-test"),
     ]
-    interactive._cleanup()
-    try:
-        support = PostResponseEffectsSupport(
-            runtime=SimpleNamespace(client=client, config=config),
-            logger=get_logger("tests.post_response"),
-            runtime_paths=runtime_paths_for(config),
-            delivery_gateway=Mock(),
-            conversation_reader=make_conversation_reader_mock(),
-        )
-        await apply_post_response_effects(
-            final_outcome,
-            ResponseOutcome(interactive_target=target),
-            support.build_deps(
-                room_id=target.room_id,
-                interactive_agent_name="code",
-            ),
-        )
+    support = PostResponseEffectsSupport(
+        runtime=SimpleNamespace(client=client, config=config),
+        logger=get_logger("tests.post_response"),
+        runtime_paths=runtime_paths_for(config),
+        conversation_reader=make_conversation_reader_mock(),
+        membership=make_membership_stub(),
+        agent_name="agent",
+    )
+    await apply_post_response_effects(
+        final_outcome,
+        ResponseOutcome(response_target=target),
+        support.build_deps(
+            room_id=target.room_id,
+            membership_turn_id="$turn",
+        ),
+    )
 
-        registered = interactive._active_questions["$displayed-root"]
-        assert registered.thread_id == "$thread-root"
-        assert registered.options == final_outcome.option_map
-        reaction_targets = [
-            call.kwargs["content"]["m.relates_to"]["event_id"] for call in client.room_send.await_args_list
-        ]
-        reaction_keys = [call.kwargs["content"]["m.relates_to"]["key"] for call in client.room_send.await_args_list]
-        assert reaction_targets == ["$displayed-root", "$displayed-root", "$displayed-root"]
-        assert "$obsolete-edit" not in reaction_targets
-        assert reaction_keys == ["✅", "❌", "🧪"]
-    finally:
-        interactive._cleanup()
+    reaction_targets = [call.kwargs["content"]["m.relates_to"]["event_id"] for call in client.room_send.await_args_list]
+    reaction_keys = [call.kwargs["content"]["m.relates_to"]["key"] for call in client.room_send.await_args_list]
+    assert reaction_targets == ["$displayed-root", "$displayed-root", "$displayed-root"]
+    assert "$obsolete-edit" not in reaction_targets
+    assert reaction_keys == ["✅", "❌", "🧪"]
 
 
+@pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_streamed_interactive_metadata_survives_unparseable_canonical_final_body(tmp_path: Path) -> None:
     """Registration should use the same interactive parse that rendered the visible streamed body."""

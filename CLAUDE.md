@@ -61,7 +61,7 @@ Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI doc
 
 ```text
 Matrix sync callback
-  -> matrix/journal_ingress.py                             (pre-fanout admission: commit the event before nio is told it was accepted)
+  -> matrix/durable_ingestion.py                           (validate owned Nio work, commit its receipt and effects, then acknowledge)
   -> bot.py (AgentBot/TeamBot runtime shell)
   -> journal_dispatch.py + pending_event_worker.py         (fan admitted events out to callbacks; unsettled work is woken again)
   -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
@@ -117,7 +117,15 @@ Matrix sync callback
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
+| `approval_execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
+| `approval_response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
 | `approval_manager.py` | Matrix-backed tool approval runtime state |
+| `oauth/credential_binding.py` | Canonical OAuth provider and worker-target bindings for browser workflows |
+| `oauth/credential_lifecycle.py` | Single transaction owner for scoped OAuth load, refresh, callback publication, invalidation, and reset state |
+| `oauth/credential_store.py` | Per-scope SQLite OAuth credential storage, revisions, legacy adoption, and reset receipts |
+| `oauth/reset.py` | OAuth reset target resolution and requester-bound browser intents |
+| `oauth/reset_execution.py` | MCP retirement and durable reset execution |
+| `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
@@ -136,20 +144,24 @@ Matrix sync callback
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `scheduling.py` | Cron and natural-language task scheduling |
-| `scheduling_executor.py` | Fire one scheduled task: hook emission, message build, Matrix delivery, failure notices |
+| `scheduling_executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
+| `scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
 | `tools/` | 100+ tool integrations |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
 | `model_loading.py` | Model instantiation and provider-specific loader selection |
-| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
+| `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
+| `legacy_session_migration.py` | Background retirement of Agno 2 session run blobs |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
-| `matrix/sync_checkpoint_trust.py` | Sync-checkpoint persistence and the journal generation a checkpoint is certified against |
-| `matrix/sync_continuity.py` | Crash-atomic checkpoint and pending join-fence persistence |
-| `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
+| `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |
+| `matrix/durable_ingestion.py` | Owned Nio batch validation, journal admission, and acknowledgement |
+| `matrix/sync_continuity.py` | Durable pending join-fence persistence |
+| `matrix/journal_ingress.py` | Typed event classification and replay parsing using Nio provenance |
 | `matrix/message_content.py` | Canonical Matrix message content building for text, edits, and tool traces |
 | `matrix/message_builder.py` | Message content building helpers |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
@@ -160,12 +172,13 @@ Matrix sync callback
 | `matrix/reply_chain.py` | Reply chain context management |
 | `matrix/identity.py` | Matrix ID parsing and utilities |
 | `matrix/mentions.py` | Matrix mention formatting |
+| `matrix/member_display_names.py` | Current member display names snapshotted from the synced nio room cache for model-facing `<msg>` tags |
 | `matrix/typing.py` | Typing indicator utilities |
 | `matrix/avatar.py` | Avatar management |
 | `commands/` | Chat command parsing (`!help`, `!schedule`, `!config`, etc.) |
 | `commands/config_commands.py` | Chat-based config commands (`!config`) |
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
-| `voice_handler.py` | Voice message download, transcription, and command recognition |
+| `voice_handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup |
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
 | `shell_execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
 | `shell_supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
@@ -179,6 +192,7 @@ Matrix sync callback
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
+| `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
 | `background_tasks.py` | Background task management for non-blocking operations |
 | `tool_system/events.py` | Tool-event formatting and metadata for Matrix messages |
 | `tool_system/declarations.py` | Leaf tool metadata enums and dataclasses shared by implementations and the runtime catalog |
@@ -188,9 +202,13 @@ Matrix sync callback
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
+| `access_policy.py` | Resolve membership access config into immutable effective room and responder policies |
+| `config/access.py` | Membership access configuration models (responder access, room defaults) |
+| `config/access_migration.py` | One-shot migration from retired access fields to the membership schema; delete with the retired fields |
 | `thread_utils.py` | Thread analysis and agent detection |
 | `session_ids.py` | Leaf helpers for the canonical persisted room/thread session ID |
 | `thread_models.py` | Durable per-thread model overrides backing `!model` and the `thread_model` tool |
+| `room_model_overrides.py` | Durable per-room runtime model defaults backing `!room_model` |
 | `file_watcher.py` | File change detection for config hot-reload |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
 | `stop.py` | StopManager for cancelling in-progress responses |
@@ -205,8 +223,8 @@ Matrix sync callback
 | `logging_config.py` | Structured logging setup |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
 
-**Persistent state** lives under `mindroom_data/` (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
-- `sessions/` – Per-agent SQLite event history for Agno conversations
+**Persistent state** lives under `mindroom_data/` by default (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
+- `agents/*/sessions/` and `teams/*/sessions/` – SQLite event history for Agno conversations, optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
 - `learning/` – Per-agent Agno Learning preference data
 - `chroma/` – ChromaDB storage backing the memory system
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
@@ -214,7 +232,6 @@ Matrix sync callback
 - `credentials/` – JSON secrets synchronized from `.env`
 - `encryption_keys/` – Matrix E2E encryption keys
 - `sync_continuity/` – Crash-atomic Matrix checkpoints and pending join decrypt fences
-- `culture/` – Shared culture state
 - `logs/` – Log files
 - `matrix_state.yaml` – Matrix sync state
 
@@ -263,11 +280,17 @@ agents:
       - Always read files before modifying them.
     rooms: [lobby, dev]
     knowledge_bases: [engineering_docs]
+    access:
+      current_room_members: false
+      members_of_rooms: [lobby, dev]
+      users: []
+    credential_managers: []
 
 defaults:
   tools: [scheduler]
   markdown: true
   enable_streaming: true
+  large_message_strategy: sidecar
 
 memory:
   backend: mem0
@@ -296,12 +319,6 @@ teams:
     agents: [code]
     mode: collaborate
 
-cultures:
-  engineering:
-    description: Follow clean code principles and write tests
-    agents: [code]
-    mode: automatic
-
 knowledge_bases:
   engineering_docs:
     path: ./knowledge_docs
@@ -317,20 +334,21 @@ mindroom_user:
   username: mindroom_user
   display_name: MindRoomUser
 
-matrix_room_access:
-  mode: single_user_private
-  multi_user_join_rule: public
-  publish_to_room_directory: false
-  invite_only_rooms: []
-  reconcile_existing_rooms: false
+administrators:
+  - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+
+room_defaults:
+  join_policy: invite
+  listed: false
+  encrypted: false
+  invite_users:
+    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+  admins:
+    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
 
 authorization:
-  default_room_access: false
-  global_users:
-    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
-  agent_reply_permissions:
-    "*":
-      - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+  config_command_enabled: false
+  aliases: {}
 
 timezone: America/Los_Angeles
 ```
@@ -464,7 +482,7 @@ Use this when Matrix + chat UI are hosted and only the MindRoom backend runs loc
 
 1) Initialize local config with hosted defaults
 ```bash
-uvx mindroom config init --profile public
+uvx mindroom config init --matrix-server mindroom.chat
 ```
 
 2) Add at least one model provider key in `~/.mindroom/.env` (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
@@ -557,7 +575,7 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 
 ### Step 6: Viewing the Widget
 
-- **Taking Screenshots**: To view the dashboard without Jupyter, use `python frontend/take_screenshot.py` from the project root.
+- **Taking Screenshots**: To view the dashboard without Jupyter, use `uv run python frontend/take_screenshot.py` from the project root.
 - **Manual Screenshot**: From the frontend directory, run `bun run dev` to start the development server, then run `bun run screenshot` in another terminal.
 - **Screenshot Location**: Screenshots are saved to `frontend/screenshots/` with timestamps.
 - **Use Cases**: This is helpful for visual verification, documentation, and sharing the dashboard appearance.
@@ -698,7 +716,7 @@ mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 mindroom run --log-level DEBUG  # Surface routing decisions, tool calls, config reloads
 ```
 
-Inspect agent traces: `mindroom_data/sessions/<agent>.db`
+Inspect agent traces under `<session-storage-root>/agents/<agent>/sessions/<agent>.db`, where the session storage root is `MINDROOM_SESSION_STORAGE_PATH` when set and `MINDROOM_STORAGE_PATH` otherwise.
 
 ## 6. Releases
 

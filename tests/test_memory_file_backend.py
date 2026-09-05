@@ -325,7 +325,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
 
     access_base_ids: list[str] = []
 
-    def resolve_access(
+    async def resolve_access(
         base_id: str,
         access_config: Config,
         access_runtime_paths: object,
@@ -351,7 +351,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
         return [memory_file.resolve()]
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
-    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access, raising=False)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler(), raising=False)
 
     results = await semantic_file_search.search_semantic_file_memories(
@@ -395,7 +395,7 @@ async def test_semantic_memory_search_emits_nested_query_timings(
     runtime_paths = runtime_paths_for(config)
     fake_knowledge = _FakeSemanticTimingKnowledge()
 
-    def resolve_access(*_args: object, **_kwargs: object) -> object:
+    async def resolve_access(*_args: object, **_kwargs: object) -> object:
         return SimpleNamespace(knowledge=fake_knowledge, availability=KnowledgeAvailability.READY)
 
     emitted: list[tuple[str, str | None]] = []
@@ -404,7 +404,7 @@ async def test_semantic_memory_search_emits_nested_query_timings(
         emitted.append((label, timing_scope.get()))
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", lambda *_args, **_kwargs: [memory_file.resolve()])
-    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
     monkeypatch.setattr(semantic_file_search, "emit_elapsed_timing", emit_timing)
 
     token = timing_scope.set("scope-123")
@@ -449,11 +449,11 @@ async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_rai
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
 
-    def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
+    async def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
         return KnowledgeBaseAccessResolution(knowledge=None, availability=KnowledgeAvailability.INITIALIZING)
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
-    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
     with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError) as excinfo:
@@ -491,7 +491,7 @@ async def test_semantic_memory_cold_failed_index_carries_classified_cause(
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
 
-    def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
+    async def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
         return KnowledgeBaseAccessResolution(
             knowledge=None,
             availability=KnowledgeAvailability.REFRESH_FAILED,
@@ -501,7 +501,7 @@ async def test_semantic_memory_cold_failed_index_carries_classified_cause(
         )
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
-    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
     with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError) as excinfo:

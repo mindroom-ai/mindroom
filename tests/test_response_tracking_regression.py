@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -21,6 +20,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -28,6 +28,7 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_journal_support,
     install_send_response_mock,
+    make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
     wrap_extracted_collaborators,
@@ -81,7 +82,7 @@ class TestResponseTrackingRegression:
         test_room_id = "!test:localhost"
 
         # Set up router bot (only router handles commands)
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
@@ -90,7 +91,7 @@ class TestResponseTrackingRegression:
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = make_matrix_client_mock(user_id=mock_router_agent.user_id)
         bot.client.user_id = mock_router_agent.user_id
         install_runtime_journal_support(bot)
 
@@ -171,7 +172,7 @@ class TestResponseTrackingRegression:
         test_room_id = "!test:localhost"
 
         # Set up router bot
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
@@ -238,7 +239,7 @@ class TestResponseTrackingRegression:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_ai_routing_response_tracking(
         self,
         mock_suggest_responder: AsyncMock,
@@ -254,7 +255,7 @@ class TestResponseTrackingRegression:
         test_room_id = "!test:localhost"
 
         # Set up router bot
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
@@ -263,7 +264,7 @@ class TestResponseTrackingRegression:
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
-        bot.client = AsyncMock()
+        bot.client = make_matrix_client_mock(user_id=mock_router_agent.user_id)
         bot.client.user_id = mock_router_agent.user_id
         install_runtime_journal_support(bot)
 

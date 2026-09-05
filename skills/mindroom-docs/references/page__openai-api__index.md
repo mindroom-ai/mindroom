@@ -119,6 +119,7 @@ Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom i
 Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`.
 Only shared agents that are either unscoped or explicitly configured with `worker_scope=shared` appear in `/v1/models`.
 Agents that use `agents.<name>.private` are not listed there, because `private.per` creates requester-private instances and therefore an isolating execution scope.
+Agents whose `delegate_to` closure reaches an isolating agent are also excluded, because an OpenAI-compatible request cannot safely materialize that delegated target.
 An OpenAI-compatible run can expose fewer tool functions than the same agent in Matrix when `tool_approval` hides approval-gated functions from `/v1` or tool metadata hides functions that require live room context.
 
 ### Auto-routing

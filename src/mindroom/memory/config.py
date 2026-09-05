@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mem0 import AsyncMemory
+    from mem0.llms.openai import OpenAILLM
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -262,6 +263,11 @@ async def create_memory_instance(
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects
     memory = AsyncMemory.from_config(config_dict)
+    memory_llm = config.memory.llm
+    if memory_llm is not None and memory_llm.provider == "openai":
+        from mindroom.memory._mem0_openai import install_mem0_openai_compatibility  # noqa: PLC0415
+
+        install_mem0_openai_compatibility(cast("OpenAILLM", memory.llm))
     if config.memory.embedder.provider == "openai":
         # Mem0's own OpenAI embedder indexes response.data[0] without validation
         # and can expose raw provider errors. Reuse MindRoom's strict boundary.

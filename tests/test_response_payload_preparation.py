@@ -13,9 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
-from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
@@ -28,6 +26,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.turn_policy import PreparedDispatch
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -43,17 +43,19 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.dispatch_handoff import MediaDispatchEvent
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 def _config(tmp_path: Path) -> Config:
     return bind_runtime_paths(
-        Config(
-            agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
-            teams={},
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
+        with_current_room_member_access(
+            Config(
+                agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
+                teams={},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
         ),
         test_runtime_paths(tmp_path),
     )
@@ -67,7 +69,7 @@ def _bot(tmp_path: Path) -> AgentBot:
         display_name="General",
         user_id="@mindroom_general:localhost",
     )
-    bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     install_runtime_journal_support(bot)

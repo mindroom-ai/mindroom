@@ -11,6 +11,7 @@ from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy
 from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV, SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
+    private_instance_scope_root_path,
     resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
     worker_key_agent_name,
@@ -29,6 +30,7 @@ __all__ = [
     "build_backend_config_signature",
     "build_dedicated_worker_runtime_paths",
     "plan_scoped_visible_state_roots",
+    "resolve_state_scope_worker_key",
     "resolved_agent_policies_from_config_data",
     "stable_signature_json",
     "validate_dedicated_worker_extra_env",
@@ -60,6 +62,22 @@ class ScopedVisibleStateRoot:
 
     local_path: Path
     worker_visible_path: Path
+
+
+def resolve_state_scope_worker_key(worker_key: str, state_scope_worker_key: str | None) -> str:
+    """Resolve a narrower run key to the durable worker scope it is allowed to mount."""
+    if state_scope_worker_key is None or state_scope_worker_key == worker_key:
+        return worker_key
+    worker_parts = worker_key.split(":")
+    state_scope_parts = state_scope_worker_key.split(":")
+    if (
+        len(worker_parts) == len(state_scope_parts) + 1
+        and worker_parts[:-2] == state_scope_parts[:-1]
+        and worker_parts[-1] == state_scope_parts[-1]
+    ):
+        return state_scope_worker_key
+    msg = f"Worker state scope does not own the requested worker key: {worker_key}"
+    raise WorkerBackendError(msg)
 
 
 def validate_private_user_agent_visibility(
@@ -243,16 +261,21 @@ def plan_scoped_visible_state_roots(
         )
 
     effective_private_agent_names = private_agent_names or frozenset()
-    worker_visible_roots = visible_state_roots_for_worker_key(
-        worker_visible_shared_storage_root,
-        worker_key,
-        private_agent_names=effective_private_agent_names,
-    )
-    local_roots = visible_state_roots_for_worker_key(
-        local_shared_storage_root,
-        worker_key,
-        private_agent_names=effective_private_agent_names,
-    )
+    agent_name = worker_key_agent_name(worker_key)
+    if scope == "user_agent" and agent_name is not None and agent_name in effective_private_agent_names:
+        worker_visible_roots = (private_instance_scope_root_path(worker_visible_shared_storage_root, worker_key),)
+        local_roots = (private_instance_scope_root_path(local_shared_storage_root, worker_key),)
+    else:
+        worker_visible_roots = visible_state_roots_for_worker_key(
+            worker_visible_shared_storage_root,
+            worker_key,
+            private_agent_names=effective_private_agent_names,
+        )
+        local_roots = visible_state_roots_for_worker_key(
+            local_shared_storage_root,
+            worker_key,
+            private_agent_names=effective_private_agent_names,
+        )
     if not worker_visible_roots or len(worker_visible_roots) != len(local_roots):
         msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
         raise WorkerBackendError(msg)

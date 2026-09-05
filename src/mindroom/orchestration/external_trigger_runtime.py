@@ -12,6 +12,7 @@ from mindroom.matrix.client_room_admin import get_joined_rooms
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -23,6 +24,7 @@ class ExternalTriggerRuntimeCoordinator:
     """Own external trigger API runtime binding and live deliverability state."""
 
     runtime_paths: RuntimePaths
+    agent_reply_memberships: AgentReplyMembershipIndex
     api_enabled: bool = True
 
     def bind_if_ready(
@@ -49,6 +51,9 @@ class ExternalTriggerRuntimeCoordinator:
             client=router_bot.client,
             conversation_reader=router_bot._conversation_reader,
             is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+            agent_reply_memberships=self.agent_reply_memberships,
+            response_admission_gate=router_bot.admission_gate,
+            wait_for_admission_or_shutdown=router_bot.wait_for_admission_or_shutdown,
         )
 
     def unbind(self) -> None:

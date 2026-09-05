@@ -1,12 +1,14 @@
 """Tests for the dashboard backend API endpoints."""
 
 import asyncio
+import copy
 import json
 import os
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
@@ -35,8 +37,12 @@ from mindroom.embedder_health import capture_embedder_health_recorder
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState
+from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
+from mindroom.oauth.credential_store import oauth_credential_transaction
+from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
+from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
@@ -86,10 +92,11 @@ def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None)
 def _config_with_worker_scope(
     worker_scope: str | None,
     *,
-    authorization: dict[str, Any] | None = None,
+    allowed_users: list[str] | None = None,
     worker_grantable_credentials: list[str] | None = None,
 ) -> Config:
     payload: dict[str, Any] = {
+        "administrators": ["@owner:example.org"],
         "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
         "agents": {
             "general": {
@@ -98,6 +105,8 @@ def _config_with_worker_scope(
                 "tools": ["homeassistant"],
                 "instructions": ["hi"],
                 "rooms": ["lobby"],
+                "access": {"users": allowed_users or []},
+                "credential_managers": allowed_users or [],
             },
         },
         "defaults": {
@@ -105,8 +114,6 @@ def _config_with_worker_scope(
             "worker_grantable_credentials": worker_grantable_credentials,
         },
     }
-    if authorization is not None:
-        payload["authorization"] = authorization
     config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
     return config
@@ -537,6 +544,24 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     assert auth._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
 
+def test_runtime_path_swap_clears_script_broker_and_worker_keepalive(tmp_path: Path) -> None:
+    """An API app cannot retain script capabilities from another runtime root."""
+    fresh_app = FastAPI()
+    initial_runtime = _runtime_paths(tmp_path / "first")
+    refreshed_runtime = _runtime_paths(tmp_path / "second")
+    main.initialize_api_app(fresh_app, initial_runtime)
+    main.bind_script_runtime(
+        fresh_app,
+        broker=MagicMock(),
+        touch_live_workers=MagicMock(),
+    )
+
+    main.initialize_api_app(fresh_app, refreshed_runtime)
+
+    assert fresh_app.state.script_tool_broker is None
+    assert config_lifecycle.app_state(fresh_app).script_worker_keepalive is None
+
+
 def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_path: Path) -> None:
     """Swapping an app to a different config file should drop the previous cached payload."""
     first_dir = tmp_path / "first"
@@ -846,10 +871,10 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
         runtime_paths: constants.RuntimePaths,
         *,
         runtime_config: object | None = None,
-        worker_grantable_credentials: frozenset[str] | None = None,
+        touch_live_workers: Callable[[WorkerBackend], None] | None = None,
     ) -> int:
         del runtime_config
-        assert worker_grantable_credentials == constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
+        assert touch_live_workers is None
         cleanup_paths.append(runtime_paths.config_path)
         if len(cleanup_paths) == 1:
             main.initialize_api_app(main.app, second_runtime)
@@ -878,6 +903,32 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     await main._worker_cleanup_loop(stop_event, main.app, idle_poll_interval_seconds=0.01)
 
     assert cleanup_paths == [first_runtime.config_path, second_runtime.config_path]
+
+
+def test_worker_cleanup_touches_live_script_workers_before_maintenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Active script workers must have their leases refreshed before idle cleanup."""
+    actions: list[str] = []
+    worker_manager = MagicMock()
+    worker_manager.backend_name = "test"
+    monkeypatch.setattr(
+        main,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
+    )
+    monkeypatch.setattr(
+        main,
+        "maintain_workers",
+        lambda _backend: actions.append("maintain") or WorkerMaintenanceResult(cleaned=(), reconciled=()),
+    )
+
+    main._cleanup_workers_once(
+        main._app_runtime_paths(main.app),
+        touch_live_workers=lambda backend: actions.append("touch") if backend is worker_manager else None,
+    )
+
+    assert actions == ["touch", "maintain"]
 
 
 def test_health_check(test_client: TestClient) -> None:
@@ -1109,29 +1160,7 @@ def test_readiness_check_reports_startup_detail(test_client: TestClient) -> None
 
 def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Background worker cleanup should no-op when no backend is configured."""
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: False)
-
-    assert (
-        main._cleanup_workers_once(
-            main._app_runtime_paths(main.app),
-            worker_grantable_credentials=constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
-        )
-        == 0
-    )
-
-
-def test_worker_cleanup_once_skips_kubernetes_without_committed_runtime_config(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kubernetes cleanup should skip the cycle when no committed runtime config is available."""
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-
-    def _unexpected_get_primary_worker_manager(*_args: object, **_kwargs: object) -> object:
-        msg = "cleanup should not build a Kubernetes worker manager without a committed snapshot"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(main, "get_primary_worker_manager", _unexpected_get_primary_worker_manager)
+    monkeypatch.setattr(main, "lease_configured_primary_worker_manager", lambda *_args, **_kwargs: None)
 
     assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
 
@@ -1160,34 +1189,16 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
             assert now is None
             return WorkerMaintenanceResult(cleaned=tuple(self.cleanup_idle_workers()), reconciled=())
 
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    captured_kwargs: dict[str, object] = {}
-
-    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> _FakeWorkerManager:
-        captured_kwargs.update(kwargs)
-        return _FakeWorkerManager()
-
-    monkeypatch.setattr(main, "get_primary_worker_manager", _fake_get_primary_worker_manager)
+    worker_manager = _FakeWorkerManager()
+    monkeypatch.setattr(
+        main,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
+    )
 
     runtime_paths = main._app_runtime_paths(main.app)
     runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    assert (
-        main._cleanup_workers_once(
-            runtime_paths,
-            runtime_config=runtime_config,
-            worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
-        )
-        == 1
-    )
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
-    assert captured_kwargs["kubernetes_config_snapshot"] == (
-        main.serialized_kubernetes_worker_config_snapshot(runtime_config)
-    )
-    assert captured_kwargs["worker_grantable_credentials"] == runtime_config.get_worker_grantable_credentials()
+    assert main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config) == 1
 
 
 def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1206,19 +1217,14 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
             return WorkerMaintenanceResult(cleaned=(), reconciled=())
 
     worker_manager = _FakeWorkerManager()
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    monkeypatch.setattr(main, "get_primary_worker_manager", lambda *_args, **_kwargs: worker_manager)
+    monkeypatch.setattr(
+        main,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
+    )
     runtime_paths = main._app_runtime_paths(main.app)
     runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    main._cleanup_workers_once(
-        runtime_paths,
-        runtime_config=runtime_config,
-        worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
-    )
+    main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config)
 
     assert maintained_managers == [worker_manager]
 
@@ -1243,21 +1249,11 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
                 ),
             ]
 
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(workers_api, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    captured_kwargs: dict[str, object] = {}
-
-    def _fake_get_primary_worker_manager(*_args: object, **kwargs: object) -> _FakeWorkerManager:
-        captured_kwargs.update(kwargs)
-        return _FakeWorkerManager()
-
+    worker_manager = _FakeWorkerManager()
     monkeypatch.setattr(
         workers_api,
-        "get_primary_worker_manager",
-        _fake_get_primary_worker_manager,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
 
     response = test_client.get("/api/workers")
@@ -1265,18 +1261,17 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
     assert response.status_code == 200
     assert response.json()["workers"][0]["worker_key"] == "worker-key"
     assert response.json()["workers"][0]["backend_name"] == "kubernetes"
-    assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
-    assert captured_kwargs["kubernetes_config_snapshot"] is not None
-    assert captured_kwargs["worker_grantable_credentials"] == constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
 
 
 def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The dashboard should expose manual idle-worker cleanup."""
+    """Manual cleanup refreshes live-script workers before applying the idle cutoff."""
+    actions: list[tuple[str, object]] = []
 
     class _FakeWorkerManager:
         idle_timeout_seconds = 60.0
 
         def cleanup_idle_workers(self) -> list[WorkerHandle]:
+            actions.append(("cleanup", self))
             return [
                 WorkerHandle(
                     worker_id="worker-1",
@@ -1290,16 +1285,32 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
                 ),
             ]
 
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(workers_api, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
-    monkeypatch.setattr(workers_api, "get_primary_worker_manager", lambda *_args, **_kwargs: _FakeWorkerManager())
+    worker_manager = _FakeWorkerManager()
+
+    class _Lease:
+        released = False
+
+        def __enter__(self) -> _FakeWorkerManager:
+            return worker_manager
+
+        def __exit__(self, *_args: object) -> None:
+            self.released = True
+
+    lease = _Lease()
+    monkeypatch.setattr(
+        workers_api,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: lease,
+    )
+    config_lifecycle.ensure_app_state(cast("FastAPI", test_client.app)).script_worker_keepalive = lambda manager: (
+        actions.append(("touch", manager))
+    )
 
     response = test_client.post("/api/workers/cleanup")
 
     assert response.status_code == 200
+    assert actions == [("touch", worker_manager), ("cleanup", worker_manager)]
+    assert lease.released is True
     assert response.json()["idle_timeout_seconds"] == 60.0
     assert response.json()["cleaned_workers"][0]["status"] == "idle"
 
@@ -1503,7 +1514,8 @@ def test_get_tools(test_client: TestClient) -> None:
     assert calculator_tool["agent_override_fields"] is None
 
 
-def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path) -> None:
     """Custom non-OAuth auth providers should still use ordinary credential presence."""
     runtime_paths = _runtime_paths(tmp_path)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
@@ -1533,7 +1545,7 @@ def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path)
         },
     ]
 
-    tools_api._update_tools_statuses(tools, context)
+    await tools_api._update_tools_statuses(tools, context)
 
     assert tools[0]["status"] == "available"
 
@@ -1703,7 +1715,7 @@ def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_
     runtime_paths = use_trusted_upstream_runtime(main.app)
     config = _config_with_worker_scope(
         "shared",
-        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+        allowed_users=["@alice:example.org"],
     )
     tools = [
         {
@@ -1854,7 +1866,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=app_runtime_paths.config_path,
         storage_path=app_runtime_paths.storage_root,
-        process_env={},
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials(
@@ -1914,7 +1926,70 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     assert tool["name"] == "google_drive"
     assert tool["status"] == "requires_config"
 
-    manager.for_primary_runtime_agent_scope("general").save_credentials(
+    worker_target = resolve_worker_target("shared", "general", execution_identity=identity)
+    credential_context = resolve_oauth_credential_context(
+        google_drive_oauth_provider(),
+        runtime_paths,
+        manager,
+        worker_target,
+    )
+
+    async def publish_oauth_credentials() -> None:
+        async with oauth_credential_transaction(credential_context) as transaction:
+            transaction.publish(
+                {
+                    "token": "drive-token",
+                    "refresh_token": "drive-refresh-token",
+                    "client_id": "client-id",
+                    "scopes": [
+                        "openid",
+                        "https://www.googleapis.com/auth/userinfo.email",
+                        "https://www.googleapis.com/auth/userinfo.profile",
+                        "https://www.googleapis.com/auth/drive",
+                    ],
+                    "_source": "oauth",
+                },
+                advance_connection_generation=True,
+            )
+            await transaction.commit()
+
+    asyncio.run(publish_oauth_credentials())
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        connected_response = test_client.get("/api/tools/?agent_name=general")
+
+    assert connected_response.status_code == 200
+    connected_tool = connected_response.json()["tools"][0]
+    assert connected_tool["status"] == "available"
+
+
+def test_get_tools_non_requester_oauth_keeps_non_authoritative_shared_preview(
+    test_client: TestClient,
+) -> None:
+    """Existing OAuth providers must not expose requester stores through non-authoritative status."""
+    runtime_paths = use_trusted_upstream_runtime(main.app)
+    config = _config_with_worker_scope(
+        "user",
+        allowed_users=["@alice:example.org"],
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "google_drive_oauth_client",
+        {"client_id": "client-id", "client_secret": "client-secret"},
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    oauth_target = resolve_worker_target("user", "general", execution_identity=identity)
+    save_scoped_credentials(
         "google_drive_oauth",
         {
             "token": "drive-token",
@@ -1927,17 +2002,38 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
                 "https://www.googleapis.com/auth/drive",
             ],
             "_source": "oauth",
+            "_oauth_provider": "google_drive",
         },
+        credentials_manager=manager,
+        worker_target=oauth_target,
     )
+    tools = [
+        {
+            "name": "google_drive",
+            "display_name": "Google Drive",
+            "description": "Drive access",
+            "category": "productivity",
+            "status": "requires_config",
+            "setup_type": "oauth",
+            "auth_provider": "google_drive",
+            "config_fields": [],
+        },
+    ]
+    headers = trusted_upstream_headers(
+        user_id="alice",
+        email="alice@example.org",
+        matrix_user_id="@alice:example.org",
+    )
+
     with (
         patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
-        connected_response = test_client.get("/api/tools/?agent_name=general")
+        response = test_client.get("/api/tools/?agent_name=general", headers=headers)
 
-    assert connected_response.status_code == 200
-    connected_tool = connected_response.json()["tools"][0]
-    assert connected_tool["status"] == "available"
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
+    assert response.json()["tools"][0]["status"] == "requires_config"
 
 
 def test_get_tools_marks_google_oauth_tool_available_with_service_account(
@@ -1952,6 +2048,7 @@ def test_get_tools_marks_google_oauth_tool_available_with_service_account(
         storage_path=app_runtime_paths.storage_root,
         process_env={
             "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "google-service-account.json"),
+            "MINDROOM_OWNER_USER_ID": "@owner:example.org",
         },
     )
     tools = [
@@ -2017,6 +2114,147 @@ def test_get_tools_does_not_treat_scoped_credentials_as_dashboard_truth(
     assert tool["status"] == "requires_config"
     assert tool["dashboard_configuration_supported"] is False
     mock_load_scoped_credentials.assert_not_called()
+
+
+def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: TestClient) -> None:
+    """GitHub manual auth status should use the authenticated requester's persisted agent target."""
+    runtime_paths = use_trusted_upstream_runtime(main.app)
+    config = _config_with_worker_scope(
+        "user_agent",
+        allowed_users=["@alice:example.org", "@bob:example.org"],
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    alice_target = resolve_worker_target("user_agent", "general", execution_identity=alice_identity)
+    manual_secret = "github-manual-secret"  # noqa: S105
+    save_scoped_credentials(
+        "github",
+        {"access_token": manual_secret, "base_url": "https://api.github.com"},
+        credentials_manager=manager,
+        worker_target=alice_target,
+    )
+    tools = [
+        {
+            "name": "github",
+            "display_name": "GitHub",
+            "description": "GitHub access",
+            "category": "development",
+            "status": "requires_config",
+            "setup_type": "oauth",
+            "auth_provider": "github",
+            "config_fields": [
+                {"name": "access_token", "required": False},
+                {"name": "base_url", "required": False},
+            ],
+            "oauth_fallback_fields": ["access_token"],
+        },
+    ]
+    alice_headers = trusted_upstream_headers(
+        user_id="alice",
+        email="alice@example.org",
+        matrix_user_id="@alice:example.org",
+    )
+    bob_headers = trusted_upstream_headers(
+        user_id="bob",
+        email="bob@example.org",
+        matrix_user_id="@bob:example.org",
+    )
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", side_effect=lambda *_: copy.deepcopy(tools)),
+    ):
+        alice_response = test_client.get("/api/tools/?agent_name=general", headers=alice_headers)
+        bob_response = test_client.get("/api/tools/?agent_name=general", headers=bob_headers)
+
+    assert alice_response.status_code == 200
+    assert alice_response.json()["status_authoritative"] is False
+    alice_tool = alice_response.json()["tools"][0]
+    assert alice_tool["status"] == "available"
+    assert alice_tool["manual_auth_configured"] is True
+    assert manual_secret not in alice_response.text
+
+    assert bob_response.status_code == 200
+    bob_tool = bob_response.json()["tools"][0]
+    assert bob_tool["status"] == "requires_config"
+    assert bob_tool["manual_auth_configured"] is False
+
+
+def test_get_tools_reports_requester_scoped_github_oauth_for_unscoped_agent(test_client: TestClient) -> None:
+    """An unscoped agent should inspect the authenticated requester's GitHub OAuth store."""
+    runtime_paths = use_trusted_upstream_runtime(main.app)
+    config = _config_with_worker_scope(
+        None,
+        allowed_users=["@alice:example.org"],
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "github_oauth_client",
+        {"client_id": "github-client-id", "client_secret": "github-client-secret"},
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    oauth_target = resolve_worker_target("user", "general", execution_identity=identity)
+    oauth_secret = "github-oauth-secret"  # noqa: S105
+    save_scoped_credentials(
+        "github_oauth",
+        {
+            "token": oauth_secret,
+            "refresh_token": "github-refresh-secret",
+            "client_id": "github-client-id",
+            "scopes": [],
+            "expires_at": 4_102_444_800.0,
+            "_source": "oauth",
+            "_oauth_provider": "github",
+        },
+        credentials_manager=manager,
+        worker_target=oauth_target,
+    )
+    tools = [
+        {
+            "name": "github",
+            "display_name": "GitHub",
+            "description": "GitHub access",
+            "category": "development",
+            "status": "requires_config",
+            "setup_type": "oauth",
+            "auth_provider": "github",
+            "config_fields": [{"name": "access_token", "required": False}],
+            "oauth_fallback_fields": ["access_token"],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get(
+            "/api/tools/?agent_name=general",
+            headers=trusted_upstream_headers(
+                user_id="alice",
+                email="alice@example.org",
+                matrix_user_id="@alice:example.org",
+            ),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["tools"][0]["status"] == "available"
+    assert oauth_secret not in response.text
 
 
 def test_get_tools_uses_one_runtime_snapshot(
@@ -3905,7 +4143,10 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
 @pytest.fixture
 def api_key_client(temp_config_file: Path) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
-    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=temp_config_file,
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
+    )
     main.initialize_api_app(main.app, runtime_paths)
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,

@@ -7,6 +7,7 @@ from typing import Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
+from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
@@ -31,6 +32,7 @@ class EffectiveToolConfig:
 
 
 AgentLearningMode = Literal["always", "agentic"]
+_LargeMessageStrategy = Literal["sidecar", "split"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
 
@@ -359,6 +361,13 @@ class DefaultsConfig(BaseModel):
         default=True,
         description="Enable streaming responses via progressive message edits",
     )
+    large_message_strategy: _LargeMessageStrategy = Field(
+        default="sidecar",
+        description=(
+            "How to deliver oversized text responses: 'sidecar' uploads the full content as an "
+            "attachment behind a preview event; 'split' sends the full text as lossless segmented messages"
+        ),
+    )
     coalescing: CoalescingConfig = Field(
         default_factory=CoalescingConfig,
         description="Live message coalescing settings for rapid same-sender turns",
@@ -600,4 +609,11 @@ class RouterConfig(BaseModel):
     """Configuration for the router system."""
 
     model: str = Field(default="default", description="Model to use for routing decisions")
-    accept_invites: bool = Field(default=True, description="Whether the router accepts and persists room invites")
+    accept_invites: InviteAcceptancePolicy = Field(
+        default=True,
+        description="Whether the router accepts all, no, or matching inviter room invites",
+    )
+    access: ResponderAccessConfig | None = Field(
+        default=None,
+        description="Optional membership-based conversation access policy",
+    )

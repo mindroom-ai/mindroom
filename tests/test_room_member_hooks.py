@@ -13,14 +13,26 @@ from unittest.mock import MagicMock
 import nio
 import pytest
 
+import mindroom.hooks as hook_api
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import mindroom_user_id
-from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
+from mindroom.event_journal import EventClass, EventKind
+from mindroom.hooks import (
+    EVENT_ROOM_MEMBER_JOINED,
+    EVENT_ROOM_MEMBER_LEFT,
+    HookRegistry,
+    RoomMemberJoinedContext,
+    RoomMemberLeftContext,
+    hook,
+)
 from mindroom.matrix import room_member_joins
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -68,6 +80,8 @@ def _room_member_event(
     prev_membership: str | None = "leave",
     display_name: str | None = "Alice",
     avatar_url: str | None = "mxc://localhost/alice",
+    prev_display_name: str | None = None,
+    prev_avatar_url: str | None = None,
 ) -> nio.RoomMemberEvent:
     content: dict[str, object] = {"membership": membership}
     if display_name is not None:
@@ -83,7 +97,12 @@ def _room_member_event(
         "content": content,
     }
     if prev_membership is not None:
-        raw_event["unsigned"] = {"prev_content": {"membership": prev_membership}}
+        prev_content: dict[str, object] = {"membership": prev_membership}
+        if prev_display_name is not None:
+            prev_content["displayname"] = prev_display_name
+        if prev_avatar_url is not None:
+            prev_content["avatar_url"] = prev_avatar_url
+        raw_event["unsigned"] = {"prev_content": prev_content}
     event = nio.RoomMemberEvent.from_dict(raw_event)
     assert isinstance(event, nio.RoomMemberEvent)
     return event
@@ -122,12 +141,19 @@ def _router_bot(
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config(bot_accounts=bot_accounts or [], mindroom_user=mindroom_user), runtime_paths)
     persist_entity_accounts(config, runtime_paths, usernames={ROUTER_AGENT_NAME: "mindroom_router"})
-    bot = AgentBot(_router_user(), tmp_path, config=config, runtime_paths=runtime_paths)
+    memberships = AgentReplyMembershipIndex()
+    bot = AgentBot(
+        _router_user(),
+        tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_reply_memberships=memberships,
+        agent_reply_membership_sync=AgentReplyMembershipSync(memberships),
+    )
     install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.homeserver = "http://localhost:8008"
     bot._first_sync_done = True
-    bot._room_member_join_hooks_armed = True
     return bot
 
 
@@ -140,7 +166,9 @@ def _agent_bot(tmp_path: Path) -> AgentBot:
         display_name="Helper",
         password=TEST_PASSWORD,
     )
-    return install_runtime_journal_support(AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths))
+    return install_runtime_journal_support(
+        make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths),
+    )
 
 
 def test_room_member_joined_is_a_builtin_hook_event() -> None:
@@ -153,6 +181,20 @@ def test_room_member_joined_is_a_builtin_hook_event() -> None:
     registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     assert registry.has_hooks(EVENT_ROOM_MEMBER_JOINED)
+
+
+def test_room_member_left_is_a_builtin_hook_event() -> None:
+    """room:member_left should be accepted as a built-in hook event."""
+    event_name = hook_api.EVENT_ROOM_MEMBER_LEFT
+    context_type = hook_api.RoomMemberLeftContext
+
+    @hook(event_name)
+    async def left(ctx: object) -> None:
+        assert isinstance(ctx, context_type)
+
+    registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+
+    assert registry.has_hooks(event_name)
 
 
 @pytest.mark.asyncio
@@ -183,6 +225,119 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
     assert context.display_name == "Alice"
     assert context.avatar_url == "mxc://localhost/alice"
     assert context.matrix_admin is not None
+
+
+@pytest.mark.asyncio
+async def test_router_emits_room_member_left_for_human_self_leave(tmp_path: Path) -> None:
+    """The router should expose an exact human join-to-leave self-transition."""
+    seen: list[RoomMemberLeftContext] = []
+
+    @hook(EVENT_ROOM_MEMBER_LEFT)
+    async def left(ctx: RoomMemberLeftContext) -> None:
+        seen.append(ctx)
+
+    bot = _router_bot(tmp_path)
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+
+    await bot._on_room_member(
+        _room("!personal:localhost"),
+        _room_member_event(
+            event_id="$leave1",
+            membership="leave",
+            prev_membership="join",
+            display_name=None,
+            avatar_url=None,
+            prev_display_name="Alice",
+            prev_avatar_url="mxc://localhost/alice",
+        ),
+    )
+
+    assert len(seen) == 1
+    context = seen[0]
+    assert context.agent_name == ROUTER_AGENT_NAME
+    assert context.room_id == "!personal:localhost"
+    assert context.event_id == "$leave1"
+    assert context.user_id == "@alice:localhost"
+    assert context.sender_id == "@alice:localhost"
+    assert context.membership == "leave"
+    assert context.prev_membership == "join"
+    assert context.display_name == "Alice"
+    assert context.avatar_url == "mxc://localhost/alice"
+    assert context.matrix_admin is not None
+
+
+@pytest.mark.asyncio
+async def test_router_dispatches_recovered_room_member_self_leave_once(tmp_path: Path) -> None:
+    """An unsettled recovered leave remains owed work and settles exactly once."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_LEFT)
+    async def left(ctx: RoomMemberLeftContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room("!personal:localhost")
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+    event = _room_member_event(
+        event_id="$recovered-leave",
+        membership="leave",
+        prev_membership="join",
+    )
+    await bot._journal_dispatcher.admit_out_of_band(
+        room,
+        event,
+        EventKind.ROOM_LIFECYCLE,
+        EventClass.ACTIONABLE,
+        live=False,
+    )
+
+    await bot._journal_dispatcher.drain_once()
+    await bot._journal_dispatcher.drain_once()
+
+    assert seen == ["$recovered-leave"]
+    assert not await bot._journal_dispatcher.store.is_pending("$recovered-leave")
+
+
+@pytest.mark.asyncio
+async def test_router_ignores_non_human_or_non_self_room_member_leaves(tmp_path: Path) -> None:
+    """Joins, kicks, bans, uncertain history, and configured bots are not self-leaves."""
+    seen: list[RoomMemberLeftContext] = []
+
+    @hook(EVENT_ROOM_MEMBER_LEFT)
+    async def left(ctx: RoomMemberLeftContext) -> None:
+        seen.append(ctx)
+
+    bot = _router_bot(tmp_path, bot_accounts=["@service:localhost"])
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+    room = _room("!personal:localhost")
+
+    events = (
+        _room_member_event(event_id="$join", membership="join", prev_membership="leave"),
+        _room_member_event(
+            event_id="$kick",
+            membership="leave",
+            prev_membership="join",
+            sender="@admin:localhost",
+        ),
+        _room_member_event(
+            event_id="$ban",
+            membership="ban",
+            prev_membership="join",
+            sender="@admin:localhost",
+        ),
+        _room_member_event(event_id="$unknown", membership="leave", prev_membership=None),
+        _room_member_event(
+            event_id="$service-leave",
+            user_id="@service:localhost",
+            membership="leave",
+            prev_membership="join",
+        ),
+    )
+    for event in events:
+        await bot._on_room_member(room, event)
+
+    assert seen == []
 
 
 def test_room_member_marker_returns_normally_or_raises_without_boolean_status(tmp_path: Path) -> None:

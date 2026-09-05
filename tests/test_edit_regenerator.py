@@ -123,6 +123,7 @@ def _tagged_prompt(source_event_ids: tuple[str, ...], prompts: dict[str, str]) -
         prompts,
         _source_metadata(*source_event_ids),
         timestamp_formatter=lambda _timestamp_ms: None,
+        member_display_names={},
     )
     assert prompt is not None
     return prompt
@@ -251,6 +252,7 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     """An edited single-message turn regenerates with the edited body and records the new outcome."""
     record = _turn_record()
     harness = _harness(tmp_path, turn_record=record)
+    harness.room.add_member(USER_ID, "Banana Man", None)
     event, event_info = _edit_event(new_body="what is 3+3?")
 
     await _handle_edit(harness, event, event_info)
@@ -258,6 +260,7 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     harness.generate_response.assert_awaited_once()
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "what is 3+3?"
+    assert request.member_display_names == {USER_ID: "Banana Man"}
     assert request.existing_event_id == RESPONSE_EVENT_ID
     assert request.existing_event_is_placeholder is False
     assert request.user_id == USER_ID

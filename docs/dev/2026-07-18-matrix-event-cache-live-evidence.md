@@ -28,7 +28,7 @@ The room was created by `@mindroom_code:mindroom.chat`, and authenticated member
 
 For the checked-in run, the authenticated `/joined_members` response was captured alongside the harness output and copied into the sanitized summary.
 
-The current harness now performs the same authenticated query fail-closed and records the sorted joined-member IDs in its raw evidence.
+The harness version used for the checked-in run performed the same authenticated query fail-closed and recorded the sorted joined-member IDs in its raw evidence.
 
 The primary thread root was `$RLlVnt7Z04PV8IdyDQbwEZmk--UcNL_SCdU01fGiPi8`.
 
@@ -104,13 +104,13 @@ The sanitized raw evidence SHA-256 was `8e43c3ade26b3a2797b7a329614c08571994b40f
 
 ## Reproduction boundary
 
-The hosted service database must remain read-only to the harness.
+The hosted service database had to remain read-only to the harness.
 
-Strict thread reads must use `--strict-read-cache-db` with a new path that differs from `--cache-db`.
+Strict thread reads had to use `--strict-read-cache-db` with a new path that differed from `--cache-db`.
 
-The harness rejects an existing strict-cache path, rejects the service-cache path, and fails before writing evidence when any declared interaction expectation disagrees with observed state.
+The harness rejected an existing strict-cache path, rejected the service-cache path, and failed before writing evidence when any declared interaction expectation disagreed with observed state.
 
-The harness also rejects unpaired invite identity/token configuration and any missing or cache-only event accounting.
+The harness also rejected unpaired invite identity/token configuration and any missing or cache-only event accounting.
 
 This is a record of one audit run, not a live procedure.
 The subsystem it measured, the contract document that specified the run, and the harness itself were all removed when the event cache was replaced by the event journal and the visible-message projection.

@@ -36,6 +36,9 @@ export interface ToolInfo {
   function_names?: string[] | null;
   dashboard_configuration_supported?: boolean;
   execution_scope_supported?: boolean;
+  oauth_fallback_fields?: string[];
+  manual_auth_configured?: boolean;
+  environment_auth_configured?: boolean;
 }
 
 export interface ToolsResponse {
@@ -123,5 +126,8 @@ export function mapToolToIntegration(tool: ToolInfo) {
     dependencies: tool.dependencies,
     docs_url: tool.docs_url,
     helper_text: tool.helper_text,
+    oauth_fallback_fields: tool.oauth_fallback_fields,
+    manual_auth_configured: tool.manual_auth_configured,
+    environment_auth_configured: tool.environment_auth_configured,
   };
 }

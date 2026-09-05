@@ -28,6 +28,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import resolved_agent_policies_from_config_data
+from mindroom.workers.worker_retirement import open_worker_state_root
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
     validate_local_copy_source_dir,
@@ -377,6 +378,15 @@ class DockerProjectionManager:
             return {}
         return resolved_agent_policies_from_config_data(self._load_host_config_data(host_config_path))
 
+    def retire_worker_projection(self, worker_name: str) -> None:
+        """Remove every projected config snapshot owned by one exact worker root."""
+        with open_worker_state_root(
+            self._projected_configs_root.parent,
+            workers_subpath=(self._projected_configs_root.name,),
+            worker_name=worker_name,
+        ) as projection:
+            projection.remove()
+
     def _prune_projected_configs(self, paths: LocalWorkerStatePaths, *, keep: Path) -> None:
         """Remove stale projected config snapshots for one worker root."""
         projection_root = self._worker_projected_configs_root(paths)
@@ -551,12 +561,13 @@ class DockerProjectionManager:
             }
 
         config_data["teams"] = {}
-        config_data["cultures"] = {}
         config_data["calls"] = {}
         config_data["room_models"] = {}
         config_data["bot_accounts"] = []
+        config_data["administrators"] = []
+        config_data["room_defaults"] = {}
+        config_data["rooms"] = {}
         config_data["authorization"] = {}
-        config_data["matrix_room_access"] = {}
         config_data["matrix_space"] = {}
         config_data["mindroom_user"] = None
 
@@ -599,6 +610,9 @@ class DockerProjectionManager:
                 worker_scope=policy.effective_execution_scope,
             )
         )
+        if len(matching_agent_names) > 1:
+            msg = f"Worker key '{worker_key}' has an ambiguous normalized agent name."
+            raise WorkerBackendError(msg)
         if matching_agent_names:
             return (matching_agent_names[0],)
         if not resolved_agent_policies:
@@ -649,7 +663,8 @@ class DockerProjectionManager:
         worker_scope: WorkerScope | None,
     ) -> bool:
         expected_scope = "unscoped" if worker_scope is None else worker_scope
-        if resolved_worker_key_scope(worker_key) != expected_scope:
+        actual_scope = resolved_worker_key_scope(worker_key)
+        if actual_scope not in {expected_scope, "user_agent"}:
             return False
         encoded_agent_name = worker_key_agent_name(worker_key)
         if encoded_agent_name is None:

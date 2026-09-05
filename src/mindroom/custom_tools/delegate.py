@@ -16,9 +16,15 @@ from agno.tools import Toolkit
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import ResponseTurnContext, ai_response
-from mindroom.knowledge import resolve_agent_knowledge_access
+from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.knowledge import resolve_agent_knowledge_access_async
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    ToolRuntimeModelBinding,
+    get_tool_runtime_context,
+    tool_runtime_context,
+)
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -105,6 +111,20 @@ class DelegateTools(Toolkit):
         if not task or not task.strip():
             return "Cannot delegate an empty task. Please provide a task description."
 
+        runtime_context = get_tool_runtime_context()
+        active_config = runtime_context.current_config if runtime_context is not None else self._config
+        if runtime_context is None:
+            return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."
+        if not is_sender_allowed_for_responder(
+            runtime_context.requester_id,
+            agent_name,
+            runtime_context.room_id,
+            active_config,
+            self._runtime_paths,
+            runtime_context.require_agent_reply_memberships(),
+        ):
+            return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
+
         try:
             session_id = f"delegate:{self._agent_name}:{agent_name}:{uuid4()}"
             execution_identity = (
@@ -113,9 +133,9 @@ class DelegateTools(Toolkit):
                 else None
             )
 
-            knowledge_resolution = resolve_agent_knowledge_access(
+            knowledge_resolution = await resolve_agent_knowledge_access_async(
                 agent_name,
-                self._config,
+                active_config,
                 self._runtime_paths,
                 refresh_scheduler=self._refresh_scheduler,
                 execution_identity=execution_identity,
@@ -131,16 +151,25 @@ class DelegateTools(Toolkit):
                 depth=self._delegation_depth + 1,
                 task_preview=task[:100],
             )
-            runtime_context = get_tool_runtime_context()
             room_id = _resolve_delegated_room_id(
                 runtime_context=runtime_context,
                 execution_identity=execution_identity,
             )
+            thread_id = _resolve_delegated_thread_id(
+                runtime_context=runtime_context,
+                execution_identity=execution_identity,
+            )
+            active_model_name = active_config.resolve_runtime_model(
+                entity_name=agent_name,
+                room_id=room_id,
+                thread_id=thread_id,
+                runtime_paths=self._runtime_paths,
+            ).model_name
             delegated_runtime_context = self._build_delegated_runtime_context(
                 agent_name=agent_name,
                 session_id=session_id,
-                room_id=room_id,
                 runtime_context=runtime_context,
+                active_model_name=active_model_name,
             )
             delegated_correlation_id = (
                 delegated_runtime_context.correlation_id if delegated_runtime_context is not None else None
@@ -152,9 +181,10 @@ class DelegateTools(Toolkit):
                 correlation_id=delegated_correlation_id or uuid4().hex,
                 reply_to_event_id=None,
                 room_id=room_id,
-                thread_id=None,
+                thread_id=thread_id,
                 requester_id=execution_identity.requester_id if execution_identity is not None else None,
                 matrix_run_metadata=None,
+                active_model_name=active_model_name,
                 transient_enrichment_items=tuple(transient_enrichment_items),
             )
             with tool_runtime_context(delegated_runtime_context):
@@ -162,7 +192,7 @@ class DelegateTools(Toolkit):
                     turn_ctx,
                     prompt=task,
                     runtime_paths=self._runtime_paths,
-                    config=self._config,
+                    config=active_config,
                     knowledge=knowledge_resolution.knowledge,
                     include_interactive_questions=False,
                     tool_function_filter=(
@@ -171,6 +201,7 @@ class DelegateTools(Toolkit):
                     execution_identity=execution_identity,
                     delegation_depth=self._delegation_depth + 1,
                     refresh_scheduler=self._refresh_scheduler,
+                    attempt_model_runtime=ToolRuntimeModelBinding(),
                 )
         except Exception as e:
             logger.exception(
@@ -188,22 +219,16 @@ class DelegateTools(Toolkit):
         *,
         agent_name: str,
         session_id: str,
-        room_id: str | None,
         runtime_context: ToolRuntimeContext | None,
+        active_model_name: str,
     ) -> ToolRuntimeContext | None:
         """Return the child tool runtime context for one delegated run."""
         if runtime_context is None:
             return None
-        runtime_model = self._config.resolve_runtime_model(
-            entity_name=agent_name,
-            room_id=room_id,
-            thread_id=runtime_context.resolved_thread_id,
-            runtime_paths=self._runtime_paths,
-        )
         return replace(
             runtime_context,
             agent_name=agent_name,
-            active_model_name=runtime_model.model_name,
+            active_model_name=active_model_name,
             target=replace(runtime_context.target, session_id=session_id),
         )
 
@@ -218,4 +243,17 @@ def _resolve_delegated_room_id(
         return runtime_context.room_id
     if execution_identity is not None:
         return execution_identity.room_id
+    return None
+
+
+def _resolve_delegated_thread_id(
+    *,
+    runtime_context: ToolRuntimeContext | None,
+    execution_identity: ToolExecutionIdentity | None,
+) -> str | None:
+    """Resolve the thread context that should apply to a delegated child run."""
+    if runtime_context is not None:
+        return runtime_context.resolved_thread_id
+    if execution_identity is not None:
+        return execution_identity.resolved_thread_id
     return None

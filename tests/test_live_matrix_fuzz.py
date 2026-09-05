@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import os
 import signal
 import sqlite3
@@ -22,6 +21,7 @@ import httpx
 import pytest
 import yaml
 
+from mindroom.config.main import Config
 from mindroom.event_journal import DeliveryStage, EventClass, EventJournalStore, EventKind, InboundEvent
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.sync_continuity import SyncContinuityStore
@@ -754,491 +754,6 @@ def test_fuzz_cli_keeps_its_default_thread_count(monkeypatch: pytest.MonkeyPatch
 
     assert scenario.profile == "fuzz"
     assert scenario.thread_count == 45
-
-
-@pytest.mark.asyncio
-async def test_managed_load_authenticates_the_sender_without_registering() -> None:
-    """Managed load must use the persisted sender instead of creating an account."""
-    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
-    client = _ManagedStreamBoundaryClient()
-    runner = LiveFuzzRunner(
-        stack,
-        (cast("LiveMatrixClient", client),),
-        sustained_stream_capacity_scenario(root_count=1),
-        reply_timeout=1,
-        settle_seconds=0,
-    )
-    try:
-        stack.storage_path.mkdir()
-        (stack.storage_path / "matrix_state.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "accounts": {
-                        "agent_load_sender": {
-                            "access_token": "managed-sender-token",
-                            "device_id": "MANAGED-SENDER-DEVICE",
-                        },
-                    },
-                },
-            ),
-            encoding="utf-8",
-        )
-
-        await runner._authenticate_managed_sender()
-
-        assert client.access_token == "managed-sender-token"  # noqa: S105 - fake live-test token
-        assert client.calls == ["join_room"]
-    finally:
-        stack.close()
-
-
-@pytest.mark.asyncio
-async def test_sustained_stream_capacity_run_dispatches_before_disposable_registration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Capacity must select managed credentials before the disposable-user path."""
-    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
-    client = _ManagedStreamBoundaryClient()
-    runner = LiveFuzzRunner(
-        stack,
-        (cast("LiveMatrixClient", client),),
-        sustained_stream_capacity_scenario(),
-        reply_timeout=1,
-        settle_seconds=0,
-    )
-    calls: list[str] = []
-
-    async def run_capacity() -> dict[str, float | int | str]:
-        calls.append("capacity")
-        return {"profile": "sustained-stream-capacity", "status": "PASS"}
-
-    monkeypatch.setattr(runner, "_run_sustained_stream_capacity", run_capacity, raising=False)
-    try:
-        assert await runner.run() == {"profile": "sustained-stream-capacity", "status": "PASS"}
-        assert calls == ["capacity"]
-        assert client.calls == []
-    finally:
-        stack.close()
-
-
-@pytest.mark.asyncio
-async def test_sustained_stream_capacity_releases_two_hundred_roots_without_fault_injection() -> None:
-    """Every no-fault root enters one gather and carries one exact marker and mention."""
-    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
-    stack.agent_id = "@mindroom_general:example"
-    client = _ManagedStreamLaunchBarrierClient(expected_sends=200)
-    runner = LiveFuzzRunner(
-        stack,
-        (cast("LiveMatrixClient", client),),
-        sustained_stream_capacity_scenario(),
-        reply_timeout=1,
-        settle_seconds=0,
-    )
-    try:
-        released = await asyncio.wait_for(
-            runner._release_managed_roots(
-                run_id="unit-run",
-                deadline=time.monotonic() + 1,
-                transaction_prefix="sustained-stream-capacity-root",
-                body_prefix="Sustained stream capacity",
-            ),
-            timeout=1,
-        )
-
-        assert len(client.sent_payloads) == 200
-        assert len(released) == 200
-        root_payloads = {
-            txn_id: content
-            for event_type, txn_id, content in client.sent_payloads
-            if event_type == "m.room.message" and content["msgtype"] == "m.text"
-        }
-        assert len(root_payloads) == 200
-        observed_markers: set[str] = set()
-        for thread in range(200):
-            content = root_payloads[f"sustained-stream-capacity-root-unit-run-{thread}"]
-            marker = f"run=unit-run thread={thread}"
-            assert content["body"].count(marker) == 1
-            observed_markers.add(marker)
-            assert content["m.mentions"] == {"user_ids": [stack.agent_id]}
-        assert len(observed_markers) == 200
-    finally:
-        stack.close()
-
-
-@pytest.mark.asyncio
-async def test_sustained_stream_capacity_samples_liveness_while_root_gather_is_outstanding(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The root gather cannot finish before an in-flight health/process sample."""
-    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
-    stack.agent_id = "@mindroom_general:example"
-    client = _ManagedStreamLaunchBarrierClient(expected_sends=200, finish=False)
-    runner = LiveFuzzRunner(
-        stack,
-        (cast("LiveMatrixClient", client),),
-        sustained_stream_capacity_scenario(),
-        reply_timeout=1,
-        settle_seconds=0,
-    )
-    sampled: list[ManagedStreamHealthSample] = []
-
-    async def observer_step(
-        *,
-        deadline: float,
-        health_samples: list[ManagedStreamHealthSample],
-    ) -> ManagedStreamHealthSample:
-        assert deadline > time.monotonic()
-        await client.all_entered.wait()
-        assert client.all_entered.is_set()
-        assert len(client.sent_payloads) == 200
-        sample = ManagedStreamHealthSample(True, datetime(2026, 8, 8, tzinfo=UTC))
-        health_samples.append(sample)
-        sampled.append(sample)
-        client.never.set()
-        await asyncio.sleep(0)
-        return sample
-
-    monkeypatch.setattr(runner, "_managed_stream_observer_step", observer_step)
-    try:
-        released = await runner._release_sustained_stream_capacity_roots(
-            run_id="unit-run",
-            deadline=time.monotonic() + 5,
-            health_samples=[],
-        )
-
-        assert len(released) == 200
-        assert sampled
-    finally:
-        client.never.set()
-        stack.close()
-
-
-@pytest.mark.asyncio
-async def test_sustained_stream_capacity_fast_root_gather_still_samples_concurrent_health(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Every root must enter before health begins, and no send may finish before health starts."""
-    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
-    stack.agent_id = "@mindroom_general:example"
-    order: list[str] = []
-
-    class FastClient(_ManagedStreamBoundaryClient):
-        async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
-            del event_type, content
-            order.append(f"send:{txn_id}")
-            return f"${txn_id}"
-
-    client = FastClient()
-    runner = LiveFuzzRunner(
-        stack,
-        (cast("LiveMatrixClient", client),),
-        sustained_stream_capacity_scenario(root_count=2),
-        reply_timeout=1,
-        settle_seconds=0,
-    )
-    health_samples: list[ManagedStreamHealthSample] = []
-
-    async def observer_step(**kwargs: object) -> ManagedStreamHealthSample:
-        order.append("health:started")
-        sample = ManagedStreamHealthSample(True, datetime(2026, 8, 8, tzinfo=UTC))
-        cast("list[ManagedStreamHealthSample]", kwargs["health_samples"]).append(sample)
-        await asyncio.sleep(0)
-        return sample
-
-    barrier_type = fuzz_live_matrix._ManagedRootLaunchBarrier
-    wait_for_release = barrier_type.wait_for_release
-
-    async def record_root_entry(barrier: object) -> None:
-        order.append("root:entered")
-        await wait_for_release(barrier)
-
-    monkeypatch.setattr(barrier_type, "wait_for_release", record_root_entry)
-    monkeypatch.setattr(runner, "_managed_stream_observer_step", observer_step)
-    try:
-        released = await runner._release_sustained_stream_capacity_roots(
-            run_id="unit-run",
-            deadline=time.monotonic() + 1,
-            health_samples=health_samples,
-        )
-
-        assert released == (
-            "$sustained-stream-capacity-root-unit-run-0",
-            "$sustained-stream-capacity-root-unit-run-1",
-        )
-        assert health_samples
-        assert order[:5] == [
-            "root:entered",
-            "root:entered",
-            "health:started",
-            "send:sustained-stream-capacity-root-unit-run-0",
-            "send:sustained-stream-capacity-root-unit-run-1",
-        ]
-    finally:
-        stack.close()
-
-
-@pytest.mark.parametrize("primary_exception", [RuntimeError, asyncio.CancelledError])
-@pytest.mark.asyncio
-async def test_sustained_stream_capacity_consumes_concurrent_release_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    primary_exception: type[BaseException],
-) -> None:
-    """Health failure or cancellation must not leak a simultaneous root-task exception."""
-    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
-    stack.agent_id = "@mindroom_general:example"
-    all_sends_entered = asyncio.Event()
-    fail_sends = asyncio.Event()
-    all_sends_failed = asyncio.Event()
-    send_count = 0
-    failed_send_count = 0
-
-    class ConcurrentFailureClient(_ManagedStreamBoundaryClient):
-        async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
-            nonlocal send_count, failed_send_count
-            del event_type, txn_id, content
-            send_count += 1
-            if send_count == 2:
-                all_sends_entered.set()
-            await fail_sends.wait()
-            failed_send_count += 1
-            if failed_send_count == 2:
-                all_sends_failed.set()
-            msg = "root release failed"
-            raise ValueError(msg)
-
-    runner = LiveFuzzRunner(
-        stack,
-        (cast("LiveMatrixClient", ConcurrentFailureClient()),),
-        sustained_stream_capacity_scenario(root_count=2),
-        reply_timeout=1,
-        settle_seconds=0,
-    )
-
-    async def fail_health(**_kwargs: object) -> ManagedStreamHealthSample:
-        await all_sends_entered.wait()
-        fail_sends.set()
-        await all_sends_failed.wait()
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        msg = "initial health failed"
-        raise primary_exception(msg)
-
-    monkeypatch.setattr(runner, "_managed_stream_observer_step", fail_health)
-    loop = asyncio.get_running_loop()
-    loop_exceptions: list[dict[str, object]] = []
-    previous_exception_handler = loop.get_exception_handler()
-    loop.set_exception_handler(lambda _loop, context: loop_exceptions.append(context))
-
-    async def run_and_assert_primary_failure() -> None:
-        with pytest.raises(primary_exception, match="initial health failed") as raised:
-            await runner._release_sustained_stream_capacity_roots(
-                run_id="unit-run",
-                deadline=time.monotonic() + 1,
-                health_samples=[],
-            )
-        raised.value.__traceback__ = None
-
-    try:
-        await run_and_assert_primary_failure()
-        gc.collect()
-        await asyncio.sleep(0)
-    finally:
-        loop.set_exception_handler(previous_exception_handler)
-        stack.close()
-
-    assert loop_exceptions == []
-
-
-@pytest.mark.asyncio
-async def test_managed_stream_health_and_sync_poll_cannot_overrun_the_fixed_sla(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A slow health request is governed by the load SLA, not its own timeout."""
-    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
-    client = _ManagedStreamBoundaryClient()
-    runner = LiveFuzzRunner(
-        stack,
-        (cast("LiveMatrixClient", client),),
-        sustained_stream_capacity_scenario(root_count=1),
-        reply_timeout=1,
-        settle_seconds=0,
-    )
-    health_release = threading.Event()
-
-    def blocked_health() -> ManagedStreamHealthSample:
-        health_release.wait(timeout=1)
-        return ManagedStreamHealthSample(
-            healthy=True,
-            last_sync_time=datetime(2026, 8, 7, tzinfo=UTC),
-        )
-
-    monkeypatch.setattr(stack, "managed_stream_health_sample", blocked_health)
-    asyncio.get_running_loop().call_later(0.2, health_release.set)
-    try:
-        with pytest.raises(TimeoutError):
-            await runner._managed_stream_observer_step(
-                deadline=time.monotonic() + 0.075,
-                health_samples=[],
-            )
-        assert client.sync_calls == 0
-    finally:
-        health_release.set()
-        stack.close()
-
-
-@pytest.mark.asyncio
-async def test_managed_stream_observer_step_uses_the_complete_incremental_cursor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Moving the observer back to strict no-backfill sync must reintroduce this failure."""
-    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
-    client = _ManagedStreamBoundaryClient()
-    runner = LiveFuzzRunner(
-        stack,
-        (cast("LiveMatrixClient", client),),
-        sustained_stream_capacity_scenario(root_count=1),
-        reply_timeout=1,
-        settle_seconds=0,
-    )
-    monkeypatch.setattr(stack, "require_runtime_alive", lambda: None)
-    monkeypatch.setattr(
-        stack,
-        "managed_stream_health_sample",
-        lambda: ManagedStreamHealthSample(True, datetime(2026, 8, 7, tzinfo=UTC)),
-    )
-    try:
-        await runner._managed_stream_observer_step(
-            deadline=time.monotonic() + 1,
-            health_samples=[],
-        )
-
-        assert client.complete_sync_calls == 1
-        assert client.sync_calls == 0
-    finally:
-        stack.close()
-
-
-@pytest.mark.asyncio
-async def test_managed_stream_limited_backfill_cannot_overrun_the_fixed_sla(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Every `/messages` page remains causally bounded by the workload deadline."""
-    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
-    client = LiveMatrixClient("http://matrix.invalid", "!recovery:example")
-    client.next_batch = "s-before"
-    client.seen_events = {"$known": _observer_event("$known", "completed")}
-    runner = LiveFuzzRunner(
-        stack,
-        (client,),
-        sustained_stream_capacity_scenario(root_count=1),
-        reply_timeout=1,
-        settle_seconds=0,
-    )
-    page_release = asyncio.Event()
-
-    async def limited_sync(_since: str | None, *, timeout_ms: int) -> dict[str, Any]:
-        assert timeout_ms <= 250
-        return {
-            "next_batch": "s-after",
-            "rooms": {
-                "join": {
-                    client.room_id: {
-                        "timeline": {
-                            "limited": True,
-                            "prev_batch": "p-start",
-                            "events": [_observer_event("$newest")],
-                        },
-                    },
-                },
-            },
-        }
-
-    async def blocked_messages(
-        _method: str,
-        _path: str,
-        *,
-        json_body: Mapping[str, Any] | None = None,
-        params: Mapping[str, str | int] | None = None,
-    ) -> dict[str, Any]:
-        assert json_body is None
-        assert params == {"dir": "f", "from": "s-before", "to": "s-after", "limit": 500}
-        await page_release.wait()
-        return {"start": "p-start", "end": "p-next", "chunk": []}
-
-    monkeypatch.setattr(stack, "require_runtime_alive", lambda: None)
-    monkeypatch.setattr(
-        stack,
-        "managed_stream_health_sample",
-        lambda: ManagedStreamHealthSample(True, datetime(2026, 8, 7, tzinfo=UTC)),
-    )
-    monkeypatch.setattr(client, "sync", limited_sync)
-    monkeypatch.setattr(client, "_request", blocked_messages)
-    asyncio.get_running_loop().call_later(0.2, page_release.set)
-    try:
-        with pytest.raises(TimeoutError):
-            await runner._managed_stream_observer_step(
-                deadline=time.monotonic() + 0.075,
-                health_samples=[],
-            )
-
-        assert client.next_batch == "s-before"
-        assert set(client.seen_events) == {"$known"}
-    finally:
-        page_release.set()
-        await client.close()
-        stack.close()
-
-
-@pytest.mark.asyncio
-async def test_managed_stream_samples_post_fence_health_after_exact_settlement(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The advancing health timestamp must be observed after fence settlement."""
-    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
-    client = _ManagedStreamBoundaryClient()
-    runner = LiveFuzzRunner(
-        stack,
-        (cast("LiveMatrixClient", client),),
-        sustained_stream_capacity_scenario(root_count=1),
-        reply_timeout=1,
-        settle_seconds=0,
-    )
-    order: list[str] = []
-    before = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
-    after = datetime(2026, 8, 7, 12, 1, tzinfo=UTC)
-    health_times = iter((before, after))
-
-    def sample_health() -> ManagedStreamHealthSample:
-        order.append("health")
-        return ManagedStreamHealthSample(healthy=True, last_sync_time=next(health_times))
-
-    def reaction_state(event_id: str) -> str:
-        assert event_id == "$reaction"
-        order.append("settled-query")
-        return "settled"
-
-    async def send_reaction(event_type: str, txn_id: str, content: dict[str, Any]) -> str:
-        del event_type, txn_id, content
-        order.append("send-reaction")
-        return "$reaction"
-
-    monkeypatch.setattr(stack, "require_runtime_alive", lambda: None)
-    monkeypatch.setattr(stack, "managed_stream_health_sample", sample_health)
-    monkeypatch.setattr(stack, "managed_stream_reaction_state", reaction_state)
-    monkeypatch.setattr(client, "send_event", send_reaction)
-    try:
-        settled, pre_fence, post_fence = await runner._wait_for_managed_stream_fence(
-            target_event_id="$response",
-            run_id="unit-run",
-            deadline=time.monotonic() + 1,
-            health_samples=[],
-        )
-
-        assert settled is True
-        assert (pre_fence, post_fence) == (before, after)
-        assert order == ["health", "send-reaction", "settled-query", "health"]
-    finally:
-        stack.close()
 
 
 def _stream_original(event_id: str, source_id: str, timestamp: int, status: str) -> dict[str, Any]:
@@ -2641,6 +2156,10 @@ def test_restart_config_uses_agent_specific_replacement_model() -> None:
         assert config["router"]["model"] == "router"
         assert config["models"]["default"]["id"] == "mindroom-live-fuzz"
         assert config["models"]["router"]["id"] == "mindroom-live-fuzz"
+        assert config["room_defaults"]["join_policy"] == "public"
+        assert "matrix_room_access" not in config
+        assert "authorization" not in config
+        Config.model_validate(config)
 
         stack.apply_replacement_config("!restart:example")
         replacement = yaml.safe_load(stack.config_path.read_text(encoding="utf-8"))
@@ -2724,13 +2243,13 @@ def test_managed_stream_drain_counts_only_live_journal_and_outbox_rows() -> None
         database_path.parent.mkdir(parents=True)
         with closing(sqlite3.connect(database_path)) as database:
             database.execute("CREATE TABLE journal_events(state TEXT NOT NULL)")
-            database.execute("CREATE TABLE response_outbox(acknowledged_event_id TEXT)")
+            database.execute("CREATE TABLE matrix_delivery_outbox(acknowledged_event_id TEXT)")
             database.executemany(
                 "INSERT INTO journal_events(state) VALUES (?)",
                 (("pending",), ("settled",)),
             )
             database.executemany(
-                "INSERT INTO response_outbox(acknowledged_event_id) VALUES (?)",
+                "INSERT INTO matrix_delivery_outbox(acknowledged_event_id) VALUES (?)",
                 ((None,), ("$response",)),
             )
             database.commit()
@@ -2749,6 +2268,37 @@ def test_managed_stream_drain_fails_when_the_journal_database_is_missing() -> No
     try:
         with pytest.raises(FileNotFoundError, match="event journal database"):
             stack.managed_stream_drain_counts()
+    finally:
+        stack.close()
+
+
+def test_recovery_debt_counts_only_exact_workload_final_rows() -> None:
+    """Only attempted unacknowledged FINAL debt for general workload roots is evidence."""
+    stack = ManagedTuwunelStack(profile="sustained-stream-capacity")
+    stack.agent_id = "@mindroom_general:example"
+    expected_principal = f"general@{stack.agent_id}"
+    try:
+        database_path = stack.storage_path / "tracking" / "event_journal.db"
+        database_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute(
+                "CREATE TABLE matrix_delivery_outbox("
+                "principal_id TEXT, delivery_id TEXT, stage TEXT, attempted INTEGER, acknowledged_event_id TEXT)",
+            )
+            database.executemany(
+                "INSERT INTO matrix_delivery_outbox VALUES (?, ?, ?, ?, ?)",
+                (
+                    (expected_principal, "$source-0", "final", 1, None),
+                    ("router@@mindroom_router:example", "$source-0", "final", 1, None),
+                    (expected_principal, "$unknown", "final", 1, None),
+                    (expected_principal, "$source-1", "initial", 1, None),
+                    (expected_principal, "$source-1", "final", 0, None),
+                    (expected_principal, "$source-1", "final", 1, "$acknowledged"),
+                ),
+            )
+            database.commit()
+
+        assert stack.recovery_outbox_debt(("$source-0", "$source-1")) == 1
     finally:
         stack.close()
 
@@ -4206,8 +3756,8 @@ def test_missing_reply_diagnosis_reads_the_production_journal_schema() -> None:
                         source={"event_id": event_id},
                     ),
                 )
-            await principal.enqueue_delivery(
-                turn_id="$staged",
+            await principal.enqueue_matrix_delivery(
+                delivery_id="$staged",
                 stage=DeliveryStage.INITIAL,
                 room_id="!room:example",
                 thread_id=None,

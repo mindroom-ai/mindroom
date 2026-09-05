@@ -13,7 +13,10 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.agent_descriptions import describe_agent
+from mindroom.authorization import ensure_room_membership_synced
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -31,7 +34,15 @@ from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import delivered_matrix_side_effect, make_conversation_reader_mock, make_relation_lookup
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
+from tests.conftest import (
+    delivered_matrix_side_effect,
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
+    make_relation_lookup,
+)
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -66,6 +77,7 @@ def _make_agent_config(
         tools=list(tools) if tools is not None else ["shell"],
         delegate_to=list(delegate_to) if delegate_to is not None else [],
         rooms=list(rooms) if rooms is not None else [],
+        access=ResponderAccessConfig(users=["*"]),
     )
 
 
@@ -86,8 +98,9 @@ def _make_config(
     config.get_entity_thread_mode = MagicMock(return_value=thread_mode)
     config.get_agent_tools = MagicMock(side_effect=lambda agent_name: config.agents[agent_name].tool_names)
     config.render_prompt = MagicMock(return_value="Delegate only to listed agents.")
-    config.authorization.agent_reply_permissions = {}
-    config.authorization.resolve_alias.side_effect = lambda sender_id: sender_id
+    config.administrators = []
+    config.authorization = AuthorizationConfig()
+    config.router = SimpleNamespace(access=ResponderAccessConfig(users=["*"]))
     return config
 
 
@@ -112,7 +125,7 @@ def _make_context(
     effective_config = config or _make_config()
     _persist_subagent_accounts(effective_config, runtime_paths)
     room = _make_room(effective_config, runtime_paths, room_id, agent_name, room_agent_names)
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget.resolve(
             room_id=room_id,
@@ -120,7 +133,7 @@ def _make_context(
             reply_to_event_id=None,
         ),
         requester_id=requester_id,
-        client=MagicMock(),
+        client=make_matrix_client_mock(),
         config=effective_config,
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
@@ -212,6 +225,26 @@ async def test_agents_list_payload_structure(tmp_path: Path) -> None:
     assert all(set(row) == {"name", "can_delegate", "can_spawn", "description"} for row in payload["agents"])
     assert all(isinstance(row, dict) for row in payload["agents"])
     assert all(row["can_spawn"] is True for row in payload["agents"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_agents_list_uses_current_authorization_after_reload(
+    tmp_path: Path,
+) -> None:
+    """A long-lived tool context must not expose agents revoked by a config reload."""
+    original_config = _make_config()
+    current_config = _make_config()
+    current_config.agents["research"].access = ResponderAccessConfig(users=[])
+    ctx = replace(
+        _make_context(tmp_path, config=original_config),
+        config_provider=lambda: current_config,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    assert [row["name"] for row in payload["agents"]] == ["code"]
 
 
 @pytest.mark.asyncio
@@ -413,6 +446,28 @@ async def test_agents_list_can_delegate_aligns_with_delegate_tools(tmp_path: Pat
     result = await delegate_tools.delegate_task("C", "task")
     assert "Cannot delegate to 'C'" in result
     assert "Run agents_list to inspect can_delegate flags." in result
+
+
+@pytest.mark.asyncio
+async def test_agents_list_reuses_failed_turn_membership_snapshot(tmp_path: Path) -> None:
+    """Current-room discovery must not retry a failed turn membership refresh."""
+    base_context = _make_context(tmp_path)
+    assert base_context.room is not None
+    base_context.room.members_synced = False
+    base_context.client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+    context = replace(base_context, membership_turn_id="$turn")
+
+    assert not await ensure_room_membership_synced(
+        context.client,
+        context.room,
+        sender_id=context.requester_id,
+    )
+
+    with tool_runtime_context(context):
+        payload = json.loads(await SubAgentsTools().agents_list())
+
+    assert [agent["name"] for agent in payload["agents"]] == ["code", "research"]
+    assert context.client.joined_members.await_count == 1
 
 
 @pytest.mark.asyncio

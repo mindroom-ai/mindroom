@@ -58,7 +58,9 @@ Matrix callback
 
 ## Durable Dispatch Boundary
 
-Nio pre-fanout admission callbacks persist each correctness-critical Matrix timeline callback before any ordinary event callback can run.
+Nio's owned ingestion session persists prepared source work, and MindRoom's one-record pump validates and commits each receipt and semantic effect before acknowledging the batch.
+The pump wakes journal dispatch only after settlement; a crash between journal commit and Nio acknowledgement replays the receipt without duplicating semantic work.
+Room-backed authorization uses authenticated batch provenance: uncertainty revokes grants before admission, and live membership changes update grants after admission.
 Every principal shares one durable store at `tracking/event_journal.db`, or one PostgreSQL database, and each bot reads only its own principal-bound view of it.
 Writes are serialized per store rather than per entity, so one principal's admission waits behind another's write transaction; the reader pool is separate, so reads do not.
 A row is keyed `(principal_id, event_id)`, so one Matrix event is one row no matter how many features could have claimed it, and the callback kind is a column on that row rather than part of its identity.
@@ -135,11 +137,104 @@ The tokenless room-member baseline remains pending across rejected response atte
 After a live reset from a certified checkpoint, unseen state-block joins also enter the exact durable dispatch path so a join omitted from the replay timeline is not lost.
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Response-owned lifecycle paths run outside nio's timeline fanout, so they admit their own events through `admit_and_run` and get the same durable dispatch, retry, and de-duplication a timeline event gets.
-Invites take neither path and are not journalled at all: an invite carries no Matrix event ID to key a durable row on, and it does not need one, because an invite the bot has not acted on reappears in every sync response until it does.
-The homeserver is therefore already providing the redelivery a journal row would have, so invite handling is a plain background task.
+Invite callbacks are not written to the event journal because invite events do not provide a stable event ID.
+`_on_invite_before_sync_certification` stores a pending room and inviter before starting plain background handling.
+The pending record wakes reconsideration of unfinished work, but it does not make Matrix repeat an already-checkpointed invite.
+That record never grants inviter authority: routers and agents re-read the current inviter from nio after the join fence is durable and immediately before starting the Matrix join request.
+The own-membership sync path clears nio's invited-room cache entry before asynchronous departure fencing when Matrix reports a departure.
+A restart without current invite-cache evidence may require another invitation.
+Invite handling remains a plain background task and remains independent from responder conversation authorization.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
 To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without journal ownership.
+
+## Turn Lifecycle Vocabulary
+
+### Ordering identities
+
+Receipt ordering, batching, and response serialization use five different identities because they protect different invariants.
+
+- Physical sender: the Matrix user ID that physically sent the event.
+- Effective requester: the trusted user ID the turn is attributed to after ingress validation; trusted-relay promotion can make it differ from the physical sender.
+- Receipt lane: the per-(room, effective requester) FIFO in `ingress_lanes.py`, keyed by `ReceiptLaneKey`, that preserves receipt order while asynchronous readiness (voice STT, media downloads) resolves.
+- Batching owner: the `CoalescingOwner` inside `CoalescingKey`, built through `requester_coalescing_key` or `active_follow_up_coalescing_key`; the gate in `coalescing.py` merges only same-owner messages into one batch, and a busy conversation reroutes admissions to an `ActiveFollowUpCoalescingOwner` key so follow-ups batch behind the active response.
+- Delivery target: `MessageTarget`, the authoritative identity for where a response is sent; the response-lifecycle lock that serializes visible responses derives from it as `ResponseLifecycleKey` via `MessageTarget.lifecycle_key`.
+
+### Prepared ingress
+
+`PreparedIngress` is the sole canonical prepared value.
+Ordinary text is normalized exactly once at admission, before the coalescing gate; dispatch never re-normalizes.
+Per-source evidence travels as named frozen fields on the value: effective requester, source kind, policy source kind, hook source, message depth, trust evidence, discovery alias, and the recovery flag.
+Raw Matrix media events are wrapped at enqueue with their caption as body and the protocol object retained on `raw_event` for attachment registration and media planning.
+`PendingEvent` carries one `PreparedIngress` plus only queue-local state (enqueue timing and opaque dispatch metadata); the busy-reroute policy stamp is a `dataclasses.replace` on the frozen value.
+
+### Durable turn and callback states
+
+An ordinary callback moves through these lifecycle phases; durable and in-process markers can coexist.
+
+- Journal pending: the durable acceptance row exists and still owns the callback work.
+- Executing in-process: `PendingEventWorker` marks one process as running the persisted callback without adding a durable running state.
+- Downstream-owned: the callback handed the source to lane, coalescing, or turn work, so the journal row stays pending while the live owner exists.
+- Durably pending turn: `TurnStore.record_pending_turn` wrote `completed=False`; response ownership has begun.
+- Terminal delivery: the final outbox enqueue or an intentional no-answer decision settles the journal source; delivery acknowledgement commits the corresponding terminal turn record when needed.
+
+Two claim types cross these states.
+
+- Pending turn claim: the in-memory exclusive claim on one physical source event ID (`TurnStore.try_claim_turn`); it is acquired before normalization, released on every non-admission or failure path, and transferred into dispatch metadata across the coalescing gate.
+- Semantic consumer: `SemanticConsumer`, the durable single-consumer claim used only for multi-purpose callbacks (approval replies and reactions); it is not the ordinary message-turn ownership token.
+- Settled journal row: the compact terminal row that blocks re-execution when Matrix redelivers an old event.
+
+### Delivery text evidence
+
+The delivery contract keeps three text values separate.
+
+- Canonical delivery text: the unrendered response selected by the response driver before response hooks and Matrix formatting, currently the blocking `response_text` or the streaming `canonical_final_body_candidate`.
+- Rendered Matrix text: the post-hook formatted body actually supplied to a successful send or edit; it is the only source for a known `final_visible_body`.
+- Replayable assistant text: the execution-owned `CompletedAttempt.replayable_text` or streaming recorder text; it is never reconstructed from post-hook or rendered Matrix text.
+
+### Ordinary-turn durable sequence
+
+The ordinary message and media path follows this sequence.
+
+```text
+journal event pending
+  -> in-process journal execution claim
+  -> pending physical-source turn claim
+  -> normalization and ingress admission under that claim
+  -> journal event remains pending while downstream owns work
+  -> durable pending TurnStore record when response ownership begins
+  -> final outbox enqueue settles the journal sources atomically
+  -> delivery acknowledgement projects the server-ordered Matrix event and binds its terminal TurnStore record atomically
+```
+
+The pending claim must be acquired before normalization and released on every non-admission or failure path.
+The exact crash guarantee is durable callback acceptance with retryable callback execution, followed by durable turn ownership and terminal deduplication once the turn record exists.
+
+### Multi-purpose callback sequence
+
+Approval replies and reactions can have several semantic consumers, so they follow a different sequence.
+
+```text
+journal event pending
+  -> in-process journal execution claim
+  -> SemanticConsumer durable claim selects exactly one consumer
+  -> claimed consumer runs its side effects or transfers work downstream
+  -> synchronous consumers settle after their side effects
+  -> deferred interactive responses settle at terminal delivery
+```
+
+For those callback families only, `SemanticConsumer` is the durable authority that prevents a second consumer from claiming the same callback.
+Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
+An interactive reaction remains pending while its detached response owns the selection, so a restart can replay it until response delivery becomes durable.
+Reaction and numeric-answer admission atomically snapshot the prompt revision that the journal projection currently exposes; later edits cannot reinterpret that stored selection, and unrelated Matrix origin clocks are never treated as causal order.
+Active prompts are derived by joining those immutable revisions to the Matrix-visible projection, so history recovery and refetch can restore an unconsumed revision without resurrecting one already answered.
+The active Matrix target and the pending source's immutable selection use separate journal rows, while the exact selecting source—not the reusable target event ID—is the response turn's execution and deduplication identity.
+
+### Deferred callback outcome
+
+`TurnDispatchOutcome.DEFERRED` means live downstream work owns the source, so `JournalDispatcher` leaves the row pending and `PendingEventWorker` tracks its in-memory owner.
+`TurnDispatchOutcome.INTENTIONALLY_IGNORED` means the callback is complete and the journal row may settle immediately.
+There is deliberately no persisted deferred state: after a restart, an unsettled row replays because the former in-memory owner no longer exists.
 
 ## Completed Simplifications
 
@@ -210,17 +305,23 @@ It registers stop tracking, runs the cancellable response task, logs cancellatio
 It deliberately does not send the turn's placeholder.
 The durable `INITIAL` outbox row that `ResponseRunner` writes when it takes the lifecycle lock is the only thing allowed to put a placeholder in the room, so a send whose outcome Matrix never confirmed is resolved by resending that row under its own transaction ID rather than by a second, unowned send.
 When the durable placeholder cannot be delivered, the turn runs without one and the `FINAL` row becomes its first visible message.
+Every durable outbox-owned Matrix delivery freezes the room membership epoch that authorized it, except when a visible approval card and both delivery stages atomically transfer their already-decided terminal cleanup to a successor membership.
+Departure retires unsent rows as identity tombstones, while acknowledgement always records the physical Matrix result but projects it into conversation history only when that frozen membership is still current.
 
 The ingress-to-execution seam is now one-way.
 Ingress (`TurnController` and `text_ingress_dispatch`) builds an immutable `ResponsePayloadPreparation` value and hands it to the runner inside `ResponseRequest`.
 The runner acquires the lifecycle lock, refreshes thread history, then calls `ResponsePayloadPreparer.prepare` as a first-class execution step to assemble the final payload, run enrichment hooks, and log startup latency.
 The old `prepare_after_lock` callback that ran payload building back inside `TurnController` is deleted; data crosses the seam as values, not closures.
 
+Ordering identities are named types now: `ReceiptLaneKey` for receipt lanes, the `CoalescingOwner` union for batching, and `ResponseLifecycleKey` (via `MessageTarget.lifecycle_key`) for response serialization; no synthetic requester string or bare tuple crosses these boundaries.
+Ordinary ingress is normalized once at admission into the canonical `PreparedIngress`, which also owns the per-source evidence that used to travel in mutable parallel fields.
+`DeliveryGateway` is the sole constructor of `FinalDeliveryOutcome`, translates typed Matrix delivery failures (`MatrixDeliveryFailure`) into its failure vocabulary, and the delivery types own cancellation provenance (`resolved_cancel_source`) and final event-ID precedence.
+Agent and team outer settlement share extracted helpers for blocking cancellation, failed-turn persistence, delivery timing, and streamed finalization; the shared blocking and streaming drivers are unchanged.
+The router relay lives in `router_relay.py` behind the narrow `_RouterRelaySupport` protocol.
+
 ## Next Simplification Work
 
-Shrink `ResponseRunner` further.
-It keeps locking, streaming, AI or team execution, and post-response effects.
-The under-lock payload-assembly side path now lives in `ResponsePayloadPreparer`; the remaining follow-up is to fold `execution_preparation.py` into the execution side and move any other side paths that belong to ingress or delivery out of `ResponseRunner`.
+The router relay already lives in `router_relay.py`; the voice readiness cluster, interactive-selection execution, response-action assembly, and the `ResponseRunner` domain clusters (team turn driver, interrupted persistence, inbox tracking, enrichment helpers) are the remaining moves.
 
 Revisit `IngressHookRunner`.
 It may stay as a helper, but it should not grow into another top-level orchestration object.

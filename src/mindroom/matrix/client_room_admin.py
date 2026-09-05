@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 if TYPE_CHECKING:
@@ -25,15 +26,9 @@ _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _DEFAULT_USER_POWER_LEVEL = 0
 _POWER_USER_POWER_LEVEL = 50
 
-# Element Call membership state event (deployed MSC3401 flavor). Regular room
-# members must be able to publish it to join a call, so it is pinned to PL0 —
-# the same convention Element uses for call-capable rooms. Mirrors
-# ``mindroom.matrix_rtc.events.CALL_MEMBER_EVENT_TYPE`` (kept as a literal here
-# to avoid a core -> matrix_rtc dependency).
-_CALL_MEMBER_EVENT_TYPE = "org.matrix.msc3401.call.member"
 _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     THREAD_TAGS_EVENT_TYPE: 0,
-    _CALL_MEMBER_EVENT_TYPE: 0,
+    CALL_MEMBER_EVENT_TYPE: 0,
 }
 _TERMINAL_ROOM_JOIN_ERROR_CODES = frozenset(
     {
@@ -48,6 +43,7 @@ class RoomJoinOutcome(StrEnum):
     """Typed outcome for one Matrix room join attempt."""
 
     JOINED = "joined"
+    ACCESS_DENIED = "access_denied"
     RETRYABLE_FAILURE = "retryable_failure"
     TERMINAL_FAILURE = "terminal_failure"
 
@@ -208,8 +204,7 @@ async def ensure_managed_room_power_levels(
     for event_type, power_level in _MANAGED_ROOM_EVENT_POWER_LEVELS.items():
         desired_content = _with_event_power_level(desired_content, event_type, power_level)
     concrete_admin_ids = {user_id for user_id in admin_user_ids if user_id}
-    if concrete_admin_ids:
-        desired_content = _with_room_admin_power_levels(desired_content, concrete_admin_ids)
+    desired_content = _with_room_admin_power_levels(desired_content, concrete_admin_ids)
     if desired_content == current_content:
         logger.debug(
             "Managed room power levels already configured",
@@ -626,11 +621,12 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> RoomJoinOutcome:
             )
         logger.info("matrix_room_joined", room_id=room_id)
         return RoomJoinOutcome.JOINED
-    outcome = (
-        RoomJoinOutcome.TERMINAL_FAILURE
-        if isinstance(response, nio.JoinError) and response.status_code in _TERMINAL_ROOM_JOIN_ERROR_CODES
-        else RoomJoinOutcome.RETRYABLE_FAILURE
-    )
+    if isinstance(response, nio.JoinError) and response.status_code in _TERMINAL_ROOM_JOIN_ERROR_CODES:
+        outcome = RoomJoinOutcome.TERMINAL_FAILURE
+    elif isinstance(response, nio.JoinError) and response.status_code == "M_FORBIDDEN":
+        outcome = RoomJoinOutcome.ACCESS_DENIED
+    else:
+        outcome = RoomJoinOutcome.RETRYABLE_FAILURE
     logger.warning(
         "matrix_room_join_failed",
         room_id=room_id,

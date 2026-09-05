@@ -22,11 +22,19 @@ ROUTER_AGENT_NAME = "router"
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 CONFIG_CONFIRMATION_REACTION_KEY = "com.mindroom.config_confirmation_reaction"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
+# Raise the per-room Classic Sync timeline limit above the homeserver default
+# (~10) so a room has to flood much harder before the server truncates its
+# timeline and forces a limited-sync gap backfill.
+CLASSIC_SYNC_TIMELINE_LIMIT = 5000
 DEFAULT_COMPACTION_TIMEOUT_SECONDS = 600.0
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV = "MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"
 DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 4
 MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 128
+KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS"
+# Generous enough for a cold full index of a large corpus, short enough that a
+# wedged child cannot outlive the day.
+DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS = 3600.0
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _PROMPT_HISTORY_STORAGE_ROLES = frozenset({"system", "developer"})
 
@@ -166,6 +174,30 @@ class RuntimePaths:
         if value is None:
             return default
         return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_session_state_root(state_root: Path, runtime_paths: RuntimePaths) -> Path:
+    """Map a canonical state root into optional dedicated session storage."""
+    configured_root = runtime_paths.env_value(runtime_env_policy.SESSION_STORAGE_PATH_ENV)
+    if configured_root is None or not configured_root.strip():
+        return state_root
+
+    session_storage_root = Path(configured_root).expanduser()
+    if not session_storage_root.is_absolute():
+        session_storage_root = runtime_paths.config_dir / session_storage_root
+    session_storage_root = session_storage_root.resolve()
+    canonical_storage_root = runtime_paths.storage_root.expanduser().resolve()
+    canonical_state_root = state_root.expanduser().resolve()
+    try:
+        relative_state_root = canonical_state_root.relative_to(canonical_storage_root)
+    except ValueError as exc:
+        msg = "Session state root must originate inside the canonical storage root"
+        raise ValueError(msg) from exc
+    resolved_session_state_root = (session_storage_root / relative_state_root).resolve()
+    if not resolved_session_state_root.is_relative_to(session_storage_root):
+        msg = "Session state root must stay within the session storage root"
+        raise ValueError(msg)
+    return resolved_session_state_root
 
 
 def _copy_process_env(process_env: dict[str, str] | None = None) -> dict[str, str]:
@@ -1016,6 +1048,8 @@ SOURCE_KIND_KEY = "com.mindroom.source_kind"
 PER_FIRE_THREAD_ROOT_KEY = "com.mindroom.per_fire_thread_root"
 PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
 SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"
+SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
+SILENT_SCHEDULE_NO_REPLY_TOKEN = "NO_REPLY"  # noqa: S105 - Public no-report marker, not a credential.
 HOOK_SOURCE_KEY = "com.mindroom.hook_source"
 HOOK_MESSAGE_RECEIVED_DEPTH_KEY = "com.mindroom.message_received_depth"
 SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
@@ -1041,11 +1075,14 @@ MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
 MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
+DURABLE_FINAL_OUTCOME_KEY = "io.mindroom.final_delivery"
+DURABLE_FINAL_OUTCOME_VERSION = 2
 STREAM_VISIBLE_BODY_KEY = "io.mindroom.visible_body"
 STREAM_WARMUP_SUFFIX_KEY = "io.mindroom.warmup_suffix"
 TOOL_TRACE_CONTENT_KEY = "io.mindroom.tool_trace"
 STREAM_STATUS_PENDING = "pending"
 STREAM_STATUS_STREAMING = "streaming"
+STREAM_STATUS_APPROVAL_PENDING = "approval_pending"
 STREAM_STATUS_COMPLETED = "completed"
 STREAM_STATUS_CANCELLED = "cancelled"
 STREAM_STATUS_INTERRUPTED = "interrupted"
@@ -1056,6 +1093,12 @@ STREAM_STATUS_ERROR = "error"
 # by the provisioning service.
 OWNER_MATRIX_USER_ID_PLACEHOLDER = "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
 OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
+
+
+def is_silent_schedule_no_report_response(response_text: str) -> bool:
+    """Return whether one silent-schedule final text explicitly reports nothing."""
+    normalized = response_text.strip()
+    return not normalized or normalized.casefold() == SILENT_SCHEDULE_NO_REPLY_TOKEN.casefold()
 
 
 # Canonical mapping from provider name to the environment variable it requires.

@@ -99,7 +99,7 @@ The `/v1` API remains intentionally restricted to unscoped agents and agents wit
 - Do not create a fresh container per tool call.
 - Do not special-case the architecture around only `shell`, `file`, or `python`.
 - Do not support split-brain mutable state where one runtime edits one copy and another runtime reads a different authoritative copy.
-- Do not promise durable background processes as a product contract until a dedicated supervisor exists.
+- Do not treat arbitrary shell backgrounding as durable product state; supported background Python work must use the supervised `script` tool contract.
 
 ## Scope Semantics
 
@@ -369,9 +369,15 @@ Concrete current examples include `scheduler`, `subagents`, and self-configurati
 
 ## Background Processes
 
-Background processes inside workers should not be treated as reliable product state until MindRoom has an explicit worker-local supervisor.
-The safe contract is that worker processes may be terminated whenever a worker is evicted, restarted, or migrated.
-If background execution is later supported, worker metadata should track process identity and cleanup state under the worker root.
+MindRoom now supports background Python only through the primary-owned `script` tool and the worker-local shell supervisor.
+The primary runtime durably owns run identity, requester-and-agent scope, capability revocation, launch grants, approval receipts, runtime limits, and desired cancellation state.
+The worker-local supervisor owns the process handle, bounded output, status checks, graceful signals, and force kills.
+Scripts call governed tools through the authenticated script gateway rather than receiving the primary runtime's tool objects or secrets.
+In worker mode, the source and raw capability are staged in a private run directory under the dedicated worker state root's `workspace`; unsafe local mode instead uses the canonical agent workspace.
+The raw capability is removed during terminal cleanup in either mode.
+A worker loss, eviction, restart, migration, or missing supervisor handle transitions the run to `interrupted`; the first release does not restart the Python source automatically.
+Ordinary unmanaged background commands remain outside the product contract even when they happen to outlive one tool request.
+See [Background Python Scripts](../tools/background-scripts.md) for configuration, SDK, approval, cancellation, and self-trigger guidance.
 
 ## Security And Isolation Rules
 

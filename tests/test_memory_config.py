@@ -10,6 +10,7 @@ import pytest
 from mem0 import AsyncMemory
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.openai import OpenAIEmbedding
+from mem0.llms.openai import OpenAILLM
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -26,7 +27,7 @@ from mindroom.memory.config import (
     _memory_collection_name,
     create_memory_instance,
 )
-from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT
+from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENAI_GPT_LUNA, OPENAI_GPT_TERRA
 from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
@@ -117,6 +118,80 @@ class TestMemoryConfig:
         assert result["llm"]["provider"] == "openai"
         assert result["llm"]["config"]["model"] == "gpt-4"
         assert result["llm"]["config"]["api_key"] == "test-key"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model_id", "expected_top_p", "legacy_request_builder"),
+        [
+            (OPENAI_GPT_LUNA, None, False),
+            (OPENAI_GPT_TERRA, None, False),
+            ("gpt-4", 0.8, False),
+            (OPENAI_GPT_TERRA, None, True),
+        ],
+        ids=["luna", "terra", "gpt-4", "terra-legacy-mem0"],
+    )
+    async def test_mem0_openai_top_p_support_is_model_specific(
+        self,
+        tmp_path: Path,
+        model_id: str,
+        expected_top_p: float | None,
+        legacy_request_builder: bool,
+    ) -> None:
+        """Memory extraction must omit only sampling controls rejected by its model."""
+        memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="ollama",
+                config=EmbedderConfig(model="nomic-embed-text", host="http://localhost:11434"),
+            ),
+            llm=_MemoryLLMConfig(
+                provider="openai",
+                config={
+                    "api_key": "test-key",
+                    "model": model_id,
+                    "temperature": 0.1,
+                    "top_p": 0.8,
+                },
+            ),
+        )
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
+        create_completion = MagicMock(return_value=response)
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create_completion)))
+
+        with patch("mem0.llms.openai.OpenAI", return_value=fake_client):
+            mem0_llm = OpenAILLM(memory.llm.config)
+
+        with patch.object(
+            AsyncMemory,
+            "from_config",
+            return_value=SimpleNamespace(llm=mem0_llm, vector_store=object()),
+        ):
+            instance = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
+
+        assert instance.llm is mem0_llm
+        messages = [{"role": "user", "content": "remember this"}]
+        if legacy_request_builder:
+
+            def legacy_generate_response(llm: OpenAILLM, request_messages: list[dict[str, str]]) -> object:
+                return llm.client.chat.completions.create(
+                    model=llm.config.model,
+                    messages=request_messages,
+                    temperature=llm.config.temperature,
+                    max_tokens=llm.config.max_tokens,
+                    top_p=llm.config.top_p,
+                )
+
+            with patch.object(OpenAILLM, "generate_response", legacy_generate_response):
+                instance.llm.generate_response(messages)
+        else:
+            instance.llm.generate_response(messages)
+
+        request_params = create_completion.call_args.kwargs
+        assert request_params["temperature"] == 0.1
+        if expected_top_p is None:
+            assert "top_p" not in request_params
+        else:
+            assert request_params["top_p"] == expected_top_p
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,

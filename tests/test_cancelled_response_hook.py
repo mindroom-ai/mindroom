@@ -49,6 +49,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_team_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -68,14 +70,18 @@ from tests.identity_helpers import entity_ids
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.bot import TeamBot
+
 
 def _config(tmp_path: Path) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(display_name="Code", rooms=["!room:localhost"]),
-            },
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "code": AgentConfig(display_name="Code", rooms=["!room:localhost"]),
+                },
+            ),
         ),
         runtime_paths,
     )
@@ -154,7 +160,7 @@ def _team_bot(tmp_path: Path) -> TeamBot:
         display_name="Team Bot",
         password=TEST_PASSWORD,
     )
-    bot = TeamBot(
+    bot = make_test_team_bot(
         team_user,
         tmp_path,
         config=config,
@@ -749,8 +755,7 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
 
     parsed = MagicMock()
     parsed.formatted_text = "visible response"
-    parsed.option_map = None
-    parsed.options_list = None
+    parsed.interactive_metadata = None
 
     with (
         patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),

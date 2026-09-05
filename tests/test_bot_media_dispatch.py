@@ -8,20 +8,20 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import nio
 import pytest
 from agno.media import Image
 
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
-from mindroom.bot import AgentBot
 from mindroom.coalescing import CoalescingGate, LaneSlot, ReadyPendingEvent
-from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
+from mindroom.coalescing_batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
@@ -56,11 +56,13 @@ from tests.bot_helpers import (
     _visible_message,
     _wrap_extracted_collaborators,
     make_mock_agent_user,
+    make_test_agent_bot,
 )
 from tests.conftest import (
     dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
+    make_pending_event,
     replace_turn_controller_deps,
     runtime_paths_for,
 )
@@ -68,8 +70,7 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import nio
-
+    from mindroom.ingress_lanes import ReceiptLaneKey
     from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -90,6 +91,12 @@ def _assert_ready_voice_claim_handoff(ready_event: ReadyPendingEvent | None) -> 
     claim_metadata.close()
 
 
+def _synced_room(own_user_id: str) -> nio.MatrixRoom:
+    room = nio.MatrixRoom("!test:localhost", own_user_id)
+    room.members_synced = True
+    return room
+
+
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
 
@@ -101,7 +108,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Image messages should reach response generation with an images payload."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
 
@@ -122,8 +129,7 @@ class TestAgentBot(AgentBotTestBase):
         generate_response = AsyncMock(return_value="$response")
         install_generate_response_mock(bot, generate_response)
 
-        room = MagicMock()
-        room.room_id = "!test:localhost"
+        room = _synced_room(bot.matrix_id.full_id)
 
         event = _room_image_event(sender="@user:localhost", event_id="$img_event", body="photo.jpg")
         event.source = {"content": {"body": "photo.jpg"}}  # no filename → body is filename
@@ -136,8 +142,7 @@ class TestAgentBot(AgentBotTestBase):
         attachment_record.attachment_id = attachment_id
 
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -211,10 +216,9 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Image/file media dispatch should fix its conversation key before enqueueing dispatch."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        room = MagicMock()
-        room.room_id = "!test:localhost"
+        room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value=None)
@@ -235,9 +239,9 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Audio dispatch should reserve receive order, then admit under a resolved key."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        room = SimpleNamespace(room_id="!test:localhost")
+        room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
         call_order: list[str] = []
         admitted_ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
@@ -250,13 +254,12 @@ class TestAgentBot(AgentBotTestBase):
         original_enter_lane = bot._coalescing_gate.enter_lane
 
         def record_enter_lane(
+            lane_key: ReceiptLaneKey,
             *,
-            room_id: str,
-            sender_id: str,
             receipt_time: float | None = None,
         ) -> LaneSlot:
             call_order.append("reserve")
-            return original_enter_lane(room_id=room_id, sender_id=sender_id, receipt_time=receipt_time)
+            return original_enter_lane(lane_key, receipt_time=receipt_time)
 
         def record_submit(
             slot: LaneSlot,
@@ -270,7 +273,7 @@ class TestAgentBot(AgentBotTestBase):
             assert ready_task is not None
             nonlocal admitted_ready_task
             call_order.append("admit")
-            assert key == CoalescingKey("!test:localhost", "$thread_root", "@user:localhost")
+            assert key == CoalescingKey("!test:localhost", "$thread_root", RequesterCoalescingOwner("@user:localhost"))
             assert source_event_id == "$voice_event"
             assert source_kind == VOICE_SOURCE_KIND
             assert slot.released is False
@@ -318,8 +321,9 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A media replay cannot repeat thread resolution while the first delivery owns the turn."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        room = SimpleNamespace(room_id="!test:localhost")
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = _synced_room(bot.matrix_id.full_id)
         event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
         resolution_started = asyncio.Event()
 
@@ -354,8 +358,9 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A durable competing owner settles redelivery without repeating media resolution."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        room = SimpleNamespace(room_id="!test:localhost")
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = _synced_room(bot.matrix_id.full_id)
         event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
 
         ingress = MagicMock(spec=IngressValidator, wraps=bot._ingress_validator)
@@ -383,8 +388,9 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Claim-and-reserve must leave the source retryable when lane creation fails."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        room = SimpleNamespace(room_id="!test:localhost")
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = _synced_room(bot.matrix_id.full_id)
         event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
         competing_claim = TurnRecord.create([event.event_id], completed=False)
 
@@ -393,7 +399,7 @@ class TestAgentBot(AgentBotTestBase):
         ingress.precheck_event.return_value = "@user:localhost"
         gate = MagicMock(spec=CoalescingGate, wraps=bot._coalescing_gate)
 
-        def reject_lane_reservation(**_kwargs: object) -> None:
+        def reject_lane_reservation(*_args: object, **_kwargs: object) -> None:
             assert bot._turn_store.try_claim_turn(competing_claim) is False
             msg = "lane unavailable"
             raise RuntimeError(msg)
@@ -415,10 +421,9 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Cancelled pre-admission audio resolution must not leave gate work behind."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        room = MagicMock()
-        room.room_id = "!test:localhost"
+        room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
         prechecked_event = SimpleNamespace(event=event, requester_user_id="@user:localhost")
 
@@ -440,7 +445,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """An earlier text message must not be overtaken by a later voice message."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -463,11 +468,11 @@ class TestAgentBot(AgentBotTestBase):
                 await release_text_lookup.wait()
             return "$thread-root"
 
-        async def dispatch_batch(batch: CoalescedBatch) -> None:
-            dispatches.append(list(batch.source_event_ids))
+        async def dispatch_batch(batch: PreparedTurn) -> None:
+            dispatches.append(list(batch.handled_turn.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
-            dispatch_batch=dispatch_batch,
+            dispatch_turn=dispatch_batch,
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )
@@ -481,13 +486,13 @@ class TestAgentBot(AgentBotTestBase):
                     reply_to_event_id=voice_event.event_id,
                     event_source=voice_event.source,
                 ),
-                CoalescingKey(room.room_id, "$thread-root", "@user:localhost"),
+                CoalescingKey(room.room_id, "$thread-root", RequesterCoalescingOwner("@user:localhost")),
             ),
         )
         bot._turn_controller._ready_voice_event = AsyncMock(
             return_value=ReadyPendingEvent(
-                pending_event=PendingEvent(
-                    event=PreparedTextEvent(
+                pending_event=make_pending_event(
+                    PreparedIngress(
                         sender="@user:localhost",
                         event_id="$voice",
                         body="voice second",
@@ -500,7 +505,7 @@ class TestAgentBot(AgentBotTestBase):
                         },
                         source_kind_override=VOICE_SOURCE_KIND,
                     ),
-                    room=room,
+                    room,
                     source_kind=VOICE_SOURCE_KIND,
                 ),
             ),
@@ -510,7 +515,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed first",
@@ -519,7 +524,6 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             text_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, text_event))
             await asyncio.sleep(0)
@@ -542,7 +546,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """An earlier non-audio media event must reserve before thread lookup can block."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -565,11 +569,11 @@ class TestAgentBot(AgentBotTestBase):
                 await release_media_lookup.wait()
             return "$thread-root"
 
-        async def dispatch_batch(batch: CoalescedBatch) -> None:
-            dispatches.append(list(batch.source_event_ids))
+        async def dispatch_batch(batch: PreparedTurn) -> None:
+            dispatches.append(list(batch.handled_turn.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
-            dispatch_batch=dispatch_batch,
+            dispatch_turn=dispatch_batch,
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )
@@ -580,7 +584,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed second",
@@ -589,7 +593,6 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             media_task = asyncio.create_task(bot._turn_controller.handle_media_event(room, image_event))
             await asyncio.sleep(0)
@@ -612,7 +615,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """An earlier file sidecar text preview must reserve before preview normalization can block."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -632,7 +635,7 @@ class TestAgentBot(AgentBotTestBase):
             "type": "m.room.message",
             "content": {"msgtype": "m.text", "body": "typed second"},
         }
-        prepared_sidecar = PreparedTextEvent(
+        prepared_sidecar = PreparedIngress(
             sender="@user:localhost",
             event_id="$sidecar",
             body="sidecar first",
@@ -649,15 +652,15 @@ class TestAgentBot(AgentBotTestBase):
         release_preview_normalization = asyncio.Event()
         dispatches: list[list[str]] = []
 
-        async def prepare_file_sidecar_text_event(_event: nio.RoomMessageFile) -> PreparedTextEvent:
+        async def prepare_file_sidecar_text_event(_event: nio.RoomMessageFile) -> PreparedIngress:
             await release_preview_normalization.wait()
             return prepared_sidecar
 
-        async def dispatch_batch(batch: CoalescedBatch) -> None:
-            dispatches.append(list(batch.source_event_ids))
+        async def dispatch_batch(batch: PreparedTurn) -> None:
+            dispatches.append(list(batch.handled_turn.source_event_ids))
 
         bot._coalescing_gate = CoalescingGate(
-            dispatch_batch=dispatch_batch,
+            dispatch_turn=dispatch_batch,
             debounce_seconds=lambda: 0.01,
             is_shutting_down=lambda: False,
         )
@@ -672,7 +675,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(
-                    return_value=PreparedTextEvent(
+                    return_value=PreparedIngress(
                         sender="@user:localhost",
                         event_id="$typed",
                         body="typed second",
@@ -681,7 +684,6 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             ),
-            patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             sidecar_task = asyncio.create_task(bot._turn_controller.handle_media_event(room, sidecar_event))
             await asyncio.sleep(0)
@@ -704,7 +706,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Media turns should include attachment IDs already referenced in thread history."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
 
@@ -760,8 +762,7 @@ class TestAgentBot(AgentBotTestBase):
         attachment_record.attachment_id = current_attachment_id
 
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -803,8 +804,8 @@ class TestAgentBot(AgentBotTestBase):
                 thread_id="$thread_root",
             ),
         ]
-        # Only current-turn records convert to inline media; history media is
-        # pinned to its thread-history message instead.
+        # Only current-turn records convert to inline media; history records
+        # remain available by attachment ID.
         converted_records = mock_records_to_media.call_args.args[0]
         assert [record.attachment_id for record in converted_records] == [current_attachment_id]
 
@@ -841,7 +842,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Inline media carries only current-turn attachments while IDs stay thread/history-scoped."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         current_attachment_id = f"att_current_{kind}"
         thread_attachment_id = f"att_thread_{kind}"
@@ -904,9 +905,9 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Thread and history media stay pinned to their messages, not the current turn."""
+        """Thread and history attachments stay ID-only instead of joining the current turn."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         current_attachment_id = "att_current_image"
         thread_attachment_id = "att_thread_image"
@@ -962,7 +963,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Payloads without attachments should have empty inline media and no tool-visible IDs."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
 
         payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
@@ -990,7 +991,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Fallback images should still populate inline media when no current IDs resolve."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         fallback_image = Image(content=b"\x89PNG\r\n\x1a\nfallback", mime_type="image/png")
 
@@ -1020,7 +1021,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Fallback image bytes should be appended instead of discarded when some registrations succeed."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         stored_image = Image(content=b"\x89PNG\r\n\x1a\nstored", mime_type="image/png")
         fallback_image = Image(content=b"\x89PNG\r\n\x1a\nfallback", mime_type="image/png")
@@ -1067,7 +1068,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Attachment IDs should be isolated to model_prompt instead of mutating the raw user prompt."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         stored_image = Image(content=b"\x89PNG\r\n\x1a\nstored", mime_type="image/png")
 
@@ -1110,7 +1111,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Successful voice transcripts should explain that raw audio is optional."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         current_attachment_id = "att_current_audio"
         current_path = _register_payload_media_attachment(
@@ -1151,7 +1152,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Raw voice fallback should leave audio transcription up to the agent."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         current_attachment_id = "att_raw_audio"
         _register_payload_media_attachment(
@@ -1188,7 +1189,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Message enrichment should extend an existing model prompt rather than replacing it."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         dispatch = PreparedDispatch(
             requester_user_id="@user:localhost",
             context=MessageContext(
@@ -1238,7 +1239,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Image download failure should not mark the event responded without a visible terminal error."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         tracker = MagicMock()
@@ -1265,8 +1266,7 @@ class TestAgentBot(AgentBotTestBase):
         event.source = {"content": {"body": "please analyze"}}
 
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -1290,7 +1290,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """File messages should reach response generation with a local media path in prompt."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         tracker = MagicMock()
@@ -1335,8 +1335,7 @@ class TestAgentBot(AgentBotTestBase):
         assert attachment_record is not None
 
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -1401,7 +1400,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """File persistence failure should not mark the event responded without a visible terminal error."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         tracker = MagicMock()
@@ -1429,8 +1428,7 @@ class TestAgentBot(AgentBotTestBase):
         event.source = {"content": {"body": "report.pdf", "msgtype": "m.file"}}
 
         with (
-            patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.turn_policy.decide_team_formation",

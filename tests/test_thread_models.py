@@ -13,13 +13,14 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.commands.model_commands import handle_model_command
-from mindroom.commands.parsing import CommandType, command_parser
+from mindroom.commands.parsing import CommandType, command_parser, get_command_help
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.message_target import MessageTarget
+from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import (
     _get_thread_model_override,
     _store_path,
@@ -28,6 +29,9 @@ from mindroom.thread_models import (
 )
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -307,7 +311,15 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
     )
     assert "✅" in response
     assert "`large`" in response
+    assert "room-level model selection" in response
     assert _get_thread_model_override(runtime_paths, THREAD_ID) == "large"
+
+    set_room_model_override(
+        runtime_paths,
+        room_id=ROOM_ID,
+        model_name="large",
+        set_by="@admin:localhost",
+    )
 
     response = handle_model_command(
         "reset",
@@ -318,7 +330,17 @@ def test_model_command_set_and_reset(tmp_path: Path) -> None:
         requester_user_id="@user:localhost",
     )
     assert "✅" in response
+    assert "room-level model selection" in response
     assert _get_thread_model_override(runtime_paths, THREAD_ID) is None
+    assert (
+        config.resolve_runtime_model(
+            entity_name="test_agent",
+            room_id=ROOM_ID,
+            thread_id=THREAD_ID,
+            runtime_paths=runtime_paths,
+        ).model_name
+        == "large"
+    )
 
     response = handle_model_command(
         "reset",
@@ -345,6 +367,7 @@ def test_model_command_show(tmp_path: Path) -> None:
         requester_user_id="@user:localhost",
     )
     assert "No thread model override" in response
+    assert "room-level model selection" in response
     assert "`default`" in response
     assert "`large`" in response
 
@@ -364,6 +387,13 @@ def test_model_command_show(tmp_path: Path) -> None:
         requester_user_id="@user:localhost",
     )
     assert "`large` override" in response
+
+
+def test_model_help_describes_room_level_fallback() -> None:
+    """Reset help must describe the room-level fallback that actually runs."""
+    help_text = get_command_help("model")
+
+    assert "room-level model selection" in help_text
 
 
 def test_model_command_list_alias_shows_models(tmp_path: Path) -> None:
@@ -469,7 +499,7 @@ def test_store_drops_records_with_corrupt_set_at(tmp_path: Path) -> None:
 
 def _make_tool_context(*, thread_id: str | None = THREAD_ID) -> ToolRuntimeContext:
     config = _config_with_models(Path(tempfile.mkdtemp()))
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="test_agent",
         target=MessageTarget.resolve(
             room_id=ROOM_ID,
@@ -490,12 +520,25 @@ def _make_tool_context(*, thread_id: str | None = THREAD_ID) -> ToolRuntimeConte
 def test_thread_model_tool_registered() -> None:
     """The thread_model tool should be available from the metadata registry."""
     config = _config_with_models(Path(tempfile.mkdtemp()))
+    toolkit = get_tool_by_name("thread_model", runtime_paths_for(config), worker_target=None)
 
     assert "thread_model" in TOOL_METADATA
-    assert isinstance(
-        get_tool_by_name("thread_model", runtime_paths_for(config), worker_target=None),
-        ThreadModelTools,
-    )
+    assert isinstance(toolkit, ThreadModelTools)
+    assert "list_models" in toolkit.async_functions
+    assert "list_models" in TOOL_METADATA["thread_model"].function_names
+
+
+def test_thread_model_switch_stops_provider_without_exposing_raw_result() -> None:
+    """The continuation, not Agno's raw tool result, should own the final response."""
+    tool = ThreadModelTools()
+    function = tool.async_functions["switch_thread_model"]
+    function.process_entrypoint(strict=False)
+
+    assert function.stop_after_tool_call is True
+    assert function.show_result is False
+    assert function.parameters["properties"]["model_name"]["type"] == "string"
+    assert function.parameters["properties"]["when"]["enum"] == ["after-toolcall", "next-turn"]
+    assert function.parameters["required"] == ["model_name"]
 
 
 @pytest.mark.asyncio
@@ -506,6 +549,25 @@ async def test_thread_model_tool_requires_runtime_context() -> None:
     assert payload["status"] == "error"
     assert payload["tool"] == "thread_model"
     assert "context" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_thread_model_tool_lists_configured_models_without_thread() -> None:
+    """Removing explicit discovery would leave agents unable to choose a configured alias."""
+    context = _make_tool_context(thread_id=None)
+
+    with tool_runtime_context(context):
+        payload = json.loads(await ThreadModelTools().list_models())
+
+    assert payload == {
+        "action": "list",
+        "models": [
+            {"model_id": "default-model", "name": "default", "provider": "openai"},
+            {"model_id": "large-model", "name": "large", "provider": "openai"},
+        ],
+        "status": "ok",
+        "tool": "thread_model",
+    }
 
 
 @pytest.mark.asyncio
@@ -540,6 +602,38 @@ async def test_thread_model_tool_switch_get_and_reset() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thread_model_tool_can_switch_after_current_tool_call() -> None:
+    """Ignoring the timing argument would leave the current response on the old model."""
+    context = _make_tool_context()
+
+    with tool_runtime_context(context):
+        payload = json.loads(
+            await ThreadModelTools().switch_thread_model("large", when="after-toolcall"),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["model"] == "large"
+    assert payload["when"] == "after-toolcall"
+    assert payload["note"] == "The current response will continue with the new model after this tool call."
+    assert _get_thread_model_override(context.runtime_paths, THREAD_ID) == "large"
+
+
+@pytest.mark.asyncio
+async def test_thread_model_tool_rejects_unknown_switch_timing() -> None:
+    """Accepting an unknown timing value could persist a change with undefined execution semantics."""
+    context = _make_tool_context()
+
+    with tool_runtime_context(context):
+        payload = json.loads(
+            await ThreadModelTools().switch_thread_model("large", when="later"),  # type: ignore[arg-type]
+        )
+
+    assert payload["status"] == "error"
+    assert payload["available_when"] == ["after-toolcall", "next-turn"]
+    assert _get_thread_model_override(context.runtime_paths, THREAD_ID) is None
+
+
+@pytest.mark.asyncio
 async def test_thread_model_tool_rejects_unknown_model() -> None:
     """Switching should reject names missing from config.models."""
     context = _make_tool_context()
@@ -563,6 +657,12 @@ async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
         room_id=ROOM_ID,
         set_by="@user:localhost",
     )
+    set_room_model_override(
+        context.runtime_paths,
+        room_id=ROOM_ID,
+        model_name="large",
+        set_by="@admin:localhost",
+    )
 
     with tool_runtime_context(context):
         payload = json.loads(await ThreadModelTools().get_thread_model())
@@ -571,6 +671,16 @@ async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
     assert payload["override"] is None
     assert payload["stale_override"] == "removed-model"
     assert "no longer configured" in payload["note"]
+    assert "room-level model selection" in payload["note"]
+    assert (
+        context.config.resolve_runtime_model(
+            entity_name="test_agent",
+            room_id=ROOM_ID,
+            thread_id=THREAD_ID,
+            runtime_paths=context.runtime_paths,
+        ).model_name
+        == "large"
+    )
 
 
 def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path) -> None:

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -102,20 +103,27 @@ def check_agent_mentioned(
     agent_id: MatrixID | None,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    room: nio.MatrixRoom,
 ) -> tuple[list[MatrixID], bool, bool]:
     """Check if an agent is mentioned in a message.
 
     Returns (mentioned_agents, am_i_mentioned, has_non_agent_mentions).
     ``has_non_agent_mentions`` is True when the message explicitly tags a
-    user who is *not* a configured agent and not in ``config.bot_accounts``
-    (i.e. a real human user).
+    joined participant who is *not* a configured agent and not in
+    ``config.bot_accounts``. While the member cache is unsynced (the
+    authoritative refresh failed) every such mention counts, so a lost
+    membership fetch degrades to silence rather than an interjection.
     """
     raw_content = event_source.get("content", {})
     content = visible_content_from_content(raw_content) if isinstance(raw_content, dict) else {}
     all_mentioned_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
     mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config, runtime_paths)
     am_i_mentioned = agent_id in mentioned_agents
-    has_non_agent_mentions = any(not _is_bot_or_agent(uid, config, runtime_paths) for uid in all_mentioned_ids)
+    non_agent_mentions = [uid for uid in all_mentioned_ids if not _is_bot_or_agent(uid, config, runtime_paths)]
+    has_non_agent_mentions = bool(non_agent_mentions) and (
+        not room.members_synced or not authorization.cached_joined_member_ids(room).isdisjoint(non_agent_mentions)
+    )
 
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
 
@@ -192,6 +200,7 @@ def thread_requires_explicit_agent_targeting(
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
     available_responders_in_room: Sequence[MatrixID] | None = None,
 ) -> bool:
     """Return whether a thread already has visible ownership or multiple human participants."""
@@ -200,6 +209,7 @@ def thread_requires_explicit_agent_targeting(
         sender_id,
         config,
         runtime_paths,
+        membership_index,
         available_responders_in_room=available_responders_in_room,
     )
     if sender_visible_responders:
@@ -212,6 +222,7 @@ def filter_thread_agents_for_sender(
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
     *,
     available_responders_in_room: Sequence[MatrixID] | None = None,
 ) -> list[MatrixID]:
@@ -221,6 +232,7 @@ def filter_thread_agents_for_sender(
         sender_id,
         config,
         runtime_paths,
+        membership_index,
     )
     if available_responders_in_room is None:
         return sender_visible_agents
@@ -261,6 +273,7 @@ def _decide_thread_agent_response(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
     available_responders: Sequence[MatrixID],
     agents_in_thread: Sequence[MatrixID] | None,
 ) -> AgentResponseDecision:
@@ -276,6 +289,7 @@ def _decide_thread_agent_response(
         sender_id,
         config,
         runtime_paths,
+        membership_index,
         available_responders_in_room=available_responders,
     )
     if sender_visible_thread_agents:
@@ -306,6 +320,7 @@ def decide_agent_response(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
     mentioned_agents: list[MatrixID] | None = None,
     has_non_agent_mentions: bool = False,
     *,
@@ -325,14 +340,22 @@ def decide_agent_response(
         thread_history: History of messages in the thread
         config: Application configuration
         runtime_paths: Explicit runtime context for permissions and mention resolution
+        membership_index: Shared authoritative grant-room membership index
         mentioned_agents: List of all agent MatrixIDs mentioned in the message
-        has_non_agent_mentions: True when the message explicitly tags a non-agent user
+        has_non_agent_mentions: True when the message explicitly tags a joined non-agent user
         sender_id: Sender Matrix ID used for per-agent reply permissions
         available_responders_in_room: Optional precomputed sender-visible responders for the room
         agents_in_thread: Optional precomputed agents that have participated in the thread
 
     """
-    if not authorization.is_sender_allowed_for_agent_reply(sender_id, agent_name, config, runtime_paths):
+    if not authorization.is_sender_allowed_for_agent_reply_in_room(
+        sender_id,
+        agent_name,
+        config,
+        room.room_id,
+        runtime_paths,
+        membership_index,
+    ):
         return AgentResponseDecision(False, "sender_not_allowed")
 
     available_responders = available_responders_in_room
@@ -342,6 +365,7 @@ def decide_agent_response(
             sender_id,
             config,
             runtime_paths,
+            membership_index,
         )
     agent_matrix_id = entity_identity_registry(config, runtime_paths).current_id(agent_name)
     available_responder_ids = {responder.full_id for responder in available_responders}
@@ -352,7 +376,7 @@ def decide_agent_response(
     if am_i_mentioned:
         return AgentResponseDecision(True)
 
-    # Never respond if anyone else is explicitly mentioned (agent or not)
+    # Never respond if another managed entity or joined unmanaged participant is explicitly mentioned.
     if mentioned_agents or has_non_agent_mentions:
         return AgentResponseDecision(False, "other_explicit_mention")
 
@@ -370,6 +394,7 @@ def decide_agent_response(
         thread_history=thread_history,
         config=config,
         runtime_paths=runtime_paths,
+        membership_index=membership_index,
         available_responders=available_responders,
         agents_in_thread=agents_in_thread,
     )

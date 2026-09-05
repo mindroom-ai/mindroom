@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY
@@ -30,6 +29,7 @@ from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -46,6 +46,8 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 def test_should_skip_mentions_with_metadata() -> None:
@@ -91,7 +93,7 @@ def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
         )
     runtime_paths = runtime_paths_for(config)
     current_ids = entity_ids(config, runtime_paths)
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="email_agent",
             password=TEST_PASSWORD,
@@ -142,7 +144,7 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
     with patch("mindroom.delivery_gateway.format_message_with_mentions") as mock_create:
         mock_create.return_value = mock_content.copy()
         with patch(
-            "mindroom.delivery_gateway.send_message_result",
+            "mindroom.delivery_gateway.send_message_outcome",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$response123")),
         ) as mock_send:
             # Call the actual delivery gateway send_text with skip_mentions=True
@@ -344,7 +346,7 @@ async def test_delivery_gateway_send_text_logs_target_thread_context(
         return_value="$latest",
     )
     with patch(
-        "mindroom.delivery_gateway.send_message_result",
+        "mindroom.delivery_gateway.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
     ):
         event_id = await gateway.send_text(
@@ -378,7 +380,7 @@ async def test_delivery_gateway_send_text_builds_threaded_relation_from_the_reso
     )
 
     with patch(
-        "mindroom.delivery_gateway.send_message_result",
+        "mindroom.delivery_gateway.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
     ) as send:
         event_id = await gateway.send_text(
@@ -411,7 +413,7 @@ async def test_delivery_gateway_edit_text_sends_a_relation_free_replacement(tmp_
     )
 
     with patch(
-        "mindroom.delivery_gateway.edit_message_result",
+        "mindroom.delivery_gateway.edit_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit-event")),
     ) as edit:
         edited = await gateway.edit_text(
@@ -493,7 +495,7 @@ async def test_delivery_gateway_edit_text_skips_dead_room_mode_relation(tmp_path
             new=MagicMock(side_effect=AssertionError("edit path must not resolve thread mode")),
         ) as mode_lookup,
         patch(
-            "mindroom.matrix.client_delivery.send_message_result",
+            "mindroom.matrix.client_delivery.send_message_outcome",
             new=AsyncMock(side_effect=record_send),
         ),
     ):
@@ -527,8 +529,7 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tm
 
     parsed = MagicMock()
     parsed.formatted_text = "formatted response"
-    parsed.option_map = None
-    parsed.options_list = None
+    parsed.interactive_metadata = None
 
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")) as mock_send_text,
@@ -570,8 +571,7 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
 
     parsed = MagicMock()
     parsed.formatted_text = "formatted response"
-    parsed.option_map = None
-    parsed.options_list = None
+    parsed.interactive_metadata = None
 
     with (
         patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)) as mock_edit_text,

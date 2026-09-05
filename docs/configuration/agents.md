@@ -57,8 +57,15 @@ agents:
       - lobby
       - dev
 
-    # Accept authorized ad-hoc room invites for this agent
+    # Accept all, none, or matching inviter ID patterns
     accept_invites: true
+
+    # Conversation access is separate from invitation acceptance
+    access:
+      current_room_members: false
+      members_of_rooms:
+        - lobby
+      users: []
 
     # Enable markdown formatting
     markdown: true
@@ -127,6 +134,10 @@ agents:
       reserve_tokens: 16384
       timeout_seconds: 600
 
+    # Keep <workspace>/thread_exports/ current with YAML exports of this agent's rooms
+    # (true enables the defaults; see Thread Exports below)
+    thread_exports: true
+
 ```
 
 ## Configuration Options
@@ -141,7 +152,7 @@ agents:
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
-| `accept_invites` | bool | `true` | Accept authorized inbound Matrix room invites for this agent. Invited room IDs are persisted so ad-hoc memberships survive restarts and room cleanup. Set to `false` to ignore new invites for this agent. Approval-gated tools still require the router to be joined to the room, so ad-hoc invited rooms only support approval if the router is already joined there |
+| `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted ad-hoc room IDs are persisted so memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows the current Matrix transport account |
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
@@ -149,6 +160,8 @@ agents:
 | `memory_search` | object | `null` | File-memory search override for this agent. Supports `mode`, `include`, and `include_entrypoint`; omitted fields inherit from global `memory.search` |
 | `private` | object | `null` | Optional requester-private state for one shared agent definition |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
+| `access` | object | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this agent's own managed `rooms`. See [Authorization](../authorization.md) |
+| `credential_managers` | list | `[]` | Concrete Matrix user IDs allowed to manage this agent's credentials and OAuth connections. Independent of `access`: a credential manager gains no conversation access, and a responder user gains no credential authority |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
@@ -162,6 +175,7 @@ agents:
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
+| `thread_exports` | bool or object | `null` | Continuously export every thread from rooms this agent is joined to as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](#thread-exports)) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 See [Knowledge Bases](../knowledge.md) for `mode: semantic` and `mode: files`.
@@ -174,11 +188,15 @@ Use `memory_backend: none` for stateless agents that should skip prompt memory l
 Unset `memory_search` fields inherit from top-level `memory.search`.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
-Agents use `agents.<name>.accept_invites`, while the router uses its own `router.accept_invites` option with the same durable invite semantics.
-Teams do not currently expose a separate `accept_invites` option, but accepted team invites are still persisted as durable desired membership.
-Invite acceptance still respects your normal authorization rules, so unauthorized senders cannot force an entity to join and persist a room.
+Agents use `agents.<name>.accept_invites`, while teams and the router use their own `accept_invites` options with the same durable invite semantics.
+`true` accepts every valid invitation, `false` and `[]` reject every invitation, and a list accepts exact or wildcard Matrix user IDs after human-only alias resolution; non-human accounts retain their exact transport ID.
+Invite acceptance and responder access are independent, so joining a room does not authorize its inviter to interact with the agent.
+The agent continues to apply `access.users`, `access.current_room_members`, and `access.members_of_rooms` to every interaction after joining.
 Approval-gated tools are stricter than plain ad-hoc chat access.
-Approval-gated tools only work there while the router is already joined.
+When approval needs a missing router, the agent can call `invite_router` to invite it into the current room and then retry.
+The tool waits briefly for joined membership and, if the invite remains pending, tells the agent to retry only after the router joins.
+The router accepts and persists that internal invite when `router.accept_invites` allows the current Matrix transport account's user ID.
+For a team execution, that identity is the team's Matrix account rather than the member agent's account.
 
 MindRoom compacts in one visible lifecycle.
 Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, and `timeout_seconds`.
@@ -365,7 +383,7 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `attachments`, `desktop`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some local-only tools stay in the primary runtime even when listed: `approved_egress`, `attachments`, `callback_manager`, `desktop`, `external_trigger_manager`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, `homeassistant`, `invite_router`, `oauth_connections`, and `todo`.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
 Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
 Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
@@ -373,10 +391,11 @@ Config-adjacent `.env` files are intentionally masked as files inside those Dock
 A filtered public startup-runtime env payload can still propagate from exported env vars and allowed `.env` values.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
-That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
-OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
+That list includes `spotify` and `homeassistant`.
+Configured `mcp_<server_id>` tools work on every worker scope: generated OAuth providers follow the selected agent's effective credential scope, while non-OAuth servers use the shared MCP session without requester credentials.
+For OAuth-backed MCP, `shared` uses one agent-owned connection, `user` reuses one requester-owned connection across agents, `user_agent` isolates each requester-agent pair, and unscoped uses one installation-level connection.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
-`gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
+`github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `oauth_connections` also always stay local.
 `spotify` can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
@@ -424,8 +443,8 @@ Workers mount those canonical private-instance roots.
 They do not own them.
 
 The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-OAuth providers that support scoped dashboard flows, such as the Google Drive, Docs, Gmail, Calendar, and Sheets providers, are the exception.
-For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime.
+The Google Drive, Docs, Gmail, Calendar, and Sheets OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
+GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
 Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md).
@@ -549,6 +568,81 @@ For a `mind` agent with `private.per: user`, different users get different priva
 - Custom templates are fully supported.
 - The Mind-style filenames shown above are a convention, not a requirement, unless you choose to reference them in `private.context_files` or `private.knowledge.path`.
 
+## Thread Exports
+
+`thread_exports` keeps a YAML copy of the agent's conversation history inside its workspace, so its `file` and `shell` tools can grep past threads without any Matrix API access.
+
+```yaml
+agents:
+  code:
+    thread_exports: true            # defaults below
+  research:
+    thread_exports:
+      invited_rooms: false          # config rooms only
+      private_room_scope: owner     # private agents only
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `invited_rooms` | bool | `true` | Also export user-created rooms the agent joined through invites. Current membership is always required |
+| `private_room_scope` | string | `"owner_and_agent"` | Private agents only. Within the agent's configured and invited rooms, `owner_and_agent` requires both the requester and agent to be joined; `owner` requires only the requester |
+
+Exports land at `<storage_root>/agents/<agent>/workspace/thread_exports/<urlencoded room key>/<urlencoded thread id>.yaml`, the same layout `mindroom threads export` writes.
+Inside the agent's own tools that directory is `$MINDROOM_AGENT_WORKSPACE/thread_exports/`.
+Each thread file holds `version`, `room` metadata, `thread` metadata including the latest thread summary as `thread.summary`, and a `messages` list.
+Each room directory also holds an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
+
+MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, batching everything that arrives in that window into one pass, and runs one full pass at startup and after every config reload.
+A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
+A full pass that could export no room at all skips that directory-wide removal, because an empty result cannot be told apart from a failed one; the same guard and its manual-cleanup guidance are described under [`threads export`](../cli.md#threads-export).
+Files are rewritten only when a thread's content changed.
+Agents may edit or delete their exported files; deleted files return on the next pass that touches the room.
+Each workspace is populated only through that agent's running Matrix account and principal-bound event-journal projection, so a pass costs no Matrix history call for threads that agent has seen.
+
+### Security and Retention
+
+Thread export authorization controls which data future passes may write.
+Export cleanup is best-effort workspace maintenance, not a revocation or data-erasure boundary.
+Previously exported data may remain or may have been copied or committed by the agent.
+Principal isolation does not trigger a one-time purge or migration of existing exports.
+
+Shared agents export only rooms where the agent's own Matrix account is currently joined.
+Private agents (`private:`) get one export tree per materialized instance under `<storage_root>/private_instances/<scope-key>/<agent>/<private root>/thread_exports/`; each tree stays within that agent's configured and invited rooms and is scoped to the requester's current room memberships, so one requester's private workspace never accumulates other users' conversations.
+A membership lookup failure blocks new writes for that room and leaves existing files in place until a successful lookup proves that access was revoked.
+
+### Semantic Search Over Exports
+
+The exports are plain YAML, so file-aware tools already cover keyword search.
+With an embedder configured (`memory.embedder`), point a knowledge base at the export directory for semantic search through `search_knowledge_base`.
+
+```yaml
+knowledge_bases:
+  code_threads:
+    path: ./mindroom_data/agents/code/workspace/thread_exports
+    description: Exported Matrix conversation history for the code agent
+    exclude_patterns: ["*/index.json"]
+agents:
+  code:
+    thread_exports: true
+    knowledge_bases: [code_threads]
+```
+
+For a private agent, index the private-root-relative path instead:
+
+```yaml
+agents:
+  secret:
+    thread_exports: true
+    private:
+      per: user
+      knowledge:
+        path: thread_exports
+        description: Your exported conversation history
+```
+
+The active thread's file rewrites on every message, so a watching semantic index re-embeds that thread per message.
+This is negligible with a local embedder but costs real money with paid embedding APIs in busy rooms.
+
 ## Thread Mode Resolution
 
 Thread mode is resolved per message using the current room ID.
@@ -627,8 +721,8 @@ Agent and team names must be distinct — the same key cannot appear in both `ag
 
 ## Defaults
 
-The `defaults` section sets fallback values for all agents.
-Any agent that omits a setting inherits the value from here.
+The `defaults` section sets fallback values for supported per-agent override fields and global-only agent behavior.
+Supported override fields inherit when omitted, `defaults.tools` is merged only when `include_default_tools` is true, and global-only defaults apply to every agent.
 
 ```yaml
 defaults:

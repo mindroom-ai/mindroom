@@ -232,7 +232,7 @@ export function VoiceConfig() {
                 </span>
               </div>
               <div className="flex items-start justify-between gap-4">
-                <span className="text-muted-foreground">Command Model:</span>
+                <span className="text-muted-foreground">Transcript Model:</span>
                 <span className="font-mono text-right text-foreground">
                   {voiceConfig.intelligence.model}
                 </span>
@@ -355,12 +355,12 @@ export function VoiceConfig() {
             </div>
           </div>
 
-          {/* Command Intelligence Model */}
+          {/* Transcript Intelligence Model */}
           <div className="space-y-4">
             <div className="flex items-center gap-2">
               <Settings className="h-4 w-4" />
               <Label className="text-base font-semibold">
-                Command Intelligence
+                Transcript Intelligence
               </Label>
             </div>
 
@@ -390,8 +390,7 @@ export function VoiceConfig() {
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Model used to process transcriptions into commands and agent
-                mentions
+                Model used for mention normalization and light ASR cleanup
               </p>
             </div>
           </div>
@@ -425,9 +424,8 @@ export function VoiceConfig() {
             <li className="flex items-start gap-2">
               <span className="text-primary mt-0.5">🤖</span>
               <span>
-                {
-                  'Smart command recognition (e.g., "schedule a meeting" -> "!schedule meeting")'
-                }
+                Transcript cleanup without converting natural language into chat
+                commands
               </span>
             </li>
             <li className="flex items-start gap-2">

@@ -10,12 +10,14 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
+    SILENT_SCHEDULE_EVENT_TYPE,
     SOURCE_KIND_KEY,
 )
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
     HookRegistry,
+    HookRegistryState,
     ScheduleFiredContext,
     build_hook_message_sender,
     build_hook_room_state_putter,
@@ -39,13 +41,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_ACTIVE_HOOK_REGISTRY: HookRegistry = HookRegistry.empty()
+_SCHEDULING_HOOK_REGISTRY_STATE = HookRegistryState(HookRegistry.empty())
 
 
 def set_scheduling_hook_registry(hook_registry: HookRegistry) -> None:
     """Update the immutable hook snapshot used by scheduled task runners."""
-    global _ACTIVE_HOOK_REGISTRY
-    _ACTIVE_HOOK_REGISTRY = hook_registry
+    _SCHEDULING_HOOK_REGISTRY_STATE.registry = hook_registry
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,13 @@ def _raise_scheduled_workflow_send_error() -> typing.NoReturn:
     """Raise when a scheduled workflow message cannot be sent."""
     msg = "Failed to send scheduled workflow message to Matrix"
     raise RuntimeError(msg)
+
+
+def _validate_scheduled_workflow_message(message_text: str) -> None:
+    """Reject an empty trigger body before Matrix accepts it as delivered."""
+    if not message_text.strip():
+        msg = "Scheduled workflow message is empty after hooks"
+        raise ValueError(msg)
 
 
 async def _build_workflow_message_content(
@@ -180,7 +188,8 @@ async def execute_scheduled_workflow(
     with bound_log_context(**target.log_context):
         try:
             message_text = workflow.message
-            if _ACTIVE_HOOK_REGISTRY.has_hooks(EVENT_SCHEDULE_FIRED):
+            hook_registry = _SCHEDULING_HOOK_REGISTRY_STATE.registry
+            if hook_registry.has_hooks(EVENT_SCHEDULE_FIRED):
                 context = ScheduleFiredContext(
                     event_name=EVENT_SCHEDULE_FIRED,
                     plugin_name="",
@@ -204,13 +213,15 @@ async def execute_scheduled_workflow(
                     thread_id=target.resolved_thread_id,
                     created_by=workflow.created_by,
                     message_text=message_text,
+                    _hook_registry_state=_SCHEDULING_HOOK_REGISTRY_STATE,
                 )
-                await emit(_ACTIVE_HOOK_REGISTRY, EVENT_SCHEDULE_FIRED, context)
+                await emit(hook_registry, EVENT_SCHEDULE_FIRED, context)
                 if context.suppress:
                     logger.info("Scheduled workflow suppressed by hook", task_id=task_id, room_id=workflow.room_id)
                     return ScheduledWorkflowOutcome(delivered=False, failure_reason="suppressed by hook")
                 message_text = context.message_text
 
+            _validate_scheduled_workflow_message(message_text)
             content = await _build_workflow_message_content(
                 workflow,
                 target,
@@ -221,12 +232,17 @@ async def execute_scheduled_workflow(
             )
             if workflow.created_by:
                 content[ORIGINAL_SENDER_KEY] = workflow.created_by
-            content[SOURCE_KIND_KEY] = SCHEDULED_SOURCE_KIND
-            if workflow.new_thread:
+            content[SOURCE_KIND_KEY] = SILENT_SCHEDULE_SOURCE_KIND if workflow.silent else SCHEDULED_SOURCE_KIND
+            if workflow.new_thread and not workflow.silent:
                 content[PER_FIRE_THREAD_ROOT_KEY] = True
             if workflow.history_limit is not None:
                 content[SCHEDULED_HISTORY_LIMIT_KEY] = workflow.history_limit
-            delivered = await send_matrix_message(client, workflow.room_id, content)
+            delivered = await send_matrix_message(
+                client,
+                workflow.room_id,
+                content,
+                message_type=SILENT_SCHEDULE_EVENT_TYPE if workflow.silent else "m.room.message",
+            )
             if delivered is None:
                 _raise_scheduled_workflow_send_error()
             logger.info(

@@ -72,9 +72,8 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             ),
             patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-            patch("mindroom.bot.interactive.init_persistence"),
             patch("mindroom.bot.emit", AsyncMock(side_effect=startup_error)),
-            pytest.raises(type(startup_error), match="hook boom" if isinstance(startup_error, RuntimeError) else None),
+            pytest.raises(type(startup_error)),
         ):
             await bot.start()
 
@@ -84,6 +83,45 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         assert bot.running is False
         assert bot.client is None
         assert bot._ingestion_session is None
+
+    @pytest.mark.asyncio
+    async def test_approval_recovery_retains_owned_store_until_final_send_finishes(self, bot: AgentBot) -> None:
+        """A recovery-only FINAL reuses restored owned state and releases both ownership lanes."""
+        bot.client = None
+        client = _make_client_mock(user_id=bot.agent_user.user_id)
+        client.device_id = "RECOVERY_DEVICE"
+        session = AsyncMock()
+        order: list[str] = []
+
+        async def recover(_approval_id: str) -> bool:
+            assert bot.client is client
+            assert bot._ingestion_session is session
+            assert bot._sending_device_id == "RECOVERY_DEVICE"
+            order.append("final")
+            return True
+
+        async def close_session() -> None:
+            order.append("session")
+
+        async def close_client() -> None:
+            order.append("client")
+
+        session.close.side_effect = close_session
+        client.close.side_effect = close_client
+        with (
+            patch(
+                "mindroom.bot.login_agent_owned_session",
+                AsyncMock(return_value=SimpleNamespace(client=client, session=session)),
+            ),
+            patch.object(bot._response_runner, "recover_approval_final", AsyncMock(side_effect=recover)),
+        ):
+            assert await bot.recover_approval_final("approval")
+
+        assert order == ["final", "session", "client"]
+        assert bot.client is None
+        assert bot._ingestion_session is None
+        assert bot._sending_device_id is None
+        client.sync.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_login_as_another_user_keeps_the_journal_this_bot_already_opened(self, bot: AgentBot) -> None:

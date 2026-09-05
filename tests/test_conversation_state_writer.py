@@ -20,7 +20,7 @@ from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.history.runtime import create_scope_session_storage, open_bound_scope_session_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session, test_runtime_paths
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -74,7 +74,8 @@ def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path)
         subdir="sessions",
         session_table="test_agent_sessions",
     )
-    storage.upsert_session(
+    seed_session(
+        storage,
         AgentSession(
             session_id="session-1",
             agent_id="test_agent",
@@ -93,7 +94,7 @@ def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path)
     )
 
     try:
-        writer.persist_response_event_id_in_session_run(
+        writer._persist_response_event_id_in_session_run(
             storage=storage,
             session_id="session-1",
             session_type=SessionType.AGENT,

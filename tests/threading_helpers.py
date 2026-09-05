@@ -12,7 +12,7 @@ import nio
 import pytest_asyncio
 from nio.api import RelationshipType
 
-from mindroom.bot import AgentBot
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -28,6 +28,8 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -37,11 +39,12 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import load_sync_checkpoint
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
 
+    from mindroom.bot import AgentBot
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 
@@ -503,6 +506,7 @@ def _conversation_runtime(*, client: nio.AsyncClient | None = None) -> BotRuntim
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=True,
         orchestrator=None,
     )
@@ -514,23 +518,6 @@ def _conversation_runtime_config() -> Config:
     return bind_runtime_paths(
         Config(agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])}),
         runtime_paths,
-    )
-
-
-def _save_certified_sync_token(
-    bot: AgentBot,
-    token: str,
-) -> None:
-    """Persist one certified sync token for bot lifecycle tests.
-
-    Certified by the event journal: the token has to name the store that
-    consumed the events it covers.
-    """
-    save_sync_token(
-        bot.storage_path,
-        bot.agent_name,
-        token,
-        store_generation=bot._sync_checkpoint_trust.store_generation,
     )
 
 
@@ -548,17 +535,19 @@ class ThreadingBehaviorTestBase:
         )
 
         config = _runtime_bound_config(
-            Config(
-                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
+            with_current_room_member_access(
+                Config(
+                    agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                    teams={},
+                    room_models={},
+                    models={"default": ModelConfig(provider="ollama", id="test-model")},
+                    router=RouterConfig(model="default"),
+                ),
             ),
             tmp_path,
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],

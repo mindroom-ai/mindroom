@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tests.conftest import seed_session
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
@@ -61,7 +63,7 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
-from mindroom.tool_approval import _shutdown_approval_store
+from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.tool_calls import record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -193,9 +195,9 @@ def _prepared_team_execution_context(
 @pytest.fixture(autouse=True)
 def reset_approval_store() -> Iterator[None]:
     """Keep the module-level approval store isolated per test."""
-    asyncio.run(_shutdown_approval_store())
+    asyncio.run(shutdown_approval_runtime())
     yield
-    asyncio.run(_shutdown_approval_store())
+    asyncio.run(shutdown_approval_runtime())
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -4550,7 +4552,7 @@ class TestTeamCompletion:
                     ],
                 ),
             ]
-            scope_context.storage.upsert_session(scope_context.session)
+            seed_session(scope_context.storage, scope_context.session)
 
         with open_bound_scope_session_context(
             agents=[agent],
@@ -5322,7 +5324,8 @@ class TestKnowledgeIntegration:
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
-                "mindroom.api.openai_compat.resolve_agent_knowledge_access",
+                "mindroom.api.openai_compat.resolve_agent_knowledge_access_async",
+                new_callable=AsyncMock,
                 side_effect=RuntimeError("DB connection failed"),
             ),
         ):

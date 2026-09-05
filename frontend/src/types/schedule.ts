@@ -12,7 +12,10 @@ export interface ScheduleTask {
   cron_description: string | null;
   description: string;
   message: string;
+  history_limit: number | null;
   thread_id: string | null;
+  new_thread: boolean;
+  silent: boolean;
   created_by: string | null;
   created_at: string | null;
 }
@@ -29,6 +32,7 @@ export interface UpdateScheduleRequest {
   schedule_type?: ScheduleType;
   execute_at?: string;
   cron_expression?: string;
+  silent?: boolean;
 }
 
 export interface CancelScheduleResponse {

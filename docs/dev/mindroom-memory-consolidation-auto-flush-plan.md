@@ -2,11 +2,11 @@
 
 Last updated: 2026-03-18
 
-**Status: ~90% complete.**
+**Status: implemented without incremental message-cursor chunking.**
 Core auto-flush exists (`memory/auto_flush.py`, `memory/_file_backend.py`).
 The full config surface (`MemoryAutoFlushConfig`) is implemented including stale cleanup (`stale_ttl_seconds`) and max-dirty-age fallback (`max_dirty_age_seconds`).
 Auto-flush defaults to disabled (`enabled: false`) with a 30-minute flush interval (`flush_interval_seconds: 1800`).
-Remaining: optional daily curation pass (not yet implemented).
+Remaining: optional daily curation and cursor-based backlog chunking.
 
 ## Goals
 
@@ -37,15 +37,10 @@ Use a JSON state file as durable flush control state:
 
 - Path: `mindroom_data/memory_flush_state.json`
 - Purpose: source of truth for dirty sessions and flush watermarks across restarts.
-- Keys per `(agent_name, session_id)`:
-  - `dirty`: bool
-  - `last_session_updated_at`: int | null
-  - `last_flushed_at`: int | null
-  - `last_flushed_session_updated_at`: int | null
-  - `room_id`: str | null
-  - `thread_id`: str | null
-  - `last_seen_at`: int
-  - `in_flight`: bool (ephemeral safety; can be reset on boot)
+- Keys are `(agent_name, worker_key, session_id)` for private scopes and `(agent_name, session_id)` otherwise.
+- Each entry stores `agent_name`, `session_id`, `worker_key`, `execution_identity`, `first_dirty_at`, `next_attempt_at`, `consecutive_failures`, `priority_boost_at`, `dirty_revision`, and `flush_started_dirty_revision`, plus current dirty/in-flight and session watermark timestamps.
+- `room_id` and `thread_id` are deliberately removed during state sanitization, and there is no `last_flushed_at` field.
+- Persisted `in_flight: true` is currently preserved on load; boot-time recovery does not reset it.
 
 ## Triggering Strategy
 
@@ -94,9 +89,9 @@ A session is flush-eligible only if all conditions hold:
 For each eligible session:
 
 1. Read session via Agno DB API (`SqliteDb.get_session`), deserialize to `AgentSession`.
-2. Pull recent conversation context from `AgentSession.get_chat_history(...)` using a bounded extraction window.
-   - Use a session watermark/cursor so each flush handles only new turns.
-   - If backlog exceeds one window, process in multiple incremental chunks across cycles.
+2. Pull the newest bounded conversation window from `AgentSession.get_chat_history(...)`.
+   - `updated_at` detects whether the session changed, but no per-message cursor exists.
+   - A backlog larger than one extraction window is not processed incrementally across cycles; each changed session re-extracts its latest bounded window.
 3. Run a silent extraction turn (same model family) with instructions:
    - write durable memory only,
    - append to `daily/YYYY-MM-DD.md`,

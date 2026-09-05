@@ -103,7 +103,7 @@ class ExportProjectionView(ConversationReadView, HydrationView, SupportsConversa
     pages, it triggers the hydration behind the first of them, and it asks
     whether that hydration finished -- so this is where the union is written
     down. Naming it keeps the factory from taking the whole ``PrincipalStore``
-    for want of a type: an export that reached for ``enqueue_delivery`` or
+    for want of a type: an export that reached for ``enqueue_matrix_delivery`` or
     ``admit`` would fail the type checker rather than typecheck and be caught,
     if at all, in review.
     """

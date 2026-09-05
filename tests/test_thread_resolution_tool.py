@@ -16,6 +16,9 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -36,7 +39,7 @@ def _context(tmp_path: Path, *, thread_id: str | None = THREAD_ID) -> ToolRuntim
         Config(agents={"general": AgentConfig(display_name="General Agent")}),
         test_runtime_paths(tmp_path),
     )
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(room_id=ROOM_ID, thread_id=thread_id, reply_to_event_id=None),
         requester_id="@user:localhost",

@@ -14,11 +14,14 @@ import pytest
 from agno.media import Audio
 
 from mindroom import voice_handler
+from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
+from tests.access_schema_support import with_current_room_member_access
+from tests.authorization_helpers import isolated_membership_index
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_actual_entity_accounts
 
@@ -85,6 +88,7 @@ async def _handle_voice_message(
         event,
         config,
         runtime_paths_for(config),
+        isolated_membership_index(),
         audio=audio,
     )
 
@@ -116,6 +120,7 @@ async def _prepare_voice_message(
         event,
         config,
         runtime_paths=runtime_paths_for(config),
+        membership_index=isolated_membership_index(),
         thread_id=thread_id,
     )
 
@@ -477,6 +482,40 @@ class TestVoiceHandler:
         assert mock_process.await_args.kwargs["available_team_names"] == []
 
     @pytest.mark.asyncio
+    async def test_voice_handler_reuses_failed_boundary_membership_snapshot(self) -> None:
+        """Voice normalization must not retry a failed membership refresh from the same turn."""
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        client = AsyncMock()
+        client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+        room = _matrix_room(
+            "!voice:localhost",
+            members=("@mindroom_router:localhost", "@alice:example.com"),
+            members_synced=False,
+        )
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$voice"
+        event.sender = "@alice:example.com"
+        event.body = "voice.ogg"
+        event.source = {"content": {"body": "voice.ogg"}}
+
+        assert not await ensure_room_membership_synced(client, room, sender_id=event.sender)
+
+        with (
+            patch("mindroom.voice_handler._transcribe_audio", return_value="hello"),
+            patch("mindroom.voice_handler._process_transcription", return_value="hello"),
+        ):
+            result = await _handle_voice_message(
+                client,
+                room,
+                event,
+                config,
+                audio=Audio(content=b"audio", mime_type="audio/ogg"),
+            )
+
+        assert result == "🎤 hello"
+        assert client.joined_members.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_download_audio_unencrypted(self) -> None:
         """Test downloading unencrypted audio messages."""
         _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))  # Just to verify it works, not used in test
@@ -537,7 +576,7 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_prepare_voice_message_clears_inflight_task_after_failed_download(self, tmp_path: Path) -> None:
         """Failed normalization should not leave stale in-flight task entries behind."""
-        config = _runtime_bound_config(Config(authorization={"default_room_access": True}))
+        config = _runtime_bound_config(with_current_room_member_access(Config(authorization={})))
         client = AsyncMock()
         room = _matrix_room("!test:server", members=("@alice:example.com",))
         event = MagicMock(spec=nio.RoomMessageAudio)
@@ -570,7 +609,7 @@ class TestVoiceHandler:
         tmp_path: Path,
     ) -> None:
         """Canceling one waiter should not cancel the shared normalization task for others."""
-        config = _runtime_bound_config(Config(authorization={"default_room_access": True}))
+        config = _runtime_bound_config(with_current_room_member_access(Config(authorization={})))
         client = AsyncMock()
         room = _matrix_room("!test:server", members=("@alice:example.com",))
         event = MagicMock(spec=nio.RoomMessageAudio)
@@ -707,6 +746,7 @@ class TestVoiceHandler:
                             event,
                             config,
                             runtime_paths_for(config),
+                            isolated_membership_index(),
                             thread_id=None,
                         ),
                         timeout=2.0,

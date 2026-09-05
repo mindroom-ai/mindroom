@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -41,7 +42,11 @@ logger = get_logger(__name__)
 def retract_room_export(accumulator: ThreadExportAccumulator, room: ThreadExportRoom) -> None:
     """Remove one target's room export or record a room-scoped storage failure."""
     try:
-        remove_room_export(accumulator.target.output_dir, room)
+        remove_room_export(
+            accumulator.target.output_dir,
+            room,
+            trusted_root=accumulator.target.trusted_root,
+        )
     except (OSError, RuntimeError) as exc:
         accumulator.failed_items.append(failure_for_room(room, f"Room removal failed: {exc}"))
 
@@ -86,10 +91,10 @@ async def _authorized_room_accumulators(
     eligible = [accumulator for accumulator in accumulators if target_accepts_room(accumulator.target, room)]
     for accumulator in accumulators:
         if not target_accepts_room(accumulator.target, room):
-            retract_room_export(accumulator, room)
+            await asyncio.to_thread(retract_room_export, accumulator, room)
 
-    scoped = [accumulator for accumulator in eligible if accumulator.target.required_member_user_id is not None]
-    authorized = [accumulator for accumulator in eligible if accumulator.target.required_member_user_id is None]
+    scoped = [accumulator for accumulator in eligible if accumulator.target.required_member_user_ids]
+    authorized = [accumulator for accumulator in eligible if not accumulator.target.required_member_user_ids]
     if not scoped:
         return authorized
     try:
@@ -104,11 +109,11 @@ async def _authorized_room_accumulators(
         return authorized
 
     for accumulator in scoped:
-        member_user_id = accumulator.target.required_member_user_id
-        if member_user_id in member_ids:
+        required_member_user_ids = accumulator.target.required_member_user_ids
+        if member_ids.issuperset(required_member_user_ids):
             authorized.append(accumulator)
         else:
-            retract_room_export(accumulator, room)
+            await asyncio.to_thread(retract_room_export, accumulator, room)
     return authorized
 
 
@@ -136,11 +141,13 @@ async def _write_thread_to_targets(
 
     for accumulator in accumulators:
         try:
-            wrote_file = write_thread_payload(
+            wrote_file = await asyncio.to_thread(
+                write_thread_payload,
                 accumulator.target.output_dir,
                 room,
                 thread_id,
                 payload,
+                trusted_root=accumulator.target.trusted_root,
             )
         except Exception as exc:
             accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
@@ -152,7 +159,7 @@ async def _write_thread_to_targets(
             accumulator.threads_unchanged += 1
 
 
-def _finish_room_exports(
+def _finish_room_exports_blocking(
     room: ThreadExportRoom,
     thread_ids: Sequence[str],
     *,
@@ -160,11 +167,22 @@ def _finish_room_exports(
     accumulators: Sequence[ThreadExportAccumulator],
     changed_accumulator_ids: set[int],
 ) -> None:
-    """Reconcile removed threads and update indexes for one enumerated room."""
+    """Reconcile removed threads and update indexes for one enumerated room.
+
+    Re-reads every exported thread file in the room, so it runs off the event loop.
+    """
     for accumulator in accumulators:
         try:
             output_dir = accumulator.target.output_dir
-            skip_empty_reconciliation = not truncated and not thread_ids and room_has_thread_exports(output_dir, room)
+            skip_empty_reconciliation = (
+                not truncated
+                and not thread_ids
+                and room_has_thread_exports(
+                    output_dir,
+                    room,
+                    trusted_root=accumulator.target.trusted_root,
+                )
+            )
             if skip_empty_reconciliation:
                 logger.warning(
                     "Skipping stale thread reconciliation after empty enumeration",
@@ -177,6 +195,7 @@ def _finish_room_exports(
                     output_dir,
                     room,
                     thread_ids,
+                    trusted_root=accumulator.target.trusted_root,
                 )
                 if removed_stale_threads:
                     changed_accumulator_ids.add(id(accumulator))
@@ -184,6 +203,7 @@ def _finish_room_exports(
                 output_dir,
                 room,
                 thread_files_changed=id(accumulator) in changed_accumulator_ids,
+                trusted_root=accumulator.target.trusted_root,
             )
         except Exception as exc:
             accumulator.failed_items.append(failure_for_room(room, f"Room reconciliation failed: {exc}"))
@@ -264,7 +284,8 @@ async def _export_enumerated_room_threads(
             changed_accumulator_ids=changed_accumulator_ids,
         )
 
-    _finish_room_exports(
+    await asyncio.to_thread(
+        _finish_room_exports_blocking,
         room,
         thread_ids,
         truncated=truncated,

@@ -10,8 +10,6 @@ _PUBLIC_SYNC_OWNERS = (
     _SOURCE_ROOT / "matrix" / "sync_loop.py",
     _SOURCE_ROOT / "matrix" / "journal_ingress.py",
     _SOURCE_ROOT / "matrix" / "client_session.py",
-    _SOURCE_ROOT / "matrix" / "sync_certification.py",
-    _SOURCE_ROOT / "matrix" / "sync_checkpoint_trust.py",
 )
 _FORK_ONLY_NIO_REFERENCES = (
     "nio.SlidingSyncResponse",

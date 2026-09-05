@@ -119,7 +119,8 @@ jobs:
         build-args: |
           VERSION=${{ steps.vars.outputs.version }}
         cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:buildcache-${{ matrix.platform_suffix }}
-        cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:buildcache-${{ matrix.platform_suffix }},mode=max
+        # Fork PRs get a read-only GITHUB_TOKEN and cannot write the ghcr build cache.
+        cache-to: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork) && format('type=registry,ref={0}/{1}/{2}:buildcache-{3},mode=max', env.REGISTRY, env.OWNER, matrix.target.image_name, matrix.platform_suffix) || '' }}
         provenance: false
         sbom: false
 

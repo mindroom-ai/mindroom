@@ -40,15 +40,33 @@ The row is kept and the payload is dropped, which is the smallest thing that sur
 
 A context-only event never carries a payload at all: it is admitted already settled, so the field it would have used is written empty from the start.
 
-`visible_messages.content_json` holds the current visible body of one logical message, and it is the only long-lived plaintext store.
+`visible_messages.content_json` holds the current visible body of one logical message and is the general long-lived conversation-body projection.
 
 The projection keeps no edit history, so an edit overwrites the body and the previous text is gone.
 
+`interactive_questions.question_json` duplicates the active question text and options while its visible-message row survives.
+It is deleted when the current question revision is cleared, and its foreign key also cascades when the visible message is deleted.
+
+`turn_records.record_json` retains durable turn identity, outcome, and regeneration content.
+
 `unresolved_edits.content_json` holds an edit whose target has not arrived yet, and it is deleted the moment the target lands or is redacted.
 
-`response_outbox.payload_json` holds an answer frozen before it was sent, and it survives until the delivery is acknowledged.
+`matrix_delivery_outbox.payload_json` holds each ordinary response or tool-approval event frozen before it is sent.
 
-`approval_cards.card_json` and `approval_cards.resolution_json` hold one tool-approval prompt and the decision taken on it.
+`approval_cards` retains only the durable delivery reference, exact continuation and tool-call identity, and membership epoch while a card is actionable.
+
+`approval_continuations.context_json` may contain the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` required to resume an approved call.
+It also retains the acknowledged `response_text`, structured team `response_presentation_state`, and `response_tool_trace` needed to preserve transcript order after continuation.
+The durable tool trace contains redacted argument and result previews plus internal tool-call and member-scope identities; those internal identities are omitted from Matrix message metadata.
+A team continuation without the versioned structured presentation is rejected instead of reconstructed from rendered Markdown, because reconstruction could bind a tool to the wrong member or transcript position; the requester must start a new turn.
+`finish()` and `discard_unavailable()` delete the continuation after terminal delivery or cleanup, and foreign-key cascades remove its sources and calls.
+
+The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.
+
+During the delivery-outbox schema upgrade, already-decided legacy calls keep their first decision and undecided calls expire atomically.
+Known card event IDs are tombstoned so every late click remains inert.
+All legacy approval delivery debt is dropped because its Matrix outcome cannot be reconciled safely without retaining the removed delivery protocol.
+An existing generic outbox without membership and retirement columns is rejected at startup with reset guidance because its rows lack the ownership facts the current schema requires.
 
 ## Sidecar previews are never stored as bodies
 
@@ -108,9 +126,23 @@ Journal rows survive the fence on purpose, because they are the proof that an ev
 
 Turn-backed rows still pending are settled as intentionally ignored, since their answers would be refused by the epoch check forever and leaving them pending would replay the model run on every recovery pass.
 
-Unattempted outbox rows for the room are deleted, because they answer a conversation the bot has left and nothing outside the process has seen them.
+Unattempted non-card outbox rows for the room are retired, because they answer a conversation the bot has left and must never be sent after rejoin.
 
-An attempted row is kept instead: its outcome is unknown, and only presenting the same frozen transaction again can converge on one visible answer rather than posting a second.
+An unattempted approval card is instead deleted with its provably invisible delivery stages, while an attempted visible card follows the approval cleanup policy below.
+
+The retired row remains as the delivery identity tombstone, so a source-less multi-stage turn cannot enqueue `INITIAL` before departure and let `FINAL` adopt the later membership.
+
+An attempted row is kept instead because its outcome is unknown and its immutable payload, transaction, and sending-device facts are required for exact recovery.
+
+Same-device recovery reuses the frozen transaction, while changed-device recovery first reconciles room history and then either replays an ordinary response or retains actionable approval debt.
+
+When a visible approval card deliberately survives a router departure, its card row and both delivery stages atomically transfer to the successor membership so the already-decided terminal edit remains recoverable.
+
+The actionable root card is retained after an inconclusive changed-device scan, while its immutable terminal edit may be replayed because it cannot create another approval action.
+
+Old-membership recovery never sends and retires the row only after exact reconciliation proves its physical event absent.
+
+Every outbox row freezes the membership epoch that authorized it, and acknowledgement projects its Matrix event only while that exact membership remains current.
 
 One departure reaches the bot twice, locally and again in the sync response that reports it, and both must fence exactly once.
 
@@ -136,8 +168,8 @@ SQLite stores the journal at `mindroom_data/tracking/event_journal.db`, and Post
 
 That URL carries a password, so it is excluded from the backend's dataclass representation, which would otherwise reach logs and tracebacks without anyone choosing to print it.
 
-Every SQL statement originates in a module constant, and the only transformations applied to it are the parameter marker and the byte-order pin.
+SQL structure is authored only from fixed internal constants and controlled fragments, including fixed column selections, cursor clauses, placeholder counts, and PRAGMA values.
 
 Both rewrites are plain string substitution, so both refuse a statement that places their marker adjacent to a string literal rather than trusting that no statement does.
 
-Values are bound by the driver in every case and are never formatted into SQL.
+Caller-provided values are bound by the driver in every case and are never formatted into SQL.

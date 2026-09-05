@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from mindroom import runtime_env_policy as _runtime_env_policy
 from mindroom.credential_policy import credential_service_policy
+from mindroom.durable_write import create_directory_durable, replace_file_durable
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.worker_routing import worker_root_path
 
@@ -142,15 +143,24 @@ def _ensure_private_directory(path: Path, *, harden_existing: bool = False) -> N
         missing_paths.append(current_path)
         current_path = current_path.parent
 
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-
     directories_to_chmod = list(reversed(missing_paths))
     if harden_existing:
         for directory_path in _credential_owned_directory_chain(path):
             if directory_path not in directories_to_chmod:
                 directories_to_chmod.append(directory_path)
     for directory_path in directories_to_chmod:
-        _set_private_permissions(directory_path, 0o700)
+        try:
+            create_directory_durable(directory_path, mode=0o700)
+        except PermissionError as exc:
+            raise _private_permissions_error(directory_path, 0o700) from exc
+
+
+def _private_permissions_error(path: Path, mode: int) -> PermissionError:
+    """Build actionable ownership guidance for one credential permission failure."""
+    return PermissionError(
+        f"Cannot secure credential path '{path}' with mode {mode:#05o}. "
+        "Ensure the MindRoom OS user owns this path and can change its permissions.",
+    )
 
 
 def _set_private_permissions(path: Path, mode: int) -> None:
@@ -158,11 +168,7 @@ def _set_private_permissions(path: Path, mode: int) -> None:
     try:
         path.chmod(mode)
     except PermissionError as exc:
-        msg = (
-            f"Cannot secure credential path '{path}' with mode {mode:#05o}. "
-            "Ensure the MindRoom OS user owns this path and can change its permissions."
-        )
-        raise PermissionError(msg) from exc
+        raise _private_permissions_error(path, mode) from exc
 
 
 def _credential_owned_directory_chain(path: Path) -> list[Path]:
@@ -207,7 +213,7 @@ def _atomic_write_private_file(path: Path, payload: bytes) -> None:
             f.write(payload)
             f.flush()
             os.fsync(f.fileno())
-        tmp_path.replace(path)
+        replace_file_durable(tmp_path, path)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -334,6 +340,42 @@ class CredentialsManager:
     def _credentials_file(self, normalized_service: str) -> Path:
         return self.base_path / f"{normalized_service}_credentials.json"
 
+    @property
+    def credentials_encryption_enabled(self) -> bool:
+        """Return whether this manager encrypts credential payloads."""
+        return self._encryption_key is not None
+
+    @staticmethod
+    def payload_is_encrypted(payload: bytes) -> bool:
+        """Return whether one serialized payload uses MindRoom credential encryption."""
+        return payload.startswith(_ENCRYPTED_CREDENTIALS_MAGIC)
+
+    def encode_credentials(self, service: str, credentials: dict[str, Any]) -> bytes:
+        """Serialize credentials with the same policy used by the file store."""
+        normalized_service = validate_service_name(service)
+        if self._encryption_key is not None:
+            return _encrypted_credentials_payload(
+                credentials,
+                service=normalized_service,
+                key=self._encryption_key,
+            )
+        return json.dumps(credentials, indent=2).encode("utf-8")
+
+    def decode_credentials(self, service: str, payload: bytes) -> dict[str, Any]:
+        """Deserialize credentials with the same policy used by the file store."""
+        normalized_service = validate_service_name(service)
+        if self._encryption_key is not None:
+            return _decrypt_credentials_payload(
+                payload,
+                service=normalized_service,
+                key=self._encryption_key,
+            )
+        data = json.loads(payload.decode("utf-8"))
+        if not isinstance(data, dict):
+            msg = "Credential payload must contain a JSON object"
+            raise TypeError(msg)
+        return data
+
     def load_credentials(self, service: str) -> dict[str, Any] | None:
         """Load credentials for a service.
 
@@ -350,28 +392,13 @@ class CredentialsManager:
 
     def _load_credentials_file(self, normalized_service: str, credentials_path: Path) -> dict[str, Any] | None:
         if credentials_path.exists():
-            if self._encryption_key is not None:
-                try:
-                    return _decrypt_credentials_payload(
-                        credentials_path.read_bytes(),
-                        service=normalized_service,
-                        key=self._encryption_key,
-                    )
-                except (OSError, TypeError, ValueError, InvalidTag) as exc:
-                    logger.warning(
-                        "Failed to load encrypted credentials",
-                        service=normalized_service,
-                        path=str(credentials_path),
-                        error_type=type(exc).__name__,
-                    )
-                    return None
             try:
-                with credentials_path.open(encoding="utf-8") as f:
-                    data: dict[str, Any] = json.load(f)
-                    return data
-            except (OSError, TypeError, ValueError) as exc:
+                return self.decode_credentials(normalized_service, credentials_path.read_bytes())
+            except (OSError, TypeError, ValueError, InvalidTag) as exc:
                 logger.warning(
-                    "Failed to load credentials",
+                    "Failed to load encrypted credentials"
+                    if self._encryption_key is not None
+                    else "Failed to load credentials",
                     service=normalized_service,
                     path=str(credentials_path),
                     error_type=type(exc).__name__,
@@ -401,17 +428,13 @@ class CredentialsManager:
             if credentials_path.exists() and self._load_credentials_file(normalized_service, credentials_path) is None:
                 msg = f"Stored credentials for {normalized_service} could not be loaded; refusing to overwrite"
                 raise ValueError(msg)
-            payload = _encrypted_credentials_payload(
-                credentials,
-                service=normalized_service,
-                key=self._encryption_key,
-            )
+            payload = self.encode_credentials(normalized_service, credentials)
             _atomic_write_private_file(credentials_path, payload)
             return
         if credentials_path.exists() and _has_encrypted_credentials_magic(credentials_path):
             msg = f"Stored credentials for {normalized_service} are encrypted; refusing to overwrite without a key"
             raise ValueError(msg)
-        _atomic_write_private_file(credentials_path, json.dumps(credentials, indent=2).encode("utf-8"))
+        _atomic_write_private_file(credentials_path, self.encode_credentials(normalized_service, credentials))
 
     def delete_credentials(self, service: str) -> None:
         """Delete credentials for a service.

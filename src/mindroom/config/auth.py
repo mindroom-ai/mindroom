@@ -10,24 +10,9 @@ from mindroom.config.validation import duplicate_items
 class AuthorizationConfig(BaseModel):
     """Authorization configuration with fine-grained permissions."""
 
-    global_users: list[str] = Field(
-        default_factory=list,
-        description="Users with access to all rooms (e.g., '@user:example.com')",
-    )
-    room_permissions: dict[str, list[str]] = Field(
-        default_factory=dict,
-        description=(
-            "Room-specific user permissions. Keys may be room IDs ('!room:example.com'), "
-            "full aliases ('#room:example.com'), or managed room keys ('room')"
-        ),
-    )
-    default_room_access: bool = Field(
-        default=False,
-        description="Default permission for rooms not explicitly configured",
-    )
     config_command_enabled: bool = Field(
         default=False,
-        description="Enable the chat !config command for global admin users.",
+        description="Enable the chat !config command for platform administrators.",
     )
     aliases: dict[str, list[str]] = Field(
         default_factory=dict,
@@ -37,24 +22,19 @@ class AuthorizationConfig(BaseModel):
             "E.g., {'@alice:example.com': ['@telegram_123:example.com']}"
         ),
     )
-    agent_reply_permissions: dict[str, list[str]] = Field(
-        default_factory=dict,
-        description=(
-            "Per-agent reply allowlists keyed by agent/team name. "
-            "A '*' key applies to all entities without an explicit override. "
-            "A '*' user entry allows all senders for that entity. "
-            "When set for an entity, it only replies to these user IDs "
-            "(after alias resolution)."
-        ),
-    )
 
     @field_validator("aliases")
     @classmethod
     def validate_unique_aliases(cls, aliases: dict[str, list[str]]) -> dict[str, list[str]]:
-        """Ensure each alias is assigned to at most one canonical user."""
-        duplicates = duplicate_items([alias for alias_list in aliases.values() for alias in alias_list])
+        """Ensure aliases have one canonical user and cannot form chains."""
+        alias_values = [alias for alias_list in aliases.values() for alias in alias_list]
+        duplicates = duplicate_items(alias_values)
         if duplicates:
             msg = f"Duplicate bridge aliases are not allowed: {', '.join(duplicates)}"
+            raise ValueError(msg)
+        canonical_aliases = [canonical for canonical in aliases if canonical in alias_values]
+        if canonical_aliases:
+            msg = f"Canonical Matrix user IDs cannot also be bridge aliases: {', '.join(canonical_aliases)}"
             raise ValueError(msg)
         return aliases
 

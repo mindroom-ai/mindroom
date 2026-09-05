@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import mimetypes
-from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -16,12 +16,14 @@ from nio.api import Api
 from nio.exceptions import OlmTrustError
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.large_messages import prepare_large_message
+from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Sequence
+
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 
 logger = get_logger(__name__)
@@ -40,6 +42,35 @@ class DeliveredMatrixEvent:
 
     event_id: str
     content_sent: dict[str, Any]
+
+
+class MatrixDeliveryFailureKind(enum.Enum):
+    """Internal classification of one Matrix delivery failure."""
+
+    ENCRYPTION_GUARD = "encryption_guard"
+    UNKNOWN_ENCRYPTION_STATE = "unknown_encryption_state"
+    PAYLOAD_TOO_LARGE = "payload_too_large"
+    SEND_EXCEPTION = "send_exception"
+    UNEXPECTED_RESPONSE = "unexpected_response"
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixDeliveryFailure:
+    """One typed Matrix delivery failure."""
+
+    kind: MatrixDeliveryFailureKind
+    detail: str
+
+
+type MatrixSendOutcome = DeliveredMatrixEvent | MatrixDeliveryFailure
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedMatrixMessage:
+    """Prepared content plus the transport path that must send it."""
+
+    content: dict[str, Any]
+    cache_bypass: bool
 
 
 def _sanitized_delivery_error_message(error: Exception) -> str:
@@ -203,13 +234,7 @@ async def _send_prepared_room_message(
 
 def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
     """Return one room from nio's in-memory room cache if present."""
-    return _cached_rooms(client).get(room_id)
-
-
-def _cached_rooms(client: nio.AsyncClient) -> Mapping[str, nio.MatrixRoom]:
-    """Return the client room cache when nio has initialized it."""
-    rooms = client.rooms
-    return rooms if isinstance(rooms, Mapping) else {}
+    return client.rooms.get(room_id)
 
 
 def _has_encrypted_delivery_support(
@@ -244,13 +269,13 @@ def _can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operat
     )
 
 
-async def resolve_room_encryption_for_delivery(
+async def resolve_room_encryption_outcome(
     client: nio.AsyncClient,
     room_id: str,
     *,
     operation: str,
-) -> bool | None:
-    """Return authoritative room encryption state for safe outbound preparation."""
+) -> bool | MatrixDeliveryFailure:
+    """Return room encryption state or one typed preparation failure."""
     room = cached_room(client, room_id)
     if room is not None:
         room_encrypted = bool(room.encrypted)
@@ -267,15 +292,32 @@ async def resolve_room_encryption_for_delivery(
                 operation=operation,
                 hint="Unable to determine whether the room is encrypted while nio's room cache is empty.",
             )
-            return None
+            return MatrixDeliveryFailure(
+                MatrixDeliveryFailureKind.UNKNOWN_ENCRYPTION_STATE,
+                "room encryption state unknown without a synced room cache",
+            )
 
     if room_encrypted and not _has_encrypted_delivery_support(
         client,
         room_id=room_id,
         operation=operation,
     ):
-        return None
+        return MatrixDeliveryFailure(
+            MatrixDeliveryFailureKind.ENCRYPTION_GUARD,
+            "encrypted delivery rejected by local trust policy",
+        )
     return room_encrypted
+
+
+async def resolve_room_encryption_for_delivery(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    operation: str,
+) -> bool | None:
+    """Return authoritative room encryption state for safe outbound preparation."""
+    outcome = await resolve_room_encryption_outcome(client, room_id, operation=operation)
+    return outcome if isinstance(outcome, bool) else None
 
 
 def can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operation: str) -> bool:
@@ -308,46 +350,109 @@ async def send_room_event_result(
     return cast("nio.RoomSendResponse | nio.RoomSendError | None", response)
 
 
-async def send_message_result(
+async def _prepare_matrix_message(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
     *,
+    operation: str,
+    content_is_prepared: bool,
+) -> _PreparedMatrixMessage | MatrixDeliveryFailure:
+    """Prepare one message, rebuilding once if encryption turns on while yielding."""
+    rooms = client.rooms
+    room = rooms.get(room_id)
+    encryption_outcome = await resolve_room_encryption_outcome(
+        client,
+        room_id,
+        operation=operation,
+    )
+    if isinstance(encryption_outcome, MatrixDeliveryFailure):
+        return encryption_outcome
+    room_encrypted = encryption_outcome
+    cache_bypass = room is None and not room_encrypted
+
+    content_sent = content
+    if not content_is_prepared:
+        try:
+            content_sent = await prepare_large_message(
+                client,
+                room_id,
+                content,
+                room_encrypted=room_encrypted,
+            )
+        except MatrixEventTooLargeError as error:
+            return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
+
+        # An unchanged return means preparation did not yield, so room state
+        # could not have changed within this task. A changed plaintext payload
+        # may contain a sidecar uploaded across an await. Recheck only then.
+        # If encryption became enabled, rebuild from the semantic source once:
+        # the first upload remains unreferenced and the sent event points only
+        # at encrypted bytes. Matrix room encryption cannot later be disabled.
+        if not room_encrypted and content_sent is not content:
+            encryption_outcome = await resolve_room_encryption_outcome(
+                client,
+                room_id,
+                operation=operation,
+            )
+            if isinstance(encryption_outcome, MatrixDeliveryFailure):
+                return encryption_outcome
+            room_encrypted = encryption_outcome
+            cache_bypass = rooms.get(room_id) is None and not room_encrypted
+            if room_encrypted:
+                try:
+                    content_sent = await prepare_large_message(
+                        client,
+                        room_id,
+                        content,
+                        room_encrypted=True,
+                    )
+                except MatrixEventTooLargeError as error:
+                    return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
+
+    return _PreparedMatrixMessage(content_sent, cache_bypass)
+
+
+async def send_message_outcome(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    message_type: str = "m.room.message",
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
-) -> DeliveredMatrixEvent | None:
-    """Send a message to a Matrix room and return the exact delivered payload."""
+    content_is_prepared: bool = False,
+) -> MatrixSendOutcome:
+    """Send a message to a Matrix room and return the delivered payload or a typed failure.
+
+    ``content_is_prepared`` is reserved for durable payloads already frozen in
+    the outbox. Those bytes must reach Matrix verbatim so the durable record
+    remains an exact description of the wire event.
+    """
     if not _can_send_to_encrypted_room(client, room_id, operation=operation):
-        return None
-
-    rooms = client.rooms
-    cache_bypass = False
-    room_encryption_override: bool | None = None
-    if isinstance(rooms, Mapping):
-        room = rooms.get(room_id)
-        room_encryption_override = await resolve_room_encryption_for_delivery(
-            client,
-            room_id,
-            operation=operation,
+        return MatrixDeliveryFailure(
+            MatrixDeliveryFailureKind.ENCRYPTION_GUARD,
+            "encrypted delivery rejected by local trust policy",
         )
-        if room_encryption_override is None:
-            return None
-        cache_bypass = room is None and not room_encryption_override
 
-    message_type = "m.room.message"
     emit_timing_event(
         "Matrix send timing",
         phase="prepare_start",
         room_id=room_id,
         message_type=message_type,
     )
-    content_sent = await prepare_large_message(
+    prepared = await _prepare_matrix_message(
         client,
         room_id,
         content,
-        room_encrypted=room_encryption_override,
+        operation=operation,
+        content_is_prepared=content_is_prepared,
     )
+    if isinstance(prepared, MatrixDeliveryFailure):
+        return prepared
+    content_sent = prepared.content
+    cache_bypass = prepared.cache_bypass
     emit_timing_event(
         "Matrix send timing",
         phase="prepare_finish",
@@ -381,7 +486,7 @@ async def send_message_result(
             outcome="error",
             error="delivery_exception",
         )
-        return None
+        return MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "local delivery exception")
     if isinstance(response, nio.RoomSendResponse):
         emit_timing_event(
             "Matrix send timing",
@@ -399,6 +504,11 @@ async def send_message_result(
             cache_bypass=cache_bypass,
         )
         return DeliveredMatrixEvent(event_id=str(response.event_id), content_sent=content_sent)
+    failure_kind = MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE
+    failure_detail = str(response)
+    if isinstance(response, nio.RoomSendError) and response.status_code == "M_TOO_LARGE":
+        failure_kind = MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
+        failure_detail = response.message
     emit_timing_event(
         "Matrix send timing",
         phase="send_finish",
@@ -414,7 +524,33 @@ async def send_message_result(
         error=str(response),
         cache_bypass=cache_bypass,
     )
-    return None
+    return MatrixDeliveryFailure(
+        failure_kind,
+        failure_detail,
+    )
+
+
+async def send_message_result(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    message_type: str = "m.room.message",
+    operation: str = "send_message",
+    retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
+) -> DeliveredMatrixEvent | None:
+    """Send a message to a Matrix room and return the exact delivered payload."""
+    outcome = await send_message_outcome(
+        client,
+        room_id,
+        content,
+        message_type=message_type,
+        operation=operation,
+        retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
+    )
+    return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 
 
 def _guess_mimetype(file_path: Path) -> str:
@@ -715,6 +851,35 @@ def build_edit_event_content(
     return edit_content
 
 
+async def edit_message_outcome(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    new_content: dict[str, Any],
+    new_text: str,
+    *,
+    extra_content: dict[str, Any] | None = None,
+    retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
+) -> MatrixSendOutcome:
+    """Edit an existing Matrix message and return the delivered payload or a typed failure."""
+    edit_content = build_edit_event_content(
+        event_id=event_id,
+        new_content=new_content,
+        new_text=new_text,
+        extra_content=extra_content,
+    )
+
+    return await send_message_outcome(
+        client,
+        room_id,
+        edit_content,
+        operation="edit_message",
+        retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
+    )
+
+
 async def edit_message_result(
     client: nio.AsyncClient,
     room_id: str,
@@ -727,32 +892,34 @@ async def edit_message_result(
     transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Edit an existing Matrix message and return the exact delivered payload."""
-    edit_content = build_edit_event_content(
-        event_id=event_id,
-        new_content=new_content,
-        new_text=new_text,
-        extra_content=extra_content,
-    )
-
-    return await send_message_result(
+    outcome = await edit_message_outcome(
         client,
         room_id,
-        edit_content,
-        operation="edit_message",
+        event_id,
+        new_content,
+        new_text,
+        extra_content=extra_content,
         retry_sync_recovery=retry_sync_recovery,
         transaction_id=transaction_id,
     )
+    return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 
 
 __all__ = [
     "DeliveredMatrixEvent",
+    "MatrixDeliveryFailure",
+    "MatrixDeliveryFailureKind",
+    "MatrixSendOutcome",
     "build_edit_event_content",
     "cached_room",
     "can_send_to_encrypted_room",
+    "edit_message_outcome",
     "edit_message_result",
     "resolve_room_encryption_for_delivery",
+    "resolve_room_encryption_outcome",
     "send_audio_message",
     "send_file_message",
+    "send_message_outcome",
     "send_message_result",
     "send_room_event_result",
     "send_runtime_encrypted_media_message",

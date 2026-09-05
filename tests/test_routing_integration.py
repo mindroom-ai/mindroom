@@ -12,11 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -37,7 +38,7 @@ class TestRoutingIntegration:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.stream_agent_response")
-    @patch("mindroom.turn_controller.suggest_responder_for_message")
+    @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_real_scenario_research_channel(
         self,
         mock_suggest_responder: AsyncMock,
@@ -73,20 +74,22 @@ class TestRoutingIntegration:
 
         # Set up bots
         config = bind_runtime_paths(
-            Config(
-                agents={
-                    "research": AgentConfig(display_name="MindRoomResearch", rooms=["!research:localhost"]),
-                    "news": AgentConfig(display_name="MindRoomNews", rooms=["!research:localhost"]),
-                },
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
+            with_current_room_member_access(
+                Config(
+                    agents={
+                        "research": AgentConfig(display_name="MindRoomResearch", rooms=["!research:localhost"]),
+                        "news": AgentConfig(display_name="MindRoomNews", rooms=["!research:localhost"]),
+                    },
+                    teams={},
+                    room_models={},
+                    models={"default": ModelConfig(provider="ollama", id="test-model")},
+                    router=RouterConfig(model="default"),
+                ),
             ),
             test_runtime_paths(tmp_path),
         )
 
-        research_bot = AgentBot(
+        research_bot = make_test_agent_bot(
             research_agent,
             tmp_path,
             rooms=["!research:localhost"],
@@ -95,7 +98,7 @@ class TestRoutingIntegration:
             runtime_paths=runtime_paths_for(config),
         )
 
-        news_bot = AgentBot(
+        news_bot = make_test_agent_bot(
             news_agent,
             tmp_path,
             config,

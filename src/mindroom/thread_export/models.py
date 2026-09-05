@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import nio
+
     from mindroom.matrix.users import AgentMatrixUser
+    from mindroom.thread_export.projected_history import ProjectedThreadReader
 
 
 @dataclass(frozen=True)
@@ -80,8 +83,9 @@ class ThreadExportTarget:
     """One export destination and its optional room-membership scope."""
 
     output_dir: Path
-    required_member_user_id: str | None = None
+    required_member_user_ids: tuple[str, ...] = ()
     include_invited_rooms: bool = True
+    trusted_root: Path | None = None
 
 
 @dataclass
@@ -116,6 +120,20 @@ class ThreadExportGroup:
 
     rooms: tuple[ThreadExportRoom, ...]
     user: AgentMatrixUser
+
+
+@dataclass(frozen=True)
+class ThreadExportSource:
+    """Rooms readable through one live Matrix client and projection view.
+
+    ``target_output_dirs=None`` preserves the all-target fan-out used by
+    administrative exports; workspace sources name only their own targets.
+    """
+
+    client: nio.AsyncClient
+    reader: ProjectedThreadReader
+    rooms: tuple[ThreadExportRoom, ...]
+    target_output_dirs: tuple[Path, ...] | None = None
 
 
 @dataclass(frozen=True)

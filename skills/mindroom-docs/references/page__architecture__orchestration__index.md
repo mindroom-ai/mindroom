@@ -73,6 +73,17 @@ main() entry
 - **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; the default `matrix_sync.mode: classic` uses classic `/v3/sync` and `matrix_sync.mode: sliding` opts into MSC4186 Simplified Sliding Sync
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
+## Session Storage Upgrades
+
+After the runtime becomes ready, MindRoom checks session databases for Agno 2 run blobs off the event loop.
+A child process starts only when legacy data exists, then migrates and verifies each session in its own transaction.
+The runtime remains available throughout.
+Logs report each table's total, progress every 100 sessions, and completion.
+Invalid or conflicting blobs stay intact on the compatibility read path and are reported for a later retry.
+
+The legacy column is cleared for successfully migrated sessions and retained for compatibility reads when migration fails.
+Removing the column is a separate explicit cleanup because changing a live SQLite table can block writes.
+
 ## Runtime Replacement Admission
 
 Config changes are detected via polling (`watch_paths()` checks watched source-file mtimes every second and fires after one quiet scan).
@@ -82,12 +93,13 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
 1. On a config change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload.
 2. On an MCP catalog change, the orchestrator returns immediately when no configured entity references that server, while still clearing the worker validation snapshot cache.
    The dependent-entity check runs again under the config update lock immediately before replacement.
-3. `ConfigReloadLifecycle.apply_with_response_admission()` serializes config reloads and MCP catalog replacements behind one global admission owner.
+3. Config reloads and MCP catalog replacements serialize behind one global admission owner; MCP replacements enter through `ConfigReloadLifecycle.apply_with_response_admission()`.
 4. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply.
-   The gate covers Matrix-driven response lifecycles only.
-   Direct agent-run entry points that bypass the response lifecycle (`mindroom.api.openai_compat` and cascaded voice in `mindroom.matrix_rtc.call_tools`) are not admitted through it, so a replacement can still land underneath one of those runs.
-   The gate stays closed, but is not held, across config loading and plan application.
-   Holding it would stall the apply against itself: applying the plan stops bots, and stopping a bot drains its detached responses.
+   The gate covers Matrix-driven response lifecycles, external-trigger delivery, call admission, and requester-driven call operations.
+   Text and router planning, commands, edit regeneration, interactive selections, visible router voice echoes, calls, and external triggers perform their final reply-policy check after admission and retain the slot through their direct side effect or response-runner handoff.
+   The OpenAI-compatible API in `mindroom.api.openai_compat` remains outside this gate because it does not use Matrix reply authorization.
+   Config loading keeps response admission open; after current responses drain, the gate closes for diff planning and publication.
+   Holding the gate while loading would block responses for validation work that cannot affect the live runtime.
 5. While the gate is closed, a response waits before taking a lifecycle lock, incrementing the in-flight count, or publishing a placeholder.
    The gate is global and covers the whole apply window regardless of how narrow the plan turns out to be.
    When the apply finishes, responses owned by unchanged or replacement runtimes compete for admission normally.
@@ -97,8 +109,9 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped.
 7. If responses never drain, either replacement flow stops deferring after 600 seconds and closes the gate over still-running responses.
    This bounded forced apply prevents a busy install from starving config or MCP replacement forever.
-8. For config reloads, `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`.
-9. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted.
+8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config while admission remains open, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations after the gate closes.
+9. The orchestrator applies the resulting plan: changed entities are replaced, unchanged bots receive the new config, and room-only changes reconcile memberships in place while restarting only sliding receive loops to refresh their subscriptions.
+   Call-enabled agents are conservatively replaced after any authored config change because active call tooling captures the full authored config snapshot.
 10. Removed entities run `cleanup()` to leave rooms and stop the bot.
 11. New and restarted bots go through room setup.
 12. The gate reopens once the apply finishes, whether it succeeded, failed, or was cancelled, and deferred responses may then start.
@@ -109,7 +122,7 @@ Skills are watched separately via `_watch_skills_task()` with cache invalidation
 
 The `src/mindroom/orchestration/` subpackage contains helpers extracted from the monolithic orchestrator:
 
-- **`runtime.py`** — Sync loop helpers: `sync_forever_with_restart()` with linear backoff (capped at 60s), `cancel_task()`, and `create_logged_task()` for safe asyncio task creation.
+- **`runtime.py`** — Sync loop helpers: `sync_forever_with_restart()` with exponential backoff capped at 60 seconds, `cancel_task()`, and `create_logged_task()` for safe asyncio task creation.
 - **`config_lifecycle.py`** — Debounced config-reload and shared replacement-admission lifecycle: `ConfigReloadLifecycle` owns reload queueing, serialized global response draining for config and MCP replacements, and the load → diff → plan sequencing that dispatches config plans back to the orchestrator.
 - **`config_updates.py`** — Config diffing and reload planning: `build_config_update_plan()` computes a `ConfigUpdatePlan` by calling `_identify_entities_to_restart()`, which diffs old and new configs using `model_dump(exclude_none=True)`.
 - **`plugin_watch.py`** — Plugin hot-reload watcher: `watch_plugins_task()` polls configured plugin roots, with `PluginWatchState` owning the watcher baselines and dirty-state revision.
@@ -123,26 +136,24 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 - **`src/mindroom/team_exact_members.py`** — Resolves `ResolvedExactTeamMembers` for team materialization via `materialize_exact_requested_team_members()`.
 - **`src/mindroom/agent_policy.py`** — Resolves canonical execution policies and private-team eligibility derived from authored agent config.
 - **`src/mindroom/model_loading.py`** — Owns `get_model_instance()` and provider-specific model loader selection.
-- **`src/mindroom/ai_runtime.py`** — Owns agent-run input copying, queued-notice hooks, and inline-media fallback helpers used during execution.
+- **`src/mindroom/ai_runtime.py`** — Owns agent-run input copying and queued-notice hooks used during execution.
+- **`src/mindroom/provider_media_fallback.py`** — Owns provider-boundary inline-media retry and process-local capability learning per model route.
 - **`src/mindroom/agent_storage.py`** — Owns agent session and learning SQLite storage construction helpers.
 - **`src/mindroom/agent_descriptions.py`** — Owns shared agent description rendering used by routing and delegation.
 - **`src/mindroom/runtime_state.py`** — Shared runtime readiness state with `set_runtime_starting()`, `set_runtime_ready()`, and `set_runtime_failed()` used by health endpoints.
 
 ## Message Handling
 
-Event callbacks are wrapped in `_create_task_wrapper()` to run as background tasks, ensuring the sync loop is never blocked.
+Correctness-critical timeline callbacks cross durable journal admission before ordinary callbacks run, and background dispatch workers then process committed work without blocking the sync loop.
 
-**`_on_message` flow:**
+**Inbound message flow:**
 
-1. Skip own messages (except voice transcriptions from router)
-2. Check sender authorization and handle edits
-3. Check if already responded (`TurnStore.is_handled`)
-4. Router handles commands exclusively
-5. Extract message context (mentions, thread history, non-agent mention detection)
-6. Skip messages from other agents (unless mentioned)
-7. Router routes when no agent or team is mentioned and thread doesn't have multiple human participants
-8. Check for team formation or individual response
-9. Generate response and store memory
+1. `matrix/journal_ingress.py` commits the event before nio accepts it.
+2. `journal_dispatch.py` and `pending_event_worker.py` dispatch admitted or recovered work.
+3. `turn_controller.py` runs ingress validation, normalization, conversation resolution, receipt ordering, and coalescing.
+4. `text_ingress_dispatch.py` and `turn_policy.py` decide whether to ignore, route, execute a command, or respond.
+5. `response_runner.py` and `response_turn.py` execute the selected agent or team.
+6. `delivery_gateway.py` sends or edits the Matrix response and `TurnStore` records durable terminal truth.
 
 **Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content.
 The agent edits its own previous reply in place rather than sending a new message.
@@ -161,12 +172,12 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 ## Concurrency
 
 - Each bot runs its own sync loop via `sync_forever_with_restart()`
-- Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s max)
+- Sync loop failures trigger automatic restart with capped exponential backoff (5s, 10s, 20s, 40s, then 60s maximum)
 - Watchdog-driven restarts of stalled sync loops add 0–10s of random jitter on top of the backoff so a loop-wide stall does not restart every sync loop as one thundering herd
 - An automatic receive-loop restart replaces only the sync task and its watchdog, so in-flight responses keep their original owner and finish across the restart
 - The response runtime is drained and cancelled only when the bot itself stops: a config reload replacing the entity, entity removal, or process shutdown
 - Each of those lifecycle events logs `restart_reason_category` and `resulting_action`, so `matrix_sync_transport_restart` is distinguishable from `matrix_agent_response_runtime_shutdown` in logs
-- Event callbacks run as background tasks (never block the sync loop)
+- Admitted callbacks are dispatched as background work and remain durably retryable until settled
 - `TurnStore`, backed by the durable handled-turn ledger, prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses
 
@@ -174,13 +185,9 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 On `orchestrator.stop()`:
 
-1. Set `self.running = False`
-2. Cancel config reload task
-3. Drain orchestrator-owned MCP catalog replacement tasks for up to 5 seconds before MCP or entity teardown
-4. Stop memory auto-flush worker
-5. Shut down the per-binding knowledge refresh scheduler
-6. Cancel pending bot start tasks
-7. Stop the MCP manager
-8. Cancel all sync tasks
-9. Signal all bots to stop (`bot.running = False`)
-10. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)
+1. Mark the runtime stopped, signal runtime shutdown, unbind external triggers, and close approval transport/runtime state.
+2. Cancel config reload, drain MCP catalog and dispatch-recovery work, and cancel startup maintenance.
+3. Stop todo-poke and memory auto-flush workers plus knowledge watching and refresh scheduling.
+4. Cancel pending bot starts and stop the MCP manager.
+5. Cancel sync tasks before stopping bots so shutdown cannot race active receive loops.
+6. Stop all bots concurrently, wait for attachment cleanup, and close the shared event journal last because bots borrow it while draining delivery work.
