@@ -592,7 +592,6 @@ MindRoom re-exports a room within about two seconds of a message, edit, redactio
 A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
 The manual [`threads export`](https://docs.mindroom.chat/cli/#threads-export) command skips directory-wide removal when it could export no room, because an empty result cannot be told apart from a failed one.
 Continuous workspace exports have an authoritative per-agent room selection, so their full pass removes stale room directories even when that agent has no rooms left.
-The first principal-bound pass clears older workspace exports before rebuilding them through the agent's own source.
 Files are rewritten only when a thread's content changed.
 Agents may edit or delete their exported files; deleted files return on the next pass that touches the room.
 Each workspace is populated only through that agent's running Matrix account and principal-bound event-journal projection, so a pass costs no Matrix history call for threads that agent has seen.

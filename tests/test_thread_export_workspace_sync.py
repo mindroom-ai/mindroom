@@ -14,12 +14,7 @@ from mindroom.config.main import Config
 from mindroom.matrix.identity import MatrixID
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportRoom, ThreadExportTarget
-from mindroom.thread_export.storage import (
-    _PRINCIPAL_BOUND_MARKER_FILENAME,
-    _ROOT_MARKER_FILENAME,
-    prepare_principal_bound_export_root,
-    write_thread_payload,
-)
+from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME, write_thread_payload
 from mindroom.thread_export.workspace_sync import (
     _WORKSPACE_EXPORT_DIRNAME,
     WorkspaceThreadExportDeps,
@@ -336,24 +331,33 @@ async def test_invited_rooms_read_through_the_invited_entity_bot(tmp_path: Path)
 
 
 @pytest.mark.parametrize("availability", ["missing", "clientless", "stopped"])
-async def test_unavailable_agent_migrates_its_workspace_without_a_source(
+async def test_unavailable_agent_target_blocks_aliased_active_write(
     tmp_path: Path,
     availability: str,
 ) -> None:
-    """A missing runtime cannot leave known-tainted legacy workspace exports behind."""
-    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+    """An unavailable source still reserves its destination during overlap validation."""
+    config = _config(
+        tmp_path,
+        {
+            "code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig()),
+            "other": AgentConfig(display_name="Other", thread_exports=AgentThreadExportConfig()),
+        },
+    )
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
-    export_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
-    stale_thread = _write_owned_export(export_dir)
-    bots: dict[str, _ThreadExportBot] = {}
+    other_agent_dir = runtime_paths.storage_root / "agents" / "other"
+    stale_thread = _write_owned_export(other_agent_dir / "workspace" / _WORKSPACE_EXPORT_DIRNAME)
+    code_agent_dir = runtime_paths.storage_root / "agents" / "code"
+    code_agent_dir.parent.mkdir(parents=True, exist_ok=True)
+    code_agent_dir.symlink_to(other_agent_dir, target_is_directory=True)
+    bots: dict[str, _ThreadExportBot] = _bots(_FakeBot("@mindroom_other:localhost"))
     if availability != "missing":
         bot = _FakeBot(
             "@mindroom_code:localhost",
             running=availability != "stopped",
             client=None if availability == "clientless" else Mock(),
         )
-        bots = _bots(bot)
+        bots.update(_bots(bot))
     runner = _runner(config, bots)
 
     with patch(
@@ -364,8 +368,7 @@ async def test_unavailable_agent_migrates_its_workspace_without_a_source(
         await runner._run_pass_once()
 
     export_source.assert_not_awaited()
-    assert not stale_thread.exists()
-    assert (export_dir / _PRINCIPAL_BOUND_MARKER_FILENAME).is_file()
+    assert stale_thread.exists()
 
 
 async def test_full_pass_clears_stale_exports_when_agent_has_no_rooms(tmp_path: Path) -> None:
@@ -374,7 +377,6 @@ async def test_full_pass_clears_stale_exports_when_agent_has_no_rooms(tmp_path: 
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
     export_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
-    prepare_principal_bound_export_root(export_dir, trusted_root=runtime_paths.storage_root)
     stale_thread = _write_owned_export(export_dir)
     runner = _runner(
         config,
@@ -393,7 +395,6 @@ async def test_failed_joined_room_lookup_preserves_existing_exports(tmp_path: Pa
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
     export_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
-    prepare_principal_bound_export_root(export_dir, trusted_root=runtime_paths.storage_root)
     stale_thread = _write_owned_export(export_dir)
     code = _FakeBot("@mindroom_code:localhost", joined_rooms_error=RuntimeError("unavailable"))
     runner = _runner(config, _bots(code))
@@ -404,24 +405,7 @@ async def test_failed_joined_room_lookup_preserves_existing_exports(tmp_path: Pa
     assert stale_thread.exists()
 
 
-async def test_failed_first_joined_room_lookup_still_purges_legacy_exports(tmp_path: Path) -> None:
-    """Principal migration does not depend on a successful Matrix membership lookup."""
-    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
-    runtime_paths = runtime_paths_for(config)
-    write_thread_export_matrix_state(tmp_path)
-    export_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
-    stale_thread = _write_owned_export(export_dir)
-    code = _FakeBot("@mindroom_code:localhost", joined_rooms_error=RuntimeError("unavailable"))
-    runner = _runner(config, _bots(code))
-
-    runner.queue_full_pass()
-    await runner._run_pass_once()
-
-    assert not stale_thread.exists()
-    assert (export_dir / _PRINCIPAL_BOUND_MARKER_FILENAME).is_file()
-
-
-async def test_failed_room_lookup_keeps_its_target_in_global_overlap_validation(tmp_path: Path) -> None:
+async def test_failed_room_lookup_keeps_target_in_overlap_validation(tmp_path: Path) -> None:
     """A failed source cannot hide its target and let another source write through an alias."""
     config = _config(
         tmp_path,
@@ -432,9 +416,11 @@ async def test_failed_room_lookup_keeps_its_target_in_global_overlap_validation(
     )
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
-    real_agent_dir = runtime_paths.storage_root / "agents" / "other"
-    existing_thread = _write_owned_export(real_agent_dir / "workspace" / _WORKSPACE_EXPORT_DIRNAME)
-    (runtime_paths.storage_root / "agents" / "code").symlink_to(real_agent_dir, target_is_directory=True)
+    other_agent_dir = runtime_paths.storage_root / "agents" / "other"
+    existing_thread = _write_owned_export(other_agent_dir / "workspace" / _WORKSPACE_EXPORT_DIRNAME)
+    code_agent_dir = runtime_paths.storage_root / "agents" / "code"
+    code_agent_dir.parent.mkdir(parents=True, exist_ok=True)
+    code_agent_dir.symlink_to(other_agent_dir, target_is_directory=True)
     runner = _runner(
         config,
         _bots(
@@ -460,7 +446,6 @@ async def test_partial_pass_retracts_a_dirty_room_the_agent_left(tmp_path: Path)
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path)
     export_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
-    prepare_principal_bound_export_root(export_dir, trusted_root=runtime_paths.storage_root)
     stale_thread = _write_owned_export(export_dir)
     runner = _runner(config, _bots(_FakeBot("@mindroom_code:localhost", joined_room_ids=frozenset())))
 
@@ -468,30 +453,6 @@ async def test_partial_pass_retracts_a_dirty_room_the_agent_left(tmp_path: Path)
     await runner._run_pass_once()
 
     assert not stale_thread.exists()
-
-
-async def test_first_principal_bound_pass_purges_legacy_content_before_reading(tmp_path: Path) -> None:
-    """A failed first agent-bound read cannot preserve files written by the old shared source."""
-    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
-    runtime_paths = runtime_paths_for(config)
-    write_thread_export_matrix_state(tmp_path)
-    export_dir = runtime_paths.storage_root / "agents" / "code" / "workspace" / _WORKSPACE_EXPORT_DIRNAME
-    stale_thread = _write_owned_export(export_dir)
-    runner = _runner(config, _bots(_FakeBot("@mindroom_code:localhost")))
-
-    with patch(
-        "mindroom.thread_export.service.export_threads_for_targets_for_client",
-        new=AsyncMock(side_effect=RuntimeError("read failed")),
-    ):
-        runner.queue_full_pass()
-        await runner._run_pass_once()
-        assert not stale_thread.exists()
-
-        current_thread = _write_owned_export(export_dir)
-        runner.queue_full_pass()
-        await runner._run_pass_once()
-
-    assert current_thread.exists()
 
 
 async def test_full_pass_clears_exports_of_agents_without_the_setting(tmp_path: Path) -> None:

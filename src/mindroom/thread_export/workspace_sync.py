@@ -188,7 +188,7 @@ class WorkspaceThreadExportRunner:
             enabled,
             active_bots,
         )
-        principal_bound_output_dirs = await asyncio.to_thread(
+        enabled_output_dirs = await asyncio.to_thread(
             _enabled_export_dirs,
             config,
             runtime_paths,
@@ -196,12 +196,12 @@ class WorkspaceThreadExportRunner:
         )
         source_targets = tuple(target for group in target_groups.values() for target in group)
         source_target_dirs = frozenset(target.output_dir for target in source_targets)
-        migration_targets = tuple(
+        validation_targets = tuple(
             ThreadExportTarget(output_dir=output_dir, trusted_root=runtime_paths.storage_root)
-            for output_dir in principal_bound_output_dirs
+            for output_dir in enabled_output_dirs
             if output_dir not in source_target_dirs
         )
-        targets = (*source_targets, *migration_targets)
+        targets = (*source_targets, *validation_targets)
         if not targets:
             return
         state_rooms = await asyncio.to_thread(export_rooms, runtime_paths, None)
@@ -230,7 +230,6 @@ class WorkspaceThreadExportRunner:
             sources=sources,
             targets=targets,
             full_pass=full_pass,
-            principal_bound_output_dirs=principal_bound_output_dirs,
         )
         _log_pass(stats, room_ids=None if full_pass else sorted(room_ids))
 
@@ -331,7 +330,7 @@ def _enabled_export_dirs(
     runtime_paths: RuntimePaths,
     enabled: dict[str, AgentThreadExportConfig],
 ) -> tuple[Path, ...]:
-    """Resolve enabled workspace destinations independently of live Matrix sources."""
+    """Resolve enabled destinations so unavailable agents still participate in overlap validation."""
     output_dirs: list[Path] = []
     for agent_name in enabled:
         private = config.agents[agent_name].private

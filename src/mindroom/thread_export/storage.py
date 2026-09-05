@@ -30,8 +30,6 @@ _EXPORT_SCHEMA_VERSION = 1
 _ROOM_INDEX_FILENAME = "index.json"
 _ROOT_MARKER_FILENAME = ".mindroom-thread-exports"
 _ROOT_MARKER_TEXT = '{"format":"mindroom-thread-exports","version":1}\n'
-_PRINCIPAL_BOUND_MARKER_FILENAME = ".mindroom-principal-bound%"
-_PRINCIPAL_BOUND_MARKER_TEXT = '{"format":"mindroom-principal-bound","version":1}\n'
 _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
@@ -68,14 +66,14 @@ def _safe_path_segment(value: str) -> str:
 def _room_path_segment(room_key: str) -> str:
     """Return a room segment outside the export-root marker namespace."""
     encoded = _safe_path_segment(room_key)
-    if encoded in {_ROOT_MARKER_FILENAME, _PRINCIPAL_BOUND_MARKER_FILENAME}:
+    if encoded == _ROOT_MARKER_FILENAME:
         return f"%2E{encoded[1:]}"
     return encoded
 
 
 def _is_encoded_room_segment(value: str) -> bool:
     """Return whether a directory name is one canonical room segment."""
-    if value in {_ROOT_MARKER_FILENAME, _PRINCIPAL_BOUND_MARKER_FILENAME}:
+    if value == _ROOT_MARKER_FILENAME:
         return False
     try:
         return _room_path_segment(unquote(value, errors="strict")) == value
@@ -933,7 +931,7 @@ def reconcile_room_directories(
         retained_names = {_room_path_segment(room_key) for room_key in retained_room_keys}
         removed = False
         for name in os.listdir(root_fd):  # noqa: PTH208 - root_fd pins the directory
-            if name in {_ROOT_MARKER_FILENAME, _PRINCIPAL_BOUND_MARKER_FILENAME} or name in retained_names:
+            if name == _ROOT_MARKER_FILENAME or name in retained_names:
                 continue
             removed = _remove_reconciliation_room(root_fd, output_dir, name) or removed
         if removed:
@@ -958,35 +956,10 @@ def clear_thread_export_root(
         return
     try:
         for name in os.listdir(root_fd):  # noqa: PTH208 - root_fd pins the directory
-            if name in {_ROOT_MARKER_FILENAME, _PRINCIPAL_BOUND_MARKER_FILENAME}:
+            if name == _ROOT_MARKER_FILENAME:
                 continue
             _remove_reconciliation_room(root_fd, output_dir, name)
         _fsync_directory_fd(root_fd)
-    finally:
-        os.close(root_fd)
-
-
-@_serialized_export_mutation
-def prepare_principal_bound_export_root(
-    output_dir: Path,
-    *,
-    trusted_root: Path | None = None,
-) -> None:
-    """Purge pre-binding exports once, then mark this root as principal-bound."""
-    prepare_export_root(output_dir, trusted_root=trusted_root)
-    root_fd = _open_owned_export_root(output_dir, create=False, trusted_root=trusted_root)
-    assert root_fd is not None
-    try:
-        if _read_text_at(root_fd, _PRINCIPAL_BOUND_MARKER_FILENAME) == _PRINCIPAL_BOUND_MARKER_TEXT:
-            return
-    finally:
-        os.close(root_fd)
-
-    clear_thread_export_root(output_dir, trusted_root=trusted_root)
-    root_fd = _open_owned_export_root(output_dir, create=False, trusted_root=trusted_root)
-    assert root_fd is not None
-    try:
-        _atomic_write_at(root_fd, _PRINCIPAL_BOUND_MARKER_FILENAME, _PRINCIPAL_BOUND_MARKER_TEXT)
     finally:
         os.close(root_fd)
 

@@ -130,7 +130,6 @@ class ThreadExportSource:
     administrative exports; workspace sources name only their own targets.
     ``retracted_rooms`` names dirty rooms this source is authoritatively no
     longer joined to, so partial passes can remove their old exports.
-    The first explicitly bound use clears prior exporter-owned room data before writing.
     """
 
     client: nio.AsyncClient
