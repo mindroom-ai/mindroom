@@ -37,7 +37,7 @@ from mindroom.thread_export.storage import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
 
     import nio
@@ -214,6 +214,15 @@ async def _run_export_source(
     max_thread_roots: int,
 ) -> None:
     """Run one source without preventing later sources after a failure."""
+    if source.target_output_dirs is not None:
+        bound_output_dirs = _bound_output_dirs((source,))
+        accumulators = tuple(
+            accumulator for accumulator in accumulators if accumulator.target.output_dir in bound_output_dirs
+        )
+    if not accumulators:
+        return
+    if not source.rooms:
+        return
     try:
         source_accumulators = await export_threads_for_targets_for_client(
             client=source.client,
@@ -264,6 +273,22 @@ async def _validated_accumulators(
     return accumulators, await asyncio.to_thread(_validated_targets, accumulators)
 
 
+def _canonical_output_dirs(output_dirs: Iterable[Path]) -> frozenset[Path]:
+    """Return the valid canonical paths from an output-directory collection."""
+    canonical_dirs: set[Path] = set()
+    for output_dir in output_dirs:
+        try:
+            canonical_dirs.add(canonicalize_output_dir(output_dir))
+        except (OSError, RuntimeError):
+            continue
+    return frozenset(canonical_dirs)
+
+
+def _bound_output_dirs(sources: Sequence[ThreadExportSource]) -> frozenset[Path]:
+    """Return canonical target paths explicitly bound to a live source."""
+    return _canonical_output_dirs(output_dir for source in sources for output_dir in source.target_output_dirs or ())
+
+
 async def export_threads_to_sources(
     *,
     config: Config,
@@ -274,10 +299,11 @@ async def export_threads_to_sources(
     full_pass: bool,
     max_thread_roots: int = 2000,
 ) -> tuple[ThreadExportStats, ...]:
-    """Export threads from already-authenticated sources to every target.
+    """Export threads from already-authenticated sources to their allowed targets.
 
     This is the in-process path: a running bot lends its client and its
     projection view, so no login, journal open, or bind happens here.
+    An unbound source retains the existing all-target fan-out behavior.
     ``unreadable_rooms`` records a failure per room for rooms no source could
     read this pass, without retracting anything already exported for them.
     ``full_pass`` removes room directories the pass did not retain.

@@ -124,11 +124,16 @@ class ThreadExportGroup:
 
 @dataclass(frozen=True)
 class ThreadExportSource:
-    """Rooms readable through one live Matrix client and its projection view."""
+    """Rooms readable through one live Matrix client and projection view.
+
+    ``target_output_dirs=None`` preserves the all-target fan-out used by
+    administrative exports; workspace sources name only their own targets.
+    """
 
     client: nio.AsyncClient
     reader: ProjectedThreadReader
     rooms: tuple[ThreadExportRoom, ...]
+    target_output_dirs: tuple[Path, ...] | None = None
 
 
 @dataclass(frozen=True)

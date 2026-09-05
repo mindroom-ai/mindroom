@@ -1053,6 +1053,13 @@ class AgentBot:
             room_id for room_id in (*self.rooms, *self._room_lifecycle.invited_rooms) if room_id.startswith("!")
         )
 
+    async def current_joined_room_ids(self) -> frozenset[str] | None:
+        """Return the authoritative rooms this bot is currently joined to."""
+        client = self.client
+        if client is None or (room_ids := await get_joined_rooms(client)) is None:
+            return None
+        return frozenset(room_ids)
+
     @property
     def agent_name(self) -> str:
         """Get the agent name from username."""

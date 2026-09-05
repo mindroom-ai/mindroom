@@ -10,15 +10,14 @@ journal of its own. Storage I/O runs off the event loop inside
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.private_instance_identity import private_instances_for_agent
 from mindroom.thread_export.models import ThreadExportRoom, ThreadExportSource, ThreadExportTarget
 from mindroom.thread_export.projected_history import export_conversation_reader
-from mindroom.thread_export.selection import export_rooms, invited_export_rooms
+from mindroom.thread_export.selection import export_rooms
 from mindroom.thread_export.service import export_threads_to_sources
 from mindroom.thread_export.storage import clear_thread_export_root
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -48,14 +47,24 @@ class _ThreadExportBot(Protocol):
 
     running: bool
     client: nio.AsyncClient | None
+    rooms: list[str]
 
     @property
     def matrix_id(self) -> MatrixID:
         """Return the bot's Matrix identity."""
         ...
 
+    @property
+    def approval_room_ids(self) -> frozenset[str]:
+        """Return the bot's configured and durably invited room IDs."""
+        ...
+
     def journal_principal(self) -> PrincipalStore:
         """Return the bot's principal-bound projection view."""
+        ...
+
+    async def current_joined_room_ids(self) -> frozenset[str] | None:
+        """Return the bot's authoritative joined rooms, or None when unavailable."""
         ...
 
 
@@ -140,68 +149,120 @@ class WorkspaceThreadExportRunner:
             self._pending_room_ids |= room_ids
 
     async def _run_pass(self, config: Config, *, full_pass: bool, room_ids: frozenset[str]) -> None:
-        """Export the dirty rooms, or everything, into every enabled agent's workspace."""
+        """Export each agent's rooms through that agent into its own workspace."""
         runtime_paths = self._deps.runtime_paths
         enabled = {
             name: agent.thread_exports for name, agent in config.agents.items() if agent.thread_exports is not None
         }
         if full_pass:
             await asyncio.to_thread(_clear_disabled_agent_exports, config, runtime_paths, frozenset(enabled))
-        agent_user_ids = {
-            agent_name: bot.matrix_id.full_id
+        active_bots = {
+            agent_name: bot
             for agent_name in enabled
-            if (bot := self._deps.bot_provider(agent_name)) is not None
+            if (bot := self._deps.bot_provider(agent_name)) is not None and bot.running and bot.client is not None
         }
-        for agent_name in enabled.keys() - agent_user_ids.keys():
-            logger.warning("Skipping thread exports for agent without a bot", agent_name=agent_name)
-        targets = await asyncio.to_thread(_build_targets, config, runtime_paths, enabled, agent_user_ids)
+        for agent_name in enabled.keys() - active_bots.keys():
+            logger.warning("Skipping thread exports for agent without a running bot", agent_name=agent_name)
+        joined_room_ids_by_agent: dict[str, frozenset[str]] = {}
+        for agent_name, bot in active_bots.items():
+            approval_room_ids = bot.approval_room_ids
+            if not full_pass and room_ids.isdisjoint(approval_room_ids):
+                continue
+            try:
+                joined_room_ids = await bot.current_joined_room_ids()
+            except Exception as exc:
+                logger.warning(
+                    "Skipping thread exports because joined rooms could not be read",
+                    agent_name=agent_name,
+                    error=str(exc),
+                )
+                continue
+            if joined_room_ids is None:
+                logger.warning(
+                    "Skipping thread exports because joined rooms could not be read",
+                    agent_name=agent_name,
+                )
+                continue
+            joined_room_ids_by_agent[agent_name] = frozenset(joined_room_ids) & approval_room_ids
+        target_groups = await asyncio.to_thread(
+            _build_target_groups,
+            config,
+            runtime_paths,
+            enabled,
+            active_bots,
+        )
+        enabled_output_dirs = await asyncio.to_thread(
+            _enabled_export_dirs,
+            config,
+            runtime_paths,
+            enabled,
+        )
+        source_targets = tuple(target for group in target_groups.values() for target in group)
+        source_target_dirs = frozenset(target.output_dir for target in source_targets)
+        validation_targets = tuple(
+            ThreadExportTarget(output_dir=output_dir, trusted_root=runtime_paths.storage_root)
+            for output_dir in enabled_output_dirs
+            if output_dir not in source_target_dirs
+        )
+        targets = (*source_targets, *validation_targets)
         if not targets:
             return
-        state_rooms, invited_groups = await asyncio.to_thread(_select_rooms, config, runtime_paths)
-        if not full_pass:
-            state_rooms = [room for room in state_rooms if room.room_id in room_ids]
-            invited_groups = [
-                (entity_name, selected)
-                for entity_name, rooms in invited_groups
-                if (selected := [room for room in rooms if room.room_id in room_ids])
-            ]
+        state_rooms = await asyncio.to_thread(export_rooms, runtime_paths, None)
         sources: list[ThreadExportSource] = []
-        unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = []
-        for entity_name, rooms in ((ROUTER_AGENT_NAME, state_rooms), *invited_groups):
-            if not rooms:
+        for agent_name, agent_targets in target_groups.items():
+            joined_room_ids = joined_room_ids_by_agent.get(agent_name)
+            if joined_room_ids is None:
                 continue
-            bot = self._deps.bot_provider(entity_name)
-            if bot is None or not bot.running or bot.client is None:
-                unreadable_rooms.append((tuple(rooms), f"Bot '{entity_name}' is not running"))
-                continue
-            sources.append(_source_for_bot(bot, tuple(rooms), config))
+            bot = active_bots[agent_name]
+            rooms = await asyncio.to_thread(
+                _select_agent_rooms,
+                bot.rooms,
+                joined_room_ids,
+                state_rooms,
+            )
+            rooms = [room for room in rooms if full_pass or room.room_id in room_ids]
+            sources.append(_source_for_bot(bot, tuple(rooms), agent_targets, config))
         stats = await export_threads_to_sources(
             config=config,
             runtime_paths=runtime_paths,
             sources=sources,
             targets=targets,
-            unreadable_rooms=unreadable_rooms,
             full_pass=full_pass,
         )
         _log_pass(stats, room_ids=None if full_pass else sorted(room_ids))
 
 
-def _select_rooms(
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> tuple[list[ThreadExportRoom], list[tuple[str, list[ThreadExportRoom]]]]:
-    """Read the persisted configured and invited rooms, off the event loop."""
-    state_rooms = export_rooms(runtime_paths, None)
-    invited_groups = invited_export_rooms(
-        config,
-        runtime_paths,
-        None,
-        known_room_ids={room.room_id for room in state_rooms},
+def _select_agent_rooms(
+    configured_room_ids: Sequence[str],
+    available_room_ids: frozenset[str],
+    state_rooms: Sequence[ThreadExportRoom],
+) -> list[ThreadExportRoom]:
+    """Return configured and invited rooms available to one live agent account."""
+    configured_ids = tuple(dict.fromkeys(configured_room_ids))
+    configured_id_set = frozenset(configured_ids)
+    state_rooms_by_id = {room.room_id: room for room in state_rooms}
+    ordered_room_ids = (
+        *(room_id for room_id in configured_ids if room_id in available_room_ids),
+        *sorted(available_room_ids - configured_id_set),
     )
-    return state_rooms, invited_groups
+    return [
+        replace(
+            state_rooms_by_id.get(
+                room_id,
+                ThreadExportRoom(key=room_id, room_id=room_id, alias="", name=""),
+            ),
+            invited=room_id not in configured_id_set,
+        )
+        for room_id in ordered_room_ids
+    ]
 
 
-def _source_for_bot(bot: _ThreadExportBot, rooms: tuple[ThreadExportRoom, ...], config: Config) -> ThreadExportSource:
+def _source_for_bot(
+    bot: _ThreadExportBot,
+    rooms: tuple[ThreadExportRoom, ...],
+    targets: tuple[ThreadExportTarget, ...],
+    config: Config,
+) -> ThreadExportSource:
     """Read ``rooms`` through one running bot's client and projection view."""
     client = bot.client
     assert client is not None
@@ -214,6 +275,7 @@ def _source_for_bot(bot: _ThreadExportBot, rooms: tuple[ThreadExportRoom, ...], 
             self_sender=bot.matrix_id.full_id,
         ),
         rooms=rooms,
+        target_output_dirs=tuple(target.output_dir for target in targets),
     )
 
 
@@ -237,23 +299,45 @@ def _log_pass(stats: Sequence[ThreadExportStats], *, room_ids: list[str] | None)
             )
 
 
-def _build_targets(
+def _build_target_groups(
     config: Config,
     runtime_paths: RuntimePaths,
     enabled: dict[str, AgentThreadExportConfig],
-    agent_user_ids: dict[str, str],
-) -> tuple[ThreadExportTarget, ...]:
-    """Resolve every shared and private export target for the enabled agents."""
-    targets: list[ThreadExportTarget] = []
+    active_bots: dict[str, _ThreadExportBot],
+) -> dict[str, tuple[ThreadExportTarget, ...]]:
+    """Resolve each active agent's shared or private export targets."""
+    groups: dict[str, tuple[ThreadExportTarget, ...]] = {}
     for agent_name, options in enabled.items():
-        agent_user_id = agent_user_ids.get(agent_name)
-        if agent_user_id is None:
+        bot = active_bots.get(agent_name)
+        if bot is None:
             continue
+        agent_user_id = bot.matrix_id.full_id
         if config.agents[agent_name].private is None:
-            targets.append(_shared_target(runtime_paths, agent_name, agent_user_id, options))
+            targets = (_shared_target(runtime_paths, agent_name, agent_user_id, options),)
         else:
-            targets.extend(_private_targets(config, runtime_paths, agent_name, agent_user_id, options))
-    return tuple(targets)
+            targets = tuple(_private_targets(config, runtime_paths, agent_name, agent_user_id, options))
+        if targets:
+            groups[agent_name] = targets
+    return groups
+
+
+def _enabled_export_dirs(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    enabled: dict[str, AgentThreadExportConfig],
+) -> tuple[Path, ...]:
+    """Resolve enabled destinations so unavailable agents still participate in overlap validation."""
+    output_dirs: list[Path] = []
+    for agent_name in enabled:
+        private = config.agents[agent_name].private
+        if private is None:
+            output_dirs.append(_shared_export_dir(runtime_paths, agent_name))
+            continue
+        for instance in private_instances_for_agent(runtime_paths.storage_root, agent_name, private.per):
+            output_dir = _private_export_dir(config, runtime_paths, agent_name, instance.state_root)
+            if output_dir is not None:
+                output_dirs.append(output_dir)
+    return tuple(dict.fromkeys(output_dirs))
 
 
 def _shared_target(
