@@ -527,7 +527,9 @@ class TestRoutingRegression:
         await router_bot.recover_pending_turn_journal_events()
         await drain_coalescing(router_bot)
 
-        mock_suggest_responder.assert_awaited_once()
+        # The running journal worker may retry this unsettled selection beside
+        # the explicit recovery pass, but it must not deliver to an unready bot.
+        mock_suggest_responder.assert_awaited()
         router_bot.client.room_send.assert_not_awaited()
         assert await router_bot._journal_dispatcher.store.is_pending(blocked_event.event_id)
 

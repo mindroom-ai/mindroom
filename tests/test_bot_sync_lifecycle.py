@@ -9,6 +9,7 @@ only ever happened to share a sync callback with.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -18,6 +19,8 @@ import pytest
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, current_task_is_process_shutdown
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from tests.threading_helpers import (
@@ -31,6 +34,67 @@ if TYPE_CHECKING:
 
 class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
     """Startup, checkpoint certification, redaction ownership, and drain behavior."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("standalone", "first_sync_response"), [(False, True), (True, True), (True, False)])
+    async def test_start_holds_reactions_until_semantic_dispatch_is_released(
+        self,
+        bot: AgentBot,
+        standalone: bool,
+        first_sync_response: bool,
+    ) -> None:
+        """Durable non-turn work must survive startup without running under stale grants."""
+        if standalone:
+            bot.orchestrator = None
+        dispatched = asyncio.Event()
+
+        async def on_reaction(_room: nio.MatrixRoom, _event: nio.ReactionEvent) -> TurnDispatchOutcome:
+            dispatched.set()
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = bot._journal_dispatcher
+        dispatcher.callbacks = replace(dispatcher.callbacks, on_reaction=on_reaction)
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        event = nio.ReactionEvent.from_dict(
+            {
+                "type": "m.reaction",
+                "event_id": "$startup-reaction:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$target", "key": "ok"}},
+            },
+        )
+        assert isinstance(event, nio.ReactionEvent)
+        with (
+            patch.object(bot, "ensure_user_account", AsyncMock()),
+            patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=bot.client)),
+            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
+        ):
+            await bot.start()
+
+        try:
+            await dispatcher.admit_out_of_band(room, event, EventKind.REACTION, EventClass.ACTIONABLE)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(dispatched.wait(), timeout=0.05)
+            assert await dispatcher.store.is_pending(event.event_id)
+
+            if standalone:
+                with (
+                    patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()),
+                    patch.object(bot, "_schedule_delivery_recovery"),
+                    patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
+                    patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+                ):
+                    await bot._run_sync_response_side_effects(first_sync_response=first_sync_response)
+            else:
+                bot.release_pending_turn_journal_replay()
+            await asyncio.wait_for(dispatched.wait(), timeout=1.0)
+            await dispatcher.drain_once()
+            assert not await dispatcher.store.is_pending(event.event_id)
+        finally:
+            await dispatcher.stop()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

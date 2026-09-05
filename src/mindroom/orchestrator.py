@@ -820,6 +820,14 @@ class _MultiAgentOrchestrator:
 
     def _schedule_ready_turn_dispatch_recovery(self) -> None:
         """Coalesce bot-ready signals into one orchestrator-owned recovery task."""
+        if not self._runtime_ready_event.is_set():
+            return
+        config = self.config
+        if config is not None:
+            for entity_name in configured_entity_names(config):
+                ready_bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
+                if ready_bot is not None:
+                    ready_bot.release_pending_turn_journal_replay()
         self._dispatch_recovery_requested = True
         task = self._dispatch_recovery_task
         if task is not None and not task.done():
@@ -1511,12 +1519,6 @@ class _MultiAgentOrchestrator:
         if bot.agent_name == ROUTER_AGENT_NAME:
             self._router_reply_memberships_live_sync_ready.set()
         await self._approval_transport.handle_bot_ready(bot)
-        config = self.config
-        if config is not None:
-            for entity_name in configured_entity_names(config):
-                ready_bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
-                if ready_bot is not None:
-                    ready_bot.release_pending_turn_journal_replay()
         self._schedule_ready_turn_dispatch_recovery()
 
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
@@ -1620,29 +1622,32 @@ class _MultiAgentOrchestrator:
         async with self.config_reload.startup_publication_admission():
             self.running = True
 
+            # Owned membership commands need the source and admission pump.
+            # Semantic dispatch stays parked until initial runtime publication.
+            set_runtime_starting("Starting Matrix ingestion loops")
+            phase_started = log_startup_phase_started("start_matrix_sync_loops")
+            for bot in started_bots:
+                self._start_sync_task(bot.agent_name, bot)
+            log_startup_phase_finished("start_matrix_sync_loops", phase_started)
+
             startup_cutoff_ms = int(time.time() * 1000)
             self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
             room_membership_policy_configured = self.agent_reply_memberships.needs_refresh(config)
             if room_membership_policy_configured:
                 set_runtime_starting("Establishing Matrix room memberships")
                 await self._startup_maintenance.wait_for_rooms_and_memberships()
-                router_bot.preserve_reply_memberships_on_next_sync_start()
 
             if runtime_shutdown_event.is_set():
                 return
 
-            # Expose live sync callbacks only after room-backed reply grants have an
-            # authoritative startup snapshot.
-            set_runtime_starting("Starting Matrix sync loops")
-            phase_started = log_startup_phase_started("start_matrix_sync_loops")
-            sync_started = await self._start_sync_tasks_after_membership_publication(
-                router_bot,
+            # Publish semantic callbacks only after room-backed reply grants and
+            # the router's initial owned sync have both been established.
+            sync_ready = await self._wait_for_initial_membership_sync(
                 runtime_shutdown_event,
                 room_membership_policy_configured=room_membership_policy_configured,
             )
-            if not sync_started:
+            if not sync_ready:
                 return
-            log_startup_phase_finished("start_matrix_sync_loops", phase_started)
 
             for entity_name in start_results.retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)
@@ -1653,35 +1658,24 @@ class _MultiAgentOrchestrator:
             )
             set_runtime_ready()
             self._runtime_ready_event.set()
+            self._schedule_ready_turn_dispatch_recovery()
         # Stay alive until explicit shutdown. Hot reload replaces sync tasks in
         # self._sync_tasks, so awaiting the initial task generation would let a
         # config-triggered restart look like normal orchestrator completion.
         await runtime_shutdown_event.wait()
 
-    async def _start_sync_tasks_after_membership_publication(
+    async def _wait_for_initial_membership_sync(
         self,
-        router_bot: AgentBot | TeamBot,
         runtime_shutdown_event: asyncio.Event,
         *,
         room_membership_policy_configured: bool,
     ) -> bool:
-        """Start receive loops without exposing responders to a stale grant snapshot."""
-        self._schedule_ready_turn_dispatch_recovery()
+        """Keep semantic dispatch parked until the router has observed owned sync."""
         if not room_membership_policy_configured:
-            for entity_name, bot in self.agent_bots.items():
-                if bot.running:
-                    self._start_sync_task(entity_name, bot)
             return True
 
         assert self._response_admission_gate.closed, "startup publication must own response admission"
-        self._start_sync_task(ROUTER_AGENT_NAME, router_bot)
-        router_ready = await self._wait_for_router_reply_memberships_or_shutdown(runtime_shutdown_event)
-        if not router_ready:
-            return False
-        for entity_name, bot in self.agent_bots.items():
-            if entity_name != ROUTER_AGENT_NAME and bot.running:
-                self._start_sync_task(entity_name, bot)
-        return True
+        return await self._wait_for_router_reply_memberships_or_shutdown(runtime_shutdown_event)
 
     async def _wait_for_router_reply_memberships_or_shutdown(
         self,

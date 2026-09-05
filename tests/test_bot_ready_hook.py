@@ -378,6 +378,7 @@ async def test_bot_ready_releases_later_ready_bot_while_serial_recovery_is_block
     """A later first sync must release replay without waiting for an earlier drain."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.config = _config(tmp_path)
+    orchestrator._runtime_ready_event.set()
     router_bot = MagicMock()
     code_bot = MagicMock()
     router_bot.agent_name = "router"
@@ -911,6 +912,8 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
     )
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
+    orchestrator.revoke_reply_authorized_calls.assert_awaited_once_with()
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
     orchestrator.reconcile_reply_authorized_calls.assert_awaited_once_with()
 
 
@@ -986,7 +989,7 @@ async def test_live_membership_replay_retries_an_unfinished_reconciliation(tmp_p
         transport=TransportKind.CLASSIC,
         sequence=0,
     )
-    orchestrator.reconcile_reply_authorized_calls = AsyncMock(
+    orchestrator.revoke_reply_authorized_calls = AsyncMock(
         side_effect=[RuntimeError("reconciliation interrupted"), None],
     )
 
@@ -1008,7 +1011,8 @@ async def test_live_membership_replay_retries_an_unfinished_reconciliation(tmp_p
     assert index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
     assert orchestrator.reconcile_pending_invites.await_count == 2
-    assert orchestrator.reconcile_reply_authorized_calls.await_count == 2
+    assert orchestrator.revoke_reply_authorized_calls.await_count == 2
+    orchestrator.reconcile_reply_authorized_calls.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -1135,7 +1139,7 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     )
 
     assert not index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
-    assert orchestrator.reconcile_reply_authorized_calls.await_count == 2
+    assert orchestrator.revoke_reply_authorized_calls.await_count == 2
 
     later_join = _validated_timeline_admission(
         bot,
@@ -1151,7 +1155,7 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     )
 
     assert index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
-    assert orchestrator.reconcile_reply_authorized_calls.await_count == 3
+    assert orchestrator.revoke_reply_authorized_calls.await_count == 3
 
     await bot._after_ingestion_admission(
         later_join,
@@ -1160,6 +1164,8 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     )
 
     assert index.is_allowed(sender_id, ["grant"], bot.config, bot.runtime_paths)
+    assert orchestrator.revoke_reply_authorized_calls.await_count == 3
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
     assert orchestrator.reconcile_reply_authorized_calls.await_count == 3
 
 

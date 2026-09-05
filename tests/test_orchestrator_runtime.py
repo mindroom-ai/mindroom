@@ -3193,6 +3193,7 @@ class TestMultiAgentOrchestrator:
         )
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
+        orchestrator._runtime_ready_event.set()
 
         router_bot = MagicMock()
         router_bot.agent_name = ROUTER_AGENT_NAME
@@ -3237,6 +3238,7 @@ class TestMultiAgentOrchestrator:
         )
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
+        orchestrator._runtime_ready_event.set()
 
         router_bot = MagicMock()
         router_bot.running = True
@@ -3355,6 +3357,7 @@ class TestMultiAgentOrchestrator:
         config = _runtime_bound_config(Config(), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
+        orchestrator._runtime_ready_event.set()
         recovery_started = asyncio.Event()
         release_recovery = asyncio.Event()
 
@@ -3475,6 +3478,7 @@ class TestMultiAgentOrchestrator:
         config = _configured_team_test_config(tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
+        orchestrator._runtime_ready_event.set()
 
         router_bot = MagicMock()
         router_bot.agent_name = ROUTER_AGENT_NAME

@@ -1568,6 +1568,8 @@ class AgentBot:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
 
         orchestrator = self.orchestrator
+        if orchestrator is None:
+            self.release_pending_turn_journal_replay()
         if not self._orchestrator_ready_handled and orchestrator is not None:
             await orchestrator.handle_bot_ready(self)
             self._orchestrator_ready_handled = True
@@ -1820,7 +1822,6 @@ class AgentBot:
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
-            self._journal_dispatcher.start()
         except BaseException:
             await self._close_owned_matrix_after_start_failure()
             raise
@@ -1859,7 +1860,8 @@ class AgentBot:
         await self._close_owned_matrix_after_start_failure()
 
     def release_pending_turn_journal_replay(self) -> None:
-        """Let this ready bot's durable turns progress beside fleet recovery."""
+        """Start semantic dispatch after the runtime publishes initial memberships."""
+        self._journal_dispatcher.start()
         self._journal_dispatcher.release_turn_replay()
 
     async def recover_pending_turn_journal_events(self) -> None:
@@ -2573,14 +2575,20 @@ class AgentBot:
         orchestrator = self.orchestrator
         if orchestrator is None:
             self.schedule_pending_invite_reconciliation()
-            await self.reconcile_reply_authorized_calls()
+            await self.revoke_reply_authorized_calls()
+            self.schedule_reply_authorized_call_reconciliation()
             return
         create_background_task(
             orchestrator.reconcile_pending_invites(),
             name="pending_invite_reconciliation",
             owner=self._runtime_view,
         )
-        await orchestrator.reconcile_reply_authorized_calls()
+        await orchestrator.revoke_reply_authorized_calls()
+        create_background_task(
+            orchestrator.reconcile_reply_authorized_calls(),
+            name="matrix_rtc_reply_authorization",
+            owner=self._runtime_view,
+        )
 
     async def _apply_live_reply_membership_transition(
         self,

@@ -2776,10 +2776,10 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
 
 @pytest.mark.asyncio
-async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and_readiness(  # noqa: PLR0915
+async def test_start_runtime_ingests_before_membership_setup_but_defers_semantic_dispatch(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
-    """Live ingress and readiness must wait for initial room-backed grants."""
+    """Owned joins need ingestion while semantic work waits for published grants."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config)
@@ -2790,22 +2790,28 @@ async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and
     config.event_journal = MagicMock()
     orchestrator.config = config
 
-    router_bot = AsyncMock()
+    router_bot = MagicMock(spec=AgentBot)
     router_bot.agent_name = "router"
     router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
     router_bot.running = True
+    router_bot.client = MagicMock()
     router_bot.stop = AsyncMock()
     router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
     router_bot.schedule_reply_authorized_call_revocation = MagicMock()
     router_bot.preserve_reply_memberships_on_next_sync_start = MagicMock()
+    router_bot.release_pending_turn_journal_replay = MagicMock()
+    router_bot.first_sync_complete = True
 
-    general_bot = AsyncMock()
+    general_bot = MagicMock(spec=AgentBot)
     general_bot.agent_name = "general"
     general_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
     general_bot.running = True
+    general_bot.client = MagicMock()
     general_bot.stop = AsyncMock()
     general_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
     general_bot.schedule_reply_authorized_call_revocation = MagicMock()
+    general_bot.release_pending_turn_journal_replay = MagicMock()
+    general_bot.first_sync_complete = True
 
     orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
 
@@ -2821,6 +2827,8 @@ async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and
     async def blocked_setup(_: list[object]) -> None:
         call_order.append("setup_started")
         setup_started.set()
+        for started in sync_started_by_entity.values():
+            await started.wait()
         await setup_can_finish.wait()
         call_order.append("setup_finished")
 
@@ -2846,25 +2854,29 @@ async def test_start_runtime_waits_for_authoritative_memberships_before_sync_and
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
         try:
             await asyncio.wait_for(setup_started.wait(), timeout=1.0)
-            await asyncio.sleep(0)
-            assert not any(event.is_set() for event in sync_started_by_entity.values())
-            assert not runtime_ready.is_set()
-
-            setup_can_finish.set()
-            await asyncio.wait_for(sync_started_by_entity["router"].wait(), timeout=1.0)
-            await asyncio.sleep(0)
-            assert not sync_started_by_entity["general"].is_set()
+            for started in sync_started_by_entity.values():
+                await asyncio.wait_for(started.wait(), timeout=1.0)
             assert not runtime_ready.is_set()
             assert orchestrator._response_admission_gate.closed
             assert not orchestrator._response_admission_gate.close_if_idle()
 
+            # An early frame completion cannot release semantic callbacks while
+            # setup still owns the initial membership publication.
             await orchestrator.handle_bot_ready(router_bot)
-            await asyncio.wait_for(sync_started_by_entity["general"].wait(), timeout=1.0)
+            await orchestrator.handle_bot_ready(general_bot)
+            await asyncio.sleep(0)
+            router_bot.release_pending_turn_journal_replay.assert_not_called()
+            general_bot.release_pending_turn_journal_replay.assert_not_called()
+
+            setup_can_finish.set()
             await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
+            await asyncio.sleep(0)
 
             setup_finished = call_order.index("setup_finished")
-            assert setup_finished < call_order.index("sync_started:router")
-            assert call_order.index("sync_started:router") < call_order.index("sync_started:general")
+            assert call_order.index("sync_started:router") < setup_finished
+            assert call_order.index("sync_started:general") < setup_finished
+            router_bot.release_pending_turn_journal_replay.assert_called()
+            general_bot.release_pending_turn_journal_replay.assert_called()
             assert not orchestrator._response_admission_gate.closed
         finally:
             setup_can_finish.set()

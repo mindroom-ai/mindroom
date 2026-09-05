@@ -3457,7 +3457,7 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
                     await runtime_task
 
     router_bot.recover_pending_turn_journal_events.assert_not_awaited()
-    assert call_order == ["wait", "recover", "setup", "sync", "recover"]
+    assert call_order == ["wait", "sync", "recover", "setup", "recover"]
 
 
 @pytest.mark.asyncio
