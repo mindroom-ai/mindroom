@@ -3732,9 +3732,17 @@ async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unreadable_error",
+    [
+        "Error constructing hnsw segment reader: EOF while parsing",
+        "Error sending backfill request to compactor: Failed to apply logs to the hnsw segment writer",
+    ],
+)
 async def test_an_unreadable_candidate_is_discarded_without_touching_the_published_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    unreadable_error: str,
 ) -> None:
     """A corrupt unpublished vector segment must not permanently block refresh."""
     docs_path = tmp_path / "docs"
@@ -3763,8 +3771,7 @@ async def test_an_unreadable_candidate_is_discarded_without_touching_the_publish
 
     def _fail_unreadable_candidate(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
         if self._name == unreadable_candidate:
-            message = "Error constructing hnsw segment reader: EOF while parsing"
-            raise InternalError(message)
+            raise InternalError(unreadable_error)
         return original_get(self, **kwargs)
 
     monkeypatch.setattr(_FakeCollection, "get", _fail_unreadable_candidate)
