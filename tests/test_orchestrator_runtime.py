@@ -58,6 +58,7 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.orchestrator import (
     _EmbeddedApiServerContext,
+    _finish_runtime_shutdown,
     _MultiAgentOrchestrator,
     _run_api_server,
     _run_auxiliary_task_forever,
@@ -183,8 +184,8 @@ async def test_invalidation_during_post_refresh_effects_skips_positive_reconcili
 
     router_bot = MagicMock()
     router_bot.client = client
-    router_bot.reconcile_pending_invites = AsyncMock(side_effect=block_post_refresh_effects)
-    router_bot.revoke_reply_authorized_calls = AsyncMock()
+    router_bot.reconcile_pending_invites = AsyncMock()
+    router_bot.revoke_reply_authorized_calls = AsyncMock(side_effect=block_post_refresh_effects)
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
     orchestrator.invalidate_agent_reply_memberships(reason="initial_gap")
     router_bot.schedule_reply_authorized_call_revocation.reset_mock()
@@ -199,6 +200,7 @@ async def test_invalidation_during_post_refresh_effects_skips_positive_reconcili
 
     router_bot.schedule_reply_authorized_call_revocation.assert_called_once_with()
     router_bot.schedule_reply_authorized_call_reconciliation.assert_not_called()
+    router_bot.schedule_pending_invite_reconciliation.assert_called_once_with()
 
 
 @pytest.mark.parametrize("preserve_startup_snapshot", [False, True])
@@ -382,6 +384,12 @@ async def test_entity_removal_keeps_bot_registered_until_cleanup_succeeds(
         await orchestrator._remove_deleted_entities({"removed"})
 
     assert orchestrator.agent_bots["removed"] is bot
+
+
+def _bind_orderly_shutdown(bot: MagicMock) -> None:
+    """Give a lightweight bot double the async shutdown protocol."""
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.stop = AsyncMock()
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -1160,6 +1168,52 @@ class TestAgentBot(AgentBotTestBase):
         await asyncio.wait_for(wait_task, timeout=1)
 
         assert cleanup_task.done()
+
+    @pytest.mark.asyncio
+    async def test_runtime_shutdown_stops_core_before_waiting_for_auxiliary_tasks(
+        self,
+    ) -> None:
+        """A stuck watcher cannot delay Matrix quiesce and owned cleanup."""
+        auxiliary_started = asyncio.Event()
+        auxiliary_cancelled = asyncio.Event()
+        core_stop_started = asyncio.Event()
+
+        async def stubborn_auxiliary() -> None:
+            auxiliary_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                auxiliary_cancelled.set()
+                await core_stop_started.wait()
+                raise
+
+        auxiliary_task = asyncio.create_task(stubborn_auxiliary())
+        await asyncio.wait_for(auxiliary_started.wait(), timeout=1)
+        orchestrator = MagicMock()
+
+        async def stop_core() -> None:
+            core_stop_started.set()
+
+        orchestrator.stop = AsyncMock(side_effect=stop_core)
+
+        finishing = asyncio.create_task(
+            _finish_runtime_shutdown(
+                shutdown_wait_task=None,
+                api_task=None,
+                orchestrator_task=None,
+                auxiliary_tasks=[auxiliary_task],
+                orchestrator=orchestrator,
+                stall_detector=None,
+            ),
+        )
+        try:
+            await asyncio.wait_for(core_stop_started.wait(), timeout=0.1)
+        finally:
+            core_stop_started.set()
+            await finishing
+
+        assert auxiliary_cancelled.is_set()
+        orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_runtime_cleanup_preserves_unrequested_cancellation_after_cleanup_failure(
@@ -2282,7 +2336,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.try_start = AsyncMock(return_value=True)
         bot.recover_pending_turn_journal_events = AsyncMock()
-        bot.stop = AsyncMock()
+        _bind_orderly_shutdown(bot)
         orchestrator.agent_bots = {"router": bot}
 
         call_order: list[str] = []
@@ -2322,7 +2376,7 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "router"
         bot.try_start = AsyncMock(return_value=True)
         bot.recover_pending_turn_journal_events = AsyncMock()
-        bot.stop = AsyncMock()
+        _bind_orderly_shutdown(bot)
         orchestrator.agent_bots = {"router": bot}
 
         async def _sync_runtime_support_services(*args: object, **kwargs: object) -> None:
@@ -2370,12 +2424,12 @@ class TestMultiAgentOrchestrator:
 
         bot.try_start = AsyncMock(side_effect=_start_bot)
         bot.recover_pending_turn_journal_events = AsyncMock()
+        _bind_orderly_shutdown(bot)
 
         async def _emit_bot_ready(_response: object) -> None:
             await orchestrator.handle_bot_ready(bot)
 
         bot._on_sync_response = AsyncMock(side_effect=_emit_bot_ready)
-        bot.stop = AsyncMock()
         orchestrator.agent_bots = {"router": bot}
 
         call_order: list[str] = []
@@ -2846,7 +2900,7 @@ class TestMultiAgentOrchestrator:
             bot.agent_name = "router"
             bot.try_start = AsyncMock(return_value=True)
             bot.recover_pending_turn_journal_events = AsyncMock()
-            bot.stop = AsyncMock()
+            _bind_orderly_shutdown(bot)
             orchestrator.agent_bots = {"router": bot}
 
         with (
@@ -3045,12 +3099,12 @@ class TestMultiAgentOrchestrator:
         router_bot.agent_name = "router"
         router_bot.try_start = AsyncMock(return_value=True)
         router_bot.recover_pending_turn_journal_events = AsyncMock()
-        router_bot.stop = AsyncMock()
+        _bind_orderly_shutdown(router_bot)
 
         failing_bot = MagicMock()
         failing_bot.agent_name = "general"
         failing_bot.try_start = AsyncMock(return_value=False)
-        failing_bot.stop = AsyncMock()
+        _bind_orderly_shutdown(failing_bot)
 
         orchestrator.agent_bots = {"router": router_bot, "general": failing_bot}
 
@@ -3082,7 +3136,7 @@ class TestMultiAgentOrchestrator:
         router_bot.running = True
         router_bot.first_sync_complete = False
         router_bot.try_start = AsyncMock(return_value=True)
-        router_bot.stop = AsyncMock()
+        _bind_orderly_shutdown(router_bot)
 
         async def recover_router_turns() -> None:
             assert responder_started
@@ -3102,7 +3156,7 @@ class TestMultiAgentOrchestrator:
             return True
 
         responder_bot.try_start = AsyncMock(side_effect=start_responder)
-        responder_bot.stop = AsyncMock()
+        _bind_orderly_shutdown(responder_bot)
         orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "general": responder_bot}
 
         def bind_runtime_support(_bots: list[object]) -> None:
@@ -3139,6 +3193,7 @@ class TestMultiAgentOrchestrator:
         )
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
+        orchestrator._runtime_ready_event.set()
 
         router_bot = MagicMock()
         router_bot.agent_name = ROUTER_AGENT_NAME
@@ -3183,6 +3238,7 @@ class TestMultiAgentOrchestrator:
         )
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
+        orchestrator._runtime_ready_event.set()
 
         router_bot = MagicMock()
         router_bot.running = True
@@ -3301,6 +3357,7 @@ class TestMultiAgentOrchestrator:
         config = _runtime_bound_config(Config(), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
+        orchestrator._runtime_ready_event.set()
         recovery_started = asyncio.Event()
         release_recovery = asyncio.Event()
 
@@ -3350,7 +3407,7 @@ class TestMultiAgentOrchestrator:
         router_bot.running = True
         router_bot.try_start = AsyncMock(return_value=True)
         router_bot.recover_pending_turn_journal_events = AsyncMock()
-        router_bot.stop = AsyncMock()
+        _bind_orderly_shutdown(router_bot)
 
         team_bot = MagicMock()
         team_bot.agent_name = "support_team"
@@ -3368,7 +3425,7 @@ class TestMultiAgentOrchestrator:
 
         team_bot.try_start = AsyncMock(side_effect=start_team)
         team_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=recover_team_turns)
-        team_bot.stop = AsyncMock()
+        _bind_orderly_shutdown(team_bot)
 
         member_bot = MagicMock()
         member_bot.agent_name = "general"
@@ -3383,7 +3440,7 @@ class TestMultiAgentOrchestrator:
             return True
 
         member_bot.try_start = AsyncMock(side_effect=start_member)
-        member_bot.stop = AsyncMock()
+        _bind_orderly_shutdown(member_bot)
         orchestrator.agent_bots = {
             ROUTER_AGENT_NAME: router_bot,
             "support_team": team_bot,
@@ -3421,6 +3478,7 @@ class TestMultiAgentOrchestrator:
         config = _configured_team_test_config(tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
+        orchestrator._runtime_ready_event.set()
 
         router_bot = MagicMock()
         router_bot.agent_name = ROUTER_AGENT_NAME
@@ -3524,12 +3582,12 @@ class TestMultiAgentOrchestrator:
         router_bot.agent_name = "router"
         router_bot.try_start = AsyncMock(return_value=True)
         router_bot.recover_pending_turn_journal_events = AsyncMock()
-        router_bot.stop = AsyncMock()
+        _bind_orderly_shutdown(router_bot)
 
         failing_bot = MagicMock()
         failing_bot.agent_name = "general"
         failing_bot.try_start = AsyncMock(side_effect=PermanentMatrixStartupError("boom"))
-        failing_bot.stop = AsyncMock()
+        _bind_orderly_shutdown(failing_bot)
 
         orchestrator.agent_bots = {"router": router_bot, "general": failing_bot}
 

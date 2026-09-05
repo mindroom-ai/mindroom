@@ -15,7 +15,7 @@ from mindroom.desktop.credentials import (
     load_desktop_credentials,
     save_desktop_credentials,
 )
-from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_entity
+from mindroom.desktop.identity import DesktopIdentityError
 from mindroom.desktop.pairing import (
     DesktopPairingError,
     complete_desktop_pairing,
@@ -24,6 +24,8 @@ from mindroom.desktop.pairing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
@@ -37,6 +39,7 @@ class DesktopCommandScope:
     runtime_paths: RuntimePaths
     agent_name: str
     requester_id: str
+    controller_identity: Callable[[str], DesktopControllerIdentity]
 
 
 def chat_pairing_desktop_error(config: Config, agent_name: str) -> str | None:
@@ -65,7 +68,7 @@ def _load_desktop_credentials(scope: DesktopCommandScope) -> dict[str, object] |
 
 def _setup_response(scope: DesktopCommandScope) -> str:
     _validate_desktop_scope(scope)
-    controller = controller_identity_for_entity(scope.agent_name, runtime_paths=scope.runtime_paths)
+    controller = scope.controller_identity(scope.agent_name)
     pairing = create_desktop_pairing(
         scope.runtime_paths,
         requester_id=scope.requester_id,
@@ -139,7 +142,7 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
     state = desktop_configuration_state(credentials)
     if state.status is not DesktopConfigurationStatus.READY:
         raise DesktopPairingError(state.error or "Claimed Desktop device identity is invalid.")
-    controller = controller_identity_for_entity(scope.agent_name, runtime_paths=scope.runtime_paths)
+    controller = scope.controller_identity(scope.agent_name)
     run_command = _run_command(scope, controller)
     save_desktop_credentials(
         get_runtime_credentials_manager(scope.runtime_paths),

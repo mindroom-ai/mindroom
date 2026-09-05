@@ -61,7 +61,7 @@ Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI doc
 
 ```text
 Matrix sync callback
-  -> matrix/journal_ingress.py                             (pre-fanout admission: commit the event before nio is told it was accepted)
+  -> matrix/durable_ingestion.py                           (validate owned Nio work, commit its receipt and effects, then acknowledge)
   -> bot.py (AgentBot/TeamBot runtime shell)
   -> journal_dispatch.py + pending_event_worker.py         (fan admitted events out to callbacks; unsettled work is woken again)
   -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
@@ -159,9 +159,9 @@ Matrix sync callback
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |
-| `matrix/sync_checkpoint_trust.py` | Sync-checkpoint persistence and the journal generation a checkpoint is certified against |
-| `matrix/sync_continuity.py` | Crash-atomic checkpoint and pending join-fence persistence |
-| `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
+| `matrix/durable_ingestion.py` | Owned Nio batch validation, journal admission, and acknowledgement |
+| `matrix/sync_continuity.py` | Durable pending join-fence persistence |
+| `matrix/journal_ingress.py` | Typed event classification and replay parsing using Nio provenance |
 | `matrix/message_content.py` | Canonical Matrix message content building for text, edits, and tool traces |
 | `matrix/message_builder.py` | Message content building helpers |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |

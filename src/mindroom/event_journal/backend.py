@@ -48,6 +48,10 @@ class Backend(Protocol):
         """Run one operation in a read transaction."""
         ...
 
+    async def recovery_read[T](self, operation: Operation[T]) -> T:
+        """Run one shutdown handoff read independently of ordinary backlog."""
+        ...
+
     async def close(self) -> None:
         """Release every connection this backend owns."""
         ...

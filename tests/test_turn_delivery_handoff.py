@@ -682,10 +682,11 @@ class TestRedactedPendingTurnSources:
         source = text_event("$source")
         if not source_first:
             await admit_redaction(journal(bot), "$redaction", redacts="$source")
-        await dispatcher._ingress._admit(
+        await dispatcher.admit_out_of_band(
             nio.MatrixRoom(ROOM, BOT),
             source,
-            nio.TimelineEventProvenance.LIVE,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
         )
         if source_first:
             await admit_redaction(journal(bot), "$redaction", redacts="$source")

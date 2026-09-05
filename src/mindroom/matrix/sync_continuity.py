@@ -55,12 +55,12 @@ class SyncContinuityStore:
         with advisory_file_lock(self._lock_path, exclusive=False):
             return self._load_locked()
 
-    def replace_checkpoint(self, checkpoint: SyncCheckpoint) -> SyncContinuityRecord:
+    def _replace_checkpoint(self, checkpoint: SyncCheckpoint) -> SyncContinuityRecord:
         """Replace only the checkpoint from fresh durable state."""
         normalized = _normalize_checkpoint(checkpoint)
         return self._update(lambda current: replace(current, checkpoint=normalized))
 
-    def clear_checkpoint(self) -> SyncContinuityRecord:
+    def _clear_checkpoint(self) -> SyncContinuityRecord:
         """Clear checkpoint trust and repair an invalid record to cold state."""
         return self._update(
             lambda current: replace(current, checkpoint=None),
@@ -87,7 +87,7 @@ class SyncContinuityStore:
 
         return self._update(transform)
 
-    def accept_classic_response(
+    def _accept_classic_response(
         self,
         checkpoint: SyncCheckpoint,
         *,

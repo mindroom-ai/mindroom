@@ -2,26 +2,54 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
     from mindroom.cancellation import TaskCancelSource
 
 __all__ = [
     "ENTITY_REMOVED_SHUTDOWN",
     "GENERIC_SHUTDOWN",
     "ORDERLY_SHUTDOWN",
+    "RESPONSE_FINALIZATION_TIMEOUT_SECONDS",
     "SYNC_RESTART_SHUTDOWN",
+    "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS",
+    "ResponseShutdownTimeoutError",
     "RestartReasonCategory",
     "RuntimeLifecycleAction",
     "RuntimeShutdownIntent",
+    "ShutdownBudget",
     "StopReason",
+    "gather_shutdown_phase",
     "restart_reason_category_for",
     "shutdown_intent_for_entity",
 ]
 
 StopReason = Literal["restart", "entity_removed", "shutdown"]
+
+SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS = 5.0
+RESPONSE_FINALIZATION_TIMEOUT_SECONDS = 15.0
+
+
+async def gather_shutdown_phase(
+    *awaitables: Awaitable[object],
+) -> tuple[list[object], asyncio.CancelledError | None]:
+    """Gather and finish one ownership-release phase if its caller is cancelled."""
+    phase = asyncio.gather(*awaitables, return_exceptions=True)
+    try:
+        return list(await asyncio.shield(phase)), None
+    except asyncio.CancelledError as cancellation:
+        return list(await phase), cancellation
+
+
+class ResponseShutdownTimeoutError(RuntimeError):
+    """Raised when a response still owns runtime resources after bounded cleanup."""
+
 
 # One taxonomy for the `restart_reason_category` and `resulting_action` fields that
 # the sync supervisor and the bot response runtime both log, so the two emitters
@@ -58,6 +86,29 @@ class RuntimeShutdownIntent:
 
     stop_reason: StopReason | None
     cancel_source: TaskCancelSource | None = None
+
+
+@dataclass(frozen=True)
+class ShutdownBudget:
+    """One monotonic deadline shared by sequential shutdown stages."""
+
+    deadline_monotonic: float
+
+    @classmethod
+    def start(cls, timeout_seconds: float) -> ShutdownBudget:
+        """Start a budget that expires after ``timeout_seconds``."""
+        return cls(deadline_monotonic=time.monotonic() + max(0.0, timeout_seconds))
+
+    def remaining_seconds(self) -> float:
+        """Return the non-negative time remaining before the deadline."""
+        return max(0.0, self.deadline_monotonic - time.monotonic())
+
+    def per_window_seconds(self, *, windows: int) -> float:
+        """Divide the remaining budget across a fixed number of wait windows."""
+        if windows <= 0:
+            message = "shutdown budget windows must be positive"
+            raise ValueError(message)
+        return self.remaining_seconds() / windows
 
 
 GENERIC_SHUTDOWN = RuntimeShutdownIntent(stop_reason=None, cancel_source=None)

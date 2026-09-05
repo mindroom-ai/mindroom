@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import batched
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import UUID
 
 from mindroom.history_recovery import (
     HistoryRecoveryOutcome,
@@ -42,7 +43,14 @@ from .approvals import (  # noqa: TC001 - part of this module's runtime return t
 )
 from .background_approvals import BackgroundApprovalDecision  # noqa: TC001
 from .membership_state import claim_active_membership_epoch
-from .models import AdmissionResult, DeliveryAcknowledgement, DeliveryProjectionPendingError
+from .models import (
+    AdmissionResult,
+    DeliveryAcknowledgement,
+    DeliveryProjectionPendingError,
+    DeliveryStage,
+    IngestionConsumer,
+    IngestionConsumerBindingError,
+)
 from .projection import discard_delivery_event, drop_refetched_message, install_refetched_revision, project
 
 if TYPE_CHECKING:
@@ -54,18 +62,20 @@ if TYPE_CHECKING:
     from .backend import Backend, Transaction
     from .interactive_questions import InteractiveSelection
     from .models import (
+        AdmissionFacts,
         ConversationCursor,
         ConversationPage,
-        DeliveryStage,
         DepartureOutcome,
         DepartureSource,
         EventKind,
         HydrationCoverage,
         InboundEvent,
+        IngestionBatchAdmission,
         JournalEvent,
         MatrixDelivery,
         PendingPage,
         RefreshRequest,
+        RoomMembershipPosition,
         SemanticConsumer,
         TerminalTurnWrite,
         UnreadableMatrixDelivery,
@@ -83,12 +93,75 @@ _DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT = 100
 _HYDRATION_INSTALL_CHUNK_SIZE = 256
 
 
+def _consumer(transaction: Transaction, principal_id: str, generation: UUID, stream_id: UUID | None) -> IngestionConsumer:  # fmt: skip
+    if stream_id is None:
+        transaction.execute("INSERT INTO matrix_sync_consumers (principal_id, consumer_generation, stream_id) VALUES (?, ?, NULL) ON CONFLICT (principal_id) DO NOTHING", (principal_id, str(generation)))  # fmt: skip
+    else:
+        transaction.execute("UPDATE matrix_sync_consumers SET stream_id = ? WHERE principal_id = ? AND consumer_generation = ? AND (stream_id IS NULL OR stream_id = ?) AND NOT EXISTS (SELECT 1 FROM matrix_sync_consumers WHERE stream_id = ?)", (str(stream_id), principal_id, str(generation), str(stream_id), str(stream_id)))  # fmt: skip
+    row = transaction.fetchone("SELECT * FROM matrix_sync_consumers WHERE principal_id = ?", (principal_id,))
+    if row is None:
+        raise IngestionConsumerBindingError
+    try:
+        consumer = IngestionConsumer(UUID(str(row["consumer_generation"])), None if row["stream_id"] is None else UUID(str(row["stream_id"])))  # fmt: skip
+    except (KeyError, TypeError, ValueError) as error:
+        raise IngestionConsumerBindingError from error
+    if stream_id is not None and consumer != IngestionConsumer(generation, stream_id):
+        raise IngestionConsumerBindingError
+    return consumer
+
+
+def _snapshot_interactive_source(
+    transaction: Transaction,
+    principal_id: str,
+    event: InboundEvent,
+) -> None:
+    """Freeze an interactive source only after its visible target is durable."""
+    if interactive_questions.snapshot_source_candidate(
+        transaction,
+        principal_id,
+        event,
+    ) and outbox.has_attempted_unacknowledged_prompt_delivery(
+        transaction,
+        principal_id,
+        room_id=event.room_id,
+        membership_epoch=journal.current_membership_epoch(transaction, principal_id, event.room_id),
+    ):
+        msg = f"Matrix delivery projection is pending in room {event.room_id!r}"
+        raise DeliveryProjectionPendingError(msg)
+
+
+def _admit_ingestion_batch(
+    transaction: Transaction,
+    principal_id: str,
+    admission: IngestionBatchAdmission,
+) -> AdmissionFacts:
+    """Apply one ingestion receipt with the interactive source snapshot it admits."""
+    facts = journal.admit_ingestion_batch(transaction, principal_id, admission)
+    if facts.receipt_new and admission.event is not None:
+        _snapshot_interactive_source(transaction, principal_id, admission.event)
+    return facts
+
+
 @dataclass(frozen=True, slots=True)
 class PrincipalStore:
     """Everything one bot may durably do, scoped to that bot."""
 
     _backend: Backend
     _principal_id: str
+
+    async def load_or_create_ingestion_consumer(self, *, new_generation: UUID) -> IngestionConsumer:  # noqa: D102
+        return await self._backend.write(lambda tx: _consumer(tx, self._principal_id, new_generation, None))
+
+    async def bind_ingestion_stream(self, *, generation: UUID, stream_id: UUID) -> IngestionConsumer:  # noqa: D102
+        try:
+            return await self._backend.write(lambda tx: _consumer(tx, self._principal_id, generation, stream_id))
+        except Exception as error:
+            if getattr(error, "sqlite_errorname", None) != "SQLITE_CONSTRAINT_UNIQUE" and getattr(error, "sqlstate", None) != "23505":  # fmt: skip
+                raise
+            owner = await self._backend.read(lambda tx: tx.fetchone("SELECT principal_id FROM matrix_sync_consumers WHERE stream_id = ?", (str(stream_id),)))  # fmt: skip
+            if owner is not None and owner["principal_id"] != self._principal_id:
+                raise IngestionConsumerBindingError from error
+            raise
 
     async def admit(
         self,
@@ -98,6 +171,15 @@ class PrincipalStore:
         """Admit one event and update the projection in a single transaction."""
         return await self._backend.write(
             lambda transaction: _admit(transaction, self._principal_id, event, projected),
+        )
+
+    async def admit_ingestion_batch(
+        self,
+        admission: IngestionBatchAdmission,
+    ) -> AdmissionFacts:
+        """Atomically persist one authenticated nio ingestion record."""
+        return await self._backend.write(
+            lambda tx: _admit_ingestion_batch(tx, self._principal_id, admission),
         )
 
     async def pending(
@@ -129,6 +211,32 @@ class PrincipalStore:
         return await self._backend.read(
             lambda transaction: journal.is_pending(transaction, self._principal_id, event_id),
         )
+
+    async def response_recovery_state(
+        self,
+        *,
+        source_event_ids: tuple[str, ...],
+        turn_id: str | None,
+    ) -> tuple[tuple[bool, ...], MatrixDelivery | None]:
+        """Read one response's durable handoff through the reserved recovery lane."""
+
+        def load(transaction: Transaction) -> tuple[tuple[bool, ...], MatrixDelivery | None]:
+            pending = tuple(
+                journal.is_pending(transaction, self._principal_id, event_id) for event_id in source_event_ids
+            )
+            delivery = (
+                None
+                if any(pending) or turn_id is None
+                else outbox.load(
+                    transaction,
+                    self._principal_id,
+                    delivery_id=turn_id,
+                    stage=DeliveryStage.FINAL,
+                )
+            )
+            return pending, delivery
+
+        return await self._backend.recovery_read(load)
 
     async def settle(self, event_id: str) -> None:
         """Mark one event's semantic work terminal."""
@@ -220,6 +328,16 @@ class PrincipalStore:
         """Return the current membership epoch for one room."""
         return await self._backend.read(
             lambda transaction: journal.current_membership_epoch(transaction, self._principal_id, room_id),
+        )
+
+    async def membership_position(self, room_id: str) -> RoomMembershipPosition:
+        """Return the journal-authoritative prior position for a local command."""
+        return await self._backend.read(
+            lambda transaction: journal.membership_position(
+                transaction,
+                self._principal_id,
+                room_id,
+            ),
         )
 
     async def interactive_prompt_is_current(
@@ -1272,22 +1390,8 @@ def _admit(
 ) -> AdmissionResult:
     """Admit one event after any already-visible outbox delivery is projected."""
     result = journal.admit(transaction, principal_id, event, projected)
-    if (
-        result is AdmissionResult.ADMITTED
-        and interactive_questions.snapshot_source_candidate(
-            transaction,
-            principal_id,
-            event,
-        )
-        and outbox.has_attempted_unacknowledged_prompt_delivery(
-            transaction,
-            principal_id,
-            room_id=event.room_id,
-            membership_epoch=journal.current_membership_epoch(transaction, principal_id, event.room_id),
-        )
-    ):
-        msg = f"Matrix delivery projection is pending in room {event.room_id!r}"
-        raise DeliveryProjectionPendingError(msg)
+    if result is AdmissionResult.ADMITTED:
+        _snapshot_interactive_source(transaction, principal_id, event)
     return result
 
 

@@ -660,6 +660,7 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         room.add_member(extra_member, None, None)
     send_response = AsyncMock(return_value="$desktop")
     candidate_resolver = AsyncMock(return_value=[MatrixID.parse("@mindroom_code:localhost")])
+    controller_identity = MagicMock()
     desktop_handler = MagicMock(return_value="desktop status")
     monkeypatch.setattr("mindroom.commands.handler.handle_desktop_command", desktop_handler)
     context = make_test_command_handler_context(
@@ -673,6 +674,7 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         record_command_result=AsyncMock(),
         send_response=send_response,
         responder_candidates_for_room=candidate_resolver,
+        controller_identity=controller_identity,
     )
 
     await handle_command(
@@ -695,6 +697,7 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
     if extra_member is None:
         assert desktop_handler.call_args.kwargs["scope"].agent_name == "code"
         assert desktop_handler.call_args.kwargs["scope"].requester_id == "@alice:localhost"
+        assert desktop_handler.call_args.kwargs["scope"].controller_identity is controller_identity
     else:
         desktop_handler.assert_not_called()
         assert "private room" in send_response.await_args.args[0]

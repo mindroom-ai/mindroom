@@ -350,6 +350,7 @@ class TurnControllerDeps:
     visible_voice_echo: VisibleVoiceEchoLifecycle
     visible_responses: VisibleResponseReconciler
     retry_dispatch_sources: Callable[[tuple[str, ...]], None]
+    response_recovery_ready: Callable[[TurnRecord], Awaitable[bool]]
     settle_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
     dispatch_source_is_terminal: Callable[[str], Awaitable[bool]]
 

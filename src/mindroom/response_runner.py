@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
@@ -73,19 +74,31 @@ from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
     classify_cancel_source,
+    current_task_is_process_shutdown,
     log_cancelled_response,
     log_cancelled_response_source,
     request_task_cancel,
 )
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
+from mindroom.response_shutdown_diagnostics import (
+    ResponseShutdownPhase,
+    ResponseShutdownPhaseTrace,
+    context_with_response_shutdown_trace,
+    response_shutdown_phase,
+)
 from mindroom.response_terminal import (
     PendingVisibleResponse,
     TerminalFailureStatus,
     build_terminal_stream_transport_outcome,
 )
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
-from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
+from mindroom.runtime_shutdown import (
+    GENERIC_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
+    ResponseShutdownTimeoutError,
+    RuntimeShutdownIntent,
+)
 from mindroom.scheduled_run_records import record_silent_schedule_started_if_needed
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -191,6 +204,34 @@ if TYPE_CHECKING:
 type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
+_PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
+
+
+async def _cancel_pending_responses(
+    pending: set[asyncio.Task[None]],
+    *,
+    timeout_seconds: float,
+    shutdown_intent: RuntimeShutdownIntent,
+) -> set[asyncio.Task[None]]:
+    """Cancel pending responses without extending the caller's cleanup window."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout_seconds)
+    while pending:
+        for task in pending:
+            request_task_cancel(
+                task,
+                cancel_source=shutdown_intent.cancel_source,
+                process_shutdown=shutdown_intent.stop_reason == "shutdown",
+            )
+        remaining_seconds = max(0.0, deadline - loop.time())
+        window_expired = remaining_seconds == 0.0
+        wait_seconds = remaining_seconds
+        if shutdown_intent.stop_reason == "shutdown":
+            wait_seconds = min(wait_seconds, _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS)
+        _done, pending = await asyncio.wait(pending, timeout=wait_seconds)
+        if window_expired or shutdown_intent.stop_reason != "shutdown":
+            break
+    return pending
 
 
 def _merge_response_extra_content(
@@ -615,6 +656,12 @@ def _generation_outcome(
     )
 
 
+def _raise_if_process_shutdown() -> None:
+    """Restore process cancellation when generation code consumed it."""
+    if current_task_is_process_shutdown():
+        raise asyncio.CancelledError
+
+
 @dataclass(frozen=True)
 class _TeamResponseRequest:
     """Typed carrier for one team response request plus team-specific inputs."""
@@ -667,8 +714,9 @@ class _PreparedResponseRuntime:
 class _InboxResponseOwnership:
     """Recovery callbacks retained with one detached inbox response."""
 
-    recovery_proof_ready: Callable[[], bool]
+    recovery_proof_ready: Callable[[], bool | Awaitable[bool]]
     on_failure: Callable[[], None] | None
+    shutdown_phase_trace: ResponseShutdownPhaseTrace
     source_event_ids: frozenset[str]
 
 
@@ -685,7 +733,21 @@ class ResponseRunner:
         init=False,
     )
     _inbox_response_tasks: dict[asyncio.Task[None], _InboxResponseOwnership] = field(default_factory=dict, init=False)
+    _process_shutdown_recovery_checks: dict[
+        asyncio.Task[None],
+        Callable[[], bool | Awaitable[bool]],
+    ] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _recovery_proof_tasks: dict[asyncio.Task[None], asyncio.Task[bool]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
+    _process_shutdown_started: bool = field(default=False, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _user_stop_receipt_orders: dict[str, set[int]] = field(default_factory=dict, init=False, repr=False)
     _approval_responses: ApprovalResponseCoordinator = field(init=False, repr=False)
@@ -719,17 +781,29 @@ class ResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
-        recovery_proof_ready: Callable[[], bool],
+        recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
         on_failure: Callable[[], None] | None = None,
+        on_terminal: Callable[[], None] | None = None,
         source_event_ids: tuple[str, ...] = (),
     ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
-        task = asyncio.create_task(response, name=name)
+        if self._process_shutdown_started:
+            response.close()
+            raise ResponseAdmissionRefusedError
+        shutdown_phase_trace = ResponseShutdownPhaseTrace()
+        task = asyncio.create_task(
+            response,
+            name=name,
+            context=context_with_response_shutdown_trace(shutdown_phase_trace),
+        )
         self._inbox_response_tasks[task] = _InboxResponseOwnership(
             recovery_proof_ready=recovery_proof_ready,
             on_failure=on_failure,
+            shutdown_phase_trace=shutdown_phase_trace,
             source_event_ids=frozenset(source_event_ids),
         )
+        if on_terminal is not None:
+            task.add_done_callback(lambda _finished: on_terminal())
         task.add_done_callback(self._finish_inbox_response_task)
         return task
 
@@ -740,12 +814,48 @@ class ResponseRunner:
     @property
     def pending_inbox_response_count(self) -> int:
         """Return an event-loop-local snapshot of runner-owned unsettled responses."""
-        return sum(not task.done() for task in self._inbox_response_tasks)
+        process_owned_responses = set(self._process_shutdown_recovery_checks)
+        generic_response_owners = {
+            task for task in self._inbox_response_tasks if not task.done() and task not in process_owned_responses
+        }
+        orphan_proof_owners = {
+            proof
+            for response, proof in self._recovery_proof_tasks.items()
+            if not proof.done() and response not in process_owned_responses
+        }
+        return len(process_owned_responses) + len(generic_response_owners) + len(orphan_proof_owners)
+
+    @property
+    def pending_response_phase_counts(self) -> dict[str, int]:
+        """Aggregate fixed phases for response and proof owners still retained."""
+        counts: dict[str, int] = {}
+        process_owned_responses = set(self._process_shutdown_recovery_checks)
+        for task, ownership in self._inbox_response_tasks.items():
+            if task.done():
+                continue
+            phase = ownership.shutdown_phase_trace.phase
+            counts[phase] = counts.get(phase, 0) + 1
+        terminal_process_owners = {task for task in process_owned_responses if task.done()}
+        proof_owners = {
+            proof
+            for response, proof in self._recovery_proof_tasks.items()
+            if not proof.done() and response not in process_owned_responses
+        }
+        recovery_owner_count = len(terminal_process_owners) + len(proof_owners)
+        if recovery_owner_count:
+            phase = ResponseShutdownPhase.RECOVERY_PROOF.value
+            counts[phase] = counts.get(phase, 0) + recovery_owner_count
+        return dict(sorted(counts.items()))
 
     @property
     def incomplete_inbox_responses_recoverable(self) -> bool:
         """Return whether every timed-out response has finished cleanup with recovery proof."""
         return self._incomplete_inbox_responses_recoverable
+
+    @property
+    def process_shutdown_started(self) -> bool:
+        """Return whether orderly process shutdown has closed response admission."""
+        return self._process_shutdown_started
 
     def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
         ownership = self._inbox_response_tasks.pop(task, None)
@@ -768,25 +878,195 @@ class ResponseRunner:
                 error=str(error),
             )
 
+    def begin_process_shutdown(self) -> None:
+        """Signal owned responses before other orderly-shutdown drains spend the budget."""
+        self._process_shutdown_started = True
+        for task, ownership in tuple(self._inbox_response_tasks.items()):
+            if task.done():
+                continue
+            self._process_shutdown_recovery_checks.setdefault(task, ownership.recovery_proof_ready)
+            task.add_done_callback(self._start_terminal_process_recovery_proof)
+            request_task_cancel(task, process_shutdown=True)
+
+    async def _evaluate_recovery_proof(
+        self,
+        recovery_check: Callable[[], bool | Awaitable[bool]],
+        *,
+        retry_until_ready: bool,
+    ) -> bool:
+        """Evaluate one exact durable handoff, following a pending commit."""
+        while True:
+            ready = recovery_check()
+            if inspect.isawaitable(ready):
+                ready = await ready
+            if ready or not retry_until_ready:
+                return bool(ready)
+            await asyncio.sleep(_PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS)
+
+    def _ensure_recovery_proof_task(
+        self,
+        response_task: asyncio.Task[None],
+        recovery_check: Callable[[], bool | Awaitable[bool]],
+        *,
+        retry_until_ready: bool,
+    ) -> asyncio.Task[bool]:
+        """Return the single proof owner for one terminal response."""
+        proof_task = self._recovery_proof_tasks.get(response_task)
+        if proof_task is None or proof_task.cancelled():
+            proof_task = asyncio.create_task(
+                self._evaluate_recovery_proof(
+                    recovery_check,
+                    retry_until_ready=retry_until_ready,
+                ),
+                name=f"response_recovery_proof:{response_task.get_name()}",
+            )
+            self._recovery_proof_tasks[response_task] = proof_task
+            proof_task.add_done_callback(
+                lambda finished, response=response_task: self._finish_recovery_proof_task(
+                    response,
+                    finished,
+                ),
+            )
+        return proof_task
+
+    def _start_terminal_process_recovery_proof(
+        self,
+        response_task: asyncio.Task[None],
+    ) -> None:
+        """Use the remaining cleanup window once one response is terminal."""
+        recovery_check = self._process_shutdown_recovery_checks.get(response_task)
+        if recovery_check is None:
+            return
+        if not response_task.cancelled() and response_task.exception() is None:
+            return
+        self._ensure_recovery_proof_task(
+            response_task,
+            recovery_check,
+            retry_until_ready=True,
+        )
+
+    async def _recovery_proofs_are_ready(
+        self,
+        tasks: set[asyncio.Task[None]],
+        recovery_checks: dict[asyncio.Task[None], Callable[[], bool | Awaitable[bool]]],
+        *,
+        deadline: float | None = None,
+        retry_until_ready: bool = False,
+    ) -> bool:
+        """Prove terminal tasks transferred ownership within the drain deadline."""
+        if any(not task.done() for task in tasks):
+            return False
+        proof_targets = {task for task in tasks if task.cancelled() or task.exception() is not None}
+        if not proof_targets:
+            return True
+
+        while True:
+            proof_tasks = {
+                self._ensure_recovery_proof_task(
+                    response_task,
+                    recovery_checks[response_task],
+                    retry_until_ready=retry_until_ready,
+                )
+                for response_task in proof_targets
+            }
+            try:
+                remaining_seconds = None if deadline is None else max(0.0, deadline - asyncio.get_running_loop().time())
+                _done, pending = await asyncio.wait(proof_tasks, timeout=remaining_seconds)
+                if pending:
+                    msg = "response recovery proof exceeded bounded cleanup"
+                    raise ResponseShutdownTimeoutError(msg)
+                # The preceding bounded phase may have cancelled a proof while
+                # its journal read was already committed to an offload worker.
+                # Reusing that still-running task is required for ownership,
+                # but its eventual CancelledError is not a new proof result.
+                # Only after it is terminal may this phase launch a replacement.
+                if any(task.cancelled() for task in proof_tasks):
+                    continue
+                return all(task.result() for task in proof_tasks)
+            finally:
+                pending = {task for task in proof_tasks if not task.done()}
+                for task in pending:
+                    task.cancel()
+
+    def _finish_recovery_proof_task(
+        self,
+        response_task: asyncio.Task[None],
+        proof_task: asyncio.Task[bool],
+    ) -> None:
+        """Retain a proof result for cleanup retry, or forget a cancelled read."""
+        if proof_task.cancelled():
+            if self._recovery_proof_tasks.get(response_task) is proof_task:
+                self._recovery_proof_tasks.pop(response_task, None)
+            return
+        proof_task.exception()
+
+    def _forget_process_shutdown_recovery(
+        self,
+        tasks: set[asyncio.Task[None]],
+    ) -> None:
+        """Release terminal response proof state after its result is consumed."""
+        for task in tasks:
+            self._process_shutdown_recovery_checks.pop(task, None)
+            self._recovery_proof_tasks.pop(task, None)
+
+    async def _bounded_recovery_proofs_are_ready(
+        self,
+        tasks: set[asyncio.Task[None]],
+        recovery_checks: dict[asyncio.Task[None], Callable[[], bool | Awaitable[bool]]],
+        *,
+        deadline: float,
+        process_shutdown_tasks: set[asyncio.Task[None]],
+    ) -> bool:
+        """Run process-shutdown proofs without losing a timed-out obligation."""
+        return await self._recovery_proofs_are_ready(
+            tasks,
+            recovery_checks,
+            deadline=deadline,
+            retry_until_ready=bool(process_shutdown_tasks),
+        )
+
+    async def finish_process_shutdown_recovery(
+        self,
+        *,
+        timeout_seconds: float,
+    ) -> bool:
+        """Finish retained response ownership inside an explicit final budget."""
+        return await self.drain_inbox_responses(
+            cancel_after_seconds=max(0.0, timeout_seconds) / 2,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+
     async def drain_inbox_responses(
         self,
         *,
         cancel_after_seconds: float | None = None,
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> bool:
-        """Settle detached inbox responses: graceful drains await, bounded drains cancel.
+        """Settle detached inbox responses: graceful drains await, bounded grace cancels.
 
-        Returns False when a bounded drain had to cancel or abandon running work.
-        A bounded drain may take up to two cancel_after_seconds windows: one
-        waiting for completion and one letting cancelled tasks run cleanup.
+        Generic bounded cancellation returns False because the interrupted work
+        has no durable restart contract. Orderly process cancellation returns
+        True only when every task is terminal and its recovery callback proves
+        journal or outbox ownership. The grace period uses two
+        ``cancel_after_seconds`` windows: one waiting for completion and one
+        letting cancelled tasks run cleanup. Orderly process shutdown repeats
+        its cancellation signal inside the same second window so finite
+        cancellation-resistant cleanup cannot strand ownership. A task that
+        remains live after that cleanup window fails the shutdown boundary;
+        callers must not release resources it can still use.
         """
-        tasks = [task for task in self._inbox_response_tasks if not task.done()]
+        tasks = list(
+            {
+                *(task for task in self._inbox_response_tasks if not task.done()),
+                *self._process_shutdown_recovery_checks,
+            },
+        )
         # Done callbacks pop tasks, so snapshot proofs before an await can run them.
         recovery_checks = {
             task: (
-                self._inbox_response_tasks[task].recovery_proof_ready
-                if task in self._inbox_response_tasks
-                else lambda: True
+                self._process_shutdown_recovery_checks[task]
+                if task in self._process_shutdown_recovery_checks
+                else self._inbox_response_tasks[task].recovery_proof_ready
             )
             for task in tasks
         }
@@ -794,16 +1074,52 @@ class ResponseRunner:
             return True
         if cancel_after_seconds is None:
             await asyncio.gather(*tasks, return_exceptions=True)
-            return True
+            process_shutdown_tasks = set(self._process_shutdown_recovery_checks).intersection(tasks)
+            if not process_shutdown_tasks:
+                return True
+            recoverable = await self._recovery_proofs_are_ready(
+                process_shutdown_tasks,
+                recovery_checks,
+                retry_until_ready=True,
+            )
+            self._incomplete_inbox_responses_recoverable &= recoverable
+            self._forget_process_shutdown_recovery(process_shutdown_tasks)
+            return recoverable
+        loop = asyncio.get_running_loop()
+        cancel_after_seconds = max(0.0, cancel_after_seconds)
+        proof_deadline = loop.time() + 2 * cancel_after_seconds
+        process_shutdown_tasks = set(self._process_shutdown_recovery_checks).intersection(tasks)
         _done, pending = await asyncio.wait(tasks, timeout=cancel_after_seconds)
         if not pending:
-            return True
-        for task in pending:
-            request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
-        await asyncio.wait(pending, timeout=cancel_after_seconds)
-        cancelled_responses_recoverable = all(task.done() and recovery_checks[task]() for task in pending)
+            if not process_shutdown_tasks:
+                return True
+            recoverable = await self._bounded_recovery_proofs_are_ready(
+                process_shutdown_tasks,
+                recovery_checks,
+                deadline=proof_deadline,
+                process_shutdown_tasks=process_shutdown_tasks,
+            )
+            self._incomplete_inbox_responses_recoverable &= recoverable
+            self._forget_process_shutdown_recovery(process_shutdown_tasks)
+            return recoverable
+        cancelled_tasks = process_shutdown_tasks.union(pending)
+        pending = await _cancel_pending_responses(
+            pending,
+            timeout_seconds=max(0.0, proof_deadline - loop.time()),
+            shutdown_intent=shutdown_intent,
+        )
+        cancelled_responses_recoverable = await self._bounded_recovery_proofs_are_ready(
+            cancelled_tasks,
+            recovery_checks,
+            deadline=proof_deadline,
+            process_shutdown_tasks=process_shutdown_tasks,
+        )
         self._incomplete_inbox_responses_recoverable &= cancelled_responses_recoverable
-        return False
+        if pending:
+            msg = f"{len(pending)} response tasks did not stop within bounded cleanup"
+            raise ResponseShutdownTimeoutError(msg)
+        self._forget_process_shutdown_recovery(process_shutdown_tasks)
+        return cancelled_responses_recoverable if process_shutdown_tasks else False
 
     async def wait_for_source_owned_inbox_responses(self) -> None:
         """Wait for detached responses that still own durable journal sources."""
@@ -864,6 +1180,7 @@ class ResponseRunner:
 
     def resume_pending_admissions(self) -> None:
         """Let a fresh sync-loop generation wait for config apply completion."""
+        self._process_shutdown_started = False
         self._admission_shutdown_requested.clear()
 
     def refuse_pending_admissions(self) -> None:
@@ -1747,6 +2064,8 @@ class ResponseRunner:
         response_event_id: str | None,
     ) -> None:
         """Persist one failed or interrupted turn that never completed."""
+        if current_task_is_process_shutdown():
+            return
         if recorder.outcome in {"completed", "suspended"} or recorder.original_status is RunStatus.cancelled:
             return
         if recorder.outcome == "pending":
@@ -1810,18 +2129,19 @@ class ResponseRunner:
         extra_content: dict[str, Any] | None,
     ) -> FinalDeliveryOutcome:
         """Finalize one streamed delivery and mark the terminal delivery timing."""
-        delivery = await self.deps.delivery_gateway.finalize_streamed_response(
-            FinalizeStreamedResponseRequest(
-                target=delivery_target,
-                stream_transport_outcome=transport_outcome,
-                initial_delivery_kind=delivery_kind,
-                identity=response_identity,
-                tool_trace=tool_trace,
-                extra_content=extra_content,
-                existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
-            ),
-        )
+        with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
+            delivery = await self.deps.delivery_gateway.finalize_streamed_response(
+                FinalizeStreamedResponseRequest(
+                    target=delivery_target,
+                    stream_transport_outcome=transport_outcome,
+                    initial_delivery_kind=delivery_kind,
+                    identity=response_identity,
+                    tool_trace=tool_trace,
+                    extra_content=extra_content,
+                    existing_event_id=request.existing_event_id,
+                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                ),
+            )
         self._note_final_delivery_timing(request, delivery)
         return delivery
 
@@ -2139,6 +2459,8 @@ class ResponseRunner:
                     ),
                 )
             except asyncio.CancelledError as error:
+                if current_task_is_process_shutdown():
+                    raise
                 if early_placeholder.placeholder_event_id is not None and not early_placeholder.settlement_started:
                     await self._finalize_early_placeholder_cancellation(
                         early_placeholder,
@@ -3032,6 +3354,8 @@ class ResponseRunner:
                 post_response_deps=post_response_deps,
             )
         except asyncio.CancelledError as exc:
+            if current_task_is_process_shutdown():
+                raise
             failure_reason = cancel_failure_reason(classify_cancel_source(exc))
             cancelled_outcome = self.deps.delivery_gateway.cancelled_terminal_outcome(
                 final_delivery_outcome,
@@ -3103,6 +3427,8 @@ class ResponseRunner:
                     failure_reason=progress.failure_reason,
                 )
         except asyncio.CancelledError as error:
+            if current_task_is_process_shutdown():
+                raise
             progress.note_task_cancelled(cancel_failure_reason(classify_cancel_source(error)))
             await self._settle_missing_delivery_outcome(
                 target=target,
@@ -3114,6 +3440,13 @@ class ResponseRunner:
             )
             deferred_error = error
         except Exception as error:
+            if current_task_is_process_shutdown():
+                if isinstance(error, StreamingDeliveryError) and isinstance(
+                    error.error,
+                    asyncio.CancelledError,
+                ):
+                    raise error.error from error
+                raise
             if isinstance(error, StreamingDeliveryError) and streaming_delivery_error_handler is not None:
                 progress.settle(await streaming_delivery_error_handler(error))
             elif progress.stage_started or progress.delivery_outcome is not None:
@@ -3197,6 +3530,7 @@ class ResponseRunner:
             ResponseLifecycleDeps(
                 response_hooks=self.deps.delivery_gateway.deps.response_hooks,
                 logger=self.deps.logger,
+                process_shutdown_requested=current_task_is_process_shutdown,
             ),
             identity=identity,
             pipeline_timing=request.pipeline_timing,
@@ -3502,6 +3836,8 @@ class ResponseRunner:
         )
 
         async def persist_failed_team_turn() -> None:
+            if current_task_is_process_shutdown():
+                return
             await self._persist_failed_turn(
                 team_turn_recorder,
                 is_team=True,
@@ -3518,7 +3854,7 @@ class ResponseRunner:
             create_storage=team_storage_factory,
         )
 
-        async def generate_team_response(message_id: str | None) -> None:  # noqa: C901, PLR0915
+        async def generate_team_response(message_id: str | None) -> None:  # noqa: C901, PLR0912, PLR0915
             delivery_request = self._request_for_delivery(delivery_request_base, message_id=message_id)
             if message_id is not None:
                 progress.track_event(message_id)
@@ -3609,6 +3945,8 @@ class ResponseRunner:
                         event_id = transport_outcome.last_physical_stream_event_id
                         progress.track_event(event_id)
                     except asyncio.CancelledError:
+                        if current_task_is_process_shutdown():
+                            raise
                         await self._persist_interrupted_recorder_off_loop(
                             recorder=team_turn_recorder,
                             session_scope=session_scope,
@@ -3621,6 +3959,7 @@ class ResponseRunner:
                         raise
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
+                _raise_if_process_shutdown()
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
                 await persist_failed_team_turn()
@@ -3682,6 +4021,8 @@ class ResponseRunner:
                                     operation=build_response_text,
                                 )
                             except asyncio.CancelledError:
+                                if current_task_is_process_shutdown():
+                                    raise
                                 await self._persist_interrupted_recorder_off_loop(
                                     recorder=team_turn_recorder,
                                     session_scope=session_scope,
@@ -3695,7 +4036,10 @@ class ResponseRunner:
                     finally:
                         await lifecycle.emit_session_started(session_started_watch)
                         await persist_failed_team_turn()
+                    _raise_if_process_shutdown()
                 except asyncio.CancelledError as exc:
+                    if current_task_is_process_shutdown():
+                        raise
                     progress.settle(
                         await self._settle_blocking_cancellation(
                             exc,
@@ -3729,6 +4073,8 @@ class ResponseRunner:
                     )
                     progress.settle(delivery)
                 except asyncio.CancelledError:
+                    if current_task_is_process_shutdown():
+                        raise
                     await self._persist_interrupted_recorder_off_loop(
                         recorder=team_turn_recorder,
                         session_scope=session_scope,
@@ -3994,6 +4340,8 @@ class ResponseRunner:
                     run_metadata_content=run_metadata_content,
                 )
         except asyncio.CancelledError:
+            if current_task_is_process_shutdown():
+                raise
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
@@ -4119,6 +4467,8 @@ class ResponseRunner:
                     )
                 return transport_outcome
         except asyncio.CancelledError:
+            if current_task_is_process_shutdown():
+                raise
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=self.deps.state_writer.history_scope(),
@@ -4195,19 +4545,23 @@ class ResponseRunner:
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
-                await lifecycle.emit_session_started(session_started_watch)
-                await self._persist_failed_turn(
-                    turn_recorder,
-                    is_team=False,
-                    session_scope=session_scope,
-                    session_id=runtime.session_id,
-                    execution_identity=runtime.tool_dispatch.execution_identity,
-                    run_id=run_id,
-                    response_event_id=request.existing_event_id,
-                )
+                if not current_task_is_process_shutdown():
+                    await lifecycle.emit_session_started(session_started_watch)
+                    await self._persist_failed_turn(
+                        turn_recorder,
+                        is_team=False,
+                        session_scope=session_scope,
+                        session_id=runtime.session_id,
+                        execution_identity=runtime.tool_dispatch.execution_identity,
+                        run_id=run_id,
+                        response_event_id=request.existing_event_id,
+                    )
+            _raise_if_process_shutdown()
         except ResponsePausedForApproval:
             raise
         except asyncio.CancelledError as exc:
+            if current_task_is_process_shutdown():
+                raise
             return build_outcome(
                 await self._settle_blocking_cancellation(
                     exc,
@@ -4243,6 +4597,8 @@ class ResponseRunner:
                 ),
             )
         except asyncio.CancelledError:
+            if current_task_is_process_shutdown():
+                raise
             await self._persist_interrupted_recorder_off_loop(
                 recorder=turn_recorder,
                 session_scope=session_scope,
@@ -4256,7 +4612,7 @@ class ResponseRunner:
         self._note_final_delivery_timing(request, delivery)
         return build_outcome(delivery)
 
-    async def _process_and_respond_streaming(  # noqa: C901
+    async def _process_and_respond_streaming(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -4318,22 +4674,29 @@ class ResponseRunner:
 
         try:
             try:
-                transport_outcome = await self.generate_streaming_ai_response(
-                    request,
-                    identity=response_identity,
-                    run_id=run_id,
-                    runtime=runtime,
-                    active_event_ids=active_event_ids,
-                    turn_recorder=turn_recorder,
-                    tool_trace=tool_trace,
-                    run_metadata_content=run_metadata_content,
-                    attempt_run_id_collector=attempt_run_ids,
-                    pipeline_timing=request.pipeline_timing,
-                    visible_event_id_callback=on_delivery_started,
-                )
+                with response_shutdown_phase(ResponseShutdownPhase.STREAMING_RESPONSE):
+                    transport_outcome = await self.generate_streaming_ai_response(
+                        request,
+                        identity=response_identity,
+                        run_id=run_id,
+                        runtime=runtime,
+                        active_event_ids=active_event_ids,
+                        turn_recorder=turn_recorder,
+                        tool_trace=tool_trace,
+                        run_metadata_content=run_metadata_content,
+                        attempt_run_id_collector=attempt_run_ids,
+                        pipeline_timing=request.pipeline_timing,
+                        visible_event_id_callback=on_delivery_started,
+                    )
             finally:
                 await lifecycle.emit_session_started(session_started_watch)
+            _raise_if_process_shutdown()
         except StreamingDeliveryError as error:
+            if current_task_is_process_shutdown() and isinstance(
+                error.error,
+                asyncio.CancelledError,
+            ):
+                raise error.error from error
             stream_transport_outcome = error.transport_outcome
             if stream_transport_outcome.terminal_status == "cancelled":
                 log_cancelled_response_source(
@@ -4393,6 +4756,8 @@ class ResponseRunner:
             )
             raise
         except Exception as error:
+            if current_task_is_process_shutdown():
+                raise
             self.deps.logger.exception("Error in streaming response", error=str(error))
             return build_outcome(
                 await self.deps.delivery_gateway.finalize_streamed_response(

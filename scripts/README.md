@@ -48,8 +48,7 @@ uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 
 uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45 --restart-interval 5
 uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
 uv run python scripts/testing/fuzz_live_matrix.py --profile short-stream-correctness
-uv run python scripts/testing/fuzz_live_matrix.py --profile recovery-cliff --reply-timeout 180
-uv run python scripts/testing/fuzz_live_matrix.py --profile recovery-cliff --threads 200 --reply-timeout 180
+uv run python scripts/testing/fuzz_live_matrix.py --profile sustained-stream-capacity --threads 200 --reply-timeout 180
 ```
 
 `--restart-interval` is the only knob that decides how much recovery a fuzz run exercises, so the command above passes it explicitly.
@@ -82,10 +81,9 @@ Its responder emits exactly 4,800 characters in 40-character chunks at 80 charac
 uv run python scripts/testing/fuzz_live_matrix.py --profile sustained-stream-capacity --threads 200 --reply-timeout 180
 ```
 
-This profile measures sustained overlapping streams without pausing MindRoom or injecting a recovery-cliff context gap.
-It does not send SIGSTOP or inject a recovery-cliff context gap, and it does not require a recovery marker.
+This profile measures sustained overlapping streams and does not pause or restart MindRoom.
+It does not send SIGSTOP, does not require legacy recovery markers, and does not require a recovery marker.
 Unlike `short-stream-correctness`, it is a capacity workload with N long-lived overlapping streams rather than a short correctness scenario.
-Unlike `recovery-cliff`, it does not fault-inject a context gap or require recovery-cliff-only delivery-retry, detached-worker, or unacknowledged-FINAL evidence.
 
 PASS requires exactly N configured root source events with unique run/thread markers, the expected sender, and an explicit mention of the configured responder.
 PASS requires exactly one completed canonical terminal reply for every configured root, with unique source and response identities and no missing, duplicate, orphan, malformed, nonterminal, or later-terminal replacement evidence.
@@ -94,13 +92,7 @@ PASS requires healthy sync samples throughout the run and at least one health sa
 PASS requires zero pending journal rows and unacknowledged outbox rows when the durable probe is available, with no recovery-abandonment, watchdog-stall, or durable-drain-failure markers.
 PASS requires the post-load reaction to settle, sync time to advance after the reaction fence, and shutdown to complete cleanly within the same non-extending deadline.
 
-The `recovery-cliff` profile configures a managed `load_sender`, a managed synthetic `general` responder, and Sliding Sync with a timeline limit of 100 for a workload that defaults to 100 roots and can be raised with `--threads`.
-With the current timeline and nio recovery limits, 1,499 roots is the largest valid recoverable trace and 1,500 is refused before the held workload rather than misreported as a runtime capacity failure.
-It pauses the managed runtime at a confirmed process-group boundary, sends a derived 601-event context gap, releases every configured managed root concurrently, and resumes the runtime even if a send fails.
-Its single observer cursor enumerates every positioned sync interval forward through `/messages` before publication, so a limited or compacted `/sync` timeline cannot omit reply or edit evidence.
-One fixed whole-workload `--reply-timeout` covers the fault boundary, root sends, terminal replies, durable debt observation, final drain, and post-load fence without extension.
-PASS requires exact completed replies, sustained overlap of every configured stream, an attempted unacknowledged workload FINAL row, the detached delivery worker marker, the generic delivery-retry marker, complete durable drain, healthy advancing sync, zero watchdog stalls, no recovery abandonment, and clean shutdown.
-Short-stream-correctness results are not recovery-cliff acceptance evidence.
+Short-stream-correctness results are not capacity acceptance evidence.
 
 #### The live gate is manual, and that is a decision rather than an omission
 
@@ -131,7 +123,7 @@ Every event in one Matrix room is handled by a single sequential lane, so a batc
 Holding that to the same flat deadline as a single turn made the fuzz profile fail on a busy machine for reasons that had nothing to do with the code under test, so the harness now derives its deadlines from the work and from measured latency.
 
 - For fuzz, restart-regression, and short-stream-correctness, `--reply-timeout` is the deadline for a *single* agent turn and the floor under every larger adaptive deadline.
-- For recovery-cliff, `--reply-timeout` is one fixed non-extending deadline for the complete held-load, reply, drain, and fence workflow.
+- For sustained-stream-capacity, `--reply-timeout` is one fixed non-extending deadline for the complete root-release, reply, drain, and fence workflow.
 - A wait for N outstanding replies gets `N x measured-turn-latency x 3`, floored at `--reply-timeout`.
   The turn latency is measured from the warm-up exchange and from every completed wait after it, keeping the slowest observation, so nothing new is hardcoded.
 - Silence, not the deadline, is what identifies a wedge.

@@ -27,6 +27,7 @@ def _mock_running_bot(entity_name: str, agent_user: object, config: Config) -> M
     bot.sync_forever = AsyncMock()
     bot.try_start = AsyncMock(return_value=True)
     bot.prepare_for_sync_shutdown = AsyncMock()
+    bot._quiesce_matrix_ingestion = AsyncMock()
     bot._set_presence_with_model_info = AsyncMock()
     bot.mark_sync_loop_started = MagicMock()
     bot.reset_watchdog_clock = MagicMock()

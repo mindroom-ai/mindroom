@@ -7,16 +7,20 @@ import hmac
 import os
 from typing import TYPE_CHECKING, Self
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import httpx
 import nio
 import pytest
 import yaml
+from nio.ingest.config import ClassicSourceConfig, IngestionConfig
 
 from mindroom import constants as constants_mod
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.matrix import provisioning
+from mindroom.matrix import _owned_session, provisioning
+from mindroom.matrix import users as matrix_users
+from mindroom.matrix.appservice import ManagedAccountAuth
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.client_session import DEFAULT_MATRIX_SYNC_STORAGE, olm_store_dir
 from mindroom.matrix.state import MatrixState
@@ -1578,3 +1582,96 @@ class TestAgentLogin:
 
             with pytest.raises(ValueError, match="Failed to login"):
                 await login_agent_user("http://localhost:8008", agent_user, runtime_paths)
+
+    @pytest.mark.asyncio
+    async def test_login_agent_owned_session_gets_credentials_before_factory(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Password HTTP closes before the sole owned-client factory begins."""
+        agent_user = AgentMatrixUser(
+            agent_name="calculator",
+            user_id="@mindroom_calculator:localhost",
+            display_name="CalculatorAgent",
+            password=TEST_PASSWORD,
+        )
+        runtime_paths = _runtime_paths(tmp_path)
+        generation = UUID("22222222-2222-4222-8222-222222222222")
+        config = IngestionConfig(
+            ClassicSourceConfig(
+                timeout_ms=30_000,
+                filter_json=b'{"room":{"timeline":{"limit":50}}}',
+            ),
+        )
+        credentials = _owned_session.MatrixCredentials(
+            agent_user.user_id,
+            "AGENTDEVICE",
+            "access-token",
+        )
+        owned_client = MagicMock(
+            user_id=credentials.user_id,
+            device_id=credentials.device_id,
+            access_token=credentials.access_token,
+        )
+        opened = MagicMock(client=owned_client, session=AsyncMock())
+        consumer_store = object()
+        completion_sink = AsyncMock()
+        order: list[str] = []
+
+        async def password_credentials(*_args: object, **_kwargs: object) -> object:
+            order.append("credentials_closed")
+            return credentials
+
+        async def open_owned(*_args: object, **_kwargs: object) -> object:
+            assert order == ["credentials_closed"]
+            order.append("owned_opened")
+            return opened
+
+        with (
+            patch(
+                "mindroom.matrix.users.appservice.resolve_managed_account_auth",
+                return_value=ManagedAccountAuth(mode="password"),
+            ),
+            patch(
+                "mindroom.matrix.users.login_password_credentials",
+                side_effect=password_credentials,
+            ) as get_credentials,
+            patch(
+                "mindroom.matrix.users.open_owned_matrix_session",
+                side_effect=open_owned,
+            ) as open_session,
+            patch("mindroom.matrix.users._persist_authenticated_agent_session") as persist,
+            patch(
+                "mindroom.matrix.users.ensure_agent_cross_signing",
+                new=AsyncMock(),
+            ) as cross_signing,
+        ):
+            result = await matrix_users.login_agent_owned_session(
+                "http://localhost:8008",
+                agent_user,
+                runtime_paths,
+                consumer_store=consumer_store,
+                new_consumer_generation=generation,
+                config=config,
+                completion_sink=completion_sink,
+            )
+
+        assert result is opened
+        assert order == ["credentials_closed", "owned_opened"]
+        get_credentials.assert_awaited_once_with(
+            "http://localhost:8008",
+            agent_user.user_id,
+            TEST_PASSWORD,
+            runtime_paths,
+        )
+        open_session.assert_awaited_once_with(
+            "http://localhost:8008",
+            credentials,
+            runtime_paths,
+            consumer_store=consumer_store,
+            new_consumer_generation=generation,
+            config=config,
+            completion_sink=completion_sink,
+        )
+        persist.assert_called_once()
+        cross_signing.assert_awaited_once_with(owned_client, agent_user)

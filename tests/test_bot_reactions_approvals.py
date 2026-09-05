@@ -37,6 +37,7 @@ from mindroom.event_journal import (
     AdmissionResult,
     ApprovalContinuation,
     DeliveryStage,
+    DepartureSource,
     EventClass,
     EventKind,
     InboundEvent,
@@ -806,7 +807,10 @@ class TestAgentBot(AgentBotTestBase):
             await _dispatch_reaction(bot, room, event)
             await bot._response_runner.drain_inbox_responses()
 
-        await bot._membership_fence.fence_local_departure(room.room_id)
+        await bot.journal_principal().fence_departure(
+            room.room_id,
+            source=DepartureSource.LOCAL,
+        )
 
         assert event.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
         rows = await bot._journal_store.backend.read(

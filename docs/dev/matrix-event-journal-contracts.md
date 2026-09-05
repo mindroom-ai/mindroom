@@ -101,10 +101,11 @@ The point refetch, and nothing else.
 
 ### 8. Membership epochs fence every derived and pending fact
 
-`MembershipFence` (`event_journal/membership.py`) advances the epoch on a local leave and on a sync-reported departure.
+`admit_ingestion_batch()` (`event_journal/journal.py`) applies owned Nio lifecycle records and advances the epoch on a local leave or reported departure.
 
-Exactly-once is the substance of this contract, and it is durable rather than in-process: `fence_departure(room_id, source=LOCAL|REPORTED)` returns a `DepartureOutcome`, and `rooms_owing_departure_reports` / `retire_owed_departure_reports` carry the owed-report set across a restart.
-An in-process marker was not enough — an advance that raised left the marker set and swallowed the echo, a restart lost it, and two leaves before one echo needed two markers.
+The lifecycle effect and ingestion receipt commit atomically, so replaying an unacknowledged batch cannot advance the epoch twice.
+Nio supplies the prior and current membership epochs, while the journal rejects inconsistent transitions and absorbs already-accounted local departure echoes.
+Post-commit call and invited-room cleanup checks the current journal epoch before acting and retries unfinished effects when the receipt is replayed.
 
 An epoch advance drops conversation projections, reconciles approval cards and continuations across their distinct principals, removes delivery rows proven unattempted, and retires fully acknowledged approval deliveries after tombstoning their card event IDs.
 **Attempted but unacknowledged** rows survive deliberately: their outcome is unknown, so keeping the frozen payload and its transaction ID means a retry collapses onto the same event instead of posting a second answer.

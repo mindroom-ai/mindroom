@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+import mindroom.matrix.rooms as matrix_rooms
 import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
@@ -28,6 +29,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
+from mindroom.matrix import client_room_admin
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
@@ -112,7 +114,18 @@ def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> C
 
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
+
+    async def change_membership(room_id: str, target_membership: str) -> bool:
+        if target_membership == "join":
+            return await client_room_admin.join_room(mock_client, room_id) is RoomJoinOutcome.JOINED
+        assert target_membership == "leave"
+        return await matrix_rooms.leave_room(mock_client, room_id)
+
     bot.client = mock_client
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        change_membership=change_membership,
+    )
 
 
 def test_startup_phase_logging_helpers_emit_structured_timing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2564,7 +2577,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
         left_rooms[user_id].append(room_id)
         return True
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
@@ -2647,7 +2660,7 @@ async def test_router_updates_rooms_on_config_reload(
         left_rooms.append(room_id)
         return True
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
@@ -2727,7 +2740,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
         joined_rooms[user_id].append(room_id)
         return RoomJoinOutcome.JOINED
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
     async def mock_restore_scheduled_tasks(
@@ -2800,7 +2813,7 @@ async def test_team_room_changes_on_config_reload(
         left_rooms[user_id].append(room_id)
         return True
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
@@ -3007,7 +3020,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
         update_room_membership(client.user_id, room_id, "leave")
         return True
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks

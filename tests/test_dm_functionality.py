@@ -293,7 +293,7 @@ class TestDMIntegration:
         with (
             patch("mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room", return_value=True),
             patch(
-                "mindroom.bot_room_lifecycle.join_room",
+                "mindroom.matrix.client_room_admin.join_room",
                 return_value=RoomJoinOutcome.JOINED,
             ) as mock_join,
         ):

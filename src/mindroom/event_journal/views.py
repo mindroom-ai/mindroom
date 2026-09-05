@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from .background_approvals import BackgroundApprovalDecision
     from .interactive_questions import InteractiveSelection
     from .models import (
+        AdmissionFacts,
         AdmissionResult,
         ConversationCursor,
         ConversationPage,
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
         EventKind,
         HydrationCoverage,
         InboundEvent,
+        IngestionBatchAdmission,
         JournalEvent,
         MatrixDelivery,
         PendingPage,
@@ -63,6 +65,14 @@ class AdmissionView(Protocol):
         projected: ProjectedEvent | None = None,
     ) -> AdmissionResult:
         """Admit one event and update the projection in a single transaction."""
+        ...
+
+
+class IngestionBatchAdmissionView(Protocol):
+    """Admitting one authenticated nio batch, and nothing else."""
+
+    async def admit_ingestion_batch(self, admission: IngestionBatchAdmission) -> AdmissionFacts:  # fmt: skip
+        """Persist one record disposition, receipt, and frontier atomically."""
         ...
 
 
@@ -487,6 +497,7 @@ __all__ = [
     "DispatchView",
     "HistoryRecoveryRecordView",
     "HydrationView",
+    "IngestionBatchAdmissionView",
     "MatrixDeliveryView",
     "PendingTurnView",
     "RelationView",

@@ -58,7 +58,9 @@ Matrix callback
 
 ## Durable Dispatch Boundary
 
-Nio pre-fanout admission callbacks persist each correctness-critical Matrix timeline callback before any ordinary event callback can run.
+Nio's owned ingestion session persists prepared source work, and MindRoom's one-record pump validates and commits each receipt and semantic effect before acknowledging the batch.
+The pump wakes journal dispatch only after settlement; a crash between journal commit and Nio acknowledgement replays the receipt without duplicating semantic work.
+Room-backed authorization uses authenticated batch provenance: uncertainty revokes grants before admission, and live membership changes update grants after admission.
 Every principal shares one durable store at `tracking/event_journal.db`, or one PostgreSQL database, and each bot reads only its own principal-bound view of it.
 Writes are serialized per store rather than per entity, so one principal's admission waits behind another's write transaction; the reader pool is separate, so reads do not.
 A row is keyed `(principal_id, event_id)`, so one Matrix event is one row no matter how many features could have claimed it, and the callback kind is a column on that row rather than part of its identity.

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -29,11 +29,6 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal import EventClass, EventKind
-from mindroom.event_journal.models import (
-    DepartureObservation,
-    DepartureOutcome,
-    DepartureSource,
-)
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
@@ -245,6 +240,14 @@ async def _run_orchestrator_start_until_ready(
 def _make_matrix_client_mock() -> AsyncMock:
     """Return one Matrix client mock with safe thread-history defaults."""
     return make_matrix_client_mock()
+
+
+def owned_matrix_login(client: object, session: object | None = None) -> SimpleNamespace:
+    """Wrap a test client in Bot's private owned-login carrier shape."""
+    return SimpleNamespace(
+        client=client,
+        session=AsyncMock() if session is None else session,
+    )
 
 
 def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
@@ -974,68 +977,3 @@ class AgentBotTestBase:
             ),
             runtime_root,
         )
-
-
-@dataclass
-class FencedRoomRecorder:
-    """A `MembershipView` that records which rooms a fence invalidated.
-
-    The three bot-level tests that use this care about *which* rooms the fence
-    touched and in what order relative to their neighbours, not about the
-    durable departure bookkeeping underneath. Reporting every observation as
-    `FENCED` with no report owed keeps `MembershipFence` on its simplest path,
-    so a test that spies on room identity never has to model debt it is not
-    asserting on. `test_journal_membership_fence.py` owns the real thing.
-    """
-
-    fenced_room_ids: list[str] = field(default_factory=list)
-
-    async def fence_departure(
-        self,
-        room_id: str,
-        *,
-        source: DepartureSource,
-        report_observation_id: str | None = None,
-    ) -> DepartureOutcome:
-        """Record one invalidation and hand back the room's new epoch."""
-        del report_observation_id
-        self.fenced_room_ids.append(room_id)
-        epoch = len(self.fenced_room_ids)
-        return DepartureOutcome(
-            DepartureObservation.FENCED,
-            epoch,
-            0,
-            reported_run_epoch=(epoch if source is DepartureSource.REPORTED else None),
-        )
-
-    async def note_membership_restarted(
-        self,
-        room_id: str,
-        *,
-        expected_membership_epoch: int | None = None,
-    ) -> None:
-        """Accept a confirmed join without recording it."""
-        del room_id, expected_membership_epoch
-
-    async def close_preceding_reported_departure(
-        self,
-        room_id: str,
-        join_event_id: str,
-    ) -> None:
-        """Accept a join after one reported departure."""
-        del room_id, join_event_id
-
-    async def close_reported_departure_run(
-        self,
-        room_id: str,
-        run_epoch: int,
-    ) -> None:
-        """Accept closure of one reported departure run."""
-        del room_id, run_epoch
-
-    async def retire_owed_departure_reports(self, room_id: str) -> None:
-        """Accept a retirement that can never happen here: nothing is ever owed."""
-
-    async def rooms_owing_departure_reports(self) -> frozenset[str]:
-        """Return no debt, so the fence never opens a report window."""
-        return frozenset()

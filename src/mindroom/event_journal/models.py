@@ -10,6 +10,28 @@ from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from uuid import UUID
+
+    from .projection import ProjectedEvent
+
+
+class IngestionConsumerBindingError(RuntimeError):
+    """The durable consumer identity disagrees with a requested binding."""
+
+
+class IngestionBatchValidationError(RuntimeError): ...  # noqa: D101
+
+
+class IngestionBatchIntegrityError(RuntimeError): ...  # noqa: D101
+
+
+class IngestionBatchSequenceError(RuntimeError): ...  # noqa: D101
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionConsumer:  # noqa: D101
+    generation: UUID
+    stream_id: UUID | None
 
 
 DURABLE_DELIVERY_ID_KEY = "io.mindroom.delivery_id"
@@ -35,6 +57,7 @@ class EventKind(StrEnum):
     REACTION = "reaction"
     APPROVAL = "approval"
     ROOM_LIFECYCLE = "room_lifecycle"
+    RTC = "rtc"
     REDACTION = "redaction"
     DECRYPTION_FAILURE = "decryption_failure"
 
@@ -73,6 +96,32 @@ class AdmissionResult(StrEnum):
 
     ADMITTED = "admitted"
     DUPLICATE = "duplicate"
+
+
+class IngestionRecordDisposition(StrEnum):
+    """The one durable application owned by an ingestion record."""
+
+    SEMANTIC_EVENT = "semantic_event"
+    ROOM_LIFECYCLE = "room_lifecycle"
+    HISTORY_LOSS = "history_loss"
+    COMPATIBILITY_ONLY = "compatibility_only"
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionFacts:
+    """Receipt novelty and fresh semantic-dispatch eligibility."""
+
+    receipt_new: bool
+    semantic_event_new: bool
+
+    def __post_init__(self) -> None:
+        """Reject malformed or impossible protocol facts."""
+        if type(self.receipt_new) is not bool or type(self.semantic_event_new) is not bool:
+            msg = "Admission facts must be exact booleans"
+            raise TypeError(msg)
+        if self.semantic_event_new and not self.receipt_new:
+            msg = "A new semantic effect requires a new receipt"
+            raise ValueError(msg)
 
 
 class DeliveryProjectionPendingError(RuntimeError):
@@ -118,12 +167,23 @@ class DepartureOutcome:
     observation: DepartureObservation
     membership_epoch: int
     owed_reports: int
-    reported_run_epoch: int | None = None
 
-    @property
-    def fenced(self) -> bool:
-        """Return whether this observation invalidated the room's derived state."""
-        return self.observation is DepartureObservation.FENCED
+
+@dataclass(frozen=True, slots=True)
+class RoomMembershipPosition:
+    """The journal-authoritative prior state for one local membership command."""
+
+    membership: str
+    membership_epoch: int
+
+    def __post_init__(self) -> None:
+        """Reject noncanonical membership positions at the typed boundary."""
+        if type(self.membership) is not str or self.membership not in {"join", "leave"}:
+            msg = "membership must be exactly 'join' or 'leave'"
+            raise ValueError(msg)
+        if type(self.membership_epoch) is not int or self.membership_epoch < 0:
+            msg = "membership_epoch must be a nonnegative int"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +202,25 @@ class InboundEvent:
     sender: str
     origin_server_ts: int
     source: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionBatchAdmission:  # noqa: D101
+    schema_version: int
+    consumer_generation: UUID
+    stream_id: UUID
+    sequence: int
+    sha256: bytes
+    record_id: str
+    disposition: IngestionRecordDisposition
+    source: DepartureSource | None
+    room_id: str | None
+    previous_membership: str | None
+    membership: str | None
+    previous_membership_epoch: int | None
+    membership_epoch: int | None
+    event: InboundEvent | None
+    projected: ProjectedEvent | None
 
 
 @dataclass(frozen=True, slots=True)

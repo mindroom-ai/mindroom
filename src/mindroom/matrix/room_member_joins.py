@@ -5,20 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from itertools import chain
 from threading import Lock
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
-
-import nio
 
 from mindroom.durable_write import write_json_file_durable
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
+    from collections.abc import Awaitable, Callable, Iterable
     from pathlib import Path
+
+    import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -54,14 +53,6 @@ class RoomMemberLeave:
     avatar_url: str | None
     membership: str
     prev_membership: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class _RoomMemberSyncPlan:
-    """Classified room-member state work for one sync response."""
-
-    dispatch_events: tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...] = ()
-    record_events: tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...] = ()
 
 
 def _room_member_join_tracking_path(storage_root: Path) -> Path:
@@ -202,22 +193,6 @@ def room_member_left_from_event(
     )
 
 
-def record_room_member_joins_seen_from_events(
-    events: Iterable[tuple[nio.MatrixRoom, nio.RoomMemberEvent]],
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    storage_root: Path,
-) -> None:
-    """Record human room-member events with one durable batch update."""
-    room_user_ids: list[tuple[str, str]] = []
-    for room, event in events:
-        user_id = _human_join_user_id(event, config=config, runtime_paths=runtime_paths)
-        if user_id is not None:
-            room_user_ids.append((room.room_id, user_id))
-    _mark_room_member_joins_seen(storage_root, room_user_ids)
-
-
 def _room_member_join_from_event(
     room: nio.MatrixRoom,
     event: nio.RoomMemberEvent,
@@ -301,118 +276,6 @@ async def emit_room_member_join_at_least_once(
         await emit(join)
         await asyncio.to_thread(_record_room_member_join_seen, storage_root, join)
         return True
-
-
-def _room_member_events_from_sync_state(
-    response: nio.SyncResponse,
-    *,
-    rooms: Mapping[str, nio.MatrixRoom],
-) -> Iterator[tuple[nio.MatrixRoom, nio.RoomMemberEvent]]:
-    """Yield room-member events from sync state with their resolved room."""
-    for room_id, join_info in response.rooms.join.items():
-        room = rooms.get(room_id)
-        if room is None:
-            continue
-        for event in join_info.state:
-            if isinstance(event, nio.RoomMemberEvent):
-                yield room, event
-
-
-def _room_member_events_from_sync_timeline(
-    response: nio.SyncResponse,
-    *,
-    rooms: Mapping[str, nio.MatrixRoom],
-) -> Iterator[tuple[nio.MatrixRoom, nio.RoomMemberEvent]]:
-    """Yield room-member events from sync timelines with their resolved room."""
-    for room_id, join_info in response.rooms.join.items():
-        room = rooms.get(room_id)
-        if room is None:
-            continue
-        for event in join_info.timeline.events:
-            if isinstance(event, nio.RoomMemberEvent):
-                yield room, event
-
-
-def room_member_sync_state_plan(
-    response: nio.SyncResponse,
-    *,
-    rooms: Mapping[str, nio.MatrixRoom],
-    config: Config,
-    runtime_paths: RuntimePaths,
-    record_only: bool = False,
-    include_timeline_baseline: bool = False,
-    dispatch_snapshot_joins: bool = False,
-) -> _RoomMemberSyncPlan:
-    """Classify state events into durable hook dispatches and baseline markers."""
-    dispatch_events: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
-    record_events: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
-    limited_room_ids = frozenset(
-        room_id for room_id, join_info in response.rooms.join.items() if join_info.timeline.limited
-    )
-    events = _room_member_events_from_sync_state(response, rooms=rooms)
-    if include_timeline_baseline:
-        events = chain(
-            events,
-            _room_member_events_from_sync_timeline(response, rooms=rooms),
-        )
-    for room, event in events:
-        if record_only:
-            record_events.append((room, event))
-            continue
-        if dispatch_snapshot_joins and (
-            _room_member_join_from_event(
-                room,
-                event,
-                config=config,
-                runtime_paths=runtime_paths,
-                require_previous_membership=False,
-            )
-            is not None
-        ):
-            dispatch_events.append((room, event))
-            continue
-        if room.room_id in limited_room_ids:
-            record_events.append((room, event))
-            continue
-        if (
-            _room_member_join_from_event(
-                room,
-                event,
-                config=config,
-                runtime_paths=runtime_paths,
-                require_previous_membership=True,
-            )
-            is not None
-        ):
-            dispatch_events.append((room, event))
-        elif event.prev_membership in {None, "join"}:
-            record_events.append((room, event))
-    return _RoomMemberSyncPlan(
-        dispatch_events=tuple(dispatch_events),
-        record_events=tuple(record_events),
-    )
-
-
-def room_member_sync_timeline_events(
-    response: nio.SyncResponse,
-    *,
-    rooms: Mapping[str, nio.MatrixRoom],
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> tuple[tuple[nio.MatrixRoom, nio.RoomMemberEvent], ...]:
-    """Return eligible live joins carried by a restored-token timeline."""
-    return tuple(
-        (room, event)
-        for room, event in _room_member_events_from_sync_timeline(response, rooms=rooms)
-        if _room_member_join_from_event(
-            room,
-            event,
-            config=config,
-            runtime_paths=runtime_paths,
-            require_previous_membership=False,
-        )
-        is not None
-    )
 
 
 def _optional_string(content: dict[str, object], key: str) -> str | None:

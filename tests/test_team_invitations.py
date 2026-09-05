@@ -92,7 +92,7 @@ class TestTeamRoomMembership:
             joined_rooms.append(room_id)
             return RoomJoinOutcome.JOINED
 
-        monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
+        monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
         monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
 
         # Mock restore_scheduled_tasks
@@ -212,7 +212,7 @@ class TestTeamRoomMembership:
         bot.client = AsyncMock()
 
         join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-        monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+        monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
 
         room = nio.MatrixInvitedRoom("!team-room:localhost", team_user.user_id)
         event = MagicMock(sender="@user:localhost")

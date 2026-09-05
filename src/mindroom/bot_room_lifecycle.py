@@ -12,7 +12,7 @@ import nio
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room
+from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     is_inviter_allowed,
@@ -55,6 +55,14 @@ class _SendRoomResponse(Protocol):
         ...
 
 
+class _ChangeRoomMembership(Protocol):
+    """Execute one durable local membership action."""
+
+    def __call__(self, room_id: str, target_membership: str) -> Awaitable[bool]:
+        """Join or leave through the owned ingestion gateway."""
+        ...
+
+
 @dataclass(frozen=True)
 class BotRoomLifecycleDeps:
     """Dependencies required for room membership and invite handling."""
@@ -67,6 +75,7 @@ class BotRoomLifecycleDeps:
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]
     send_response: _SendRoomResponse
+    change_membership: _ChangeRoomMembership
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
     on_room_joined: Callable[[str], Awaitable[None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
@@ -133,7 +142,7 @@ class BotRoomLifecycle:
         return room_id in self._decrypt_notice_fenced_room_ids
 
     @property
-    def has_pending_join_decrypt_fences(self) -> bool:
+    def _has_pending_join_decrypt_fences(self) -> bool:
         """Return whether any durable join fence needs sync settlement."""
         return bool(self._decrypt_notice_fenced_room_ids)
 
@@ -143,9 +152,9 @@ class BotRoomLifecycle:
             self.deps.continuity_store.update_join_fences,
             remove=tuple(room_ids),
         )
-        self.apply_continuity_record(record)
+        self._apply_continuity_record(record)
 
-    def apply_continuity_record(self, record: SyncContinuityRecord) -> None:
+    def _apply_continuity_record(self, record: SyncContinuityRecord) -> None:
         """Expose join fences from one already-persisted continuity update."""
         if record.revision <= self._applied_continuity_revision:
             return
@@ -154,7 +163,7 @@ class BotRoomLifecycle:
 
     async def restore_pending_join_decrypt_fences(self) -> None:
         """Validate durable unfinished-join fences before sync can start."""
-        self.apply_continuity_record(await asyncio.to_thread(self.deps.continuity_store.load))
+        self._apply_continuity_record(await asyncio.to_thread(self.deps.continuity_store.load))
         if not self._decrypt_notice_fenced_room_ids:
             return
         joined_rooms = await get_joined_rooms(self._client())
@@ -168,7 +177,7 @@ class BotRoomLifecycle:
             self.deps.continuity_store.update_join_fences,
             retain=joined_rooms,
         )
-        self.apply_continuity_record(record)
+        self._apply_continuity_record(record)
 
     async def _join_room_with_decrypt_notice_fence(
         self,
@@ -181,7 +190,7 @@ class BotRoomLifecycle:
 
     async def _add_join_decrypt_notice_fence(self, room_id: str) -> None:
         """Persist the decrypt-notice fence required before one Matrix join."""
-        self.apply_continuity_record(
+        self._apply_continuity_record(
             await asyncio.to_thread(
                 self.deps.continuity_store.update_join_fences,
                 add=(room_id,),
@@ -190,14 +199,20 @@ class BotRoomLifecycle:
 
     async def _join_fenced_room(self, client: nio.AsyncClient, room_id: str) -> RoomJoinOutcome:
         """Start one Matrix join after its decrypt-notice fence is durable."""
-        join_outcome = await join_room(client, room_id)
+        del client
+        joined = await self.deps.change_membership(room_id, "join")
+        join_outcome = RoomJoinOutcome.JOINED if joined else RoomJoinOutcome.TERMINAL_FAILURE
         if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
             await self._clear_join_decrypt_notice_fence(room_id)
         return join_outcome
 
+    def _client_has_joined_room(self, room_id: str) -> bool:
+        """Return whether the owned client already projects this room as joined."""
+        return room_id in self._client().rooms
+
     async def _clear_join_decrypt_notice_fence(self, room_id: str) -> None:
         """Clear a join fence after the current join work becomes terminal."""
-        self.apply_continuity_record(
+        self._apply_continuity_record(
             await asyncio.to_thread(
                 self.deps.continuity_store.update_join_fences,
                 remove=(room_id,),
@@ -312,7 +327,13 @@ class BotRoomLifecycle:
         for room_id in desired_rooms:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
-                await self._on_configured_room_joined(room_id)
+                if await self.deps.change_membership(room_id, "join"):
+                    await self._on_configured_room_joined(room_id)
+                else:
+                    self._logger().warning(
+                        "Failed to reconcile joined room",
+                        room_id=room_id,
+                    )
                 continue
 
             if await self._join_room_with_decrypt_notice_fence(client, room_id) is RoomJoinOutcome.JOINED:
@@ -329,6 +350,10 @@ class BotRoomLifecycle:
             client,
             room_ids if room_ids is not None else await self._rooms_to_leave(),
             on_room_left=self.deps.on_room_left,
+            leave_room_action=lambda room_id: self.deps.change_membership(
+                room_id,
+                "leave",
+            ),
         )
 
     async def _rooms_to_leave(self) -> list[str]:
@@ -446,7 +471,7 @@ class BotRoomLifecycle:
 
     async def handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:
         """Handle one invite after its pending work is durable."""
-        await self._handle_invite(room, sender, invite_is_current=True)
+        await self._handle_invite(room, sender)
 
     async def reconcile_pending_invites(self) -> None:
         """Re-evaluate durable and cached invites after configuration changes."""
@@ -457,11 +482,10 @@ class BotRoomLifecycle:
                 self.record_pending_room_invite(room.room_id, room.inviter)
         for room_id, sender in tuple(self._pending_room_invites.items()):
             room = client.invited_rooms.get(room_id)
-            invite_is_current = room is not None
             if room is None:
                 room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
                 room.inviter = sender
-            await self._handle_invite(room, sender, invite_is_current=invite_is_current)
+            await self._handle_invite(room, sender)
 
     def _allowed_current_inviter(self, room_id: str) -> str | None:
         """Return the current Matrix inviter when the latest policy allows it."""
@@ -484,8 +508,6 @@ class BotRoomLifecycle:
         self,
         room: nio.MatrixRoom,
         sender: str,
-        *,
-        invite_is_current: bool,
     ) -> None:
         """Accept one invite when its dedicated invitation policy allows it."""
         client = self._client()
@@ -510,6 +532,16 @@ class BotRoomLifecycle:
                 await self._send_invite_welcome(room.room_id, sender)
                 self._forget_pending_room_invite(room.room_id)
                 return
+            if self._client_has_joined_room(room.room_id):
+                self._logger().debug("Invite already handled", room_id=room.room_id, sender=sender)
+                if not await self.deps.change_membership(room.room_id, "join"):
+                    msg = f"Failed to reconcile joined invited room {room.room_id}"
+                    raise RuntimeError(msg)
+                await self.deps.on_room_joined(room.room_id)
+                self._remember_invited_room(room.room_id)
+                await self._send_invite_welcome(room.room_id, sender)
+                self._forget_pending_room_invite(room.room_id)
+                return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=sender)
             await self._add_join_decrypt_notice_fence(room.room_id)
@@ -521,10 +553,6 @@ class BotRoomLifecycle:
             join_outcome = await self._join_fenced_room(client, room.room_id)
             if join_outcome is not RoomJoinOutcome.JOINED:
                 self._logger().error("Failed to join room", room_id=room.room_id)
-                if join_outcome is RoomJoinOutcome.ACCESS_DENIED and not invite_is_current:
-                    await self._clear_join_decrypt_notice_fence(room.room_id)
-                    self._forget_pending_room_invite(room.room_id)
-                    return
                 if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
                     self._forget_pending_room_invite(room.room_id)
                     return

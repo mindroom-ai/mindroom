@@ -25,7 +25,7 @@ source_roots = ["src"]
 
 [[modules]]
 path = "mindroom.agent_reply_membership_sync"
-depends_on = ["mindroom.matrix.sync_loop"]
+depends_on = ["mindroom.event_journal"]
 visibility = [
     "mindroom.bot",
     "mindroom.orchestrator",
@@ -141,6 +141,7 @@ depends_on = [
     "mindroom.membership_models",
 ]
 visibility = [
+    "mindroom.agent_reply_membership_sync",
     "mindroom.approval_execution",
     "mindroom.approval_manager",
     "mindroom.approval_receipt",
@@ -154,8 +155,8 @@ visibility = [
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.journal_ingress",
+    "mindroom.matrix._owned_session",
     "mindroom.matrix.relation_lookup",
-    "mindroom.matrix.sync_checkpoint_trust",
     "mindroom.matrix.transport_progress",
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
@@ -1686,6 +1687,7 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.matrix.appservice",
+    "mindroom.matrix._owned_session",
     "mindroom.matrix.client_session",
     "mindroom.matrix.cross_signing",
     "mindroom.matrix.provisioning",
@@ -1757,6 +1759,7 @@ depends_on = [
     "mindroom.bot",
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.desktop.identity",
     "mindroom.embedder_health",
     "mindroom.entity_resolution",
     "mindroom.hooks",
@@ -1809,6 +1812,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.typing",
     "mindroom.message_target",
     "mindroom.memory",
     "mindroom.orchestration.runtime",
@@ -2249,30 +2253,6 @@ path = "mindroom.matrix.thread_history_result"
 depends_on = []
 
 [[modules]]
-path = "mindroom.matrix.sync_checkpoint_trust"
-depends_on = [
-    "mindroom.background_tasks",
-    "mindroom.matrix.sync_certification",
-    "mindroom.matrix.sync_recovery_escape",
-    "mindroom.matrix.sync_token_values",
-]
-visibility = ["mindroom.bot"]
-
-[[modules]]
-path = "mindroom.matrix.sync_recovery_escape"
-depends_on = []
-visibility = ["mindroom.matrix.sync_checkpoint_trust"]
-
-[[modules]]
-path = "mindroom.matrix.sync_certification"
-depends_on = ["mindroom.matrix.sync_token_values"]
-visibility = [
-    "mindroom.bot",
-    "mindroom.matrix.sync_checkpoint_trust",
-    "mindroom.matrix.sync_continuity",
-]
-
-[[modules]]
 path = "mindroom.matrix.sync_continuity"
 depends_on = [
     "mindroom.durable_write",
@@ -2287,8 +2267,6 @@ visibility = [
 path = "mindroom.matrix.sync_token_values"
 depends_on = []
 visibility = [
-    "mindroom.matrix.sync_checkpoint_trust",
-    "mindroom.matrix.sync_certification",
     "mindroom.matrix.sync_continuity",
 ]
 
@@ -2429,6 +2407,15 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.matrix.typing"
+depends_on = [
+    "mindroom.cancellation",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_session",
+]
+visibility = ["mindroom.response_runner", "mindroom.approval_execution"]
+
+[[modules]]
 path = "mindroom.matrix.client_session"
 depends_on = ["mindroom.constants", "mindroom.matrix.to_device"]
 visibility = [
@@ -2437,13 +2424,25 @@ visibility = [
     "mindroom.desktop.identity",
     "mindroom.desktop.session",
     "mindroom.matrix.appservice",
+    "mindroom.matrix._owned_session",
     "mindroom.matrix.client",
     "mindroom.matrix.provisioning",
     "mindroom.matrix.rooms",
+    "mindroom.matrix.typing",
     "mindroom.matrix.users",
     "mindroom.orchestration.runtime",
     "mindroom.orchestrator",
 ]
+
+[[modules]]
+path = "mindroom.matrix._owned_session"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.event_journal",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_session",
+]
+visibility = ["mindroom.matrix.users"]
 
 [[modules]]
 path = "mindroom.matrix.sync_loop"
@@ -2611,11 +2610,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.desktop.identity"
-depends_on = [
-    "mindroom.matrix.client_session",
-    "mindroom.matrix.identity",
-    "mindroom.matrix.state",
-]
+depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.client_visible_messages"
@@ -3028,6 +3023,7 @@ depends_on = [
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
+    "mindroom.desktop.identity",
     "mindroom.desktop.pairing_receiver",
     "mindroom.dispatch_callback_outcome",
     "mindroom.edit_regenerator",
@@ -3049,8 +3045,6 @@ depends_on = [
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
-    "mindroom.matrix.sync_checkpoint_trust",
-    "mindroom.matrix.sync_certification",
     "mindroom.matrix.sync_continuity",
     "mindroom.matrix.sync_loop",
     "mindroom.matrix.to_device",
@@ -4426,9 +4420,17 @@ expose = [
     "olm_store_dir",
     "olm_store_exists",
     "restore_login",
-    "set_before_sync_response_callback",
 ]
 from = ["mindroom.matrix.client_session"]
+
+[[interfaces]]
+expose = [
+    "MindRoomAsyncClient",
+    "maybe_ssl_context",
+    "require_runtime_paths_arg",
+]
+from = ["mindroom.matrix.client_session"]
+visibility = ["mindroom.matrix._owned_session", "mindroom.matrix.typing"]
 
 [[interfaces]]
 expose = [

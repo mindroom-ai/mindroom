@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 
 from mindroom.matrix import typing as typing_module
+from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.typing import typing_indicator
+from mindroom.response_runner import ResponseRunner
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from tests.conftest import TEST_ACCESS_TOKEN
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -88,6 +92,67 @@ async def test_cancelled_initial_typing_request_releases_shared_lease() -> None:
         await task
 
     assert not typing_module._ACTIVE_TYPING
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_releases_typing_without_new_matrix_request() -> None:
+    """Orderly teardown removes the local lease without using the closing client."""
+    client = AsyncMock()
+    room_id = "!room:example.org"
+    entered = asyncio.Event()
+
+    async def hold_typing() -> None:
+        async with typing_indicator(client, room_id, log_context={}):
+            entered.set()
+            await asyncio.Event().wait()
+
+    runner = ResponseRunner(deps=AsyncMock())
+    task = runner.track_inbox_response(
+        hold_typing(),
+        name="test_process_shutdown_typing",
+        recovery_proof_ready=lambda: False,
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+    completed = await runner.drain_inbox_responses(
+        cancel_after_seconds=0.1,
+        shutdown_intent=ORDERLY_SHUTDOWN,
+    )
+
+    assert completed is False
+    assert task.cancelled()
+    assert [call.args[1] for call in client.room_typing.await_args_list] == [True]
+    assert not typing_module._ACTIVE_TYPING
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_transport_fence_does_not_format_typing_traceback() -> None:
+    """An expected fenced refresh must not synchronously render a traceback."""
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_agent:example.org")
+    client.access_token = TEST_ACCESS_TOKEN
+    client.begin_process_shutdown_transport_fence()
+    state = typing_module._TypingState(
+        references=1,
+        timeout_seconds=30,
+        started=asyncio.get_running_loop().create_future(),
+        log_context={},
+    )
+
+    with patch("mindroom.matrix.typing.logger.warning") as warning:
+        task = asyncio.create_task(
+            typing_module._refresh_typing(client, "!room:example.org", state=state),
+        )
+        try:
+            await asyncio.wait_for(state.started, timeout=1.0)
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            await client.close()
+
+    warning.assert_called_once()
+    assert warning.call_args.args == ("Failed to set typing indicator",)
+    assert warning.call_args.kwargs["exc_info"] is False
 
 
 @pytest.mark.asyncio

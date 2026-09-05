@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -48,6 +49,8 @@ from mindroom.event_journal import (
     EventKind,
     HistoryRecoveryOutcome,
     InboundEvent,
+    IngestionConsumer,
+    IngestionConsumerBindingError,
     InteractiveSelection,
     ProjectedEvent,
     SemanticConsumer,
@@ -57,7 +60,7 @@ from mindroom.event_journal import (
     reads,
     replacement_target,
 )
-from mindroom.event_journal.offloading import settled
+from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
 from mindroom.event_journal.schema import (
     POSTGRES_DIALECT,
@@ -1079,6 +1082,185 @@ class TestPrincipalIsolation:
 
         assert await first.is_pending("$shared-id")
         assert not await second.is_pending("$shared-id")
+
+
+class TestIngestionConsumer:
+    """The inactive per-principal nio handshake survives every retry."""
+
+    _GENERATION = uuid.UUID("77fb92ef-7c57-4054-b68c-162fe5bc44d1")
+    _OTHER_GENERATION = uuid.UUID("794a25bb-d15b-407e-af09-47f12e9f7670")
+    _STREAM = uuid.UUID("3a5dc4d3-d2c4-4b42-a0d6-256515114839")
+    _OTHER_STREAM = uuid.UUID("00fea0f9-4f00-4d48-b820-38521918b87b")
+
+    async def test_create_is_inactive_and_a_retry_keeps_the_established_generation(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A later candidate must not replace the identity already stored."""
+        created = await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        retried = await alice.load_or_create_ingestion_consumer(new_generation=self._OTHER_GENERATION)
+
+        assert created == IngestionConsumer(generation=self._GENERATION, stream_id=None)
+        assert retried == created
+
+    async def test_consumers_are_scoped_per_principal(self, journal_store: EventJournalStore) -> None:
+        """Each principal owns an independent generation and inactive state."""
+        alice = journal_store.principal("agent@alice")
+        bob = journal_store.principal("agent@bob")
+
+        assert await alice.load_or_create_ingestion_consumer(
+            new_generation=self._GENERATION,
+        ) == IngestionConsumer(self._GENERATION, None)
+        assert await bob.load_or_create_ingestion_consumer(
+            new_generation=self._OTHER_GENERATION,
+        ) == IngestionConsumer(self._OTHER_GENERATION, None)
+
+    async def test_exact_bind_and_replay_are_idempotent(self, alice: PrincipalStore) -> None:
+        """The established generation may bind one stream and replay it exactly."""
+        await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+
+        first = await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+        replay = await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+        assert first == IngestionConsumer(self._GENERATION, self._STREAM)
+        assert replay == first
+
+    @pytest.mark.parametrize(
+        ("generation", "stream_id"),
+        [
+            (_OTHER_GENERATION, _STREAM),
+            (_GENERATION, _OTHER_STREAM),
+        ],
+        ids=("wrong-generation", "wrong-stream"),
+    )
+    async def test_disagreeing_bind_is_rejected_without_changing_the_row(
+        self,
+        alice: PrincipalStore,
+        generation: uuid.UUID,
+        stream_id: uuid.UUID,
+    ) -> None:
+        """Neither ownership predicate may overwrite an established binding."""
+        await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        established = await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+        with pytest.raises(IngestionConsumerBindingError):
+            await alice.bind_ingestion_stream(generation=generation, stream_id=stream_id)
+
+        assert await alice.load_or_create_ingestion_consumer(new_generation=self._OTHER_GENERATION) == established
+
+    async def test_missing_consumer_cannot_be_bound(self, alice: PrincipalStore) -> None:
+        """Binding never creates the consumer row as a side effect."""
+        with pytest.raises(IngestionConsumerBindingError):
+            await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+    @pytest.mark.parametrize(
+        ("column", "malformed"),
+        [("consumer_generation", "not-a-uuid"), ("stream_id", "not-a-uuid")],
+    )
+    async def test_malformed_stored_uuid_is_rejected_without_repair(
+        self,
+        alice: PrincipalStore,
+        column: str,
+        malformed: str,
+    ) -> None:
+        """Corrupt durable identity must fail closed rather than be rewritten."""
+        await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                f"UPDATE matrix_sync_consumers SET {column} = ? WHERE principal_id = ?",  # noqa: S608
+                (malformed, alice._principal_id),
+            ),
+        )
+
+        with pytest.raises(IngestionConsumerBindingError):
+            await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+        row = await alice._backend.read(
+            lambda transaction: transaction.fetchone(
+                f"SELECT {column} FROM matrix_sync_consumers WHERE principal_id = ?",  # noqa: S608
+                (alice._principal_id,),
+            ),
+        )
+        assert row is not None
+        assert row[column] == malformed
+
+    async def test_binding_survives_reopen(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """A new store instance reads the exact durable consumer identity."""
+        first = journal_database().principal("agent@alice")
+        await first.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        await first.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+        reopened = journal_database().principal("agent@alice")
+        assert await reopened.load_or_create_ingestion_consumer(
+            new_generation=self._OTHER_GENERATION,
+        ) == IngestionConsumer(self._GENERATION, self._STREAM)
+
+    async def test_competing_different_streams_have_one_winner(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """The SQL ownership predicate admits exactly one concurrent stream."""
+        first = journal_database().principal("agent@alice")
+        second = journal_database().principal("agent@alice")
+        await first.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+
+        outcomes = await asyncio.gather(
+            first.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM),
+            second.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._OTHER_STREAM),
+            return_exceptions=True,
+        )
+
+        winners = [result for result in outcomes if isinstance(result, IngestionConsumer)]
+        losers = [result for result in outcomes if isinstance(result, IngestionConsumerBindingError)]
+        assert len(winners) == 1
+        assert len(losers) == 1
+        assert winners[0].stream_id in {self._STREAM, self._OTHER_STREAM}
+
+    async def test_a_stream_owned_by_another_principal_fails_with_the_binding_error(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The shared stream uniqueness constraint has one backend-neutral failure."""
+        alice = journal_store.principal("agent@alice")
+        bob = journal_store.principal("agent@bob")
+        await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        await bob.load_or_create_ingestion_consumer(new_generation=self._OTHER_GENERATION)
+        await alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM)
+
+        with pytest.raises(IngestionConsumerBindingError):
+            await bob.bind_ingestion_stream(generation=self._OTHER_GENERATION, stream_id=self._STREAM)
+
+        assert await bob.load_or_create_ingestion_consumer(
+            new_generation=self._OTHER_GENERATION,
+        ) == IngestionConsumer(self._OTHER_GENERATION, None)
+
+    async def test_independent_backends_racing_for_one_stream_return_one_focused_error(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """A database-level UNIQUE race never escapes as a backend exception."""
+        alice = journal_database().principal("agent@alice")
+        bob = journal_database().principal("agent@bob")
+        await alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION)
+        await bob.load_or_create_ingestion_consumer(new_generation=self._OTHER_GENERATION)
+
+        outcomes = await asyncio.gather(
+            alice.bind_ingestion_stream(generation=self._GENERATION, stream_id=self._STREAM),
+            bob.bind_ingestion_stream(generation=self._OTHER_GENERATION, stream_id=self._STREAM),
+            return_exceptions=True,
+        )
+
+        assert sum(isinstance(value, IngestionConsumer) for value in outcomes) == 1
+        assert sum(isinstance(value, IngestionConsumerBindingError) for value in outcomes) == 1
+        consumers = await asyncio.gather(
+            alice.load_or_create_ingestion_consumer(new_generation=self._GENERATION),
+            bob.load_or_create_ingestion_consumer(new_generation=self._OTHER_GENERATION),
+        )
+        assert sum(value.stream_id == self._STREAM for value in consumers) == 1
+        assert sum(value.stream_id is None for value in consumers) == 1
 
 
 class TestAdmission:
@@ -4103,7 +4285,8 @@ class TestDepartureBookkeeping:
         await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
 
         assert await bob.rooms_owing_departure_reports() == frozenset()
-        assert (await bob.fence_departure(ROOM, source=DepartureSource.REPORTED)).fenced
+        outcome = await bob.fence_departure(ROOM, source=DepartureSource.REPORTED)
+        assert outcome.observation is DepartureObservation.FENCED
 
     async def test_retiring_one_room_leaves_another_rooms_report_owed(self, alice: PrincipalStore) -> None:
         """Giving up on one room's report says nothing about any other room."""
@@ -4159,6 +4342,22 @@ class TestByteOrderPinning:
 
 class TestMembershipEpoch:
     """Leaving and rejoining invalidates what the previous membership saw."""
+
+    async def test_membership_position_is_the_durable_local_command_authority(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Absent, joined, and departed rows expose one exact prior position."""
+        absent = await alice.membership_position(ROOM)
+        assert (absent.membership, absent.membership_epoch) == ("leave", 0)
+
+        await alice.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        departed = await alice.membership_position(ROOM)
+        assert (departed.membership, departed.membership_epoch) == ("leave", 1)
+
+        await alice.note_membership_restarted(ROOM)
+        joined = await alice.membership_position(ROOM)
+        assert (joined.membership, joined.membership_epoch) == ("join", 1)
 
     async def test_a_join_closes_only_its_preceding_reported_departure(
         self,
@@ -6822,7 +7021,7 @@ class TestApprovalContinuations:
         assert recorded.recorded
         assert recorded.resolution is not None
         assert recorded.resolution["status"] == "approved"
-        assert departed.fenced
+        assert departed.observation is DepartureObservation.FENCED
         assert await responder.approval_continuation("approval-1") is None
         terminal = await router.load_matrix_delivery(
             delivery_id="approval-card-1",
@@ -7306,7 +7505,7 @@ class TestApprovalContinuations:
         completed, departed = await asyncio.gather(finish, departure)
 
         assert completed
-        assert departed.fenced
+        assert departed.observation is DepartureObservation.FENCED
         assert await responder.approval_continuation("approval-1") is None
         assert not await responder.is_pending("$source-1")
         assert not await responder.is_pending("$source-2")
@@ -7444,7 +7643,7 @@ class TestApprovalContinuations:
 
         departed, discarded = await asyncio.gather(departure, cleanup)
 
-        assert departed.fenced
+        assert departed.observation is DepartureObservation.FENCED
         assert not discarded
 
     async def test_stale_unavailable_notice_cannot_discard_sources(
@@ -8142,11 +8341,11 @@ class TestConcurrency:
 class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
     """A cancelled await cannot stop a worker thread, so it must not hand on what that thread is using.
 
-    Every backend statement runs on an ``asyncio.to_thread`` worker no
-    cancellation can reach. What each rule below pins is one thing the await
-    was holding while the thread ran -- the writer lock, a pooled connection,
-    a connection about to be closed -- and that none of them may change hands
-    until the statement has actually stopped.
+    Every backend statement runs on an owned worker thread no cancellation can
+    reach. What each rule below pins is one thing the await was holding while
+    the thread ran -- the writer lock, a pooled connection, a connection about
+    to be closed -- and that none of them may change hands until the statement
+    has actually stopped.
 
     Nothing here substitutes anything for ``to_thread``: the crash these guard
     against is a real connection being taken away from a real statement, and a
@@ -8223,6 +8422,170 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
 
         assert not closed_early, "close() returned while a read was still executing on the connection"
         assert await reading == "read"
+
+    async def test_closing_the_store_waits_for_a_recovery_read_already_on_a_worker_thread(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Close cannot release a connection still proving a shutdown handoff."""
+        running = threading.Event()
+        release = threading.Event()
+
+        def busy(transaction: Transaction) -> str:
+            _hold_the_connection(transaction, running, release)
+            return "recovery read"
+
+        reading = asyncio.create_task(journal_store.backend.recovery_read(busy))
+        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        closing = asyncio.create_task(journal_store.close())
+        closed_early = await _finished_within_grace(closing)
+        release.set()
+        await closing
+
+        assert not closed_early, "close() returned while a recovery read still owned a connection"
+        assert await reading == "recovery read"
+
+    async def test_recovery_read_keeps_one_snapshot_across_a_concurrent_commit(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """One handoff proof cannot combine source and outbox facts from different commits."""
+        await journal_store.backend.write(
+            lambda transaction: transaction.execute(
+                _INSERT_MEMBERSHIP,
+                ("agent@alice", ROOM, 1),
+            ),
+        )
+        first_read = threading.Event()
+        writer_committed = threading.Event()
+
+        def read_epoch(transaction: Transaction) -> int:
+            row = transaction.fetchone(
+                "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
+                ("agent@alice", ROOM),
+            )
+            assert row is not None
+            return int(row["membership_epoch"])
+
+        def interleaved_snapshot(transaction: Transaction) -> tuple[int, int]:
+            before = read_epoch(transaction)
+            first_read.set()
+            assert writer_committed.wait(_WORKER_WAIT_SECONDS), "concurrent journal write did not commit"
+            return before, read_epoch(transaction)
+
+        recovery = asyncio.create_task(journal_store.backend.recovery_read(interleaved_snapshot))
+        try:
+            assert await asyncio.to_thread(first_read.wait, _WORKER_WAIT_SECONDS), "recovery read did not start"
+            await journal_store.backend.write(
+                lambda transaction: transaction.execute(
+                    "UPDATE room_membership SET membership_epoch = ? WHERE principal_id = ? AND room_id = ?",
+                    (2, "agent@alice", ROOM),
+                ),
+            )
+        finally:
+            writer_committed.set()
+
+        assert await recovery == (1, 1)
+
+    async def test_sqlite_close_does_not_borrow_the_saturated_default_executor(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Shared application workers cannot keep a journal connection open at shutdown."""
+        backend = SqliteBackend.open(tmp_path / "dedicated-offload.db")
+        await backend.write(lambda transaction: transaction.fetchall("SELECT 1 AS one"))
+        await backend.read(lambda transaction: transaction.fetchall("SELECT 1 AS one"))
+
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+        release_workers = threading.Event()
+        workers_started = (asyncio.Event(), asyncio.Event())
+
+        def occupy_worker(index: int) -> None:
+            loop.call_soon_threadsafe(workers_started[index].set)
+            release_workers.wait()
+
+        blockers = tuple(loop.run_in_executor(None, occupy_worker, index) for index in range(2))
+        await asyncio.gather(*(started.wait() for started in workers_started))
+        closing = asyncio.create_task(backend.close())
+        try:
+            finished, _ = await asyncio.wait({closing}, timeout=_MUST_NOT_FINISH_SECONDS)
+        finally:
+            release_workers.set()
+            await asyncio.gather(*blockers)
+            await closing
+
+        assert finished == {closing}, "SQLite close waited for an unrelated default-executor worker"
+
+    async def test_cancelled_sqlite_close_still_finishes_owned_teardown(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cancelling one waiter cannot abandon the backend's connection close."""
+        backend = SqliteBackend.open(tmp_path / "cancelled-close.db")
+        running = threading.Event()
+        release = threading.Event()
+        close_started = asyncio.Event()
+        real_drain = ThreadOffload.drain
+
+        async def observe_drain(offload: ThreadOffload) -> None:
+            if offload is backend._offload:
+                close_started.set()
+            await real_drain(offload)
+
+        monkeypatch.setattr(ThreadOffload, "drain", observe_drain)
+
+        def busy(transaction: Transaction) -> str:
+            _hold_the_connection(transaction, running, release)
+            return "read"
+
+        reading = asyncio.create_task(backend.read(busy))
+        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        closing = asyncio.create_task(backend.close())
+        await close_started.wait()
+        closing.cancel()
+        returned_early = await _finished_within_grace(closing)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        assert await reading == "read"
+        await backend.close()
+
+        try:
+            backend._writer.execute("SELECT 1")
+        except sqlite3.ProgrammingError:
+            writer_closed = True
+        else:
+            writer_closed = False
+            backend._writer.close()
+
+        assert not returned_early, "the cancelled close waiter returned before owned teardown finished"
+        assert writer_closed, "a cancelled close left the SQLite writer connection open"
+
+    async def test_concurrent_sqlite_close_waits_for_owned_teardown(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Every close caller waits for the one teardown already in progress."""
+        backend = SqliteBackend.open(tmp_path / "concurrent-close.db")
+        running = threading.Event()
+        release = threading.Event()
+
+        def busy(transaction: Transaction) -> str:
+            _hold_the_connection(transaction, running, release)
+            return "read"
+
+        reading = asyncio.create_task(backend.read(busy))
+        await asyncio.to_thread(running.wait, _WORKER_WAIT_SECONDS)
+        first_close = asyncio.create_task(backend.close())
+        second_close = asyncio.create_task(backend.close())
+        second_returned_early = await _finished_within_grace(second_close)
+        release.set()
+        await asyncio.gather(first_close, second_close)
+
+        assert await reading == "read"
+        assert not second_returned_early, "a concurrent close returned before the owned teardown finished"
 
     async def test_a_cancelled_write_does_not_return_while_its_statement_runs(
         self,

@@ -22,6 +22,7 @@ from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.desktop.identity import controller_identity_for_live_bot
 from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
@@ -68,7 +69,14 @@ from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, ORDERLY_SHUTDOWN
+from mindroom.response_shutdown_diagnostics import DeferredStopPhase
+from mindroom.runtime_shutdown import (
+    ENTITY_REMOVED_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
+    RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
+    ResponseShutdownTimeoutError,
+    gather_shutdown_phase,
+)
 from mindroom.runtime_state import (
     clear_api_server_address,
     reset_runtime_state,
@@ -136,6 +144,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
 
@@ -144,9 +153,129 @@ if TYPE_CHECKING:
     from .orchestration.config_updates import ConfigUpdatePlan
 logger = get_logger(__name__)
 
+
+def _aggregate_response_phase_counts(bots: Iterable[AgentBot]) -> dict[str, int]:
+    """Sum fixed response phase counts across bots for one shutdown warning."""
+    aggregate: dict[str, int] = {}
+    for bot in bots:
+        phase_counts = bot.pending_response_phase_counts
+        if not isinstance(phase_counts, dict):
+            continue
+        for phase, count in phase_counts.items():
+            aggregate[phase] = aggregate.get(phase, 0) + count
+    return dict(sorted(aggregate.items()))
+
+
+def _aggregate_deferred_stop_phase_counts(bots: Iterable[AgentBot]) -> dict[str, int]:
+    """Count fixed deferred-release phases without exposing bot identities."""
+    aggregate: dict[str, int] = {}
+    for bot in bots:
+        phase = getattr(bot, "deferred_stop_phase", None)
+        try:
+            fixed_phase = DeferredStopPhase(phase)
+        except (TypeError, ValueError):
+            continue
+        aggregate[fixed_phase.value] = aggregate.get(fixed_phase.value, 0) + 1
+    return dict(sorted(aggregate.items()))
+
+
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
+_DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
+
+
+async def _gather_periodic_shutdown_phase(
+    bots: Iterable[AgentBot],
+    event: str,
+    phase_count_field: str,
+    *awaitables: Awaitable[object],
+) -> tuple[list[object], asyncio.CancelledError | None]:
+    """Finish one observed shutdown phase while preserving cancellation semantics."""
+    bots = tuple(bots)
+    phase = asyncio.gather(*awaitables, return_exceptions=True)
+    loop = asyncio.get_running_loop()
+    timer: asyncio.TimerHandle | None = None
+
+    def log_pending_phases() -> None:
+        nonlocal timer
+        if phase.done():
+            return
+        pending_response_owner_count = sum(
+            count for bot in bots if isinstance((count := bot.pending_response_owner_count), int)
+        )
+        logger.warning(
+            event,
+            live_response_owner_count=pending_response_owner_count,
+            pending_response_phase_counts=_aggregate_response_phase_counts(bots),
+            **{phase_count_field: _aggregate_deferred_stop_phase_counts(bots)},
+        )
+        timer = loop.call_later(
+            _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
+            log_pending_phases,
+        )
+
+    timer = loop.call_later(
+        _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS,
+        log_pending_phases,
+    )
+    try:
+        try:
+            return list(await asyncio.shield(phase)), None
+        except asyncio.CancelledError as cancellation:
+            return list(await phase), cancellation
+    finally:
+        timer.cancel()
+
+
+async def _gather_bot_shutdown_phase(
+    bots: Iterable[AgentBot],
+    *awaitables: Awaitable[object],
+) -> tuple[list[object], asyncio.CancelledError | None]:
+    """Finish initial bot stops while periodically exposing fixed phases."""
+    return await _gather_periodic_shutdown_phase(
+        bots,
+        "orchestrator_bot_stop_pending",
+        "pending_bot_stop_phase_counts",
+        *awaitables,
+    )
+
+
+async def _gather_deferred_shutdown_phase(
+    bots: Iterable[AgentBot],
+    *awaitables: Awaitable[object],
+) -> tuple[list[object], asyncio.CancelledError | None]:
+    """Finish deferred releases while periodically exposing aggregate phases."""
+    return await _gather_periodic_shutdown_phase(
+        bots,
+        "orchestrator_deferred_response_owners_pending",
+        "pending_deferred_stop_phase_counts",
+        *awaitables,
+    )
+
+
+async def _run_shutdown_step[Result](
+    shutdown_phase: str,
+    operation: Awaitable[Result],
+) -> Result:
+    """Expose one non-sensitive shutdown boundary without changing its result."""
+    logger.info(
+        "orchestrator_shutdown_phase_started",
+        shutdown_phase=shutdown_phase,
+    )
+    try:
+        result = await operation
+    except BaseException:
+        logger.info(
+            "orchestrator_shutdown_phase_failed",
+            shutdown_phase=shutdown_phase,
+        )
+        raise
+    logger.info(
+        "orchestrator_shutdown_phase_completed",
+        shutdown_phase=shutdown_phase,
+    )
+    return result
 
 
 @dataclass(frozen=True)
@@ -399,6 +528,13 @@ class _MultiAgentOrchestrator:
             return None
         return bot.running and bot.first_sync_complete
 
+    def desktop_controller_identity(self, entity_name: str) -> DesktopControllerIdentity:
+        """Resolve the current running bot's already-owned Matrix device pin."""
+        return controller_identity_for_live_bot(
+            entity_name,
+            self.agent_bots.get(entity_name),
+        )
+
     async def _stop_memory_auto_flush_worker(self) -> None:
         """Stop the background memory auto-flush worker if running."""
         worker = self._memory_auto_flush_worker
@@ -623,6 +759,44 @@ class _MultiAgentOrchestrator:
                 running_bots.append(bot)
         return running_bots
 
+    def _ready_bot_for_turn_journal_recovery(
+        self,
+        entity_name: str,
+        config: Config,
+    ) -> AgentBot | TeamBot | None:
+        """Return the current bot when its fleet dependencies are ready."""
+        bot = self.agent_bots.get(entity_name)
+        required_entities = (
+            [entity_name]
+            if entity_name == ROUTER_AGENT_NAME
+            else ([entity_name, *config.teams[entity_name].agents] if entity_name in config.teams else [entity_name])
+        )
+        if bot is None or any(
+            self.entity_first_sync_complete(required_entity) is not True for required_entity in required_entities
+        ):
+            return None
+        return bot
+
+    async def _recover_current_turn_journal_bot(self, entity_name: str) -> Exception | None:
+        """Recover the ready current generation for one configured entity."""
+        config = self.config
+        if config is None or entity_name not in configured_entity_names(config):
+            return None
+        bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
+        if bot is None:
+            return None
+        try:
+            await bot.recover_pending_turn_journal_events()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.exception(
+                "turn_dispatch_recovery_failed",
+                agent_name=entity_name,
+            )
+            return error
+        return None
+
     async def _recover_ready_turn_journal_events(self) -> None:
         """Recover fleet-dependent turns whose required runtimes are ready."""
         async with self._dispatch_recovery_lock:
@@ -630,37 +804,30 @@ class _MultiAgentOrchestrator:
             if config is None:
                 return
             first_error: Exception | None = None
+            ready_bots: list[tuple[str, AgentBot | TeamBot]] = []
             for entity_name in configured_entity_names(config):
-                bot = self.agent_bots.get(entity_name)
-                required_entities = (
-                    [entity_name]
-                    if entity_name == ROUTER_AGENT_NAME
-                    else (
-                        [entity_name, *config.teams[entity_name].agents]
-                        if entity_name in config.teams
-                        else [entity_name]
-                    )
-                )
-                if bot is None or any(
-                    self.entity_first_sync_complete(required_entity) is not True
-                    for required_entity in required_entities
-                ):
+                bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
+                if bot is None:
                     continue
-                try:
-                    await bot.recover_pending_turn_journal_events()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    first_error = first_error or error
-                    logger.exception(
-                        "turn_dispatch_recovery_failed",
-                        agent_name=entity_name,
-                    )
+                ready_bots.append((entity_name, bot))
+            for _entity_name, bot in ready_bots:
+                bot.release_pending_turn_journal_replay()
+            for entity_name, _released_bot in ready_bots:
+                error = await self._recover_current_turn_journal_bot(entity_name)
+                first_error = first_error or error
             if first_error is not None:
                 raise first_error
 
     def _schedule_ready_turn_dispatch_recovery(self) -> None:
         """Coalesce bot-ready signals into one orchestrator-owned recovery task."""
+        if not self._runtime_ready_event.is_set():
+            return
+        config = self.config
+        if config is not None:
+            for entity_name in configured_entity_names(config):
+                ready_bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
+                if ready_bot is not None:
+                    ready_bot.release_pending_turn_journal_replay()
         self._dispatch_recovery_requested = True
         task = self._dispatch_recovery_task
         if task is not None and not task.done():
@@ -1404,7 +1571,8 @@ class _MultiAgentOrchestrator:
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_bot.client)
         self.agent_reply_membership_sync.record_authoritative_refresh(config)
-        await self.reconcile_pending_invites()
+        for bot in self.agent_bots.values():
+            bot.schedule_pending_invite_reconciliation()
         await self.revoke_reply_authorized_calls()
         if self.agent_reply_memberships.needs_refresh(config):
             return
@@ -1454,29 +1622,32 @@ class _MultiAgentOrchestrator:
         async with self.config_reload.startup_publication_admission():
             self.running = True
 
+            # Owned membership commands need the source and admission pump.
+            # Semantic dispatch stays parked until initial runtime publication.
+            set_runtime_starting("Starting Matrix ingestion loops")
+            phase_started = log_startup_phase_started("start_matrix_sync_loops")
+            for bot in started_bots:
+                self._start_sync_task(bot.agent_name, bot)
+            log_startup_phase_finished("start_matrix_sync_loops", phase_started)
+
             startup_cutoff_ms = int(time.time() * 1000)
             self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
             room_membership_policy_configured = self.agent_reply_memberships.needs_refresh(config)
             if room_membership_policy_configured:
                 set_runtime_starting("Establishing Matrix room memberships")
                 await self._startup_maintenance.wait_for_rooms_and_memberships()
-                router_bot.preserve_reply_memberships_on_next_sync_start()
 
             if runtime_shutdown_event.is_set():
                 return
 
-            # Expose live sync callbacks only after room-backed reply grants have an
-            # authoritative startup snapshot.
-            set_runtime_starting("Starting Matrix sync loops")
-            phase_started = log_startup_phase_started("start_matrix_sync_loops")
-            sync_started = await self._start_sync_tasks_after_membership_publication(
-                router_bot,
+            # Publish semantic callbacks only after room-backed reply grants and
+            # the router's initial owned sync have both been established.
+            sync_ready = await self._wait_for_initial_membership_sync(
                 runtime_shutdown_event,
                 room_membership_policy_configured=room_membership_policy_configured,
             )
-            if not sync_started:
+            if not sync_ready:
                 return
-            log_startup_phase_finished("start_matrix_sync_loops", phase_started)
 
             for entity_name in start_results.retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)
@@ -1487,35 +1658,24 @@ class _MultiAgentOrchestrator:
             )
             set_runtime_ready()
             self._runtime_ready_event.set()
+            self._schedule_ready_turn_dispatch_recovery()
         # Stay alive until explicit shutdown. Hot reload replaces sync tasks in
         # self._sync_tasks, so awaiting the initial task generation would let a
         # config-triggered restart look like normal orchestrator completion.
         await runtime_shutdown_event.wait()
 
-    async def _start_sync_tasks_after_membership_publication(
+    async def _wait_for_initial_membership_sync(
         self,
-        router_bot: AgentBot | TeamBot,
         runtime_shutdown_event: asyncio.Event,
         *,
         room_membership_policy_configured: bool,
     ) -> bool:
-        """Start receive loops without exposing responders to a stale grant snapshot."""
-        self._schedule_ready_turn_dispatch_recovery()
+        """Keep semantic dispatch parked until the router has observed owned sync."""
         if not room_membership_policy_configured:
-            for entity_name, bot in self.agent_bots.items():
-                if bot.running:
-                    self._start_sync_task(entity_name, bot)
             return True
 
         assert self._response_admission_gate.closed, "startup publication must own response admission"
-        self._start_sync_task(ROUTER_AGENT_NAME, router_bot)
-        router_ready = await self._wait_for_router_reply_memberships_or_shutdown(runtime_shutdown_event)
-        if not router_ready:
-            return False
-        for entity_name, bot in self.agent_bots.items():
-            if entity_name != ROUTER_AGENT_NAME and bot.running:
-                self._start_sync_task(entity_name, bot)
-        return True
+        return await self._wait_for_router_reply_memberships_or_shutdown(runtime_shutdown_event)
 
     async def _wait_for_router_reply_memberships_or_shutdown(
         self,
@@ -2234,7 +2394,7 @@ class _MultiAgentOrchestrator:
             )
         return self._open_journal.store
 
-    async def stop(self) -> None:
+    async def stop(self) -> None:  # noqa: C901, PLR0912, PLR0915
         """Stop all agent bots."""
         self.running = False
         self.hook_registry = HookRegistry.empty()
@@ -2244,43 +2404,147 @@ class _MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
         try:
-            await self._script_runtime.shutdown()
+            await _run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:
             logger.exception("Background script runtime shutdown failed")
-        await self._approval_transport.close()
-        await shutdown_approval_runtime()
-        await self.config_reload.cancel()
+        await _run_shutdown_step("approval_transport", self._approval_transport.close())
+        await _run_shutdown_step("approval_runtime", shutdown_approval_runtime())
+        await _run_shutdown_step("config_reload", self.config_reload.cancel())
         owner = self._mcp_catalog_change_task_owner
-        await wait_for_background_tasks(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)
-        await wait_for_background_tasks(
-            5.0,
-            owner=self._dispatch_recovery_task_owner,
-            shutdown_intent=ORDERLY_SHUTDOWN,
+        await _run_shutdown_step(
+            "mcp_catalog_background",
+            wait_for_background_tasks(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN),
         )
-        await self._startup_maintenance.cancel()
-        await self._todo_poke_runtime.stop()
-        await self._thread_export_runner.stop()
-        await self._stop_memory_auto_flush_worker()
-        await self._knowledge_source_watcher.shutdown()
-        await self._knowledge_refresh_scheduler.shutdown()
-        await self._cancel_bot_start_tasks()
-        await self._stop_mcp_manager()
+        await _run_shutdown_step(
+            "dispatch_recovery_background",
+            wait_for_background_tasks(
+                5.0,
+                owner=self._dispatch_recovery_task_owner,
+                shutdown_intent=ORDERLY_SHUTDOWN,
+            ),
+        )
+        await _run_shutdown_step("startup_maintenance", self._startup_maintenance.cancel())
+        await _run_shutdown_step("todo_poke", self._todo_poke_runtime.stop())
+        await _run_shutdown_step("thread_exports", self._thread_export_runner.stop())
+        await _run_shutdown_step("memory_auto_flush", self._stop_memory_auto_flush_worker())
+        await _run_shutdown_step("knowledge_source_watchers", self._knowledge_source_watcher.shutdown())
+        await _run_shutdown_step("knowledge_refresh", self._knowledge_refresh_scheduler.shutdown())
+        await _run_shutdown_step("bot_start_tasks", self._cancel_bot_start_tasks())
+        await _run_shutdown_step("mcp_manager", self._stop_mcp_manager())
+
+        phase_cancellations: list[asyncio.CancelledError] = []
+        quiesce_results, cancellation = await _run_shutdown_step(
+            "source_quiesce",
+            gather_shutdown_phase(
+                *(bot._quiesce_matrix_ingestion() for bot in self.agent_bots.values()),
+            ),
+        )
+        if cancellation is not None:
+            phase_cancellations.append(cancellation)
+        quiesce_failures = [result for result in quiesce_results if isinstance(result, BaseException)]
 
         # Cancel sync tasks first so shutdown does not race with active sync loops.
-        for entity_name in list(self._sync_tasks.keys()):
-            await cancel_sync_task(entity_name, self._sync_tasks)
+        cancel_results, cancellation = await _run_shutdown_step(
+            "sync_tasks",
+            gather_shutdown_phase(
+                *(cancel_sync_task(entity_name, self._sync_tasks) for entity_name in list(self._sync_tasks)),
+            ),
+        )
+        if cancellation is not None:
+            phase_cancellations.append(cancellation)
 
         for bot in self.agent_bots.values():
             bot.running = False
 
-        stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in self.agent_bots.values()]
-        await asyncio.gather(*stop_tasks)
-        await wait_for_attachment_cleanup_tasks()
+        stopping_bots = list(self.agent_bots.values())
+        stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in stopping_bots]
+        stop_results, cancellation = await _run_shutdown_step(
+            "bot_stop",
+            _gather_bot_shutdown_phase(stopping_bots, *stop_tasks),
+        )
+        if cancellation is not None:
+            phase_cancellations.append(cancellation)
+        deferred_bots = [bot for bot in stopping_bots if bot.deferred_stop_required is True]
+        pre_deferred_response_owner_count = sum(
+            count for bot in self.agent_bots.values() if isinstance((count := bot.pending_response_owner_count), int)
+        )
+        if pre_deferred_response_owner_count > 0:
+            logger.warning(
+                "orchestrator_response_shutdown_owners_pending",
+                live_response_owner_count=pre_deferred_response_owner_count,
+                pending_response_phase_counts=_aggregate_response_phase_counts(
+                    self.agent_bots.values(),
+                ),
+            )
+        deferred_stop_results: list[object] = []
+        if deferred_bots:
+            deferred_stop_results, cancellation = await _run_shutdown_step(
+                "deferred_response_owners",
+                _gather_deferred_shutdown_phase(
+                    deferred_bots,
+                    *(
+                        bot.finish_deferred_stop(
+                            shutdown_intent=ORDERLY_SHUTDOWN,
+                            timeout_seconds=RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
+                        )
+                        for bot in deferred_bots
+                    ),
+                ),
+            )
+            if cancellation is not None:
+                phase_cancellations.append(cancellation)
+        pending_response_owner_count = sum(
+            count for bot in self.agent_bots.values() if isinstance((count := bot.pending_response_owner_count), int)
+        )
+        pending_response_phase_counts = _aggregate_response_phase_counts(self.agent_bots.values())
+        await _run_shutdown_step("attachment_cleanup", wait_for_attachment_cleanup_tasks())
         # Last, because every bot borrows it: closing it earlier would pull the
         # store out from under a bot still draining its outbox.
-        if self._open_journal is not None:
+        journal_failures: list[BaseException] = []
+        if self._open_journal is not None and pending_response_owner_count == 0:
             journal, self._open_journal = self._open_journal, None
-            await journal.close()
+            close_results, cancellation = await _run_shutdown_step(
+                "event_journal",
+                gather_shutdown_phase(journal.close()),
+            )
+            if cancellation is not None:
+                phase_cancellations.append(cancellation)
+            journal_failures.extend(result for result in close_results if isinstance(result, BaseException))
+        elif pending_response_owner_count > 0:
+            logger.warning(
+                "orchestrator_shared_journal_close_deferred",
+                live_response_owner_count=pending_response_owner_count,
+                pending_response_phase_counts=pending_response_phase_counts,
+            )
+        finalized_response_timeout_bot_ids = {
+            id(bot)
+            for bot, result in zip(
+                deferred_bots,
+                deferred_stop_results,
+                strict=True,
+            )
+            if not isinstance(result, BaseException) and bot.deferred_stop_required is False
+        }
+        cleanup_failures = [
+            result
+            for bot, result in zip(stopping_bots, stop_results, strict=True)
+            if isinstance(result, BaseException)
+            and not (id(bot) in finalized_response_timeout_bot_ids and isinstance(result, ResponseShutdownTimeoutError))
+        ]
+        cleanup_failures.extend(
+            result
+            for results in (cancel_results, deferred_stop_results)
+            for result in results
+            if isinstance(result, BaseException)
+        )
+        failures = [
+            *quiesce_failures,
+            *phase_cancellations,
+            *cleanup_failures,
+            *journal_failures,
+        ]
+        if failures:
+            raise failures[0]
         logger.info("All agent bots stopped")
 
 
@@ -2625,16 +2889,16 @@ async def _finish_runtime_shutdown(
     """Finish one runtime cleanup sequence without duplicating partial teardown."""
     await _cancel_task_if_pending(shutdown_wait_task)
     await _cancel_task_if_pending(api_task)
-    await _cancel_task_if_pending(orchestrator_task)
-    for task in auxiliary_tasks:
-        task.cancel()
-    for task in auxiliary_tasks:
-        with suppress(asyncio.CancelledError):
-            await task
     try:
         if orchestrator is not None:
             await orchestrator.stop()
     finally:
+        await _cancel_task_if_pending(orchestrator_task)
+        for task in auxiliary_tasks:
+            task.cancel()
+        for task in auxiliary_tasks:
+            with suppress(asyncio.CancelledError):
+                await task
         if stall_detector is not None:
             stall_detector.stop()
         reset_matrix_sync_health()

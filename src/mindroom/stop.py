@@ -289,6 +289,17 @@ class StopManager:
         else:
             logger.debug("Message not tracked, skipping cleanup", message_id=message_id)
 
+    def discard_message(self, message_id: str) -> None:
+        """Drop process-local tracking without scheduling Matrix cleanup."""
+        tracked = self.tracked_messages.pop(message_id, None)
+        if tracked is None:
+            return
+        logger.info(
+            "Discarding tracked message for process shutdown",
+            message_id=message_id,
+            **self._log_target(tracked.target),
+        )
+
     def request_stop_if(self, message_id: str, should_stop: Callable[[], bool]) -> bool:
         """Atomically validate current intent and request cancellation without yielding."""
         if not should_stop():

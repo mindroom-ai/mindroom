@@ -150,9 +150,17 @@ class SqliteBackend:
         repr=False,
     )
     _closed: bool = field(default=False, init=False, repr=False)
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
+    _recovery_offload: ThreadOffload = field(
+        default_factory=lambda: ThreadOffload.serial(
+            thread_name_prefix="mindroom-event-journal-recovery",
+        ),
+        init=False,
+        repr=False,
+    )
 
     @classmethod
     def open(cls, database_path: Path) -> SqliteBackend:
@@ -185,9 +193,9 @@ class SqliteBackend:
         return queue
 
     def _connect_writer(self) -> sqlite3.Connection:
-        # The writer runs on whichever pool thread `asyncio.to_thread` picks, so
-        # the connection has to outlive its creating thread. Only ever one write
-        # is in flight, because a single task drains the queue.
+        # The writer runs on whichever owned-pool thread is free, so the
+        # connection has to outlive its creating thread. Only ever one write is
+        # in flight, because a single task drains the queue.
         connection = sqlite3.connect(
             self.database_path,
             isolation_level=None,
@@ -367,11 +375,26 @@ class SqliteBackend:
 
         return await self._offload.run(apply)
 
+    async def recovery_read[T](self, operation: Operation[T]) -> T:
+        """Run a committed-state handoff proof on its reserved WAL reader."""
+        if self._closed:
+            raise RuntimeError(_CLOSED_MESSAGE)
+
+        def apply() -> T:
+            connection = self._reader()
+            connection.execute("BEGIN")
+            try:
+                return operation(_SqliteTransaction(connection))
+            finally:
+                connection.execute("ROLLBACK")
+
+        return await self._recovery_offload.run(apply)
+
     def _apply_read[T](self, operation: Operation[T]) -> T:
         return operation(_SqliteTransaction(self._reader()))
 
     async def close(self) -> None:
-        """Stop the writer task and close every connection.
+        """Close admission once and await the one owned connection teardown.
 
         Cancelling the writer task is safe only because ``_settle`` refuses to
         return while its worker thread is still executing: the cancellation
@@ -388,14 +411,23 @@ class SqliteBackend:
         write already admitted is in the queue, and callbacks for claimed
         handoffs later see that they no longer own an admission and do nothing.
         """
-        with self._admission_lock:
-            if self._closed:
-                return
-            self._closed = True
-            pending_admissions = tuple(self._pending_admissions.values())
-            self._pending_admissions.clear()
-        for queued in pending_admissions:
-            _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
+        close_task = self._close_task
+        if close_task is None:
+            with self._admission_lock:
+                self._closed = True
+                pending_admissions = tuple(self._pending_admissions.values())
+                self._pending_admissions.clear()
+            for queued in pending_admissions:
+                _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
+            close_task = asyncio.create_task(
+                self._finish_close(),
+                name="event_journal_sqlite_close",
+            )
+            self._close_task = close_task
+        await settled(close_task)
+
+    async def _finish_close(self) -> None:
+        """Finish the teardown every close waiter shares."""
         writer_task = self._writer_task
         self._writer_task = None
         if writer_task is not None:
@@ -409,13 +441,20 @@ class SqliteBackend:
             queued = queue.get_nowait()
             _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
             queue.task_done()
-        await self._offload.drain()
-        await asyncio.to_thread(self._writer.close)
-        with self._reader_lock:
-            readers = tuple(self._open_readers)
-            self._open_readers.clear()
-        for reader in readers:
-            await asyncio.to_thread(reader.close)
+        try:
+            await asyncio.gather(
+                self._offload.drain(),
+                self._recovery_offload.drain(),
+            )
+            await self._offload.run(self._writer.close)
+            with self._reader_lock:
+                readers = tuple(self._open_readers)
+                self._open_readers.clear()
+            for reader in readers:
+                await self._offload.run(reader.close)
+        finally:
+            self._offload.shutdown()
+            self._recovery_offload.shutdown()
 
 
 def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:

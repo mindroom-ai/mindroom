@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 if TYPE_CHECKING:
@@ -25,15 +26,9 @@ _DEFAULT_STATE_EVENT_POWER_LEVEL = 50
 _DEFAULT_USER_POWER_LEVEL = 0
 _POWER_USER_POWER_LEVEL = 50
 
-# Element Call membership state event (deployed MSC3401 flavor). Regular room
-# members must be able to publish it to join a call, so it is pinned to PL0 —
-# the same convention Element uses for call-capable rooms. Mirrors
-# ``mindroom.matrix_rtc.events.CALL_MEMBER_EVENT_TYPE`` (kept as a literal here
-# to avoid a core -> matrix_rtc dependency).
-_CALL_MEMBER_EVENT_TYPE = "org.matrix.msc3401.call.member"
 _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     THREAD_TAGS_EVENT_TYPE: 0,
-    _CALL_MEMBER_EVENT_TYPE: 0,
+    CALL_MEMBER_EVENT_TYPE: 0,
 }
 _TERMINAL_ROOM_JOIN_ERROR_CODES = frozenset(
     {

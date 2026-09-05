@@ -32,8 +32,6 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.sync_certification import SyncTrustState
-from mindroom.matrix.sync_token_values import SyncCheckpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import EntityStartResults
@@ -529,7 +527,9 @@ class TestRoutingRegression:
         await router_bot.recover_pending_turn_journal_events()
         await drain_coalescing(router_bot)
 
-        mock_suggest_responder.assert_awaited_once()
+        # The running journal worker may retry this unsettled selection beside
+        # the explicit recovery pass, but it must not deliver to an unready bot.
+        mock_suggest_responder.assert_awaited()
         router_bot.client.room_send.assert_not_awaited()
         assert await router_bot._journal_dispatcher.store.is_pending(blocked_event.event_id)
 
@@ -632,10 +632,7 @@ class TestRoutingRegression:
             ),
         )
         await coalescing_gate.drain_all()
-        router_bot._sync_checkpoint_trust.state = SyncTrustState.CERTIFIED
-        router_bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
         await router_bot.prepare_for_sync_shutdown()
-        assert router_bot._sync_checkpoint_trust.checkpoint == SyncCheckpoint("s_before_router_shutdown")
 
     @pytest.mark.asyncio
     async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(

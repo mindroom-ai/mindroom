@@ -11,12 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import nio
 
-from mindroom.constants import (
-    CLASSIC_SYNC_TIMELINE_LIMIT,
-    RuntimePaths,
-    encryption_keys_dir,
-    runtime_matrix_ssl_verify,
-)
+from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.event_types import CALL_ENCRYPTION_KEYS_EVENT_TYPE
@@ -24,7 +19,7 @@ from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Mapping
+    from collections.abc import AsyncGenerator, Mapping
 
 logger = get_logger(__name__)
 
@@ -58,25 +53,21 @@ class PermanentMatrixStartupError(PermanentStartupError):
     """Raised for Matrix startup failures that should not be retried."""
 
 
+class _MatrixTransportShutdownError(RuntimeError):
+    """Raised when process shutdown has permanently fenced Matrix transport."""
+
+    def __init__(self) -> None:
+        super().__init__("Matrix transport is fenced for process shutdown")
+
+
 @dataclass(frozen=True, slots=True)
 class MatrixSyncStorage:
-    """Select which sync state nio persists for one Matrix client."""
+    """Select whether nio persists the ordinary sync cursor."""
 
     store_tokens: bool = True
-    persist_recovery: bool = True
 
 
 DEFAULT_MATRIX_SYNC_STORAGE = MatrixSyncStorage()
-
-# How many recovered history events nio may hold for one room while it closes a
-# limited-timeline gap; exceeding it abandons the gap and leaves the room
-# unrecovered. nio's 200 is far below what a MindRoom room produces: a
-# streaming turn emits an `m.replace` edit per progressive update, so concurrent
-# agent turns can overrun even the requested sync window, and a short stall
-# accumulates thousands of events. Twenty sync windows of catch-up ensure that
-# only an outage rather than a busy minute abandons history, while still
-# bounding held parsed events per room.
-_BACKFILL_MAX_EVENTS = 20 * CLASSIC_SYNC_TIMELINE_LIMIT
 
 
 @runtime_checkable
@@ -86,31 +77,30 @@ class _AsyncRequestHeaders(Protocol):
         ...
 
 
-class _MindRoomAsyncClient(nio.AsyncClient):
+class MindRoomAsyncClient(nio.AsyncClient):
     """Matrix client for MindRoom-specific encrypted event behavior."""
 
-    _before_sync_response_callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], None] | None = None
+    _process_shutdown_transport_fenced = False
 
-    def set_before_sync_response_callback(
-        self,
-        callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], None],
-    ) -> None:
-        """Register synchronous control-plane work that must precede timeline admission."""
-        self._before_sync_response_callback = callback
-
-    async def _handle_to_device(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
-        """Run control-plane fencing on nio's accepted response before event fanout."""
-        callback = self._before_sync_response_callback
-        if callback is not None:
-            callback(response)
-        await super()._handle_to_device(response)
+    @property
+    def process_shutdown_transport_fenced(self) -> bool:
+        """Return whether orderly shutdown permanently closed new transport."""
+        return self._process_shutdown_transport_fenced
 
     async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         """Prepare dynamic request headers before every transport attempt."""
+        if self._process_shutdown_transport_fenced:
+            raise _MatrixTransportShutdownError
         headers = self.config.custom_headers
         if isinstance(headers, _AsyncRequestHeaders):
             await headers.prepare()
+        if self._process_shutdown_transport_fenced:
+            raise _MatrixTransportShutdownError
         return await super().send(*args, **kwargs)
+
+    def begin_process_shutdown_transport_fence(self) -> None:
+        """Permanently refuse new requests before owned work is drained."""
+        self._process_shutdown_transport_fenced = True
 
     def encrypt(
         self,
@@ -119,20 +109,34 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         content: dict[Any, Any],
     ) -> tuple[str, dict[str, Any]]:
         """Expose coarse delivery markers needed without decrypting room history."""
-        encrypted_message_type, encrypted_content = super().encrypt(room_id, message_type, content)
+        encrypted_message_type, encrypted_content = super().encrypt(
+            room_id,
+            message_type,
+            content,
+        )
         encrypted_content.update(encryption_visible_metadata(content))
         return encrypted_message_type, encrypted_content
 
-    def _handle_olm_events(self, response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
+    def _handle_olm_events(
+        self,
+        response: object,
+    ) -> None:
         """Preserve an explicit zero OTK count so nio replenishes a drained pool."""
-        super()._handle_olm_events(response)
-        count = response.device_key_count.signed_curve25519
+        sync_response = cast("nio.SyncResponse", response)
+        super()._handle_olm_events(sync_response)
+        count = sync_response.device_key_count.signed_curve25519
         if self.olm is not None and count is not None:
             self.olm.uploaded_key_count = count
 
-    def _handle_decrypt_to_device(self, to_device_event: nio.ToDeviceEvent) -> nio.ToDeviceEvent | None:
+    def _handle_decrypt_to_device(
+        self,
+        to_device_event: nio.ToDeviceEvent,
+    ) -> nio.ToDeviceEvent | nio.BadEvent | nio.UnknownBadEvent | None:
         decrypted = super()._handle_decrypt_to_device(to_device_event)
-        if not isinstance(to_device_event, nio.OlmEvent) or not isinstance(decrypted, nio.UnknownToDeviceEvent):
+        if not isinstance(to_device_event, nio.OlmEvent) or not isinstance(
+            decrypted,
+            nio.UnknownToDeviceEvent,
+        ):
             return decrypted
         if self.olm is None:
             _log_custom_olm_rejection(decrypted, "missing_olm_machine")
@@ -194,7 +198,7 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         )
 
 
-def _require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
+def require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
     """Reject stale positional call shapes with a clear error."""
     if isinstance(runtime_paths, RuntimePaths):
         return runtime_paths
@@ -203,17 +207,6 @@ def _require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
         "Call matrix_client(homeserver, runtime_paths, user_id=...)"
     )
     raise TypeError(msg)
-
-
-def set_before_sync_response_callback(
-    client: nio.AsyncClient,
-    callback: Callable[[nio.SyncResponse | nio.SlidingSyncResponse], None],
-) -> None:
-    """Register pre-admission sync work on a MindRoom-created Matrix client."""
-    if not isinstance(client, _MindRoomAsyncClient):
-        msg = "Pre-admission sync callbacks require a MindRoom Matrix client"
-        raise TypeError(msg)
-    client.set_before_sync_response_callback(callback)
 
 
 def matrix_startup_error(
@@ -230,7 +223,11 @@ def matrix_startup_error(
     return ValueError(message)
 
 
-def _maybe_ssl_context(homeserver: str, runtime_paths: RuntimePaths) -> ssl_module.SSLContext | None:
+def maybe_ssl_context(
+    homeserver: str,
+    runtime_paths: RuntimePaths,
+) -> ssl_module.SSLContext | None:
+    """Return the configured Matrix SSL context when HTTPS requires one."""
     if homeserver.startswith("https://"):
         if not runtime_matrix_ssl_verify(runtime_paths=runtime_paths):
             ssl_context = ssl_module.create_default_context()
@@ -262,9 +259,6 @@ def matrix_client_config(
     """Return nio config, copying plain headers while preserving request-time mappings."""
     custom_headers = dict(http_headers) if isinstance(http_headers, dict) else http_headers
     return nio.AsyncClientConfig(
-        backfill_limited_timelines=True,
-        backfill_max_events=_BACKFILL_MAX_EVENTS,
-        backfill_persist_recovery=sync_storage.persist_recovery,
         store_sync_tokens=sync_storage.store_tokens,
         custom_headers=cast("dict[str, str] | None", custom_headers),
         replace_rotated_device_keys=True,
@@ -282,8 +276,8 @@ def _create_matrix_client(
     sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
     """Create a Matrix client with consistent configuration."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
-    ssl_context = _maybe_ssl_context(homeserver, runtime_paths=runtime_paths)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
+    ssl_context = maybe_ssl_context(homeserver, runtime_paths=runtime_paths)
 
     if store_path is None and user_id:
         store_path = str(olm_store_dir(user_id, runtime_paths=runtime_paths))
@@ -292,7 +286,7 @@ def _create_matrix_client(
         if os.name != "nt":
             store_dir.chmod(0o700)
 
-    client = _MindRoomAsyncClient(
+    client = MindRoomAsyncClient(
         homeserver,
         user_id or "",
         store_path=store_path,
@@ -343,7 +337,7 @@ async def matrix_client(
     access_token: str | None = None,
 ) -> AsyncGenerator[nio.AsyncClient, None]:
     """Context manager for Matrix client that ensures proper cleanup."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
     client = _create_matrix_client(homeserver, runtime_paths, user_id, access_token)
     try:
         yield client
@@ -361,7 +355,7 @@ async def login(
     sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
     """Login to Matrix and return an authenticated client."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
     client = _create_matrix_client(
         homeserver,
         runtime_paths,
@@ -389,10 +383,16 @@ async def login_with_token(
     *,
     expected_user_id: str | None = None,
     http_headers: Mapping[str, str] | None = None,
+    sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
     """Exchange one short-lived Matrix login token and restore its exact device."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
-    login_client = _create_matrix_client(homeserver, runtime_paths, http_headers=http_headers)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
+    login_client = _create_matrix_client(
+        homeserver,
+        runtime_paths,
+        http_headers=http_headers,
+        sync_storage=sync_storage,
+    )
     try:
         response = await login_client.login(
             token=login_token,
@@ -422,6 +422,7 @@ async def login_with_token(
         access_token,
         runtime_paths,
         http_headers=http_headers,
+        sync_storage=sync_storage,
     )
 
 
@@ -458,7 +459,7 @@ async def login_flows(
     http_headers: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Return login methods advertised by one Matrix homeserver."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
     client = _create_matrix_client(homeserver, runtime_paths, http_headers=http_headers)
     try:
         response = await client.login_info()
@@ -481,7 +482,7 @@ async def restore_login(
     sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
     """Restore one authenticated Matrix session without creating a new device."""
-    runtime_paths = _require_runtime_paths_arg(runtime_paths)
+    runtime_paths = require_runtime_paths_arg(runtime_paths)
     client = _create_matrix_client(
         homeserver,
         runtime_paths,
@@ -497,7 +498,11 @@ async def restore_login(
         client.user_id = response.user_id
         if response.device_id:
             client.device_id = response.device_id
-        logger.info("matrix_login_restored", user_id=response.user_id, device_id=client.device_id)
+        logger.info(
+            "matrix_login_restored",
+            user_id=response.user_id,
+            device_id=client.device_id,
+        )
         return client
 
     await client.close()
@@ -508,6 +513,7 @@ async def restore_login(
 __all__ = [
     "DEFAULT_MATRIX_SYNC_STORAGE",
     "MatrixSyncStorage",
+    "MindRoomAsyncClient",
     "PermanentMatrixStartupError",
     "create_authenticated_client",
     "login",
@@ -516,8 +522,9 @@ __all__ = [
     "matrix_client",
     "matrix_client_config",
     "matrix_startup_error",
+    "maybe_ssl_context",
     "olm_store_dir",
     "olm_store_exists",
+    "require_runtime_paths_arg",
     "restore_login",
-    "set_before_sync_response_callback",
 ]

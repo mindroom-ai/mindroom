@@ -27,9 +27,10 @@ from .approvals import (
 )
 from .background_approvals import BackgroundApprovalDecision
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
-from .membership import MembershipFence, MembershipView
+from .journal import validate_ingestion_batch_admission
 from .models import (
     TURN_BACKED_KINDS,
+    AdmissionFacts,
     AdmissionResult,
     ConversationCursor,
     ConversationPage,
@@ -44,10 +45,18 @@ from .models import (
     HydrationCoverage,
     HydrationPolicy,
     InboundEvent,
+    IngestionBatchAdmission,
+    IngestionBatchIntegrityError,
+    IngestionBatchSequenceError,
+    IngestionBatchValidationError,
+    IngestionConsumer,
+    IngestionConsumerBindingError,
+    IngestionRecordDisposition,
     JournalEvent,
     MatrixDelivery,
     PendingPage,
     RefreshRequest,
+    RoomMembershipPosition,
     SemanticConsumer,
     TerminalTurnWrite,
     UnreadableMatrixDelivery,
@@ -71,6 +80,7 @@ from .views import (
 
 __all__ = [
     "TURN_BACKED_KINDS",
+    "AdmissionFacts",
     "AdmissionResult",
     "AdmissionView",
     "ApprovalCall",
@@ -100,12 +110,17 @@ __all__ = [
     "HydrationPolicy",
     "HydrationView",
     "InboundEvent",
+    "IngestionBatchAdmission",
+    "IngestionBatchIntegrityError",
+    "IngestionBatchSequenceError",
+    "IngestionBatchValidationError",
+    "IngestionConsumer",
+    "IngestionConsumerBindingError",
+    "IngestionRecordDisposition",
     "InteractiveSelection",
     "JournalEvent",
     "MatrixDelivery",
     "MatrixDeliveryView",
-    "MembershipFence",
-    "MembershipView",
     "PendingPage",
     "PendingTurnView",
     "PrincipalStore",
@@ -115,6 +130,7 @@ __all__ = [
     "RelationView",
     "ReplayView",
     "RoomHistoryRecovery",
+    "RoomMembershipPosition",
     "SemanticConsumer",
     "StoredApprovalCard",
     "TerminalTurnWrite",
@@ -128,5 +144,6 @@ __all__ = [
     "matrix_delivery_payload",
     "replacement_target",
     "thread_root",
+    "validate_ingestion_batch_admission",
     "visible_content",
 ]

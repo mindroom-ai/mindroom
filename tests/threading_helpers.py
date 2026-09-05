@@ -39,7 +39,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
+from tests.sync_continuity_helpers import load_sync_checkpoint
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
@@ -521,23 +521,6 @@ def _conversation_runtime_config() -> Config:
     )
 
 
-def _save_certified_sync_token(
-    bot: AgentBot,
-    token: str,
-) -> None:
-    """Persist one certified sync token for bot lifecycle tests.
-
-    Certified by the event journal: the token has to name the store that
-    consumed the events it covers.
-    """
-    save_sync_token(
-        bot.storage_path,
-        bot.agent_name,
-        token,
-        store_generation=bot._sync_checkpoint_trust.store_generation,
-    )
-
-
 class ThreadingBehaviorTestBase:
     """Shared fixtures and helpers for the split TestThreadingBehavior modules."""
 
@@ -583,11 +566,6 @@ class ThreadingBehaviorTestBase:
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
-        # Sync checkpoints are certified by the event journal. Pinned so a test
-        # that saves one and restarts exercises the token logic rather than the
-        # first-open mint, which would rightly reject it.
-        bot._sync_checkpoint_trust.store_generation = "test-store-generation"
-
         # Initialize components that depend on client
 
         # Mock the agent to return a response

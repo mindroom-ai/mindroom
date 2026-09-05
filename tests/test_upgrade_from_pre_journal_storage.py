@@ -239,7 +239,7 @@ def test_the_pre_journal_sync_checkpoint_is_refused_and_repaired(
     with pytest.raises(RuntimeError, match="unsupported version"):
         store.load()
 
-    repaired = store.clear_checkpoint()
+    repaired = store._clear_checkpoint()
 
     assert repaired.checkpoint is None
     assert store.load().checkpoint is None

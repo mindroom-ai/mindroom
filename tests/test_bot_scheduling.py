@@ -28,7 +28,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
-from tests.bot_helpers import make_test_agent_bot
+from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -496,8 +496,7 @@ class TestBotTaskRestoration:
 
             # Mock the necessary methods
             with (
-                patch("mindroom.matrix.users.login") as mock_login,
-                patch("mindroom.bot.set_before_sync_response_callback") as set_before_sync_response_callback,
+                patch("mindroom.bot.login_agent_owned_session") as mock_login,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
@@ -509,7 +508,7 @@ class TestBotTaskRestoration:
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
                 mock_client.rooms = {}
-                mock_login.return_value = mock_client
+                mock_login.return_value = owned_matrix_login(mock_client)
 
                 # Mock the client.join method to return JoinResponse
                 mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
@@ -524,10 +523,6 @@ class TestBotTaskRestoration:
                 # Verify restore was called for the room with config
                 mock_restore.assert_called_once()
                 assert mock_restore.call_args.args[1] == "!test:server"
-                set_before_sync_response_callback.assert_called_once_with(
-                    mock_client,
-                    bot._before_sync_response_admission,
-                )
 
                 # Just verify restore was called - logger testing is complex with the bind() method
                 assert mock_restore.called
@@ -555,7 +550,7 @@ class TestBotTaskRestoration:
             install_runtime_journal_support(bot)
 
             with (
-                patch("mindroom.matrix.users.login") as mock_login,
+                patch("mindroom.bot.login_agent_owned_session") as mock_login,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
                 patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
             ):
@@ -568,7 +563,7 @@ class TestBotTaskRestoration:
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
                 mock_client.rooms = {}
-                mock_login.return_value = mock_client
+                mock_login.return_value = owned_matrix_login(mock_client)
 
                 # Mock the client.join method to return JoinResponse
                 mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})

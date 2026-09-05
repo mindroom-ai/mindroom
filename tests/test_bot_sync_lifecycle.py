@@ -9,6 +9,8 @@ only ever happened to share a sync callback with.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,17 +18,14 @@ import nio
 import pytest
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
-from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, current_task_is_process_shutdown
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import EVENT_AGENT_STARTED
-from mindroom.matrix.sync_certification import SyncTrustState
-from mindroom.matrix.sync_token_values import SyncCheckpoint
-from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
-from tests.sync_continuity_helpers import load_sync_checkpoint
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
-    _load_sync_token_value,
     _make_client_mock,
-    _save_certified_sync_token,
 )
 
 if TYPE_CHECKING:
@@ -37,28 +36,156 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
     """Startup, checkpoint certification, redaction ownership, and drain behavior."""
 
     @pytest.mark.asyncio
-    async def test_start_resets_running_flag_when_agent_started_hooks_fail(self, bot: AgentBot) -> None:
+    @pytest.mark.parametrize(("standalone", "first_sync_response"), [(False, True), (True, True), (True, False)])
+    async def test_start_holds_reactions_until_semantic_dispatch_is_released(
+        self,
+        bot: AgentBot,
+        standalone: bool,
+        first_sync_response: bool,
+    ) -> None:
+        """Durable non-turn work must survive startup without running under stale grants."""
+        if standalone:
+            bot.orchestrator = None
+        dispatched = asyncio.Event()
+
+        async def on_reaction(_room: nio.MatrixRoom, _event: nio.ReactionEvent) -> TurnDispatchOutcome:
+            dispatched.set()
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        dispatcher = bot._journal_dispatcher
+        dispatcher.callbacks = replace(dispatcher.callbacks, on_reaction=on_reaction)
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        event = nio.ReactionEvent.from_dict(
+            {
+                "type": "m.reaction",
+                "event_id": "$startup-reaction:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$target", "key": "ok"}},
+            },
+        )
+        assert isinstance(event, nio.ReactionEvent)
+        with (
+            patch.object(bot, "ensure_user_account", AsyncMock()),
+            patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=bot.client)),
+            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
+        ):
+            await bot.start()
+
+        try:
+            await dispatcher.admit_out_of_band(room, event, EventKind.REACTION, EventClass.ACTIONABLE)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(dispatched.wait(), timeout=0.05)
+            assert await dispatcher.store.is_pending(event.event_id)
+
+            if standalone:
+                with (
+                    patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()),
+                    patch.object(bot, "_schedule_delivery_recovery"),
+                    patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
+                    patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+                ):
+                    await bot._run_sync_response_side_effects(first_sync_response=first_sync_response)
+            else:
+                bot.release_pending_turn_journal_replay()
+            await asyncio.wait_for(dispatched.wait(), timeout=1.0)
+            await dispatcher.drain_once()
+            assert not await dispatcher.store.is_pending(event.event_id)
+        finally:
+            await dispatcher.stop()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "startup_error",
+        [RuntimeError("hook boom"), asyncio.CancelledError()],
+        ids=["error", "cancel"],
+    )
+    async def test_start_resets_running_flag_when_agent_started_hooks_fail(
+        self,
+        bot: AgentBot,
+        startup_error: BaseException,
+    ) -> None:
         """Startup cleanup should clear running state if EVENT_AGENT_STARTED emission fails."""
         start_client = _make_client_mock(user_id="@mindroom_general:localhost")
         start_client.add_event_callback = MagicMock()
         start_client.add_response_callback = MagicMock()
         start_client.close = AsyncMock()
+        ingestion_session = AsyncMock()
+        close_order: list[str] = []
+        cleanup_error = RuntimeError("ingestion cleanup boom")
+
+        async def close_ingestion() -> None:
+            close_order.append("ingestion")
+            raise cleanup_error
+
+        async def close_http() -> None:
+            close_order.append("http")
+
+        ingestion_session.close.side_effect = close_ingestion
+        start_client.close.side_effect = close_http
         bot.hook_registry = MagicMock()
         bot.hook_registry.has_hooks.side_effect = lambda event_name: event_name == EVENT_AGENT_STARTED
 
         with (
             patch.object(bot, "ensure_user_account", AsyncMock()),
-            patch("mindroom.bot.login_agent_user", AsyncMock(return_value=start_client)),
+            patch(
+                "mindroom.bot.login_agent_owned_session",
+                AsyncMock(return_value=SimpleNamespace(client=start_client, session=ingestion_session)),
+            ),
             patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-            patch("mindroom.bot.emit", AsyncMock(side_effect=RuntimeError("hook boom"))),
-            pytest.raises(RuntimeError, match="hook boom"),
+            patch("mindroom.bot.emit", AsyncMock(side_effect=startup_error)),
+            pytest.raises(type(startup_error)),
         ):
             await bot.start()
 
         start_client.close.assert_awaited_once()
+        ingestion_session.close.assert_awaited_once()
+        assert close_order == ["ingestion", "http"]
         assert bot.running is False
         assert bot.client is None
+        assert bot._ingestion_session is None
+
+    @pytest.mark.asyncio
+    async def test_approval_recovery_retains_owned_store_until_final_send_finishes(self, bot: AgentBot) -> None:
+        """A recovery-only FINAL reuses restored owned state and releases both ownership lanes."""
+        bot.client = None
+        client = _make_client_mock(user_id=bot.agent_user.user_id)
+        client.device_id = "RECOVERY_DEVICE"
+        session = AsyncMock()
+        order: list[str] = []
+
+        async def recover(_approval_id: str) -> bool:
+            assert bot.client is client
+            assert bot._ingestion_session is session
+            assert bot._sending_device_id == "RECOVERY_DEVICE"
+            order.append("final")
+            return True
+
+        async def close_session() -> None:
+            order.append("session")
+
+        async def close_client() -> None:
+            order.append("client")
+
+        session.close.side_effect = close_session
+        client.close.side_effect = close_client
+        with (
+            patch(
+                "mindroom.bot.login_agent_owned_session",
+                AsyncMock(return_value=SimpleNamespace(client=client, session=session)),
+            ),
+            patch.object(bot._response_runner, "recover_approval_final", AsyncMock(side_effect=recover)),
+        ):
+            assert await bot.recover_approval_final("approval")
+
+        assert order == ["final", "session", "client"]
+        assert bot.client is None
+        assert bot._ingestion_session is None
+        assert bot._sending_device_id is None
+        client.sync.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_login_as_another_user_keeps_the_journal_this_bot_already_opened(self, bot: AgentBot) -> None:
@@ -88,54 +215,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             await store_before_login.existing_generation()
 
     @pytest.mark.asyncio
-    async def test_restored_first_sync_success_updates_checkpoint(self, bot: AgentBot) -> None:
-        """Successful restored-token catch-up should save the new checkpoint token."""
-        _save_certified_sync_token(bot, "s_before_complete")
-        bot._runtime_view.mark_runtime_started()
-        bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
-        bot.client.next_batch = "s_after_complete"
-
-        await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
-
-        checkpoint = load_sync_checkpoint(bot.storage_path, bot.agent_name)
-        assert checkpoint is not None
-        assert checkpoint.token == "s_after_complete"  # noqa: S105
-
-    @pytest.mark.asyncio
-    async def test_empty_joined_rooms_first_sync_certifies_checkpoint(self, bot: AgentBot) -> None:
-        """A non-limited empty sync response can certify that there were no room deltas."""
-        _save_certified_sync_token(bot, "s_before_empty")
-        bot._runtime_view.mark_runtime_started()
-        bot._sync_checkpoint_trust.state = SyncTrustState.PENDING
-        bot.client.next_batch = "s_after_empty"
-
-        await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
-
-        checkpoint = load_sync_checkpoint(bot.storage_path, bot.agent_name)
-        assert checkpoint is not None
-        assert checkpoint.token == "s_after_empty"  # noqa: S105
-
-    @pytest.mark.asyncio
-    async def test_sync_error_keeps_watchdog_clock_on_latest_activity(self, bot: AgentBot) -> None:
-        """Sync errors should keep the watchdog alive using the latest observed sync activity."""
-        sync_response = MagicMock()
-        sync_response.__class__ = nio.SyncResponse
-        sync_response.rooms = MagicMock(join={})
-        sync_error = MagicMock(spec=nio.SyncError)
-        bot._first_sync_done = True
-
-        monotonic_values = iter([100.0, 200.0])
-
-        def monotonic_side_effect() -> float:
-            return next(monotonic_values, 200.0)
-
-        with patch("mindroom.bot.time.monotonic", side_effect=monotonic_side_effect):
-            await bot._on_sync_response(sync_response)
-            await bot._on_sync_error(sync_error)
-
-        assert bot._last_sync_monotonic == 200.0
-
-    @pytest.mark.asyncio
     async def test_live_redaction_tombstones_the_source_it_names(self, bot: AgentBot) -> None:
         """The redaction callback owes exactly one thing: the durable tombstone."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
@@ -149,32 +228,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             await bot._on_redaction(room, redaction_event)
 
         mark_source_redacted.assert_called_once_with("$source:localhost")
-
-    @pytest.mark.asyncio
-    async def test_live_redaction_failure_does_not_rewind_raw_sync_position(
-        self,
-        bot: AgentBot,
-    ) -> None:
-        """Durable exact work, not raw token rewind, owns redaction retry."""
-        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
-        redaction_event = MagicMock(spec=nio.RedactionEvent)
-        redaction_event.redacts = "$source:localhost"
-        _save_certified_sync_token(bot, "s_before_redaction")
-        bot._sync_checkpoint_trust.checkpoint = SyncCheckpoint("s_before_redaction")
-        bot.client.next_batch = "s_after_redaction"
-
-        with (
-            patch.object(
-                bot._turn_store,
-                "mark_source_redacted",
-                side_effect=RuntimeError("persist failed"),
-            ),
-            pytest.raises(RuntimeError, match="persist failed"),
-        ):
-            await bot._on_redaction(room, redaction_event)
-
-        assert bot.client.next_batch == "s_after_redaction"
-        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_redaction"
 
     @pytest.mark.asyncio
     async def test_wait_for_background_tasks_owner_scope_isolated(self, bot: AgentBot) -> None:
@@ -329,3 +382,30 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
 
         assert completed is False
         assert cancelled_args == [(SYNC_RESTART_CANCEL_MSG,)]
+
+    @pytest.mark.asyncio
+    async def test_orderly_background_task_drain_marks_process_shutdown(self) -> None:
+        """Owned recovery tasks must see process shutdown before their cancellation."""
+        owner = object()
+        task_started = asyncio.Event()
+        process_shutdown_markers: list[bool] = []
+
+        async def never_finishes() -> None:
+            task_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                process_shutdown_markers.append(current_task_is_process_shutdown())
+                raise
+
+        create_background_task(never_finishes(), name="orderly_cancelled_task", owner=owner)
+        await asyncio.wait_for(task_started.wait(), timeout=1.0)
+
+        completed = await wait_for_background_tasks(
+            timeout=0.0,
+            owner=owner,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+
+        assert completed is False
+        assert process_shutdown_markers == [True]

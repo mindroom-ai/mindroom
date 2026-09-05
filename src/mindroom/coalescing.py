@@ -37,7 +37,13 @@ from .dispatch_recovery_context import turn_dispatch_recovery_scope
 from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot, ReceiptLaneKey
 from .logging_config import get_logger
-from .runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
+from .response_admission import ResponseAdmissionRefusedError
+from .runtime_shutdown import (
+    GENERIC_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
+    RuntimeShutdownIntent,
+    ShutdownBudget,
+)
 from .timing import elapsed_ms_since, emit_elapsed_timing, event_timing_scope
 
 if TYPE_CHECKING:
@@ -101,6 +107,7 @@ class CoalescingDrainResult:
     dropped_ready_count: int = 0
     dispatch_failure_count: int = 0
     dispatch_cancelled_count: int = 0
+    admission_deferred_count: int = 0
 
 
 @dataclass
@@ -111,6 +118,7 @@ class _MutableDrainResult:
     dropped_ready_count: int = 0
     dispatch_failure_count: int = 0
     dispatch_cancelled_count: int = 0
+    admission_deferred_count: int = 0
 
     def freeze(self) -> CoalescingDrainResult:
         completed = not any(
@@ -131,15 +139,22 @@ class _MutableDrainResult:
             dropped_ready_count=self.dropped_ready_count,
             dispatch_failure_count=self.dispatch_failure_count,
             dispatch_cancelled_count=self.dispatch_cancelled_count,
+            admission_deferred_count=self.admission_deferred_count,
         )
 
 
 @dataclass
 class _DrainContext:
-    ready_timeout_seconds: float | None
+    shutdown_budget: ShutdownBudget | None
     result: _MutableDrainResult
     shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN
     cancelled_initial_drain_tasks: bool = False
+
+    def remaining_seconds(self) -> float | None:
+        """Return the remaining total bounded-drain time, if bounded."""
+        if self.shutdown_budget is None:
+            return None
+        return self.shutdown_budget.remaining_seconds()
 
 
 @dataclass
@@ -384,7 +399,7 @@ class CoalescingGate:
 
     @staticmethod
     def _is_bounded_drain(context: _DrainContext | None) -> bool:
-        return context is not None and context.ready_timeout_seconds is not None
+        return context is not None and context.shutdown_budget is not None
 
     @staticmethod
     def _gate_work_count(gate: _GateEntry) -> int:
@@ -408,7 +423,7 @@ class CoalescingGate:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*(slot.settled.wait() for slot in unsettled)),
-                    timeout=drain_context.ready_timeout_seconds,
+                    timeout=drain_context.remaining_seconds(),
                 )
             except TimeoutError:
                 await self._abandon_lane_slots(unsettled, drain_context)
@@ -445,7 +460,10 @@ class CoalescingGate:
         for slot in slots:
             if slot.settled.is_set():
                 continue
-            outcome = await self._lanes.abandon_slot(slot, ready_timeout_seconds=drain_context.ready_timeout_seconds)
+            outcome = await self._lanes.abandon_slot(
+                slot,
+                ready_timeout_seconds=drain_context.remaining_seconds(),
+            )
             drain_context.result.released_reservation_count += 1
             drain_context.result.cancelled_unready_count += outcome.cancelled_unready_count
             drain_context.result.dropped_ready_count += outcome.dropped_ready_count
@@ -742,11 +760,17 @@ class CoalescingGate:
         self,
         *,
         ready_timeout_seconds: float | None = None,
+        shutdown_budget: ShutdownBudget | None = None,
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> CoalescingDrainResult:
         """Flush every active gate and await owned drain tasks."""
+        if ready_timeout_seconds is not None and shutdown_budget is not None:
+            message = "provide either a ready timeout or a shutdown budget, not both"
+            raise ValueError(message)
+        if shutdown_budget is None and ready_timeout_seconds is not None:
+            shutdown_budget = ShutdownBudget.start(ready_timeout_seconds)
         drain_context = _DrainContext(
-            ready_timeout_seconds=ready_timeout_seconds,
+            shutdown_budget=shutdown_budget,
             result=_MutableDrainResult(),
             shutdown_intent=shutdown_intent,
         )
@@ -942,9 +966,17 @@ class CoalescingGate:
             raise
         except Exception as error:
             segment_owner.close_metadata_once()
-            if (drain_context := self._current_drain_context(gate)) is not None:
-                drain_context.result.dispatch_failure_count += 1
-            self._log_dispatch_failure(key, gate, error)
+            drain_context = self._current_drain_context(gate)
+            if type(error) is ResponseAdmissionRefusedError and (
+                self._is_shutting_down()
+                or (drain_context is not None and drain_context.shutdown_intent == ORDERLY_SHUTDOWN)
+            ):
+                if drain_context is not None:
+                    drain_context.result.admission_deferred_count += 1
+            else:
+                if drain_context is not None:
+                    drain_context.result.dispatch_failure_count += 1
+                self._log_dispatch_failure(key, gate, error)
             return False
         else:
             return True
@@ -1185,7 +1217,7 @@ class _CoalescingDrainCoordinator:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*(slot.settled.wait() for slot in slots)),
-                    timeout=self.context.ready_timeout_seconds,
+                    timeout=self.context.remaining_seconds(),
                 )
             except TimeoutError:
                 await self.gate._abandon_lane_slots(slots, self.context)
@@ -1199,7 +1231,7 @@ class _CoalescingDrainCoordinator:
         if not self.gate._is_bounded_drain(self.context):
             await asyncio.gather(*tasks_to_await, return_exceptions=True)
             return False, False
-        done, pending = await asyncio.wait(tasks_to_await, timeout=self.context.ready_timeout_seconds)
+        done, pending = await asyncio.wait(tasks_to_await, timeout=self.context.remaining_seconds())
         if done:
             await asyncio.gather(*done, return_exceptions=True)
         if not pending:
