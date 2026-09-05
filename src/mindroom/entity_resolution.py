@@ -72,6 +72,8 @@ def configured_call_agent_name_for_room(
         room_aliases=room_aliases,
     )
     call_agents = set(routable_names).intersection(config.calls.agents)
+    if len(call_agents) == 1:
+        return next(iter(call_agents))
     for agent_name in config.calls.agents:
         if not should_persist_invited_rooms(config, agent_name):
             continue
