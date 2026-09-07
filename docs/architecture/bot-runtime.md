@@ -23,7 +23,7 @@ It should send, edit, redact, and finalize already-generated responses.
 It is still coupled to the current persistence split, but its workflow boundary is real.
 
 `TurnStore` owns source-redaction tombstoning, and removes redacted persisted replay before the next response starts in the affected conversation.
-The projection learns about a redaction through journal admission, so the Matrix redaction callback owes only that tombstone.
+The projection learns about a redaction through journal admission; the Matrix callback records the exact tombstone and joins it to retained physical revision owners.
 
 ## Current Problems
 
@@ -243,7 +243,8 @@ Consumer-owned side effects remain responsible for their own replay semantics; f
 One codec projects that schema into the versioned handled-turn ledger and recoverable Agno run metadata.
 Interactive-selection discovery aliases remain separate from canonical source identity, so recovery can index every triggering event without making one message look coalesced.
 Coalesced router relays persist each human discovery alias on its physical source metadata so later edits and redactions update the owned prompt.
-Per-source Matrix revision tuples keep durable edit facts newest-wins across retries and restarts.
+Per-source Matrix revision tuples identify the selected canonical prompt body.
+The owning turn's typed physical revision map retains edit ordering independently, so canonical refill may select a surviving original or older body while stale callbacks remain stale.
 `EditRegenerator` groups edits by room, response anchor, and requester in a bounded per-response mailbox.
 One draining owner folds each source's newest Matrix revision into a complete response request and loops when newer edits arrive.
 Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
@@ -264,6 +265,17 @@ Matrix source redactions are durably tombstoned in the same transaction that wit
 A tombstone becomes a retained cleanup intent once the entity has recorded the affected conversation context, while unrelated redactions remain bounded ledger barriers without storage probes.
 Pending normal and interactive responses durably record their exact target and history scope off the event loop before generation, and every source-backed response checks tombstones again under the lifecycle lock.
 Before a response starts, `TurnStore` removes the matching run and its causal suffix from every history scope recorded for the conversation, clears summary-backed replay state, preserves compaction run tombstones, and sanitizes coalesced prompt metadata used by later edit regeneration.
+Physical edits register on the owning turn before prompt retention or generation, including edits consumed only as another turn's context, without becoming source indexes or completion aliases.
+Exact edit tombstones invalidate those revisions while preserving the original source, completed response identity, and any unrelated surviving revision.
+Consumed-history metadata retains physical revision IDs through compaction; only legacy records lacking that provenance use retained source ownership to invalidate an ambiguous compacted summary.
+Registration, tombstone reconciliation, and cleanup share ledger conflict keys, and unsettled physical edits or pending cleanup pin their owners through retention.
+Recovery sanitizes each candidate before removing revision tags or backfilling missing prompts, and cleanup acknowledgement occurs only after all affected scopes are durably clean.
+The revision map remains ledger-owned; model runs carry consumption provenance without mutable cleanup debt.
+Each physical revision may retain a completed response ID as historical consumption proof, which registration alone never grants and deletion never erases.
+Coalesced regeneration refills invalidated slots through strict paginated reads proving source, requester, and visible revision, including sidecars.
+The locked edit preparation gate explicitly requests a rebuild for an invalid snapshot, preserving other pending edits when the driving revision is deleted.
+The source-preparation callback receives the actual request history both at early admission and after the final locked history and payload refresh, so context-only revisions are registered before consumption.
+Physical snapshot validation follows awaited cleanup and STOP preparation; synchronous stale-run pruning happens at most once for each immutable edit request.
 Redacted replay may remain in local session storage until that conversation's next response, but no model receives it.
 Semantic memory backends such as Mem0 have a separate lifecycle and are not altered by persisted replay cleanup.
 

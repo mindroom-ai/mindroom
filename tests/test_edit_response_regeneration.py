@@ -345,7 +345,7 @@ def _generate_response_with_locked_callback(
     async def _generate_response(request: ResponseRequest) -> str | None:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if request.prepare_source_turn is not None and await request.prepare_source_turn():
+        if request.prepare_source_turn is not None and await request.prepare_source_turn(request.thread_history):
             return None
         return response_event_id
 
@@ -1929,8 +1929,8 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
     }
 
     async def fail_visible_update(request: ResponseRequest) -> str | None:
-        if request.on_lifecycle_lock_acquired is not None:
-            request.on_lifecycle_lock_acquired()
+        assert request.prepare_source_turn is not None
+        assert await request.prepare_source_turn(request.thread_history) is False
         return "$response:example.com"
 
     mock_generate_response = AsyncMock(side_effect=fail_visible_update)

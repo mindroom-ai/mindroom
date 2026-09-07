@@ -178,6 +178,7 @@ class TestStreamingEdits:
         edit_event1.sender = "@user:localhost"
         edit_event1.body = "* @mindroom_calculator:localhost: What's 2+2? Can you show the work?"
         edit_event1.event_id = "$edit1"
+        edit_event1.server_timestamp = 1000
         edit_event1.source = {
             "content": {
                 "body": "* @mindroom_calculator:localhost: What's 2+2? Can you show the work?",
@@ -205,6 +206,7 @@ class TestStreamingEdits:
         edit_event2.sender = "@user:localhost"
         edit_event2.body = "* @mindroom_calculator:localhost: What's 2+2? Can you show the work step by step?"
         edit_event2.event_id = "$edit2"
+        edit_event2.server_timestamp = 2000
         edit_event2.source = {
             "content": {
                 "body": "* @mindroom_calculator:localhost: What's 2+2? Can you show the work step by step?",

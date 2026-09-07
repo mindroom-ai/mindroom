@@ -132,6 +132,7 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
 )
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
+from mindroom.turn_record import EditPreparation
 from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
@@ -483,7 +484,9 @@ class ResponseRequest:
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
-    prepare_source_turn: Callable[[], Coroutine[Any, Any, bool]] | None = None
+    prepare_source_turn: (
+        Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, bool | EditPreparation]] | None
+    ) = None
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     on_interrupted_response_recoverable: Callable[[], None] | None = None
@@ -3041,9 +3044,39 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
-        if request.prepare_source_turn is not None and await run_coroutine_until_complete(
-            request.prepare_source_turn(),
-        ):
+        prepared_request = await self._prepare_locked_source(
+            request,
+            resolved_target=resolved_target,
+            history_scope=history_scope,
+        )
+        if prepared_request is None:
+            return None
+        request = prepared_request
+        await record_silent_schedule_started_if_needed(
+            entity_name=self.deps.agent_name,
+            agent_names=request.participating_agent_names or (self.deps.agent_name,),
+            envelope=request.response_envelope,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+        )
+        return request
+
+    async def _prepare_locked_source(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+        history_scope: HistoryScope,
+    ) -> ResponseRequest | None:
+        """Apply the owner gate to this exact request history, before and after refresh."""
+        preparation = (
+            await run_coroutine_until_complete(request.prepare_source_turn(request.thread_history))
+            if request.prepare_source_turn is not None
+            else False
+        )
+        if preparation is EditPreparation.REBUILD:
+            return None
+        if preparation:
             self.deps.logger.info(
                 "response_suppressed_for_terminal_source",
                 source_event_id=request.response_envelope.source_event_id,
@@ -3064,13 +3097,6 @@ class ResponseRunner:
             if request.on_source_turn_suppressed is not None:
                 await request.on_source_turn_suppressed()
             return None
-        await record_silent_schedule_started_if_needed(
-            entity_name=self.deps.agent_name,
-            agent_names=request.participating_agent_names or (self.deps.agent_name,),
-            envelope=request.response_envelope,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-        )
         return request
 
     async def _prepare_admitted_locked_turn(
@@ -3082,7 +3108,7 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity,
         placeholder_message: str | None = None,
         early_placeholder_state: _EarlyPlaceholderState | None = None,
-    ) -> ResponseRequest:
+    ) -> ResponseRequest | None:
         """Run placeholder and request preparation for an already-admitted locked turn."""
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
         placeholder_event_id = None
@@ -3124,7 +3150,12 @@ class ResponseRunner:
             request,
             exclude_history_event_id=placeholder_event_id,
         )
-        return self._request_with_locked_target(request, resolved_target)
+        request = self._request_with_locked_target(request, resolved_target)
+        return await self._prepare_locked_source(
+            request,
+            resolved_target=resolved_target,
+            history_scope=history_scope,
+        )
 
     async def _begin_locked_turn(
         self,
@@ -3615,6 +3646,8 @@ class ResponseRunner:
             placeholder_message=(None if _is_silent_schedule_response(request) else "🤝 Team Response: Thinking..."),
             early_placeholder_state=placeholder_state,
         )
+        if request is None:
+            return None
         team_request = replace(team_request, request=request)
         reason = team_request.resolution_reason
         if reason is not None:
@@ -4789,7 +4822,7 @@ class ResponseRunner:
             thread_id=response_thread_id,
             runtime_paths=self.deps.runtime_paths,
         ).model_name
-        request = await self._prepare_admitted_locked_turn(
+        prepared_request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
             history_scope=history_scope,
@@ -4797,6 +4830,9 @@ class ResponseRunner:
             placeholder_message=None if _is_silent_schedule_response(request) else "Thinking...",
             early_placeholder_state=placeholder_state,
         )
+        if prepared_request is None:
+            return None
+        request = prepared_request
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,

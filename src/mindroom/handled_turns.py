@@ -41,6 +41,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.turn_record import (
+    RevisionReplay,
     SourceEventMetadata,
     SourceEventRevision,
     TurnRecord,
@@ -49,6 +50,7 @@ from mindroom.turn_record import (
     canonicalize_turn_record,
     merge_edit_facts,
     same_turn_identity,
+    sanitize_revision_replay,
 )
 
 if typing.TYPE_CHECKING:
@@ -138,6 +140,9 @@ class TurnRecordCodec:
             "response_event_id": record.response_event_id,
             "completed": record.completed,
             "timestamp": record.timestamp,
+            "revision_replay": {
+                event_id: revision.to_record() for event_id, revision in (record.revision_replay or {}).items()
+            },
         }
         if record.discovery_event_ids:
             payload["discovery_event_ids"] = list(record.discovery_event_ids)
@@ -232,6 +237,7 @@ class TurnRecordCodec:
             visible_echo_is_fallback=_bool_or_none(record.get("visible_echo_is_fallback")),
             source_event_prompts=_mapping_or_none(record.get("source_event_prompts")),
             source_event_revisions=_mapping_or_none(record.get("source_event_revisions")),
+            revision_replay=_mapping_or_none(record.get("revision_replay")),
             suppressed_source_event_revisions=_mapping_or_none(
                 record.get("suppressed_source_event_revisions"),
             ),
@@ -252,6 +258,19 @@ class TurnRecordCodec:
         )
         if event_id not in turn_record.indexed_event_ids:
             return None
+        if "revision_replay" not in record and turn_record.source_event_revisions:
+            turn_record = canonicalize_turn_record(
+                turn_record,
+                revision_replay={
+                    revision_id: RevisionReplay(
+                        turn_record.prompt_source_event_id(source),
+                        timestamp,
+                        legacy_summary_provenance=True,
+                    )
+                    for source, (timestamp, revision_id) in turn_record.source_event_revisions.items()
+                    if revision_id != turn_record.prompt_source_event_id(source)
+                },
+            )
         return turn_record
 
     @staticmethod
@@ -483,6 +502,7 @@ class HandledTurnLedger:
         for event_id in event_ids:
             if (record := self._responses.get(event_id)) is not None:
                 keys.update(record.indexed_event_ids)
+                keys.update(record.revision_replay or {})
                 if record.anchor_event_id is not None:
                     keys.add(record.anchor_event_id)
         return keys
@@ -515,9 +535,11 @@ class HandledTurnLedger:
                         if not candidate.source_event_ids:
                             return None
                         keys.update(self._write_keys(candidate.indexed_event_ids, candidate.anchor_event_id))
+                        keys.update(candidate.revision_replay or {})
                         record = _resolve_turn_record(candidate, self._responses)
                         if record is not None:
                             keys.update(self._write_keys(record.indexed_event_ids, record.anchor_event_id))
+                            keys.update(record.revision_replay or {})
                         blockers = {
                             self._state.pending_writes[key] for key in keys if key in self._state.pending_writes
                         }
@@ -778,6 +800,12 @@ class HandledTurnLedger:
                 ),
             )
 
+    def all_turn_records(self) -> tuple[TurnRecord, ...]:
+        """Return each retained owner once without publishing provenance aliases."""
+        with self._state.lock:
+            self._require_loaded()
+            return tuple({record.indexed_event_ids: record for record in self._responses.values()}.values())
+
     def turn_records_for_conversation(
         self,
         *,
@@ -864,6 +892,17 @@ def _resolve_turn_record(
     existing_records: Mapping[str, TurnRecord],
 ) -> TurnRecord | None:
     """Resolve one candidate against completed identities and newer same-turn rows."""
+    turn_record = sanitize_revision_replay(
+        turn_record,
+        tombstoned_event_ids=tuple(
+            event_id
+            for event_id in {
+                *(turn_record.revision_replay or {}),
+                *(revision[1] for revision in (turn_record.source_event_revisions or {}).values()),
+            }
+            if (record := existing_records.get(event_id)) is not None and event_id in record.redacted_source_event_ids
+        ),
+    )
     conflicting_source_event_ids = tuple(
         event_id
         for event_id in turn_record.source_event_ids
@@ -941,6 +980,8 @@ def _project_redaction_alias(
 
 def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) -> TurnRecord:
     """Keep the newer same-turn record while preserving older echo and discovery facts."""
+    candidate = sanitize_revision_replay(candidate, authority=existing)
+    existing = sanitize_revision_replay(existing, authority=candidate)
     if candidate.completed != existing.completed:
         newer, older = (candidate, existing) if candidate.completed else (existing, candidate)
     else:
@@ -1009,6 +1050,11 @@ def _response_group_requires_retention(
     return (
         not unsettled_source_event_ids.isdisjoint(group.records)
         or any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
+        or any(
+            not unsettled_source_event_ids.isdisjoint(record.revision_replay or {})
+            or any(value.cleanup_pending for value in (record.revision_replay or {}).values())
+            for record in group.records.values()
+        )
         or any(not record.completed and record.replay_source_event_ids for record in group.records.values())
         or any(
             record.user_stop_receipt_order is not None

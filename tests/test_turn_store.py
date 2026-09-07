@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
-from agno.db.base import SessionType
+from agno.agent import Agent
+from agno.db.base import BaseDb, SessionType
+from agno.models.message import Message
+from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
@@ -21,10 +25,12 @@ from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 
 from mindroom import constants
+from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.event_journal.store import TurnRecordStore
+from mindroom.execution_preparation import _build_unseen_context_messages
 from mindroom.handled_turns import (
     SourceEventMetadata,
     TurnRecord,
@@ -34,16 +40,28 @@ from mindroom.handled_turns import (
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
     read_scope_state,
+    seen_event_ids_for_runs,
     update_scope_seen_event_ids,
     write_scope_state,
 )
 from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.text_ingress_dispatch import _run_claimed_response
+from mindroom.turn_record import EditPreparation
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.bot_helpers import make_test_agent_bot
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    TEST_PASSWORD,
+    FakeModel,
+    bind_runtime_paths,
+    make_visible_message,
+    request_envelope,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
@@ -270,7 +288,7 @@ async def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_de
         ),
     )
 
-    assert await store.prepare_edit_response_source(
+    assert await store._prepare_edit_response_source(
         target=target,
         source_event_ids=("$source",),
         response_event_id="$reply",
@@ -281,7 +299,7 @@ async def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_de
     assert stopped.latest_edit_receipt_order is None
     assert stopped.user_stop_settled_receipt_order is None
 
-    assert not await store.prepare_edit_response_source(
+    assert not await store._prepare_edit_response_source(
         target=target,
         source_event_ids=("$source",),
         response_event_id="$reply",
@@ -2517,3 +2535,489 @@ def test_no_test_references_removed_bot_handled_turn_ledger_shim() -> None:
     ]
 
     assert offenders == []
+
+
+@dataclass
+class _ReplayCaptureModel(FakeModel):
+    """Capture the entire request assembled by the real Agno agent."""
+
+    requests: list[str] = field(default_factory=list)
+
+    async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
+        """Record every input message before returning a deterministic answer."""
+        messages = kwargs.get("messages", args[0] if args else None)
+        assert isinstance(messages, list)
+        assert all(isinstance(message, Message) for message in messages)
+        self.requests.append(str([message.content for message in messages]))
+        return ModelResponse(content="captured")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compacted", [False, True])
+@pytest.mark.parametrize("context_only", [False, True])
+async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR0915
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+    compacted: bool,
+    context_only: bool,
+) -> None:
+    """Exact edit deletion removes durable causal replay without deleting its root."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    scope = HistoryScope(kind="agent", scope_id="agent")
+    store = await _store(journal_store)
+    original = replace(
+        _owned_turn_record(target),
+        source_event_prompts={"$user_msg": "CURRENT_SOURCE" if context_only else "DELETED_EDIT_MARKER"},
+        source_event_revisions=None if context_only else {"$user_msg": (10, "$physical-edit")},
+    )
+    await store.record_turn(original)
+
+    def storage_factory(*_args: object, **_kwargs: object) -> BaseDb:
+        return create_state_storage("agent", tmp_path, subdir="sessions", session_table="agent_sessions")
+
+    storage = storage_factory()
+    store.deps.state_writer.create_storage.side_effect = storage_factory
+    store.deps.state_writer.history_scope.return_value = scope
+    store.deps.state_writer.session_type_for_scope.return_value = SessionType.AGENT
+    edited = RunOutput(
+        run_id="edited",
+        agent_id="agent",
+        session_id=target.session_id,
+        messages=[Message(role="user", content="DELETED_EDIT_MARKER")],
+        metadata={
+            constants.MATRIX_EVENT_ID_METADATA_KEY: "$user_msg",
+            constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY: {"$user_msg": [10, "$physical-edit"]},
+        },
+    )
+    visible = replace(
+        make_visible_message(event_id="$context-source", body="DELETED_EDIT_MARKER", timestamp=1),
+        latest_event_id="$physical-edit",
+        edited_timestamp=10,
+    )
+    if context_only:
+        runner = ResponseRunner(deps=MagicMock())
+        request = ResponseRequest(
+            prompt="CURRENT_SOURCE",
+            thread_history=[],
+            user_id="@user:example.org",
+            response_envelope=request_envelope(
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
+                reply_to_event_id="$user_msg",
+                user_id="@user:example.org",
+                agent_name="agent",
+            ),
+            prepare_source_turn=lambda history: store.prepare_pending_response_source(
+                target=target,
+                source_event_ids=("$user_msg",),
+                terminal_source_event_ids=(),
+                thread_history=history,
+            ),
+        )
+        lifecycle_lock = runner._lifecycle_coordinator._response_lifecycle_lock(target)
+        await lifecycle_lock.acquire()
+        waiting = asyncio.Event()
+
+        async def prepare_locked() -> ResponseRequest | None:
+            waiting.set()
+            async with lifecycle_lock:
+                return await runner._begin_locked_turn(
+                    request,
+                    resolved_target=target,
+                    history_scope=scope,
+                    execution_identity=MagicMock(),
+                )
+
+        with patch.object(runner, "_locked_turn_can_begin", AsyncMock(return_value=True)):
+            task = asyncio.create_task(prepare_locked())
+            await waiting.wait()
+            runner.deps.resolver.fetch_thread_history = AsyncMock(
+                return_value=ThreadHistoryResult([visible], is_full_history=True),
+            )
+            lifecycle_lock.release()
+            prepared = await task
+        assert prepared is not None
+        assert prepared.thread_history == [visible]
+        assert store.get_turn_record("$context-source") is None
+        context_owner = store.get_turn_record("$user_msg")
+        assert context_owner is not None
+        registered_before_consumption = "$physical-edit" in (context_owner.revision_replay or {})
+        messages, consumed = _build_unseen_context_messages(
+            "current",
+            prepared.thread_history,
+            seen_event_ids=set(),
+            current_event_id="$user_msg",
+            active_event_ids=(),
+            response_sender_id=None,
+            config=Config(),
+        )
+        edited.messages = list(messages)
+        edited.metadata = {constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: consumed}
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[
+            edited,
+            RunOutput(
+                run_id="dependent",
+                agent_id="agent",
+                session_id=target.session_id,
+                messages=[Message(role="assistant", content="dependent answer")],
+            ),
+        ],
+    )
+    if compacted:
+        update_scope_seen_event_ids(session, scope, seen_event_ids_for_runs([edited]))
+        session.summary = SessionSummary(summary="DELETED_EDIT_MARKER")
+        session.runs = session.runs[1:]
+    storage.upsert_session(session)
+    for run in session.runs or []:
+        storage.upsert_run(run, session_id=session.session_id)
+    storage.close()
+    storage = storage_factory()
+    initial_persisted = get_agent_session(storage, target.session_id)
+    assert initial_persisted is not None
+    if compacted:
+        assert initial_persisted.summary is not None
+        assert initial_persisted.summary.summary == "DELETED_EDIT_MARKER"
+    else:
+        assert "DELETED_EDIT_MARKER" in str([run.messages for run in initial_persisted.runs or []])
+    before_model = _ReplayCaptureModel(id="test", name="test", provider="test")
+    await Agent(
+        id="agent",
+        db=storage,
+        model=before_model,
+        add_history_to_context=True,
+        add_session_summary_to_context=True,
+    ).arun("BASELINE_INPUT", session_id=target.session_id)
+    assert "DELETED_EDIT_MARKER" in str(before_model.requests)
+    storage.close()
+    await store.mark_source_redacted("$physical-edit")
+    _reset_handled_turn_ledger_runtime()
+    reopened = TurnStore(store.deps)
+    await reopened.warm()
+    assert not await reopened._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
+    storage = storage_factory()
+    persisted = get_agent_session(storage, target.session_id)
+    assert persisted is not None
+    next_model = _ReplayCaptureModel(id="test", name="test", provider="test")
+    await Agent(
+        id="agent",
+        db=storage,
+        model=next_model,
+        add_history_to_context=True,
+        add_session_summary_to_context=True,
+    ).arun("NEXT_SURVIVING_INPUT", session_id=target.session_id)
+    assert next_model.requests
+    assert "NEXT_SURVIVING_INPUT" in str(next_model.requests)
+    assert "DELETED_EDIT_MARKER" not in str(next_model.requests)
+    if context_only:
+        assert registered_before_consumption
+        assert reopened.get_turn_record("$context-source") is None
+    owner = reopened.get_turn_record("$user_msg")
+    assert owner is not None
+    assert owner.completed
+    assert owner.response_event_id == "$reply"
+    assert owner.replay_source_event_ids == ("$user_msg",)
+    assert owner.source_event_prompts == ({"$user_msg": "CURRENT_SOURCE"} if context_only else None)
+    storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_timestamp", [1.0, 9999999999.0])
+async def test_edit_tombstone_sanitizes_recovery_before_revision_tags_are_stripped(
+    journal_store: EventJournalStore,
+    recovery_timestamp: float,
+) -> None:
+    """Older backfill and newer run repair cannot restore deleted revision text."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    edited = replace(
+        _owned_turn_record(target),
+        source_event_prompts={"$user_msg": "DELETED_EDIT_MARKER"},
+        source_event_revisions={"$user_msg": (10, "$physical-edit")},
+    )
+    await store.record_turn(edited)
+    await store.mark_source_redacted("$physical-edit")
+    recovered = await _load_with_recovery(
+        store,
+        original_event_id="$user_msg",
+        recovery_record=replace(edited, timestamp=recovery_timestamp),
+    )
+    assert recovered is not None
+    assert "DELETED_EDIT_MARKER" not in str(recovered.source_event_prompts)
+    assert recovered.replay_source_event_ids == ("$user_msg",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("crash_before_join", [False, True])
+async def test_edit_tombstone_registration_crash_reopens_cleanup_owner(
+    journal_store: EventJournalStore,
+    crash_before_join: bool,
+) -> None:
+    """A committed exact tombstone must join its root before cold retention."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_turn(_owned_turn_record(target))
+    if crash_before_join:
+        await store.register_edit_revision("$user_msg", (10, "$physical-edit"))
+        with patch.object(store, "_reconcile_revision_tombstones"):
+            await store.mark_source_redacted("$physical-edit")
+    else:
+        await store.mark_source_redacted("$physical-edit")
+        await store.register_edit_revision("$user_msg", (10, "$physical-edit"))
+    _reset_handled_turn_ledger_runtime()
+    reopened = await _store(journal_store)
+    await reopened.cleanup(unsettled_source_event_ids=("$physical-edit",))
+    owner = reopened.get_turn_record("$user_msg")
+    assert owner is not None
+    assert owner.completed
+    assert owner.response_event_id == "$reply"
+    assert owner.replay_source_event_ids == ("$user_msg",)
+    assert owner.revision_replay["$physical-edit"].cleanup_pending
+    assert "$physical-edit" not in owner.indexed_event_ids
+
+
+@pytest.mark.asyncio
+async def test_completed_root_retains_unsettled_physical_edit(journal_store: EventJournalStore) -> None:
+    """Retention must see physical callback debt without granting source completion."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_turn(_owned_turn_record(target))
+    await store.register_edit_revision("$user_msg", (10, "$unsettled-edit"))
+    owner = store.get_turn_record("$user_msg")
+    assert owner is not None
+    with patch("mindroom.handled_turns.time.time", return_value=owner.timestamp + 40 * 86400):
+        await store.cleanup(unsettled_source_event_ids=("$unsettled-edit",))
+    assert store.get_turn_record("$user_msg") is not None
+    assert store.get_turn_record("$unsettled-edit") is None
+
+
+@pytest.mark.asyncio
+async def test_late_completed_edit_keeps_consumption_proof_without_restoring_text(
+    journal_store: EventJournalStore,
+) -> None:
+    """A request started before deletion may finish afterward with immutable attribution."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_turn(_owned_turn_record(target))
+    await store.register_edit_revision("$user_msg", (10, "$physical-edit"))
+    snapshot = replace(
+        store.get_turn_record("$user_msg"),
+        source_event_prompts={"$user_msg": "DELETED_EDIT_MARKER"},
+        source_event_revisions={"$user_msg": (10, "$physical-edit")},
+    )
+    await store.mark_source_redacted("$physical-edit")
+    await store.record_responded_turn(snapshot)
+    owner = store.get_turn_record("$user_msg")
+    assert owner is not None
+    assert owner.revision_replay["$physical-edit"].response_event_id == "$reply"
+    assert owner.revision_replay["$physical-edit"].cleanup_pending
+    assert not owner.source_event_prompts
+    with patch.object(store, "_remove_redacted_event_from_recorded_scopes", return_value=True):
+        await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
+    await store.record_pending_turn(snapshot)
+    await store.record_responded_turn(snapshot)
+    owner = store.get_turn_record("$user_msg")
+    assert not owner.revision_replay["$physical-edit"].cleanup_pending
+    assert not owner.source_event_prompts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compacted", [False, True])
+async def test_deleted_noncurrent_edit_preserves_independent_surviving_run(
+    journal_store: EventJournalStore,
+    compacted: bool,
+) -> None:
+    """A superseded edit removes only runs that actually consumed that physical revision."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    newest = RunOutput(
+        run_id="newest",
+        session_id=target.session_id,
+        metadata={
+            constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY: {"$user_msg": [20, "$surviving-edit"]},
+        },
+    )
+    session = AgentSession(session_id=target.session_id, agent_id="agent", runs=[newest])
+    if compacted:
+        session.summary = SessionSummary(summary="Independent surviving summary")
+        update_scope_seen_event_ids(
+            session,
+            HistoryScope(kind="agent", scope_id="agent"),
+            ["$user_msg", "$surviving-edit"],
+        )
+    store = await _store_with_storage(journal_store, _FakeAgentStorage(session))
+    await store.record_responded_turn(
+        replace(
+            _owned_turn_record(target),
+            source_event_prompts={"$user_msg": "deleted older"},
+            source_event_revisions={"$user_msg": (10, "$physical-edit")},
+        ),
+    )
+    await store.record_responded_turn(
+        replace(
+            _owned_turn_record(target),
+            source_event_prompts={"$user_msg": "SURVIVING_EDIT"},
+            source_event_revisions={"$user_msg": (20, "$surviving-edit")},
+        ),
+    )
+    await store.mark_source_redacted("$physical-edit")
+    await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
+    assert session.runs == [newest]
+    if compacted:
+        assert session.summary is not None
+        assert session.summary.summary == "Independent surviving summary"
+    owner = store.get_turn_record("$user_msg")
+    assert owner.source_event_prompts == {"$user_msg": "SURVIVING_EDIT"}
+    assert owner.source_event_revisions == {"$user_msg": (20, "$surviving-edit")}
+    assert owner.revision_replay["$physical-edit"].response_event_id == "$reply"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_edit_cleanup_failure_keeps_debt_through_reopen(
+    journal_store: EventJournalStore,
+    cancel: bool,
+) -> None:
+    """Failed or cancelled cleanup cannot acknowledge a partially sanitized conversation."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    store = await _store(journal_store)
+    await store.record_responded_turn(
+        replace(
+            _owned_turn_record(target),
+            source_event_prompts={"$user_msg": "DELETED_EDIT_MARKER"},
+            source_event_revisions={"$user_msg": (10, "$physical-edit")},
+        ),
+    )
+    await store.mark_source_redacted("$physical-edit")
+    failure = asyncio.CancelledError() if cancel else OSError("storage unavailable")
+    with (
+        patch.object(store, "_remove_redacted_event_from_recorded_scopes", side_effect=failure),
+        pytest.raises(type(failure)),
+    ):
+        await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
+    _reset_handled_turn_ledger_runtime()
+    reopened = await _store(journal_store)
+    owner = reopened.get_turn_record("$user_msg")
+    assert owner.revision_replay["$physical-edit"].cleanup_pending
+    with patch.object(reopened, "_remove_redacted_event_from_recorded_scopes", return_value=True):
+        await reopened._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
+    assert not reopened.get_turn_record("$user_msg").revision_replay["$physical-edit"].cleanup_pending
+
+
+@pytest.mark.asyncio
+async def test_newer_registration_during_refill_invalidates_older_selected_snapshot(
+    journal_store: EventJournalStore,
+) -> None:
+    """A refreshed owner watermark does not certify an older captured edit body."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_turn(_owned_turn_record(target))
+    await store.register_edit_revision("$user_msg", (10, "$older"))
+    newer = await store.register_edit_revision("$user_msg", (20, "$newer"))
+    assert newer is not None
+    snapshot = replace(
+        newer,
+        source_event_prompts={"$user_msg": "STALE_BODY"},
+        source_event_revisions={"$user_msg": (10, "$older")},
+    )
+    result = await store.prepare_edit_snapshot(
+        record=snapshot,
+        driving_revision_id="$older",
+        edit_receipt_order=1,
+    )
+    assert result is EditPreparation.REBUILD
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["driver", "sibling", "newer"])
+async def test_edit_snapshot_rechecks_after_awaited_source_preparation(
+    journal_store: EventJournalStore,
+    mutation: str,
+) -> None:
+    """Changes in the final awaited owner preparation cannot admit stale immutable text."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    record = replace(
+        _owned_turn_record(target),
+        source_event_ids=("$sibling", "$user_msg"),
+        source_event_prompts={"$sibling": "SIBLING_EDIT", "$user_msg": "DRIVING_EDIT"},
+        source_event_revisions={"$sibling": (10, "$sibling-edit"), "$user_msg": (20, "$driving-edit")},
+    )
+    await store.record_responded_turn(record)
+    preparation_started = asyncio.Event()
+    preparation_release = asyncio.Event()
+    original_prepare = store._prepare_edit_response_source
+
+    async def delayed_prepare(**kwargs: object) -> bool:
+        preparation_started.set()
+        await preparation_release.wait()
+        return await original_prepare(**kwargs)
+
+    with patch.object(store, "_prepare_edit_response_source", delayed_prepare):
+        task = asyncio.create_task(
+            store.prepare_edit_snapshot(record=record, driving_revision_id="$driving-edit", edit_receipt_order=1),
+        )
+        await preparation_started.wait()
+        if mutation == "newer":
+            await store.register_edit_revision("$user_msg", (30, "$newer-edit"))
+        else:
+            await store.mark_source_redacted("$driving-edit" if mutation == "driver" else "$sibling-edit")
+        preparation_release.set()
+        result = await task
+    assert result is (True if mutation == "driver" else EditPreparation.REBUILD)
+    owner = store.get_turn_record("$user_msg")
+    assert owner is not None
+    assert owner.completed
+    assert owner.response_event_id == "$reply"
+    assert owner.replay_source_event_ids == ("$sibling", "$user_msg")
+    if mutation == "newer":
+        assert owner.revision_replay["$newer-edit"].response_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """Legacy summaries lacking physical IDs are invalidated only through retained owners."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    scope = HistoryScope(kind="agent", scope_id="agent")
+    original = replace(
+        _owned_turn_record(target),
+        source_event_prompts={"$user_msg": "DELETED_EDIT_MARKER"},
+        source_event_revisions={"$user_msg": (10, "$physical-edit")},
+    )
+    raw = TurnRecordCodec._to_ledger_record(original)
+    raw.pop("revision_replay")
+    await journal_store.turn_records("agent").upsert(
+        index_event_ids=original.indexed_event_ids,
+        anchor_event_id="$user_msg",
+        record_json=json.dumps(raw),
+    )
+
+    def storage_factory(*_args: object, **_kwargs: object) -> BaseDb:
+        return create_state_storage("agent", tmp_path, subdir="sessions", session_table="agent_sessions")
+
+    storage = storage_factory()
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        summary=SessionSummary(summary="DELETED_EDIT_MARKER"),
+    )
+    update_scope_seen_event_ids(session, scope, ["$user_msg"])
+    storage.upsert_session(session)
+    storage.close()
+    _reset_handled_turn_ledger_runtime()
+    store = await _store(journal_store)
+    store.deps.state_writer.create_storage.side_effect = storage_factory
+    store.deps.state_writer.history_scope.return_value = scope
+    store.deps.state_writer.session_type_for_scope.return_value = SessionType.AGENT
+    await store.mark_source_redacted("$physical-edit")
+    await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
+    storage = storage_factory()
+    persisted = get_agent_session(storage, target.session_id)
+    assert persisted is not None
+    assert persisted.summary is None
+    assert store.get_turn_record("$user_msg").replay_source_event_ids == ("$user_msg",)
+    storage.close()

@@ -650,6 +650,8 @@ def _get_unseen_event_ids_for_metadata(
         if event_id in in_progress_event_ids:
             continue
         event_ids.append(event_id)
+        if msg.latest_event_id != event_id:
+            event_ids.append(msg.latest_event_id)
     return event_ids
 
 

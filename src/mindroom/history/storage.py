@@ -40,6 +40,7 @@ from mindroom.agent_storage import replace_runs, runs_without, save_runs
 from mindroom.constants import (
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
@@ -256,6 +257,13 @@ def _run_seen_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
     raw_seen_ids = metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
     if isinstance(raw_seen_ids, list):
         seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
+    raw_revisions = metadata.get(MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY)
+    if isinstance(raw_revisions, dict):
+        seen_event_ids.update(
+            revision[1]
+            for revision in raw_revisions.values()
+            if isinstance(revision, list | tuple) and len(revision) == 2 and isinstance(revision[1], str)
+        )
     response_event_id = metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
     if isinstance(response_event_id, str) and response_event_id:
         seen_event_ids.add(response_event_id)

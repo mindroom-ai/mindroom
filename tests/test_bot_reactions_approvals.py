@@ -2653,7 +2653,7 @@ class TestAgentBot(AgentBotTestBase):
                 conversation_target=target,
             ),
         )
-        assert not await bot._turn_store.prepare_edit_response_source(
+        assert not await bot._turn_store._prepare_edit_response_source(
             target=target,
             source_event_ids=("$source",),
             response_event_id="$response",
