@@ -210,9 +210,11 @@ class GatewayServer:
         public_url: str,
         allowed_origins: tuple[str, ...] | None = None,
         timeout_seconds: float = 60,
+        record_activity: Callable[[Request], Awaitable[None]] | None = None,
     ) -> None:
         self._authenticate = authenticate
         self._dispatch = dispatch
+        self._record_activity = record_activity
         self._timeout = timeout_seconds
         self._closing = False
         self._active: dict[tuple[GatewayPrincipal, type, int | str], ExecutionLease] = {}
@@ -252,6 +254,9 @@ class GatewayServer:
             del self._active[key]
 
     async def _list_tools(self) -> list[types.Tool]:
+        identity = self._request_identity()
+        if self._record_activity is not None and identity is not None:
+            await self._record_activity(identity[0])
         return _meta_tools()
 
     def _request_identity(self) -> tuple[Request, tuple[GatewayPrincipal, type, int | str]] | None:
@@ -265,7 +270,11 @@ class GatewayServer:
         return request, (principal, type(context.request_id), context.request_id)
 
     async def _handle_call_request(self, request: types.CallToolRequest) -> types.ServerResult:
-        return types.ServerResult(await self._call_tool(request.params.name, request.params.arguments or {}))
+        result = await self._call_tool(request.params.name, request.params.arguments or {})
+        identity = self._request_identity()
+        if not result.isError and self._record_activity is not None and identity is not None:
+            await self._record_activity(identity[0])
+        return types.ServerResult(result)
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:  # noqa: PLR0911
         if name not in {"search_tools", "get_tool", "invoke_tool"}:

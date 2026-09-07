@@ -647,7 +647,7 @@ async def test_retention_keeps_live_clients_and_refresh_replay_history(
     assert await provider.load_refresh_token(client, rotated.refresh_token) is not None
     assert await provider.load_access_token(tokens.access_token) is None
     assert await provider.load_access_token(rotated.access_token) is None
-    assert _row_counts(runtime_paths) == {"clients": 1, "pending": 0, "grants": 1, "capabilities": 4}
+    assert _row_counts(runtime_paths) == {"clients": 1, "pending": 0, "grants": 1, "capabilities": 2}
     clock.now = 2_000_000_000 + 2_592_000
     assert await provider.get_client("desktop") is None
     assert _row_counts(runtime_paths) == {"clients": 0, "pending": 0, "grants": 0, "capabilities": 0}
@@ -895,6 +895,7 @@ async def test_repeated_anonymous_fill_and_expiry_reuses_database_pages(
         clock=clock,
     )
     path = runtime_paths.storage_root / "mcp_gateway" / "oauth.sqlite3"
+    schema_bytes = path.stat().st_size
     for cycle in range(8):
         accepted = 0
         for attempt in range(64):
@@ -908,7 +909,7 @@ async def test_repeated_anonymous_fill_and_expiry_reuses_database_pages(
             pytest.fail("Anonymous registration never reached its byte budget")
         assert accepted > 0
         assert _row_counts(runtime_paths)["clients"] == accepted
-        assert path.stat().st_size <= 4 * budget
+        assert path.stat().st_size <= schema_bytes + 4 * budget
         clock.now += 86_400
         assert await provider.get_client("missing") is None
         assert _row_counts(runtime_paths)["clients"] == 0

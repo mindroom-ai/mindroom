@@ -35,6 +35,8 @@ function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
         agent_display_name: "Personal assistant",
         services: [service],
       });
+    if (path === "/api/connections/mcp/clients")
+      return json({ enabled: false, clients: [] });
     if (path === "/api/connections/mail/status") return json(status);
     if (path.endsWith("/disconnect")) {
       expect(options).toMatchObject({ method: "POST", body: "{}" });
@@ -61,10 +63,18 @@ describe("personal connections", () => {
       await screen.findByRole("button", { name: "Connect Mail" }),
     ).toBeEnabled();
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
-    expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual([
-      "/api/connections",
-      "/api/connections/mail/status",
-    ]);
+    expect(
+      vi
+        .mocked(fetch)
+        .mock.calls.map(([url]) => String(url))
+        .sort(),
+    ).toEqual(
+      [
+        "/api/connections",
+        "/api/connections/mail/status",
+        "/api/connections/mcp/clients",
+      ].sort(),
+    );
   });
 
   it("loads statuses concurrently and isolates a failed provider", async () => {
@@ -106,6 +116,25 @@ describe("personal connections", () => {
     expect(
       screen.getByRole("button", { name: "Disconnect Calendar" }),
     ).toBeEnabled();
+  });
+
+  it("keeps service cards usable while the client list fails", async () => {
+    installApi({
+      "/api/connections/mcp/clients": async () =>
+        json({ detail: "Sensitive server detail" }, 500),
+    });
+
+    render(<Connections />);
+
+    expect(
+      await screen.findByRole("button", { name: "Connect Mail" }),
+    ).toBeEnabled();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not load connected clients",
+    );
+    expect(
+      screen.queryByText("Sensitive server detail"),
+    ).not.toBeInTheDocument();
   });
 
   it("requires confirmation before disconnecting, then refreshes status", async () => {

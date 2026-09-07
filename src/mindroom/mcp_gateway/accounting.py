@@ -21,26 +21,35 @@ _FIELDS = {
 _KEYS = {"clients": "client_id", "pending": "state_hash", "grants": "grant_id", "capabilities": "token_hash"}
 
 
-def _charge(table: str, prefix: str = "") -> str:
+def _charge(table: str, prefix: str = "", *, lifecycle: bool = False) -> str:
     fields = _FIELDS[table]
     if table == "grants":
         fields += ("requester_id",)
+    if lifecycle and table in {"grants", "pending"}:
+        fields += ("account_id",)
+    overhead = str(2048 if table == "grants" else 1024)
+    if lifecycle and table == "capabilities":
+        overhead = f"CASE WHEN {prefix}kind = 'refresh' AND {prefix}consumed = 1 AND {prefix}payload = '{{}}' THEN 256 ELSE 1024 END"
     return " + ".join(
-        [str(2048 if table == "grants" else 1024)]
-        + [f"COALESCE(length(CAST({prefix}{field} AS BLOB)), 0)" for field in fields],
+        [overhead] + [f"COALESCE(length(CAST({prefix}{field} AS BLOB)), 0)" for field in fields],
     )
 
 
-def _install_triggers(connection: sqlite3.Connection, table: str) -> None:
+def _install_triggers(connection: sqlite3.Connection, table: str, *, lifecycle: bool = False) -> None:
     """Charge recomputation triggers feed delta triggers, including every deletion path."""
     key = _KEYS[table]
-    charge = _charge(table, "NEW.")
+    charge = _charge(table, "NEW.", lifecycle=lifecycle)
     assignment = f"accounted_bytes = {charge}"
     if table == "grants":
         assignment += f""", requester_charge = {charge} + COALESCE((
             SELECT accounted_bytes FROM clients WHERE client_id = json_extract(NEW.payload, '$.client_id')
         ), 0)"""
-    for event in ("INSERT", "UPDATE OF " + ", ".join(_FIELDS[table])):
+    fields = _FIELDS[table]
+    if lifecycle and table in {"grants", "pending"}:
+        fields += ("account_id",)
+    if lifecycle and table == "capabilities":
+        fields += ("consumed",)
+    for event in ("INSERT", "UPDATE OF " + ", ".join(fields)):
         name = "insert" if event == "INSERT" else "change"
         connection.execute(f"""
             CREATE TRIGGER {table}_charge_{name} AFTER {event} ON {table}
@@ -139,3 +148,17 @@ def migrate_accounting(connection: sqlite3.Connection, now: float) -> None:
     ):
         connection.execute(statement)
     connection.execute("PRAGMA user_version = 1")
+
+
+def migrate_lifecycle_accounting(connection: sqlite3.Connection) -> None:
+    """Compact consumed refresh bindings and install their bounded charge once."""
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 2:
+        return
+    connection.execute("UPDATE capabilities SET payload = '{}' WHERE kind = 'refresh' AND consumed = 1")
+    for table in _FIELDS:
+        for suffix in ("charge_insert", "charge_change", "usage_update", "usage_delete"):
+            connection.execute(f"DROP TRIGGER {table}_{suffix}")
+        _install_triggers(connection, table, lifecycle=True)
+        field = "metadata" if table == "clients" else "payload"
+        connection.execute(f"UPDATE {table} SET {field} = {field}")
+    connection.execute("PRAGMA user_version = 2")

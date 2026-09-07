@@ -7,7 +7,9 @@ import os
 import sqlite3
 from typing import TYPE_CHECKING, TypeVar
 
-from mindroom.mcp_gateway.accounting import migrate_accounting
+from mindroom.mcp_gateway.accounting import migrate_accounting, migrate_lifecycle_accounting
+from mindroom.mcp_gateway.accounts import migrate_accounts
+from mindroom.mcp_gateway.lifecycle import migrate_lifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -75,6 +77,9 @@ class GatewayOAuthStore:
                 connection.execute("UPDATE clients SET expires_at = ?", (self.registration_expires_at(),))
             connection.execute("CREATE INDEX IF NOT EXISTS clients_expiry ON clients(expires_at)")
             migrate_accounting(connection, self._clock())
+            migrate_lifecycle(connection)
+            migrate_accounts(connection)
+            migrate_lifecycle_accounting(connection)
             connection.execute("COMMIT")
         finally:
             connection.close()
@@ -93,11 +98,13 @@ class GatewayOAuthStore:
     @staticmethod
     def _prune(connection: sqlite3.Connection, now: float) -> None:
         connection.execute("DELETE FROM pending WHERE expires_at <= ?", (now,))
-        # A revocation may have loaded an access token before concurrent rotation.
-        # Keep access and refresh bindings until the whole family is removed.
+        # Retain valid access bindings across rotation for concurrent revocation.
+        connection.execute("DELETE FROM capabilities WHERE kind = 'access' AND expires_at <= ?", (now,))
         due = connection.execute(
-            "SELECT grant_id FROM grants WHERE expires_at <= ? UNION ALL SELECT grant_id FROM grants WHERE revoked = 1",
-            (now,),
+            """SELECT grant_id FROM grants WHERE expires_at <= ?
+               UNION ALL SELECT grant_id FROM grants WHERE idle_expires_at <= ?
+               UNION ALL SELECT grant_id FROM grants WHERE revoked = 1""",
+            (now, now),
         ).fetchall()
         for grant_id in {row["grant_id"] for row in due}:
             GatewayOAuthStore.delete_family(connection, grant_id)

@@ -134,9 +134,10 @@ def _reconcile(provider: GatewayOAuthProvider) -> tuple[int, dict[str, int]]:
         total = 1024
         for table, entries in rows.items():
             for row in entries:
-                charge = (2048 if table == "grants" else 1024) + sum(
-                    len(value.encode("utf-8")) for value in row if isinstance(value, str)
-                )
+                overhead = 2048 if table == "grants" else 1024
+                if table == "capabilities" and row["kind"] == "refresh" and row["consumed"] and row["payload"] == "{}":
+                    overhead = 256
+                charge = overhead + sum(len(value.encode("utf-8")) for value in row if isinstance(value, str))
                 if table == "grants":
                     charge += len(row["requester_id"].encode("utf-8"))
                 assert row["accounted_bytes"] == charge
@@ -225,10 +226,10 @@ async def test_repeated_refresh_stops_at_byte_budget_and_reclamation_commits(
     clock = _Clock()
     provider = _provider(runtime_paths, clock, **{setting: 20_000})
     tokens = await provider.exchange_authorization_code(client, await issue_code(provider, client))
-    for _ in range(20):
+    for _ in range(100):
         refresh = await provider.load_refresh_token(client, tokens.refresh_token)
         assert refresh is not None
-        clock.now += 60
+        clock.now += 900
         try:
             tokens = await provider.exchange_refresh_token(client, refresh, ["mcp:tools"])
         except GatewayOAuthCapacityError:
@@ -287,10 +288,11 @@ async def test_parallel_refresh_admits_exactly_one_pair_at_exact_global_budget(
     assert one is not None
     assert two is not None
     with sqlite3.connect(provider.store.path) as connection:
-        pair_bytes = connection.execute(
-            "SELECT SUM(accounted_bytes) FROM capabilities WHERE grant_id = ?",
+        access_bytes = connection.execute(
+            "SELECT accounted_bytes FROM capabilities WHERE grant_id = ? AND kind = 'access'",
             (one.grant_id,),
         ).fetchone()[0]
+        pair_bytes = access_bytes + 256 + 64 + len(one.grant_id) + len("refresh") + 2
     first_store = _provider(runtime_paths, clock, MAX_BYTES=total + pair_bytes)
     second_store = _provider(runtime_paths, clock, MAX_BYTES=total + pair_bytes)
     results = await asyncio.gather(

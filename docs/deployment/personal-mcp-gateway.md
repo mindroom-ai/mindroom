@@ -104,8 +104,31 @@ Client applications need support for this OAuth registration and discovery flow;
 
 Access tokens last up to 15 minutes.
 Refresh tokens rotate on use; replay revokes the grant family.
-A grant expires at most 30 days after approval, even with refreshes.
+A managed-account grant expires after 30 days without successful refresh or tool use, and at most 180 days after approval.
+Successful tool discovery and calls update the portal's last-used time; token refresh extends idle expiry without pretending that a tool was used.
+Portal visits, failed calls, and invalid tokens do not extend idle expiry.
+Background token refresh counts as activity, so inactivity expiry alone does not bound a client that keeps refreshing.
+The absolute deadline never moves, even with continued use.
 The OAuth revocation endpoint revokes the whole client grant.
+
+The Connections portal lists authorized clients with their client address, last tool use, and expiry.
+Users can disconnect one client connection or all of their client connections without disconnecting their upstream service accounts.
+Disconnecting all also invalidates their already-open consent requests and unexchanged authorization codes.
+An authorized client may request fresh consent afterward.
+Client names are self-declared; users should check the displayed client address before approving access.
+Management remains available after a user loses personal-agent tool permission, using the same signed identity and exact credential-owner binding.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `MINDROOM_MCP_OAUTH_IDLE_TTL_DAYS` | `30` | Maximum time without successful refresh or tool use |
+| `MINDROOM_MCP_OAUTH_GRANT_TTL_DAYS` | `180` with provisioning, otherwise `30` | Absolute lifetime measured from approval |
+| `MINDROOM_MCP_SCIM_TOKEN` | unset | Separate provisioning bearer secret, at least 32 characters |
+
+Durations must be positive whole days, idle lifetime cannot exceed absolute lifetime, and absolute lifetime cannot exceed 365 days.
+Lifetimes above 30 days require configured account provisioning so that account-disable updates can revoke long-lived access.
+Restart the API after changing lifecycle settings.
+Existing grants keep their original absolute deadlines during migration; missing historical creation times or client addresses remain unknown.
+Enabling managed-account mode makes older grants without a provisioned account binding unusable; users must approve a fresh connection once.
 
 Each MCP request rechecks current personal-agent access.
 Grants retain both the original signed identity and its canonical credential owner, so alias reassignment cannot transfer an old grant to another owner or preserve access to the previous one.
@@ -137,7 +160,9 @@ Pending consent and client metadata without a live grant share a 64-MiB onboardi
 Set the positive integer `MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES` to adjust this storage budget.
 At capacity, registration returns private HTTP 503 with `Retry-After: 60`; authorization returns the OAuth `temporarily_unavailable` error to its validated callback.
 Expired onboarding records and inactive grant families are pruned during store write operations and client-registration lookups.
-Access and refresh token bindings remain available throughout a live grant's lifetime for revocation and refresh replay detection.
+Consumed refresh token bindings remain available throughout a live grant's lifetime for revocation and refresh replay detection.
+Consumed refresh metadata is compacted; expired access token bindings are reclaimed.
+Revocation using an expired access token may succeed as a no-op; use the portal or a retained unexpired refresh token to disconnect the client.
 This onboarding budget is separate from the durable OAuth limits below.
 
 All retained OAuth state shares a 256-MiB logical budget, configured with the positive integer `MINDROOM_MCP_OAUTH_MAX_BYTES`.
@@ -153,18 +178,45 @@ At exactly 60 seconds an issuance leaves the window; restarting does not reset i
 During the one-time schema migration, retained legacy access tokens receive the migration time as their issuance timestamp without changing expiry, so an existing family may wait up to 60 seconds before refreshing.
 Token exchange and browser consent capacity failures return private HTTP 503 with `Retry-After: 60` and `temporarily_unavailable`.
 Rejected issuance leaves the current refresh token or authorization code usable, and rejected consent preserves its prior nonce.
-Quota recovery can take longer than the retry interval: successful revocation or expiry releases family storage, while expired access-token and consumed refresh-token bindings remain until their family ends.
+Quota recovery can take longer than the retry interval: successful revocation or expiry releases family storage, while consumed refresh-token bindings remain until their family ends.
 Refresh replay still revokes the family even when its byte or issuance budget is exhausted.
 
 These are logical retained-state limits, not physical SQLite file or filesystem quotas.
 SQLite schema pages, allocation, journals, and freed pages can make physical disk use exceed the logical budget; use a filesystem or volume quota where a hard disk bound is required.
 Cleanup runs before admission and remains committed when a new write is rejected.
 
-Gateway grants last at most 30 days, with access tokens lasting at most 15 minutes and refresh unable to extend the grant deadline.
+Gateway grants retain their configured absolute deadline, with access tokens lasting at most 15 minutes and refresh unable to extend that deadline.
 A current access token or any retained, unexpired refresh token can revoke its family.
 Revocation using an already-invalid access token may succeed as a no-op.
 Browser logout or expiry of the browser identity JWT does not automatically revoke these independent gateway grants.
 Removing the user's current access policy blocks MCP use immediately.
+
+## Managed account provisioning
+
+Configure a dedicated `MINDROOM_MCP_SCIM_TOKEN` secret and expose `/mcp/scim/v2` to the identity provider over HTTPS.
+These endpoints authenticate only the dedicated provisioning bearer and must bypass interactive browser-login redirects.
+Do not share the provisioning secret with MCP clients or browser applications.
+The provisioning routes do not allow browser CORS access.
+
+The endpoint implements a restricted SCIM 2.0 User lifecycle profile: create, list, read, replace, PATCH, and delete, plus service-provider/schema discovery.
+User names match verified browser email exactly, including case; schema discovery advertises this case-sensitive policy.
+This differs from the general SCIM core userName case-insensitive convention, so check connector matching behavior during enrollment.
+Configure the connector's `userName` attribute to the same email verified by the signed browser identity; provisioning does not authenticate the browser or grant tool permissions.
+Group management, bulk operations, password management, and sorting are unsupported.
+Disable group management in the connector; unsupported group requests return an explicit error.
+Connectors that insist on a successful test-group operation need a compatible configuration before this endpoint can be used.
+
+Use the base URL `https://assistant.example.org/mcp/scim/v2` with the dedicated bearer token in a compatible custom SCIM connector.
+Provision an active test user, approve an MCP client through the existing portal login, then deactivate the provisioned user and verify that token refresh, tool use, and further consent are rejected.
+Account deactivation, user-name changes, and deletion remove all bound grants and pending consent atomically.
+Reactivation permits a new approval and never restores old grants.
+Unknown or inactive accounts cannot authorize clients in managed-account mode.
+Removing the provisioning configuration must not be used as a way to bypass managed account checks.
+
+Deactivation takes effect when MindRoom receives and commits the provisioning update; monitor connector delivery and retries.
+An upstream outage or delayed event can delay offboarding, and already-dispatched provider actions cannot be undone.
+This directory governs MCP client grants; it does not deactivate Matrix accounts, erase upstream service credentials, or replace browser-session logout.
+Provisioned directory records are administrator-managed and outside the OAuth logical byte budgets; apply the runtime's physical volume quota to the whole database.
 
 ## Execution limits
 

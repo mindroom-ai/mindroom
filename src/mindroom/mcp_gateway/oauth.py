@@ -23,6 +23,8 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
+from mindroom.mcp_gateway.accounts import account_is_active
+from mindroom.mcp_gateway.lifecycle import owned_grants, public_grant, touch_grant
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError, GatewayOAuthStore
 
 if TYPE_CHECKING:
@@ -35,7 +37,6 @@ _SCOPES = ["mcp:tools"]
 _CONSENT_TTL = 600
 _CODE_TTL = 300
 _ACCESS_TTL = 900
-_GRANT_TTL = 2_592_000
 
 
 def _budget(runtime_paths: RuntimePaths, name: str, default: int) -> int:
@@ -91,6 +92,7 @@ class _GatewayAuthorizationCode(AuthorizationCode):
     authenticated_user_id: str
     agent_name: str
     grant_id: str
+    account_id: str | None = None
 
 
 class GatewayAccessToken(AccessToken):
@@ -100,6 +102,7 @@ class GatewayAccessToken(AccessToken):
     authenticated_user_id: str
     agent_name: str
     grant_id: str
+    account_id: str | None = None
 
 
 class _GatewayRefreshToken(RefreshToken):
@@ -109,6 +112,7 @@ class _GatewayRefreshToken(RefreshToken):
     authenticated_user_id: str
     agent_name: str
     grant_id: str
+    account_id: str | None = None
     resource: str
 
 
@@ -142,6 +146,18 @@ class GatewayOAuthProvider(
         self.issuer_url = origin + "/mcp/oauth"
         self.consent_url = origin + "/connections/mcp/authorize"
         self._clock = clock or (lambda: time.time())
+        self.scim_token = runtime_paths.env_value("MINDROOM_MCP_SCIM_TOKEN") or None
+        if self.scim_token is not None and len(self.scim_token) < 32:
+            msg = "MINDROOM_MCP_SCIM_TOKEN must contain at least 32 characters"
+            raise ValueError(msg)
+        self.accounts_required = self.scim_token is not None
+        idle_days = _budget(runtime_paths, "MINDROOM_MCP_OAUTH_IDLE_TTL_DAYS", 30)
+        grant_days = _budget(runtime_paths, "MINDROOM_MCP_OAUTH_GRANT_TTL_DAYS", 180 if self.accounts_required else 30)
+        if idle_days > grant_days or grant_days > 365 or (grant_days > 30 and not self.accounts_required):
+            msg = "MCP OAuth lifetimes require idle <= absolute <= 365 days and managed accounts above 30 days"
+            raise ValueError(msg)
+        self._idle_ttl = idle_days * 86_400
+        self._grant_ttl = grant_days * 86_400
         self.store = GatewayOAuthStore(
             runtime_paths.storage_root,
             onboarding_max_bytes=_budget(runtime_paths, "MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES", 64 * 1024 * 1024),
@@ -253,19 +269,22 @@ class GatewayOAuthProvider(
         requester_id: str,
         authenticated_user_id: str,
         agent_name: str,
+        account_id: str | None = None,
     ) -> _GatewayConsent:
         """Bind the first authenticated visitor and issue a fresh browser nonce."""
 
         def bind(connection: sqlite3.Connection) -> _GatewayConsent:
             row = self._pending(connection, state)
             if (
-                not requester_id
+                not self._account_allowed(connection, account_id)
+                or not requester_id
                 or not authenticated_user_id
                 or not agent_name
                 or (
                     row["requester_id"] is not None
                     and (
-                        row["requester_id"] != requester_id
+                        row["account_id"] != account_id
+                        or row["requester_id"] != requester_id
                         or row["agent_name"] != agent_name
                         or row["authenticated_user_id"] != authenticated_user_id
                     )
@@ -274,8 +293,9 @@ class GatewayOAuthProvider(
                 raise AuthorizeError("access_denied", "Consent belongs to another principal")  # noqa: EM101
             csrf = _secret()
             connection.execute(
-                "UPDATE pending SET requester_id = ?, authenticated_user_id = ?, agent_name = ?, csrf_hash = ? WHERE state_hash = ?",
-                (requester_id, authenticated_user_id, agent_name, _digest(csrf), _digest(state)),
+                """UPDATE pending SET requester_id = ?, authenticated_user_id = ?, agent_name = ?, csrf_hash = ?, account_id = ?
+                   WHERE state_hash = ?""",
+                (requester_id, authenticated_user_id, agent_name, _digest(csrf), account_id, _digest(state)),
             )
             self.store.require_capacity(connection, onboarding=True)
             payload = json.loads(row["payload"])
@@ -292,13 +312,16 @@ class GatewayOAuthProvider(
         agent_name: str,
         csrf_token: str,
         allow: bool,
+        account_id: str | None = None,
     ) -> str:
         """Consume browser consent once and return its authoritative callback."""
 
         def finish(connection: sqlite3.Connection) -> str:
             row = self._pending(connection, state)
             if (
-                row["requester_id"] != requester_id
+                not self._account_allowed(connection, account_id)
+                or row["account_id"] != account_id
+                or row["requester_id"] != requester_id
                 or row["authenticated_user_id"] != authenticated_user_id
                 or row["agent_name"] != agent_name
                 or not row["csrf_hash"]
@@ -318,15 +341,27 @@ class GatewayOAuthProvider(
                 "authenticated_user_id": authenticated_user_id,
                 "agent_name": agent_name,
                 "grant_id": grant_id,
+                "account_id": account_id,
                 "resource": self.resource_url,
                 "scopes": _SCOPES,
+                "redirect_uri": str(params.redirect_uri),
             }
             connection.execute(
-                "INSERT INTO grants (grant_id, payload, expires_at, requester_id) VALUES (?, ?, ?, ?)",
-                (grant_id, json.dumps(grant), now + _GRANT_TTL, requester_id),
+                """INSERT INTO grants (grant_id, payload, expires_at, requester_id, created_at, last_activity_at, idle_expires_at, account_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    grant_id,
+                    json.dumps(grant),
+                    now + self._grant_ttl,
+                    requester_id,
+                    now,
+                    now,
+                    now + self._idle_ttl,
+                    account_id,
+                ),
             )
             code = _GatewayAuthorizationCode(
-                **grant,
+                **{key: value for key, value in grant.items() if key != "redirect_uri"},
                 code=_secret(),
                 expires_at=now + _CODE_TTL,
                 code_challenge=params.code_challenge,
@@ -363,18 +398,37 @@ class GatewayOAuthProvider(
         include_consumed: bool = False,
     ) -> sqlite3.Row | None:
         row = connection.execute(
-            """SELECT c.*, g.payload AS grant_payload, g.expires_at AS grant_expires_at, g.revoked
+            """SELECT c.*, g.payload AS grant_payload, g.expires_at AS grant_expires_at, g.idle_expires_at, g.revoked, g.account_id
                FROM capabilities c JOIN grants g ON g.grant_id = c.grant_id
                WHERE c.token_hash = ? AND c.kind = ?""",
             (_digest(raw), kind),
         ).fetchone()
         if row is None or row["revoked"] or (row["consumed"] and not include_consumed):
             return None
-        if min(row["expires_at"], row["grant_expires_at"]) <= self._clock():
+        if min(row["expires_at"], row["grant_expires_at"], row["idle_expires_at"]) <= self._clock():
+            return None
+        if not self._account_allowed(connection, row["account_id"]):
             return None
         if json.loads(row["grant_payload"])["resource"] != self.resource_url:
             return None
         return row
+
+    def _account_allowed(self, connection: sqlite3.Connection, account_id: str | None) -> bool:
+        if account_id is None:
+            return not self.accounts_required
+        return self.accounts_required and account_is_active(connection, account_id)
+
+    @staticmethod
+    def _capability_payload(row: sqlite3.Row) -> dict[str, Any]:
+        if row["kind"] == "refresh" and row["payload"] == "{}":
+            grant = json.loads(row["grant_payload"])
+            return _GatewayRefreshToken(token="", expires_at=row["expires_at"], **grant).model_dump(
+                mode="json",
+                exclude={"token"},
+            )
+        payload = json.loads(row["payload"])
+        payload.setdefault("account_id", None)
+        return payload
 
     @override
     async def load_authorization_code(
@@ -415,7 +469,7 @@ class GatewayOAuthProvider(
             row = self._load(connection, "refresh", refresh_token, include_consumed=True)
             if row is None:
                 return None
-            token = _GatewayRefreshToken(token=refresh_token, **json.loads(row["payload"]))
+            token = _GatewayRefreshToken(token=refresh_token, **self._capability_payload(row))
             return token if token.client_id == client.client_id else None
 
         return await self.store.read(read)
@@ -437,6 +491,7 @@ class GatewayOAuthProvider(
         self._save_capability(connection, "access", access.token, access, issued_at=issued_at)
         self._save_capability(connection, "refresh", refresh.token, refresh)
         self.store.require_capacity(connection, requester_id=grant["requester_id"])
+        touch_grant(connection, row["grant_id"], issued_at, self._idle_ttl)
         return OAuthToken(
             access_token=access.token,
             refresh_token=refresh.token,
@@ -457,7 +512,7 @@ class GatewayOAuthProvider(
             if (
                 row is None
                 or authorization_code.client_id != client.client_id
-                or json.loads(row["payload"]) != authorization_code.model_dump(mode="json", exclude={"code"})
+                or self._capability_payload(row) != authorization_code.model_dump(mode="json", exclude={"code"})
             ):
                 raise TokenError("invalid_grant", "Invalid authorization code")  # noqa: EM101
             connection.execute(
@@ -484,14 +539,16 @@ class GatewayOAuthProvider(
             if (
                 row is None
                 or refresh_token.client_id != client.client_id
-                or json.loads(row["payload"]) != refresh_token.model_dump(mode="json", exclude={"token"})
+                or self._capability_payload(row) != refresh_token.model_dump(mode="json", exclude={"token"})
             ):
                 raise TokenError("invalid_grant", "Invalid refresh token")  # noqa: EM101
             if row["consumed"]:
                 self.store.delete_family(connection, row["grant_id"])
                 return None
             connection.execute(
-                "UPDATE capabilities SET consumed = 1 WHERE grant_id = ? AND consumed = 0 AND kind IN ('access', 'refresh')",
+                """UPDATE capabilities SET consumed = 1,
+                   payload = CASE WHEN kind = 'refresh' THEN '{}' ELSE payload END
+                   WHERE grant_id = ? AND consumed = 0 AND kind IN ('access', 'refresh')""",
                 (row["grant_id"],),
             )
             return self._issue_tokens(connection, row)
@@ -507,10 +564,84 @@ class GatewayOAuthProvider(
 
         def revoke(connection: sqlite3.Connection) -> None:
             row = connection.execute(
-                "SELECT grant_id, payload FROM capabilities WHERE token_hash = ? AND kind IN ('access', 'refresh')",
+                """SELECT c.*, g.payload AS grant_payload FROM capabilities c JOIN grants g USING (grant_id)
+                   WHERE token_hash = ? AND kind IN ('access', 'refresh')""",
                 (_digest(token.token),),
             ).fetchone()
-            if row and json.loads(row["payload"]) == token.model_dump(mode="json", exclude={"token"}):
+            if row and self._capability_payload(row) == token.model_dump(mode="json", exclude={"token"}):
                 self.store.delete_family(connection, row["grant_id"])
 
         await self.store.transact(revoke)
+
+    async def list_grants(
+        self,
+        *,
+        requester_id: str,
+        authenticated_user_id: str,
+        agent_name: str,
+        after: str | None = None,
+        limit: int = 101,
+    ) -> list[dict[str, Any]]:
+        """List a bounded page of active connections without recording activity."""
+        if not 1 <= limit <= 101:
+            msg = "Connection page size must be between 1 and 101"
+            raise ValueError(msg)
+
+        def read(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = owned_grants(
+                connection,
+                requester_id=requester_id,
+                authenticated_user_id=authenticated_user_id,
+                agent_name=agent_name,
+                resource=self.resource_url,
+                active_at=self._clock(),
+                accounts_required=self.accounts_required,
+                after=after,
+                limit=limit,
+            )
+            return [public_grant(connection, row) for row in rows]
+
+        return await self.store.read(read)
+
+    async def record_use(self, token: GatewayAccessToken) -> bool:
+        """Revalidate the exact bearer under the writer lock before recording successful use."""
+
+        def record(connection: sqlite3.Connection) -> bool:
+            row = self._load(connection, "access", token.token)
+            if row is None or self._capability_payload(row) != token.model_dump(mode="json", exclude={"token"}):
+                return False
+            touch_grant(connection, row["grant_id"], self._clock(), self._idle_ttl, used=True)
+            return True
+
+        return await self.store.transact(record)
+
+    async def revoke_grants(
+        self,
+        *,
+        requester_id: str,
+        authenticated_user_id: str,
+        agent_name: str,
+        grant_id: str | None = None,
+    ) -> bool:
+        """Atomically remove owned grants and, for revoke-all, bound pending approvals."""
+
+        def revoke(connection: sqlite3.Connection) -> bool:
+            rows = owned_grants(
+                connection,
+                requester_id=requester_id,
+                authenticated_user_id=authenticated_user_id,
+                agent_name=agent_name,
+                resource=self.resource_url,
+            )
+            selected = [row for row in rows if grant_id is None or row["grant_id"] == grant_id]
+            for row in selected:
+                self.store.delete_family(connection, row["grant_id"])
+            if grant_id is None:
+                connection.execute(
+                    """DELETE FROM pending WHERE requester_id = ? AND authenticated_user_id = ? AND agent_name = ?
+                       AND json_extract(payload, '$.params.resource') = ?""",
+                    (requester_id, authenticated_user_id, agent_name, self.resource_url),
+                )
+            return grant_id is None or bool(selected)
+
+        return await self.store.transact(revoke)

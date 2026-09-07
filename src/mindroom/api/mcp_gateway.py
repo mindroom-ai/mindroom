@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import sqlite3
 from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -23,9 +24,12 @@ from starlette.routing import Route
 
 from mindroom.api.auth import require_personal_connections_user
 from mindroom.api.config_lifecycle import app_state, rebind_current_request_snapshot, require_api_state
+from mindroom.api.mcp_clients import client_routes
+from mindroom.api.mcp_scim import scim_routes
 from mindroom.api.personal_agent import PERSONAL_RESPONSE_HEADERS, resolve_personal_agent
 from mindroom.logging_config import get_logger
 from mindroom.mcp.manager import MCPServerManager
+from mindroom.mcp_gateway.accounts import GatewayAccounts
 from mindroom.mcp_gateway.admission import OnboardingRateLimiter
 from mindroom.mcp_gateway.consent import render_consent_page
 from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
@@ -95,6 +99,8 @@ def _browser_origins(paths: RuntimePaths) -> tuple[str, ...]:
 
 def gateway_cors_origins(paths: RuntimePaths, path: str) -> tuple[str, ...] | None:
     """Separate public OAuth and bearer MCP CORS from dashboard cookie policy."""
+    if path == "/mcp/scim/v2" or path.startswith("/mcp/scim/v2/"):
+        return ()
     if not _enabled(paths):
         return None
     if path in {
@@ -123,6 +129,8 @@ class GatewayRuntime:
             int(paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT") or "10"),
         )
         self.provider = GatewayOAuthProvider(paths, public_url=paths.env_value("MINDROOM_PUBLIC_URL") or "")
+        self.scim_token = self.provider.scim_token or ""
+        self.accounts = GatewayAccounts(self.provider.store)
         self.manager = MCPServerManager(paths, validate_agent_function_names=False)
         self._config_lock = asyncio.Lock()
         self.server = GatewayServer(
@@ -130,6 +138,7 @@ class GatewayRuntime:
             dispatch=self.dispatch,
             public_url=self.origin,
             allowed_origins=_browser_origins(paths),
+            record_activity=self._record_activity,
         )
         authenticator = ClientAuthenticator(self.provider)
         self.authorize = AuthorizationHandler(self.provider)
@@ -178,6 +187,16 @@ class GatewayRuntime:
         token, _ = await self.principal(request)
         return GatewayPrincipal(grant_id=token.grant_id, requester_id=token.requester_id)
 
+    async def _record_activity(self, request: Request) -> None:
+        """Record successful use without turning completed provider actions into retryable failures."""
+        _, _, raw = request.headers.get("authorization", "").partition(" ")
+        try:
+            token = await self.provider.load_access_token(raw)
+            if token is not None:
+                await self.provider.record_use(token)
+        except sqlite3.Error as exc:
+            logger.warning("mcp_gateway_activity_failed", error_type=type(exc).__name__)
+
     async def dispatch(self, request: Request, name: str, arguments: dict[str, Any]) -> GatewayToolResponse:
         """Recheck access immediately before selecting one tool operation."""
         _, context = await self.principal(request)
@@ -224,6 +243,7 @@ def _runtime(request: Request) -> GatewayRuntime:
         runtime is None
         or not _enabled(paths)
         or (paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/") != runtime.origin
+        or (paths.env_value("MINDROOM_MCP_SCIM_TOKEN") or "") != runtime.scim_token
     ):
         raise HTTPException(404, "MCP gateway is disabled", headers=PERSONAL_RESPONSE_HEADERS)
     return runtime
@@ -354,6 +374,12 @@ async def _consent(request: Request) -> Response:
     runtime = _runtime(request)
     user = await require_personal_connections_user(request)
     context = resolve_personal_agent(rebind_current_request_snapshot(request), user["matrix_user_id"], channel="matrix")
+    account_id = None
+    if runtime.provider.accounts_required:
+        email = user.get("email")
+        account_id = await runtime.accounts.resolve_active(email) if isinstance(email, str) else None
+        if account_id is None:
+            raise HTTPException(403, "An active provisioned account is required", headers=PERSONAL_RESPONSE_HEADERS)
     try:
         if request.method == "POST":
             if request.headers.get("origin") != runtime.origin or request.headers.get("sec-fetch-site") == "cross-site":
@@ -367,6 +393,7 @@ async def _consent(request: Request) -> Response:
                 requester_id=context.requester_id,
                 authenticated_user_id=user["matrix_user_id"],
                 agent_name=context.agent_name,
+                account_id=account_id,
                 csrf_token=fields["csrf_token"],
                 allow=fields["decision"] == "allow",
             )
@@ -379,6 +406,7 @@ async def _consent(request: Request) -> Response:
             requester_id=context.requester_id,
             agent_name=context.agent_name,
             authenticated_user_id=user["matrix_user_id"],
+            account_id=account_id,
         )
     except GatewayOAuthCapacityError:
         return JSONResponse(
@@ -431,6 +459,8 @@ def install_gateway_routes(app: FastAPI) -> None:
     """Register exact machine and browser routes before the frontend catch-all."""
     app.router.routes.extend(
         [
+            *client_routes(_runtime),
+            *scim_routes(_runtime),
             Route("/mcp", _MCPEndpoint(), methods=["GET", "POST", "DELETE"]),
             Route("/.well-known/oauth-authorization-server/mcp/oauth", _metadata, methods=["GET"]),
             Route("/mcp/oauth/.well-known/oauth-authorization-server", _metadata, methods=["GET"]),

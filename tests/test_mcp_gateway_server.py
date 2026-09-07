@@ -48,12 +48,14 @@ async def _client(
     dispatch: Callable[[Request, str, dict[str, object]], Awaitable[dict[str, object]]],
     *,
     deadline_seconds: float = 60,
+    record_activity: Callable[[Request], Awaitable[None]] | None = None,
 ) -> AsyncIterator[httpx.AsyncClient]:
     server = GatewayServer(
         authenticate=_authenticate,
         dispatch=dispatch,
         public_url="https://portal.example.org",
         timeout_seconds=deadline_seconds,
+        record_activity=record_activity,
     )
     app = Starlette(routes=[Route("/mcp", endpoint=server, methods=["GET", "POST", "DELETE"])])
     async with (
@@ -83,6 +85,33 @@ def _call(
 
 def _cancel(request_id: int | str) -> dict[str, object]:
     return {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": request_id}}
+
+
+async def test_activity_records_successful_discovery_and_calls_only() -> None:
+    """Malformed or failed requests cannot extend an idle grant through transport hooks."""
+    activity: list[str] = []
+
+    async def record(request: Request) -> None:
+        activity.append(request.headers["authorization"])
+
+    async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
+        return (
+            {"error": {"code": "tool_unavailable", "message": "Unavailable"}}
+            if arguments.get("query")
+            else {"tools": []}
+        )
+
+    async with _client(dispatch, record_activity=record) as client:
+        await client.post("/mcp", json=_call(name="unknown"))
+        await client.post("/mcp", json=_call(arguments={"query": "unavailable"}))
+        await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "invented"})
+        assert activity == []
+        result = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        assert "tools" in result.json()["result"]
+        assert activity == ["Bearer alice"]
+        result = await client.post("/mcp", json=_call())
+        assert result.json()["result"]["isError"] is False
+        assert activity == ["Bearer alice", "Bearer alice"]
 
 
 async def test_gateway_lists_only_static_bounded_meta_tools() -> None:
