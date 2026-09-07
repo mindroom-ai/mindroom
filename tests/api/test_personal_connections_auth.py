@@ -199,6 +199,27 @@ def test_signed_nonadmin_can_enter_personal_and_oauth_completion_routes(
     assert response.status_code == 200
 
 
+@pytest.mark.parametrize("portal_setting", [None, "", "   "])
+@pytest.mark.parametrize("path", ["/connections", "/connections/assets/portal.js"])
+def test_disabled_connections_frontend_is_unavailable(
+    portal_setting: str | None,
+    path: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    connections_auth_client: Callable[..., TestClient],
+    signed_connections_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """A disabled portal does not serve a frontend whose API cannot be used."""
+    portal = tmp_path / "connections"
+    (portal / "assets").mkdir(parents=True)
+    (portal / "index.html").write_text("personal connections")
+    (portal / "assets" / "portal.js").write_text("portal asset")
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
+    client = connections_auth_client(MINDROOM_CONNECTIONS_AGENT=portal_setting)
+    response = client.get(path, headers=signed_connections_headers("alice"))
+    assert response.status_code == 404
+
+
 @pytest.mark.parametrize("path", ["/connections", "/connections/", "/connections/nested"])
 def test_missing_connections_bundle_never_returns_administrator_html(
     path: str,

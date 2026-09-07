@@ -4,6 +4,8 @@ export interface OAuthAuthorization {
   completion_origin: string;
 }
 
+const OAUTH_FLOW_TIMEOUT_MS = 5 * 60 * 1000;
+
 export async function connectWithPopup(
   provider: string,
   authorize: () => Promise<OAuthAuthorization>,
@@ -22,6 +24,7 @@ export async function connectWithPopup(
       if (finished) return;
       finished = true;
       window.clearInterval(poll);
+      window.clearTimeout(deadline);
       window.removeEventListener("message", onMessage);
       signal.removeEventListener("abort", onAbort);
       if (!popup.closed) popup.close();
@@ -49,6 +52,10 @@ export async function connectWithPopup(
     const poll = window.setInterval(() => {
       if (popup.closed) onAbort();
     }, 500);
+    const deadline = window.setTimeout(
+      () => finish(new Error("Authorization timed out. Try connecting again.")),
+      OAUTH_FLOW_TIMEOUT_MS,
+    );
     window.addEventListener("message", onMessage);
     signal.addEventListener("abort", onAbort, { once: true });
     void authorize()

@@ -125,4 +125,75 @@ describe("connection popup", () => {
     expect(popup.close).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("times out an open popup and releases every flow resource", async () => {
+    const removeMessageListener = vi.spyOn(window, "removeEventListener");
+    const removeAbortListener = vi.spyOn(
+      controller.signal,
+      "removeEventListener",
+    );
+    const settled = vi.fn();
+    const operation = connectWithPopup(
+      "mail",
+      async () => authorization,
+      controller.signal,
+    ).then(() => settled("connected"), settled);
+    try {
+      await vi.advanceTimersByTimeAsync(299_999);
+      expect(settled).not.toHaveBeenCalled();
+      expect(popup.location.href).toBe(authorization.auth_url);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringMatching(/timed out/i),
+        }),
+      );
+      expect(popup.close).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(removeMessageListener).toHaveBeenCalledWith(
+        "message",
+        expect.any(Function),
+      );
+      expect(removeAbortListener).toHaveBeenCalledWith(
+        "abort",
+        expect.any(Function),
+      );
+      complete();
+      controller.abort();
+      expect(popup.close).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledOnce();
+    } finally {
+      controller.abort();
+      await operation;
+    }
+  });
+
+  it("ignores an authorization response arriving after the flow deadline", async () => {
+    let authorize!: (value: typeof authorization) => void;
+    const settled = vi.fn();
+    const operation = connectWithPopup(
+      "mail",
+      () =>
+        new Promise((resolve) => {
+          authorize = resolve;
+        }),
+      controller.signal,
+    ).then(() => settled("connected"), settled);
+    try {
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(settled).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringMatching(/timed out/i),
+        }),
+      );
+      authorize(authorization);
+      await Promise.resolve();
+      expect(popup.location.href).toBe("about:blank");
+      expect(popup.close).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      controller.abort();
+      await operation;
+    }
+  });
 });
