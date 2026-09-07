@@ -5013,7 +5013,11 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.mcp_gateway.server"
-depends_on = ["mindroom.logging_config"]
+depends_on = ["mindroom.logging_config", "mindroom.mcp_gateway.execution"]
+
+[[modules]]
+path = "mindroom.mcp_gateway.execution"
+depends_on = []
 
 [[modules]]
 path = "mindroom.mcp_gateway.tools"
@@ -5022,6 +5026,7 @@ depends_on = [
     "mindroom.credentials",
     "mindroom.hooks",
     "mindroom.mcp.toolkit",
+    "mindroom.mcp_gateway.execution",
     "mindroom.oauth.providers",
     "mindroom.runtime_resolution",
     "mindroom.tool_approval",

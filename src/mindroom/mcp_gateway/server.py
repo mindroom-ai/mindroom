@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from mindroom.logging_config import get_logger
+from mindroom.mcp_gateway.execution import ExecutionLease, execution_scope
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -152,7 +153,8 @@ class GatewayServer:
         self._authenticate = authenticate
         self._dispatch = dispatch
         self._timeout = timeout_seconds
-        self._active: dict[tuple[str, type, int | str], asyncio.Task[Any]] = {}
+        self._closing = False
+        self._active: dict[tuple[str, type, int | str], ExecutionLease] = {}
         self._server: Server[None, Request] = Server("MindRoom gateway")
         self._server.list_tools()(self._list_tools)
         self._server.call_tool(validate_input=False)(self._call_tool)
@@ -175,7 +177,18 @@ class GatewayServer:
     async def run(self) -> AsyncIterator[None]:
         """Run exactly once per owning API lifespan."""
         async with self._manager.run():
-            yield
+            try:
+                yield
+            finally:
+                self._closing = True
+                leases = tuple(self._active.values())
+                for lease in leases:
+                    lease.cancel()
+                await asyncio.gather(*(lease.wait() for lease in leases))
+
+    def _release(self, key: tuple[str, type, int | str], lease: ExecutionLease) -> None:
+        if self._active.get(key) is lease:
+            del self._active[key]
 
     async def _list_tools(self) -> list[types.Tool]:
         return _meta_tools()
@@ -202,15 +215,17 @@ class GatewayServer:
         request, key = identity
         if key in self._active:
             return _result(_error("duplicate_request", "A call with this request ID is already running."))
-        if len(self._active) >= _MAX_ACTIVE_CALLS:
-            return _result(_error("busy", "Gateway call capacity is currently full."))
+        if self._closing or len(self._active) >= _MAX_ACTIVE_CALLS:
+            return _result(_error("busy", "Gateway call capacity is currently unavailable."))
         task = asyncio.current_task()
         if task is None:
             return _result(_error("tool_unavailable", "Gateway execution is unavailable."))
-        self._active[key] = task
+        lease = ExecutionLease(task, lambda completed: self._release(key, completed))
+        self._active[key] = lease
         try:
-            async with asyncio.timeout(self._timeout):
-                return _result(await self._dispatch(request, name, arguments))
+            with execution_scope(lease):
+                async with asyncio.timeout(self._timeout):
+                    return _result(await self._dispatch(request, name, arguments))
         except TimeoutError:
             return _result(
                 _error("timeout", "Tool call timed out; its outcome may be unknown. Do not retry automatically."),
@@ -222,8 +237,6 @@ class GatewayServer:
         except Exception as exc:
             logger.warning("mcp_gateway_call_failed", error_type=type(exc).__name__)
             return _result(_error("tool_unavailable", "Tool execution failed. Its outcome may be unknown."))
-        finally:
-            self._active.pop(key, None)
 
     def _cancel(self, payload: object, grant: str) -> Response | None:
         if not isinstance(payload, dict):
@@ -240,9 +253,9 @@ class GatewayServer:
         request_id = notification.params.requestId
         if type(request_id) not in {str, int}:
             return JSONResponse({"error": "invalid_request"}, status_code=400)
-        task = self._active.get((grant, type(request_id), cast("int | str", request_id)))
-        if task is not None:
-            task.cancel()
+        lease = self._active.get((grant, type(request_id), cast("int | str", request_id)))
+        if lease is not None:
+            lease.cancel()
         return Response(status_code=202)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:

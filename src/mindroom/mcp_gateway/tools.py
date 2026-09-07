@@ -16,6 +16,7 @@ from referencing.exceptions import NoSuchResource
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.hooks import HookRegistry
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
+from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sync
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_schema_cache import cached_processed_schema
@@ -155,7 +156,7 @@ def _validate_arguments(schema: dict[str, Any], arguments: dict[str, object]) ->
 
 
 async def _lifecycle(operation: Callable[[], object]) -> None:
-    result = operation() if inspect.iscoroutinefunction(operation) else await asyncio.to_thread(operation)
+    result = operation() if inspect.iscoroutinefunction(operation) else await run_gateway_sync(operation)
     if inspect.isawaitable(result):
         await result
 
@@ -167,6 +168,7 @@ async def _close(toolkit: Toolkit) -> None:
 
 def _retain(cleanup: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
     task = asyncio.create_task(cleanup, name="mcp-gateway-tool-cleanup")
+    retain_execution_task(task)
     _CLEANUP_TASKS.add(task)
 
     def finished(completed: asyncio.Task[None]) -> None:
@@ -288,6 +290,7 @@ async def _build_selected(
         }
         return toolkit
     task = asyncio.create_task(asyncio.to_thread(_build_native, context, entry))
+    retain_execution_task(task)
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
@@ -317,7 +320,7 @@ async def _run_selected_operation(
     manager: MCPServerManager | None,
     operation: Callable[[Toolkit], Awaitable[dict[str, Any]]],
 ) -> dict[str, Any]:
-    entry = await asyncio.to_thread(_require_entry, context, name)
+    entry = await run_gateway_sync(_require_entry, context, name)
     toolkit = await _build_selected(context, entry, manager)
     tracker = SyncToolCompletionTracker()
     pending: asyncio.Task[Any] | None = None
@@ -386,7 +389,7 @@ async def search_tools(
     async def search() -> dict[str, Any]:
         if toolkit is not None:
             return await _selected_operation(context, toolkit, manager, selected)
-        entries = await asyncio.to_thread(_entries, context)
+        entries = await run_gateway_sync(_entries, context)
         items = []
         for name in entries:
             if not _handle(name):
@@ -457,7 +460,7 @@ async def invoke_tool(
             raise _GatewayError(code="tool_unavailable")
         schema = _schema_payload(toolkit, target)["inputSchema"]
         _validate_arguments(schema, arguments)
-        plugins = await asyncio.to_thread(load_plugins, context.config, context.runtime_paths, set_skill_roots=False)
+        plugins = await run_gateway_sync(load_plugins, context.config, context.runtime_paths, set_skill_roots=False)
         bridge = build_tool_hook_bridge(
             HookRegistry.from_plugins(plugins),
             agent_name=context.agent_name,

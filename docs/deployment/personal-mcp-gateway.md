@@ -142,7 +142,7 @@ These controls bound anonymous onboarding state; they do not impose a user or de
 - Tools requiring a live Matrix conversation are unavailable through this transport.
 - MCP generic bridge dispatchers are excluded; only selected, filtered typed functions are exposed.
 - Search returns at most 10 items and 16 KiB. A selected schema is limited to 32 KiB; tool arguments and result payloads to 64 KiB each.
-- HTTP request bodies and MCP tool responses are limited to 128 KiB. JSON-encoded request IDs are limited to 128 bytes. Calls have a 60-second gateway deadline, with at most 128 active calls per process.
+- HTTP request bodies and MCP tool responses are limited to 128 KiB. JSON-encoded request IDs are limited to 128 bytes. Calls have a 60-second gateway deadline, with at most 128 active calls per process. A cancelled or timed-out call retains its capacity until its local background work and toolkit cleanup finish.
 - Explicit MCP cancellation applies only to a matching request ID within the same client grant. Cancellation and timeout stop waiting, but a synchronous or remote action may already have taken effect. Do not automatically retry a potentially mutating call.
 
 The gateway does not automatically retry an invocation whose outcome is unknown.
