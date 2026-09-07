@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from html import escape
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
@@ -28,6 +30,7 @@ from mindroom.logging_config import get_logger
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 from mindroom.mcp_gateway.server import GatewayServer, read_gateway_body, replay_gateway_body
+from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
 from mindroom.mcp_gateway.tools import drain_gateway_tool_cleanup, get_tool, invoke_tool, search_tools
 
 if TYPE_CHECKING:
@@ -112,6 +115,11 @@ class GatewayRuntime:
     """Own client grants, lazy upstream sessions and one stateless MCP server."""
 
     def __init__(self, paths: RuntimePaths) -> None:
+        self._onboarding_limit = int(paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT") or "60")
+        if self._onboarding_limit < 1:
+            msg = "MCP onboarding rate limit must be positive"
+            raise ValueError(msg)
+        self._onboarding_requests: deque[float] = deque()
         self.provider = GatewayOAuthProvider(paths, public_url=paths.env_value("MINDROOM_PUBLIC_URL") or "")
         self.manager = MCPServerManager(paths, validate_agent_function_names=False)
         self._config_lock = asyncio.Lock()
@@ -133,6 +141,16 @@ class GatewayRuntime:
         )
         self.token = TokenHandler(self.provider, authenticator)
         self.revoke = RevocationHandler(self.provider, authenticator)
+
+    def _allow_onboarding_request(self) -> bool:
+        """Bound public onboarding traffic independently of current client grants."""
+        now = monotonic()
+        while self._onboarding_requests and self._onboarding_requests[0] <= now - 60:
+            self._onboarding_requests.popleft()
+        if len(self._onboarding_requests) >= self._onboarding_limit:
+            return False
+        self._onboarding_requests.append(now)
+        return True
 
     @property
     def origin(self) -> str:
@@ -194,7 +212,7 @@ async def gateway_lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         runtime = GatewayRuntime(paths)
     except ValueError:
-        logger.warning("MCP gateway disabled: configure a valid public origin")
+        logger.warning("MCP gateway disabled: configure a valid public origin and limits")
         yield
         return
     state.mcp_gateway_runtime = runtime
@@ -234,8 +252,8 @@ def _require_form_content_type(request: Request) -> None:
         raise HTTPException(415, "URL-encoded form required", headers=PERSONAL_RESPONSE_HEADERS)
 
 
-async def _oauth(request: Request) -> Response:
-    runtime = _runtime(request)
+def _oauth_admission(request: Request, runtime: GatewayRuntime, operation: str) -> Response | None:
+    """Answer preflight and reject excess public input before reading request bodies."""
     if request.method == "OPTIONS":
         return Response(
             status_code=204,
@@ -245,9 +263,23 @@ async def _oauth(request: Request) -> Response:
                 "Access-Control-Allow-Headers": "Content-Type, MCP-Protocol-Version",
             },
         )
-    operation = request.url.path.rsplit("/", 1)[-1]
+    if operation in {"register", "authorize"} and not runtime._allow_onboarding_request():
+        return JSONResponse(
+            {"error": "slow_down"},
+            status_code=429,
+            headers={**_MACHINE_HEADERS, "Retry-After": "60"},
+        )
     if len(request.scope.get("query_string", b"")) > 8192:
         return JSONResponse({"error": "invalid_request"}, status_code=413, headers=_MACHINE_HEADERS)
+    return None
+
+
+async def _oauth(request: Request) -> Response:
+    runtime = _runtime(request)
+    operation = request.url.path.rsplit("/", 1)[-1]
+    admission = _oauth_admission(request, runtime, operation)
+    if admission is not None:
+        return admission
     try:
         if request.method == "POST":
             body = await read_gateway_body(request)
@@ -267,6 +299,12 @@ async def _oauth(request: Request) -> Response:
             "revoke": runtime.revoke,
         }[operation]
         response = await handler.handle(request)
+    except GatewayOAuthCapacityError:
+        return JSONResponse(
+            {"error": "temporarily_unavailable"},
+            status_code=503,
+            headers={**_MACHINE_HEADERS, "Retry-After": "60"},
+        )
     except HTTPException as exc:
         return JSONResponse({"error": "invalid_request"}, status_code=exc.status_code, headers=_MACHINE_HEADERS)
     except TimeoutError:

@@ -110,6 +110,19 @@ Opaque authorization codes, browser nonces, access tokens, and refresh tokens ar
 Run one API process for this gateway: active-call limits and cancellation ownership are process-local.
 Multiple independently routed replicas are not supported by this implementation.
 
+Public registration and authorization starts share an admission limit of 60 requests per minute per API process.
+Set the positive integer `MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT` to adjust it.
+Excess requests receive HTTP 429 with `Retry-After`; token exchange, refresh, revocation, discovery, and existing MCP grants remain usable.
+
+Abandoned registrations expire 24 hours after registration; a live grant or pending consent preserves its registered client.
+Anonymous reads and repeat registration do not extend that retention period.
+Pending consent and client metadata without a live grant share a 64-MiB onboarding budget, including an allowance for row and index overhead.
+Set the positive integer `MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES` to adjust this storage budget.
+At capacity, registration returns HTTP 503 with `Retry-After`; authorization returns the OAuth `temporarily_unavailable` error to its validated callback.
+Expired onboarding records and inactive grant families are pruned during store write operations and client-registration lookups.
+Access and refresh token bindings remain available throughout a live grant's lifetime for revocation and refresh replay detection.
+These controls bound anonymous onboarding state; they do not impose a user or device count limit or block existing grants from refreshing or being revoked.
+
 ## Execution limits
 
 - Tools requiring native confirmation or configured approval cannot run through the gateway; they return `approval_required`.

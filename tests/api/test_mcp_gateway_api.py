@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mindroom import constants
-from mindroom.api import config_lifecycle, main
+from mindroom.api import config_lifecycle, main, mcp_gateway
 from mindroom.api.mcp_gateway import gateway_lifespan, install_gateway_routes
 from mindroom.config.main import Config
 from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
@@ -377,6 +377,81 @@ def test_configured_browser_origin_can_complete_bearer_mcp_requests(
         assert _list(client, token, Origin="https://evil.example.org").status_code == 403
 
 
+def test_onboarding_rate_limit_preserves_existing_grants_and_recovers(
+    gateway_app: FastAPI,
+    signed_headers: Callable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Public onboarding has bounded admission without blocking current client grants."""
+    now = [100.0]
+    monkeypatch.setattr(mcp_gateway, "monotonic", lambda: now[0], raising=False)
+    snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={**snapshot.runtime_paths.process_env, "MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT": "2"},
+    )
+    with TestClient(gateway_app, base_url=ORIGIN, follow_redirects=False) as client:
+        client_id, code = _code(client, signed_headers("alice"))
+        for response in [
+            client.post("/mcp/oauth/register", json={}),
+            client.get("/mcp/oauth/authorize"),
+        ]:
+            assert response.status_code == 429
+            assert response.json() == {"error": "slow_down"}
+            assert response.headers["retry-after"] == "60"
+            assert "no-store" in response.headers["cache-control"]
+        assert client.get("/.well-known/oauth-protected-resource/mcp").status_code == 200
+        tokens = _exchange(client, client_id, code).json()
+        assert _list(client, tokens["access_token"]).status_code == 200
+        refreshed = client.post(
+            "/mcp/oauth/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "refresh_token": tokens["refresh_token"],
+                "resource": RESOURCE,
+            },
+        )
+        assert refreshed.status_code == 200
+        access = refreshed.json()["access_token"]
+        assert client.post("/mcp/oauth/revoke", data={"client_id": client_id, "token": access}).status_code == 200
+        assert _list(client, access).status_code == 401
+        now[0] += 60
+        _authorize(client)
+
+
+@pytest.mark.parametrize("operation", ["register", "authorize"])
+def test_onboarding_storage_capacity_returns_protocol_backpressure(gateway_app: FastAPI, operation: str) -> None:
+    """Public storage exhaustion returns a controlled response through the real SDK handlers."""
+    snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={
+            **snapshot.runtime_paths.process_env,
+            "MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES": "1024" if operation == "register" else "2048",
+        },
+    )
+    with TestClient(gateway_app, base_url=ORIGIN, follow_redirects=False) as client:
+        if operation == "authorize":
+            _, callback = _authorize(client)
+            assert callback.startswith(CALLBACK + "&")
+            assert parse_qs(urlsplit(callback).query)["error"] == ["temporarily_unavailable"]
+        else:
+            response = client.post(
+                "/mcp/oauth/register",
+                json={
+                    "redirect_uris": [CALLBACK],
+                    "token_endpoint_auth_method": "none",
+                    "grant_types": ["authorization_code", "refresh_token"],
+                    "response_types": ["code"],
+                },
+            )
+            assert response.status_code == 503
+            assert response.json() == {"error": "temporarily_unavailable"}
+            assert response.headers["retry-after"] == "60"
+            assert "no-store" in response.headers["cache-control"]
+
+
 @pytest.mark.parametrize(
     ("setting", "value"),
     [
@@ -384,6 +459,10 @@ def test_configured_browser_origin_can_complete_bearer_mcp_requests(
         ("MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT", "false"),
         ("MINDROOM_PUBLIC_URL", "https://example.org/unexpected-path"),
         ("MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS", "*"),
+        ("MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT", "0"),
+        ("MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT", "invalid"),
+        ("MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES", "0"),
+        ("MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES", "invalid"),
     ],
 )
 def test_disabled_or_invalid_gateway_does_not_start(gateway_app: FastAPI, setting: str, value: str) -> None:

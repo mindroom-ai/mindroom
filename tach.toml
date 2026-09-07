@@ -4999,6 +4999,7 @@ depends_on = [
     "mindroom.mcp.manager",
     "mindroom.mcp_gateway.oauth",
     "mindroom.mcp_gateway.server",
+    "mindroom.mcp_gateway.store",
     "mindroom.mcp_gateway.tools",
 ]
 

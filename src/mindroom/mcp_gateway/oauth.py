@@ -23,10 +23,11 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
-from mindroom.mcp_gateway.store import GatewayOAuthStore
+from mindroom.mcp_gateway.store import GatewayOAuthCapacityError, GatewayOAuthStore
 
 if TYPE_CHECKING:
     import sqlite3
+    from collections.abc import Callable
 
     from mindroom.constants import RuntimePaths
 
@@ -112,7 +113,13 @@ class GatewayOAuthProvider(
 ):
     """Implement the MCP SDK authorization-server provider protocol."""
 
-    def __init__(self, runtime_paths: RuntimePaths, *, public_url: str) -> None:
+    def __init__(
+        self,
+        runtime_paths: RuntimePaths,
+        *,
+        public_url: str,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
         origin = public_url.rstrip("/")
         parsed = urlsplit(origin)
         if not _valid_url(origin) or parsed.path or parsed.query:
@@ -121,11 +128,21 @@ class GatewayOAuthProvider(
         self.resource_url = origin + "/mcp"
         self.issuer_url = origin + "/mcp/oauth"
         self.consent_url = origin + "/connections/mcp/authorize"
-        self.store = GatewayOAuthStore(runtime_paths.storage_root)
+        configured_budget = runtime_paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES")
+        onboarding_max_bytes = int(configured_budget) if configured_budget is not None else 64 * 1024 * 1024
+        if onboarding_max_bytes <= 0:
+            msg = "MCP onboarding storage budget must be a positive integer"
+            raise ValueError(msg)
+        self._clock = clock or (lambda: time.time())
+        self.store = GatewayOAuthStore(
+            runtime_paths.storage_root,
+            onboarding_max_bytes=onboarding_max_bytes,
+            clock=self._clock,
+        )
 
     @override
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        """Load registered client metadata without network fetches."""
+        """Collect expired registrations before loading client metadata without network fetches."""
 
         def read(connection: sqlite3.Connection) -> OAuthClientInformationFull | None:
             row = connection.execute("SELECT metadata FROM clients WHERE client_id = ?", (client_id,)).fetchone()
@@ -136,16 +153,17 @@ class GatewayOAuthProvider(
     @override
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         """Accept bounded metadata for public authorization-code/refresh clients."""
+        client_id = client_info.client_id
         if (
-            not client_info.client_id
-            or len(client_info.client_id) > 256
+            not client_id
+            or len(client_id) > 256
             or client_info.client_secret is not None
             or client_info.token_endpoint_auth_method != "none"  # noqa: S105
             or sorted(client_info.grant_types) != ["authorization_code", "refresh_token"]
             or client_info.response_types != ["code"]
             or client_info.scope not in (None, "mcp:tools")
             or len(client_info.client_name or "") > 256
-            or len(client_info.model_dump_json()) > 16_384
+            or len(client_info.model_dump_json().encode("utf-8")) > 16_384
         ):
             raise RegistrationError("invalid_client_metadata", "Unsupported public client metadata")  # noqa: EM101
         redirects = client_info.redirect_uris
@@ -153,19 +171,31 @@ class GatewayOAuthProvider(
             raise RegistrationError("invalid_redirect_uri", "Invalid callback URL")  # noqa: EM101
         normalized = client_info.model_copy(update={"scope": "mcp:tools"})
 
-        def save(connection: sqlite3.Connection) -> None:
+        def save(connection: sqlite3.Connection) -> bool:
             existing = connection.execute(
                 "SELECT metadata FROM clients WHERE client_id = ?",
                 (normalized.client_id,),
             ).fetchone()
             if existing and existing["metadata"] != normalized.model_dump_json():
                 raise RegistrationError("invalid_client_metadata", "Client is already registered")  # noqa: EM101
+            if existing:
+                return True
+            metadata = normalized.model_dump_json()
+            if not self.store.has_onboarding_capacity(
+                connection,
+                payload=metadata,
+                identifier=client_id,
+            ):
+                return False
             connection.execute(
-                "INSERT OR IGNORE INTO clients VALUES (?, ?)",
-                (normalized.client_id, normalized.model_dump_json()),
+                "INSERT INTO clients (client_id, metadata, expires_at) VALUES (?, ?, ?)",
+                (normalized.client_id, metadata, self.store.registration_expires_at()),
             )
+            return True
 
-        await self.store.transact(save)
+        if not await self.store.transact(save):
+            msg = "MCP onboarding storage is temporarily full"
+            raise GatewayOAuthCapacityError(msg)
 
     @override
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
@@ -190,18 +220,24 @@ class GatewayOAuthProvider(
             },
         )
 
-        def save(connection: sqlite3.Connection) -> None:
+        def save(connection: sqlite3.Connection) -> bool:
+            if not connection.execute("SELECT 1 FROM clients WHERE client_id = ?", (registered.client_id,)).fetchone():
+                raise AuthorizeError("unauthorized_client", "Client registration expired")  # noqa: EM101
+            if not self.store.has_onboarding_capacity(connection, payload=payload, identifier=_digest(state)):
+                return False
             connection.execute(
                 "INSERT INTO pending (state_hash, payload, expires_at) VALUES (?, ?, ?)",
-                (_digest(state), payload, time.time() + _CONSENT_TTL),
+                (_digest(state), payload, self._clock() + _CONSENT_TTL),
             )
+            return True
 
-        await self.store.transact(save)
+        if not await self.store.transact(save):
+            return _consent_callback(str(params.redirect_uri), error="temporarily_unavailable", state=params.state)
         return self.consent_url + "?" + urlencode({"state": state})
 
     def _pending(self, connection: sqlite3.Connection, state: str) -> sqlite3.Row:
         row = connection.execute("SELECT * FROM pending WHERE state_hash = ?", (_digest(state),)).fetchone()
-        if row is None or row["expires_at"] <= time.time():
+        if row is None or row["expires_at"] <= self._clock():
             raise AuthorizeError("invalid_request", "Consent is invalid or expired")  # noqa: EM101
         payload = json.loads(row["payload"])
         if payload["params"]["resource"] != self.resource_url:
@@ -271,7 +307,7 @@ class GatewayOAuthProvider(
             connection.execute("DELETE FROM pending WHERE state_hash = ?", (_digest(state),))
             if not allow:
                 return _consent_callback(str(params.redirect_uri), error="access_denied", state=params.state)
-            now = time.time()
+            now = self._clock()
             grant_id = _secret()
             grant = {
                 "client_id": payload["client_id"],
@@ -328,7 +364,7 @@ class GatewayOAuthProvider(
         ).fetchone()
         if row is None or row["revoked"] or (row["consumed"] and not include_consumed):
             return None
-        if min(row["expires_at"], row["grant_expires_at"]) <= time.time():
+        if min(row["expires_at"], row["grant_expires_at"]) <= self._clock():
             return None
         if json.loads(row["grant_payload"])["resource"] != self.resource_url:
             return None
@@ -349,7 +385,7 @@ class GatewayOAuthProvider(
             code = _GatewayAuthorizationCode(code=authorization_code, **json.loads(row["payload"]))
             return code if code.client_id == client.client_id else None
 
-        return await self.store.transact(read)
+        return await self.store.read(read)
 
     @override
     async def load_access_token(self, token: str) -> GatewayAccessToken | None:
@@ -359,7 +395,7 @@ class GatewayOAuthProvider(
             row = self._load(connection, "access", token)
             return GatewayAccessToken(token=token, **json.loads(row["payload"])) if row else None
 
-        return await self.store.transact(read)
+        return await self.store.read(read)
 
     @override
     async def load_refresh_token(
@@ -376,10 +412,10 @@ class GatewayOAuthProvider(
             token = _GatewayRefreshToken(token=refresh_token, **json.loads(row["payload"]))
             return token if token.client_id == client.client_id else None
 
-        return await self.store.transact(read)
+        return await self.store.read(read)
 
     def _issue_tokens(self, connection: sqlite3.Connection, row: sqlite3.Row) -> OAuthToken:
-        now = int(time.time())
+        now = int(self._clock())
         expires_at = min(now + _ACCESS_TTL, int(row["grant_expires_at"]))
         grant = json.loads(row["grant_payload"])
         access = GatewayAccessToken(**grant, token=_secret(), expires_at=expires_at)
