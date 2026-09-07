@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import signal
 import subprocess
@@ -12,11 +13,247 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from mindroom.turn_record import RevisionReplay
+from mindroom.cli import main as cli_main
+from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
+from mindroom.conversation_state_writer import ConversationStateWriter
+from mindroom.handled_turns import HandledTurnLedger
+from mindroom.matrix.identity import MatrixID
+from mindroom.tool_system.runtime_context import ToolRuntimeSupport
+from mindroom.turn_record import RevisionReplay, TurnRecord
+from mindroom.turn_store import TurnStore, TurnStoreDeps
 from scripts.testing import fuzz_live_matrix as live_fuzz
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.event_journal import EventJournalStore
+
+
+def _redaction_observer_store() -> TurnStore:
+    """Expose typed owner dependencies while isolating the original mutation boundary."""
+    resolver_deps = Mock(spec=ConversationResolverDeps)
+    resolver_deps.matrix_id = MatrixID.parse("@general:example")
+    deps = Mock(spec=TurnStoreDeps)
+    deps.agent_name = "general"
+    deps.resolver = ConversationResolver(resolver_deps)
+    store = object.__new__(TurnStore)
+    store.deps = deps
+    store._ledger = Mock(spec=HandledTurnLedger)
+    store._ledger.all_turn_records.return_value = ()
+    return store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["return", "error", "cancel", "append_failure", "missing_file"])
+async def test_runtime_redaction_observer_records_before_original(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    """Real installed wrapper records synchronously and preserves the original boundary."""
+    path = tmp_path / "entries.jsonl"
+    path.touch()
+    store = _redaction_observer_store()
+    monkeypatch.setattr(TurnStore, "is_revision_redacted", lambda _self, _target: False)
+    calls: list[str] = []
+    error = RuntimeError("original mutation failed")
+    cancelled = asyncio.CancelledError("original cancelled")
+    result = TurnRecord.create(("$edit",), completed=False)
+
+    async def original(self: TurnStore, target: str) -> TurnRecord:
+        assert self is store
+        assert json.loads(path.read_text())["target_event_id"] == target
+        calls.append(target)
+        if outcome == "error":
+            raise error
+        if outcome == "cancel":
+            raise cancelled
+        return result
+
+    monkeypatch.setattr(TurnStore, "mark_source_redacted", original)
+    monkeypatch.setattr(live_fuzz.time, "monotonic_ns", lambda: 123)
+    live_fuzz._install_runtime_redaction_observer(path)
+    if outcome in {"append_failure", "missing_file"}:
+        path.unlink()
+        if outcome == "append_failure":
+            path.mkdir()
+        with pytest.raises(SystemExit, match="redaction observation"):
+            store.mark_source_redacted("$edit").close()
+        assert not calls
+        return
+    operation = store.mark_source_redacted("$edit")
+    assert not calls
+    assert json.loads(path.read_text()) == {
+        "agent_name": "general",
+        "principal_id": "general@@general:example",
+        "target_event_id": "$edit",
+        "monotonic_ns": 123,
+        "already_redacted": False,
+    }
+    if outcome in {"error", "cancel"}:
+        with pytest.raises(type(error if outcome == "error" else cancelled)) as caught:
+            await operation
+        assert caught.value is (error if outcome == "error" else cancelled)
+    else:
+        assert await operation is result
+    assert calls == ["$edit"]
+
+
+def test_real_runtime_child_installs_observer_across_generations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Child attests installation only after installing; restart retains prior entries and model calls."""
+    path = tmp_path / "entries.jsonl"
+    path.touch()
+    attestation = tmp_path / "attestation.json"
+    store = _redaction_observer_store()
+    generation = 0
+
+    async def original(self: TurnStore, target: str) -> None:
+        assert self is store
+        assert target == "$edit"
+
+    def app() -> None:
+        assert TurnStore.mark_source_redacted is not original
+        assert json.loads(attestation.read_text())["runtime_redaction_observer"]["path"] == str(path)
+        asyncio.run(store.mark_source_redacted("$edit"))
+
+    monkeypatch.setattr(cli_main, "app", app)
+    monkeypatch.setattr(live_fuzz.sys, "argv", ["harness"])
+    monkeypatch.setattr(TurnStore, "is_revision_redacted", lambda _self, _target: generation == 2)
+    live_fuzz._ModelHandler.reset_observations()
+    monkeypatch.setattr(live_fuzz.time, "monotonic_ns", lambda: 100)
+    live_fuzz._ModelHandler._record_observation(90, frozenset({"marker"}))
+    for generation in (1, 2):
+        monkeypatch.setattr(TurnStore, "mark_source_redacted", original)
+        monkeypatch.setattr(live_fuzz.time, "monotonic_ns", lambda generation=generation: generation * 200)
+        live_fuzz._run_mindroom_runtime_child(attestation, path, ["run"])
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [entry["monotonic_ns"] for entry in entries] == [200, 400]
+    assert [entry["already_redacted"] for entry in entries] == [False, True]
+    assert live_fuzz._runtime_redaction_cutoff(path, "general@@general:example", "$edit") == 200
+    assert live_fuzz._ModelHandler.timed_observations_snapshot()[90].monotonic_ns == 100
+    live_fuzz._ModelHandler.reset_observations()
+
+
+@pytest.mark.asyncio
+async def test_runtime_redaction_observer_rejects_recovered_revision_without_physical_tombstone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    journal_store: EventJournalStore,
+) -> None:
+    """A durably invalidated owner revision cannot gain a later cutoff from its first callback."""
+    store = TurnStore(
+        TurnStoreDeps(
+            agent_name="general",
+            turn_records=journal_store.turn_records("general"),
+            legacy_responses_file=None,
+            state_writer=Mock(spec=ConversationStateWriter),
+            resolver=_redaction_observer_store().deps.resolver,
+            tool_runtime=Mock(spec=ToolRuntimeSupport),
+        ),
+    )
+    await store.warm()
+    await store.record_turn(
+        TurnRecord.create(
+            ("$source",),
+            completed=True,
+            revision_replay={"$edit": RevisionReplay("$source", 100, redacted=True)},
+        ),
+    )
+    assert not store.is_revision_redacted("$edit")
+    path = tmp_path / "entries.jsonl"
+    path.touch()
+    monkeypatch.setattr(TurnStore, "mark_source_redacted", TurnStore.mark_source_redacted)
+    live_fuzz._install_runtime_redaction_observer(path)
+    await store.mark_source_redacted("$edit")
+    assert json.loads(path.read_text())["already_redacted"] is True
+    assert live_fuzz._runtime_redaction_cutoff(path, "general@@general:example", "$edit") is None
+
+
+@pytest.mark.parametrize("invalid", ["truncated", "malformed", "backwards", "recovered", "missing"])
+def test_runtime_redaction_evidence_never_moves_cutoff(
+    tmp_path: Path,
+    invalid: str,
+) -> None:
+    """Damaged evidence or a recovered first tombstone cannot date invalidation later."""
+    path = tmp_path / "entries.jsonl"
+    entry = {
+        "agent_name": "general",
+        "principal_id": "general@@general:example",
+        "target_event_id": "$edit",
+        "monotonic_ns": 200,
+        "already_redacted": invalid == "recovered",
+    }
+    content = json.dumps(entry) + "\n"
+    if invalid == "truncated":
+        content += '{"agent_name":'
+    if invalid == "malformed":
+        content += json.dumps({**entry, "monotonic_ns": "300"}) + "\n"
+    if invalid == "backwards":
+        content += json.dumps({**entry, "monotonic_ns": 100}) + "\n"
+    if invalid != "missing":
+        path.write_text(content)
+    if invalid in {"recovered", "missing"}:
+        assert live_fuzz._runtime_redaction_cutoff(path, "general@@general:example", "$edit") is None
+    else:
+        with pytest.raises(AssertionError, match="runtime redaction evidence"):
+            live_fuzz._runtime_redaction_cutoff(path, "general@@general:example", "$edit")
+
+
+def test_model_observation_timing_is_atomic_and_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Call identifiers are opaque; each exact marker snapshot retains its own host clock."""
+    handler = live_fuzz._ModelHandler
+    handler.reset_observations()
+    monkeypatch.setattr(live_fuzz.time, "monotonic_ns", lambda: 100)
+    handler._record_observation(90, frozenset({"first"}))
+    monkeypatch.setattr(live_fuzz.time, "monotonic_ns", lambda: 300)
+    handler._record_observation(2, frozenset({"second"}))
+    observations = handler.timed_observations_snapshot()
+    assert observations[90].monotonic_ns == 100
+    assert observations[90].markers == frozenset({"first"})
+    assert observations[2].monotonic_ns == 300
+    handler.reset_observations()
+    assert handler.timed_observations_snapshot() == {}
+
+
+def test_runtime_membership_uses_exact_time_not_call_number(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh retry IDs and missing timestamps cannot inherit earlier identical marker membership."""
+    path = tmp_path / "entries.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "agent_name": "general",
+                "principal_id": "general@@general:example",
+                "target_event_id": "$edit",
+                "monotonic_ns": 200,
+                "already_redacted": False,
+            },
+        )
+        + "\n",
+    )
+    evidence = live_fuzz.RedactedEditEvidence("$source", "$edit", "marker", frozenset({4}), frozenset({"$edit"}))
+    handler = live_fuzz._ModelHandler
+    handler.reset_observations()
+    monkeypatch.setattr(live_fuzz.time, "monotonic_ns", lambda: 100)
+    handler._record_observation(90, frozenset({"marker"}))
+    monkeypatch.setattr(live_fuzz.time, "monotonic_ns", lambda: 300)
+    handler._record_observation(2, frozenset({"marker"}))
+    for call, expected in ((90, True), (2, False), (4, True), (1, False)):
+        assert (
+            live_fuzz._historical_call_observed(
+                evidence,
+                call,
+                agent_id="@general:example",
+                runtime_redaction_path=path,
+            )
+            is expected
+        )
+    handler.reset_observations()
 
 
 @pytest.mark.parametrize("method", ["stop_mindroom", "_stop_mindroom"])

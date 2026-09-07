@@ -57,9 +57,11 @@ from mindroom.prompts import AGENT_IDENTITY_CONTEXT_TEMPLATE
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Callable, Collection, Coroutine
     from io import TextIOWrapper
     from typing import Literal
+
+    from mindroom.turn_store import TurnStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INSTANCE_REGISTRY = PROJECT_ROOT / "local" / "instances" / "deploy" / "instances.json"
@@ -2151,6 +2153,14 @@ def _marker_fingerprint(markers: frozenset[str]) -> int:
     return int.from_bytes(digest, "big")
 
 
+@dataclass(frozen=True, slots=True)
+class ModelCallObservation:
+    """One exact request observed under the model server's lock."""
+
+    markers: frozenset[str]
+    monotonic_ns: int
+
+
 class _ModelHandler(BaseHTTPRequestHandler):
     """Small deterministic OpenAI-compatible endpoint for live transport tests.
 
@@ -2179,6 +2189,7 @@ class _ModelHandler(BaseHTTPRequestHandler):
     _observation_lock = threading.Lock()
     _observed_markers: ClassVar[dict[int, frozenset[str]]] = {}
     _full_request_markers: ClassVar[dict[int, frozenset[str]]] = {}
+    _timed_observations: ClassVar[dict[int, ModelCallObservation]] = {}
 
     @classmethod
     def reset_observations(cls) -> None:
@@ -2186,6 +2197,7 @@ class _ModelHandler(BaseHTTPRequestHandler):
         with cls._observation_lock:
             cls._observed_markers = {}
             cls._full_request_markers = {}
+            cls._timed_observations = {}
         cls.call_ids = itertools.count(1)
         cls.blocked_request_started.clear()
         cls.blocked_request_release.clear()
@@ -2199,8 +2211,15 @@ class _ModelHandler(BaseHTTPRequestHandler):
         full_request_markers: frozenset[str] = frozenset(),
     ) -> None:
         with cls._observation_lock:
+            cls._timed_observations[call_id] = ModelCallObservation(markers, time.monotonic_ns())
             cls._observed_markers[call_id] = markers
             cls._full_request_markers[call_id] = full_request_markers
+
+    @classmethod
+    def timed_observations_snapshot(cls) -> dict[int, ModelCallObservation]:
+        """Retain exact host-clock facts across runtime process generations."""
+        with cls._observation_lock:
+            return dict(cls._timed_observations)
 
     @classmethod
     def full_request_markers_for(cls, call_id: int) -> frozenset[str]:
@@ -2943,6 +2962,7 @@ class ManagedTuwunelStack:
         self.config_path = self.root / "config.yaml"
         self.log_path = self.root / "mindroom.log"
         self.attestation_path = self.root / "runtime-attestation.json"
+        self.runtime_redaction_path = state_root / "runs" / f"{self.instance_name}-runtime-redactions.jsonl"
         self.runtime_provenance: dict[str, object] | None = None
         self._runtime_generations: list[dict[str, object]] = []
         self.api_port = 0
@@ -3718,6 +3738,11 @@ class ManagedTuwunelStack:
         ):
             self._created = False
         _attempt_cleanup(errors, "remove temporary stack storage", self.temp_dir.cleanup)
+        _attempt_cleanup(
+            errors,
+            "remove runtime redaction observations",
+            lambda: self.runtime_redaction_path.unlink(missing_ok=True),
+        )
         cleanup_state = "cleanup_failed" if errors else "closed"
         _attempt_cleanup(
             errors,
@@ -3766,6 +3791,8 @@ class ManagedTuwunelStack:
 
     def _start_model_server(self) -> int:
         profile = self._stream_profile
+        self.runtime_redaction_path.parent.mkdir(parents=True, exist_ok=True)
+        self.runtime_redaction_path.touch(exist_ok=False)
         _ModelHandler.reset_observations()
         _ModelHandler.stream_segments = profile.stream_segments
         _ModelHandler.stream_delay = profile.stream_delay
@@ -3857,6 +3884,7 @@ class ManagedTuwunelStack:
             str(Path(__file__).resolve()),
             "__mindroom_runtime_child__",
             str(self.attestation_path),
+            str(self.runtime_redaction_path),
         ]
         command.extend(("run", "--api-port", str(self.api_port), "--log-level", "INFO"))
         self._mindroom_process = subprocess.Popen(
@@ -5364,6 +5392,91 @@ class RedactedEditEvidence:
     known_edit_event_ids: frozenset[str]
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeRedactionEntry:
+    """Synchronous entry to one owner's physical-source invalidation."""
+
+    agent_name: str
+    principal_id: str
+    target_event_id: str
+    monotonic_ns: int
+    already_redacted: bool
+
+
+def _parse_runtime_redaction_entry(line: str) -> RuntimeRedactionEntry:
+    """Reject incomplete or ill-typed serialized entry facts."""
+    try:
+        raw = json.loads(line)
+    except ValueError as exc:
+        msg = "invalid runtime redaction evidence: malformed entry"
+        raise AssertionError(msg) from exc
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"agent_name", "principal_id", "target_event_id", "monotonic_ns", "already_redacted"}
+        or any(
+            not isinstance(raw[key], str) or not raw[key] for key in ("agent_name", "principal_id", "target_event_id")
+        )
+        or type(raw["monotonic_ns"]) is not int
+        or raw["monotonic_ns"] <= 0
+        or type(raw["already_redacted"]) is not bool
+        or not raw["principal_id"].startswith(raw["agent_name"] + "@@")
+    ):
+        msg = "invalid runtime redaction evidence: invalid entry fields"
+        raise AssertionError(msg)
+    return RuntimeRedactionEntry(**raw)
+
+
+def _runtime_redaction_cutoff(path: Path | None, principal_id: str, target_id: str) -> int | None:
+    """Use only the first complete exact-owner entry; damaged evidence fails closed."""
+    if path is None or not path.exists():
+        return None
+    with path.open(encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_SH)
+        content = handle.read()
+    first: RuntimeRedactionEntry | None = None
+    previous: dict[tuple[str, str], RuntimeRedactionEntry] = {}
+    if content and not content.endswith("\n"):
+        msg = "invalid runtime redaction evidence: truncated entry"
+        raise AssertionError(msg)
+    for line in content.splitlines():
+        entry = _parse_runtime_redaction_entry(line)
+        key = (entry.principal_id, entry.target_event_id)
+        earlier = previous.get(key)
+        if earlier is not None and (
+            entry.monotonic_ns < earlier.monotonic_ns or (earlier.already_redacted and not entry.already_redacted)
+        ):
+            msg = "invalid runtime redaction evidence: contradictory entries"
+            raise AssertionError(msg)
+        previous[key] = entry
+        if first is None and key == (principal_id, target_id):
+            first = entry
+    return first.monotonic_ns if first is not None and not first.already_redacted else None
+
+
+def _historical_call_observed(
+    evidence: RedactedEditEvidence,
+    call_id: int,
+    *,
+    agent_id: str,
+    runtime_redaction_path: Path | None,
+) -> bool:
+    """Join immutable HTTP membership with exact requests strictly before runtime entry."""
+    if call_id in evidence.observed_call_ids:
+        return True
+    cutoff = _runtime_redaction_cutoff(
+        runtime_redaction_path,
+        ManagedTuwunelStack._journal_principal_id(agent_id),
+        evidence.edit_event_id,
+    )
+    observation = _ModelHandler.timed_observations_snapshot().get(call_id)
+    return (
+        cutoff is not None
+        and observation is not None
+        and observation.monotonic_ns < cutoff
+        and evidence.marker in observation.markers
+    )
+
+
 def _redaction_target_state(
     target_id: str,
     records: Mapping[str, TurnRecord],
@@ -5414,6 +5527,7 @@ class FinalStateAuditor:
         redacted_edit_evidence: Mapping[str, RedactedEditEvidence] | None = None,
         pending_edit_markers: Mapping[str, Mapping[str, str]] | None = None,
         observed_cleanup_probes: Mapping[str, tuple[str, ...]] | None = None,
+        runtime_redaction_path: Path | None = None,
     ) -> None:
         self.client = client
         self.oracle = oracle
@@ -5431,6 +5545,7 @@ class FinalStateAuditor:
         self.observed_cleanup_probes = dict(observed_cleanup_probes or {})
         self.full_request_markers_for = full_request_markers_for
         self.redacted_edit_evidence = dict(redacted_edit_evidence or {})
+        self.runtime_redaction_path = runtime_redaction_path
         self.pending_edit_markers = {source: dict(edits) for source, edits in (pending_edit_markers or {}).items()}
 
     async def audit(
@@ -6095,7 +6210,12 @@ class FinalStateAuditor:
                 or evidence.edit_event_id != edit_id
                 or evidence.source_event_id != source_id
                 or evidence.marker != revisions.get(edit_id)
-                or call_id not in evidence.observed_call_ids
+                or not _historical_call_observed(
+                    evidence,
+                    call_id,
+                    agent_id=self.agent_id,
+                    runtime_redaction_path=self.runtime_redaction_path,
+                )
                 or evidence.marker not in self.observed_markers_for(call_id)
                 or revision is None
                 or revision.source_event_id != source_id
@@ -6325,6 +6445,7 @@ class LiveFuzzRunner:
         # ``unsigned.redacted_because`` provenance.
         self.redacted_targets: dict[str, str] = {}
         self.redacted_edit_evidence: dict[str, RedactedEditEvidence] = {}
+        self.runtime_redaction_path = stack.runtime_redaction_path
         self._cleanup_probe_targets: dict[str, tuple[str, ...]] = {}
         # Per source event id, the marker of the latest valid revision that
         # reached Matrix (``orig`` on send, the edit marker after an edit
@@ -7753,6 +7874,7 @@ class LiveFuzzRunner:
             },
             observed_cleanup_probes=self._cleanup_probe_targets,
             redacted_edit_evidence=self.redacted_edit_evidence,
+            runtime_redaction_path=self.runtime_redaction_path,
             pending_edit_markers=self._pending_edit_markers,
         )
         return await auditor.audit(
@@ -7896,6 +8018,25 @@ class LiveFuzzRunner:
             if not pending:
                 del self._pending_edit_markers[source_id]
 
+    def source_matching_snapshot(self) -> dict[str, object]:
+        """Keep every historical-proof conjunct beside exact call and entry observations."""
+        return {
+            "source_current_markers": dict(self.source_current_markers),
+            "source_revision_markers": {source: dict(edits) for source, edits in self.source_revision_markers.items()},
+            "pending_edit_markers": {source: dict(edits) for source, edits in self._pending_edit_markers.items()},
+            "redacted_targets": dict(self.redacted_targets),
+            "event_summaries": dict(self.oracle.event_summaries),
+            "latest_reply_bodies": dict(self.oracle.latest_reply_bodies),
+            "redacted_edit_evidence": {
+                edit: {
+                    **asdict(evidence),
+                    "observed_call_ids": sorted(evidence.observed_call_ids),
+                    "known_edit_event_ids": sorted(evidence.known_edit_event_ids),
+                }
+                for edit, evidence in self.redacted_edit_evidence.items()
+            },
+        }
+
     def _completed_edit_orders(
         self,
         source_id: str,
@@ -7920,7 +8061,12 @@ class LiveFuzzRunner:
                 or evidence.source_event_id != source_id
                 or evidence.edit_event_id != edit
                 or evidence.marker != marker
-                or call_id not in evidence.observed_call_ids
+                or not _historical_call_observed(
+                    evidence,
+                    call_id,
+                    agent_id=self.oracle.agent_id,
+                    runtime_redaction_path=self.runtime_redaction_path,
+                )
             ):
                 continue
             order = _replacement_order(edit, self.oracle.event_summaries[edit].get("origin_server_ts"), is_edit=True)
@@ -8935,9 +9081,44 @@ def _run_provenance(mindroom_revision: str | None = None) -> dict[str, object]:
     return provenance
 
 
-def _run_mindroom_runtime_child(attestation_path: Path, arguments: list[str]) -> None:
+def _install_runtime_redaction_observer(path: Path) -> None:
+    """Install only in the real child; failed observation must stop before mutation."""
+    from mindroom.turn_store import TurnStore  # noqa: PLC0415
+
+    original = TurnStore.mark_source_redacted
+
+    def observed(self: TurnStore, source_event_id: str) -> Coroutine[Any, Any, TurnRecord | None]:
+        try:
+            entry = RuntimeRedactionEntry(
+                self.deps.agent_name,
+                f"{self.deps.agent_name}@{self.deps.resolver.deps.matrix_id.full_id}",
+                source_event_id,
+                time.monotonic_ns(),
+                self.is_revision_redacted(source_event_id)
+                or any(
+                    revision.redacted
+                    for record in self._ledger.all_turn_records()
+                    if (revision := (record.revision_replay or {}).get(source_event_id)) is not None
+                ),
+            )
+            with os.fdopen(os.open(path, os.O_WRONLY | os.O_APPEND), "w", encoding="utf-8") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                handle.write(json.dumps(asdict(entry), sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception as exc:
+            msg = f"runtime redaction observation failed before mutation: {exc}"
+            raise SystemExit(msg) from exc
+        return original(self, source_event_id)
+
+    TurnStore.mark_source_redacted = observed
+
+
+def _run_mindroom_runtime_child(attestation_path: Path, observation_path: Path, arguments: list[str]) -> None:
     """Attest actual imported packages, then enter the real MindRoom CLI."""
     from mindroom.cli.main import app  # noqa: PLC0415
+
+    _install_runtime_redaction_observer(observation_path)
 
     mindroom_file = mindroom.__file__
     nio_file = nio.__file__
@@ -8950,6 +9131,10 @@ def _run_mindroom_runtime_child(attestation_path: Path, arguments: list[str]) ->
         "mindroom_module_path": str(Path(mindroom_file).resolve()),
         "nio_module_path": str(Path(nio_file).resolve()),
         "nio_version": version("mindroom-nio"),
+        "runtime_redaction_observer": {
+            "path": str(observation_path),
+            "boundary": "TurnStore.mark_source_redacted.entry",
+        },
     }
     temporary = attestation_path.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
@@ -9113,6 +9298,9 @@ class FailureBundle:
         diagnostics: Mapping[str, object],
         tuwunel_log: str,
         full_request_observations: Mapping[object, object] | None = None,
+        model_timing_observations: Mapping[object, object] | None = None,
+        runtime_redaction_path: Path | None = None,
+        source_matching: Mapping[str, object] | None = None,
     ) -> Path:
         """Copy every durable artifact before the stack is torn down."""
 
@@ -9151,6 +9339,10 @@ class FailureBundle:
             write_json({str(call_id): markers for call_id, markers in model_observations.items()}),
         )
         self._write_isolated("diagnostics.json", write_json(dict(diagnostics)))
+        self._write_isolated("model_timing_observations.json", write_json(dict(model_timing_observations or {})))
+        self._write_isolated("source_matching.json", write_json(dict(source_matching or {})))
+        if runtime_redaction_path is not None:
+            self._write_isolated("runtime-redactions.jsonl", copy_text(runtime_redaction_path))
         self._write_isolated(
             "full_request_observations.json",
             write_json({str(call_id): markers for call_id, markers in (full_request_observations or {}).items()}),
@@ -9388,8 +9580,8 @@ def _require_runtime_provenance(
 
 def main() -> None:
     """Run one trace against a fresh disposable real-server stack."""
-    if len(sys.argv) >= 4 and sys.argv[1] == "__mindroom_runtime_child__":
-        _run_mindroom_runtime_child(Path(sys.argv[2]), sys.argv[3:])
+    if len(sys.argv) >= 5 and sys.argv[1] == "__mindroom_runtime_child__":
+        _run_mindroom_runtime_child(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4:])
         return
     args = _parse_args()
     scenario = _scenario_from_args(args)
@@ -9575,6 +9767,23 @@ def _persist_run_bundle(
         ),
     )
     ledger_path = stack.storage_path / "tracking" / "event_journal.db"
+    model_timing_observations = _capture_bundle_collector(
+        bundle,
+        "model_timing_observations.json",
+        lambda: {
+            str(call): {"markers": sorted(observation.markers), "monotonic_ns": observation.monotonic_ns}
+            for call, observation in _ModelHandler.timed_observations_snapshot().items()
+        },
+        lambda error: {"_capture_error": _capture_error_text("model_timing_observations.json", error)},
+        capture_errors,
+    )
+    source_matching = _capture_bundle_collector(
+        bundle,
+        "source_matching.json",
+        lambda: runner.source_matching_snapshot() if runner is not None else {},
+        lambda error: {"_capture_error": _capture_error_text("source_matching.json", error)},
+        capture_errors,
+    )
     path = bundle.finalize(
         exception=exception,
         log_path=stack.log_path,
@@ -9583,6 +9792,9 @@ def _persist_run_bundle(
         oracle_snapshot=oracle_snapshot,
         model_observations=model_observations,
         full_request_observations=full_request_observations,
+        model_timing_observations=cast("Mapping[object, object]", model_timing_observations),
+        runtime_redaction_path=stack.runtime_redaction_path,
+        source_matching=cast("Mapping[str, object]", source_matching),
         diagnostics=diagnostics,
         tuwunel_log=tuwunel_log,
     )

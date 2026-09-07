@@ -2629,6 +2629,7 @@ def test_managed_runtime_pins_child_to_python_313(monkeypatch: pytest.MonkeyPatc
                 str(Path(live_fuzz.__file__).resolve()),
                 "__mindroom_runtime_child__",
                 str(stack.attestation_path),
+                str(stack.runtime_redaction_path),
                 "run",
                 "--api-port",
                 str(stack.api_port),
@@ -5904,6 +5905,7 @@ def _cleanup_qualification_runner(tmp_path: Path) -> LiveFuzzRunner:
     client.room_id = "!room:example"
     client.send_event = AsyncMock(side_effect=["$ordinary", "$anchor"])
     stack = Mock(spec=ManagedTuwunelStack)
+    stack.runtime_redaction_path = tmp_path / "runtime-redactions.jsonl"
     stack.agent_id = "@agent:example"
     stack.router_id = "@router:example"
     stack.storage_path = tmp_path
@@ -7669,6 +7671,7 @@ def _revision_runner() -> LiveFuzzRunner:
     runner._source_revision_stack = {}
     runner._edit_event_source = {}
     runner.redacted_edit_evidence = {}
+    runner.runtime_redaction_path = None
     return runner
 
 
@@ -7693,6 +7696,47 @@ def _temporal_revision_runner() -> LiveFuzzRunner:
     return runner
 
 
+def _add_runtime_historical_evidence(
+    auditor: FinalStateAuditor,
+    tmp_path: Path,
+    failure: str,
+    observed: set[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install exact runtime-entry and model observations for historical boundary controls."""
+    auditor.redacted_edit_evidence["$a"] = replace(
+        auditor.redacted_edit_evidence["$a"],
+        observed_call_ids=frozenset(),
+    )
+    auditor.runtime_redaction_path = tmp_path / "runtime-redactions.jsonl"
+    entry = {
+        "agent_name": "general",
+        "principal_id": "general@@agent:example",
+        "target_event_id": "$a",
+        "monotonic_ns": 200,
+        "already_redacted": failure == "runtime_preexisting",
+    }
+    if failure == "runtime_wrong_owner":
+        entry["agent_name"] = "router"
+        entry["principal_id"] = "router@@router:example"
+    if failure == "runtime_wrong_target":
+        entry["target_event_id"] = "$other"
+    entries = [entry]
+    if failure in {"runtime_duplicate", "runtime_restart"}:
+        entries.append({**entry, "monotonic_ns": 400, "already_redacted": True})
+    if failure != "runtime_missing":
+        auditor.runtime_redaction_path.write_text(
+            "".join(json.dumps(item) + "\n" for item in entries),
+            encoding="utf-8",
+        )
+    observed_at = 100 if failure in {"runtime_before", "runtime_duplicate"} else 300
+    if failure == "runtime_tie":
+        observed_at = 200
+    monkeypatch.setattr(live_fuzz.time, "monotonic_ns", lambda: observed_at)
+    _ModelHandler.reset_observations()
+    _ModelHandler._record_observation(7, frozenset(observed))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
@@ -7714,9 +7758,22 @@ def _temporal_revision_runner() -> LiveFuzzRunner:
         "ledger_source",
         "unredacted",
         "both_markers",
+        "runtime_before",
+        "runtime_after",
+        "runtime_tie",
+        "runtime_duplicate",
+        "runtime_restart",
+        "runtime_preexisting",
+        "runtime_wrong_owner",
+        "runtime_wrong_target",
+        "runtime_missing",
     ],
 )
-async def test_redacted_edit_preserves_completed_historical_answer(tmp_path: Path, failure: str | None) -> None:
+async def test_redacted_edit_preserves_completed_historical_answer(
+    tmp_path: Path,
+    failure: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Only the exact terminal consumed edit and frozen visible generation may survive rollback."""
     marker = _source_marker("root:0", "edit:1")
     sibling = _source_marker("op:9", ORIGINAL_REVISION)
@@ -7739,6 +7796,8 @@ async def test_redacted_edit_preserves_completed_historical_answer(tmp_path: Pat
             frozenset({"$a", "$b"} if failure == "newer_live" else {"$a"}),
         ),
     }
+    if failure is not None and failure.startswith("runtime_"):
+        _add_runtime_historical_evidence(auditor, tmp_path, failure, observed, monkeypatch)
     revision = RevisionReplay(
         "$wrong" if failure == "ledger_source" else "$root",
         100,
@@ -7771,7 +7830,7 @@ async def test_redacted_edit_preserves_completed_historical_answer(tmp_path: Pat
             redacted_source_event_ids=("$a",),
         )
     try:
-        if failure is None:
+        if failure in {None, "runtime_before", "runtime_duplicate"}:
             auditor._assert_model_saw_current_sources(
                 events,
                 records=records,
@@ -7786,6 +7845,7 @@ async def test_redacted_edit_preserves_completed_historical_answer(tmp_path: Pat
                 )
     finally:
         await auditor.client.close()
+        _ModelHandler.reset_observations()
 
 
 @pytest.mark.asyncio
@@ -7961,11 +8021,12 @@ async def test_final_source_revision_uses_matrix_order_not_completion_order() ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("later_authored", [False, True])
-@pytest.mark.parametrize("frozen", [False, True])
+@pytest.mark.parametrize("proof", ["none", "http", "runtime"])
 async def test_redacted_edit_late_completion_supersedes_only_preexisting_debt(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     later_authored: bool,
-    frozen: bool,
+    proof: str,
 ) -> None:
     """A frozen request finishing after deletion can cover older input, never an unseen later edit."""
     runner = _temporal_revision_runner()
@@ -7975,9 +8036,25 @@ async def test_redacted_edit_late_completion_supersedes_only_preexisting_debt(
         runner._push_source_revision("$root", "$a", first)
     runner._push_source_revision("$root", "$b", second)
     runner._edit_event_source["$b"] = "$root"
-    monkeypatch.setattr(_ModelHandler, "observations_snapshot", lambda: {7: [second]} if frozen else {})
+    monkeypatch.setattr(_ModelHandler, "observations_snapshot", lambda: {7: [second]} if proof == "http" else {})
     monkeypatch.setattr(_ModelHandler, "observed_markers_for", lambda _: frozenset({second}))
     await runner._apply_redaction(LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:2"))
+    if proof == "runtime":
+        runner.runtime_redaction_path = tmp_path / "runtime-redactions.jsonl"
+        runner.runtime_redaction_path.write_text(
+            json.dumps(
+                {
+                    "agent_name": "general",
+                    "principal_id": "general@@agent:example",
+                    "target_event_id": "$b",
+                    "monotonic_ns": 200,
+                    "already_redacted": False,
+                },
+            )
+            + "\n",
+        )
+        monkeypatch.setattr(live_fuzz.time, "monotonic_ns", lambda: 100)
+        _ModelHandler._record_observation(7, frozenset({second}))
     if later_authored:
         runner._push_source_revision("$root", "$a", first)
     runner._pending_edit_markers = {"$root": {"$a": first}}
@@ -7989,7 +8066,11 @@ async def test_redacted_edit_late_completion_supersedes_only_preexisting_debt(
     )
     runner.oracle.latest_reply_bodies["$reply"] = ((0, 0, "$reply"), _short_body_for(7))
     runner._reconcile_edit_debts()
-    assert runner._pending_edit_markers == ({"$root": {"$a": first}} if later_authored or not frozen else {})
+    assert runner._pending_edit_markers == ({"$root": {"$a": first}} if later_authored or proof == "none" else {})
+    assert runner.redacted_edit_evidence["$b"].known_edit_event_ids == (
+        frozenset({"$b"}) if later_authored else frozenset({"$a", "$b"})
+    )
+    _ModelHandler.reset_observations()
 
 
 @pytest.mark.asyncio
@@ -8148,6 +8229,7 @@ class _FakeStack:
 
     def __init__(self, storage_path: Path, log_path: Path, *, tuwunel_log: str = "tuwunel line\n") -> None:
         self.storage_path = storage_path
+        self.runtime_redaction_path = storage_path.parent / "runtime-redactions.jsonl"
         self.log_path = log_path
         self._tuwunel_log = tuwunel_log
         self.events: list[str] = []
@@ -8209,6 +8291,15 @@ def _snapshot_oracle() -> ExactReplyOracle:
     return oracle
 
 
+def _bundle_runner(oracle: ExactReplyOracle) -> LiveFuzzRunner:
+    """Initialize the exact source-matching state captured with failure evidence."""
+    runner = _revision_runner()
+    runner.oracle = oracle
+    runner._pending_edit_markers = {}
+    runner.redacted_targets = {}
+    return runner
+
+
 @pytest.mark.asyncio
 async def test_failure_bundle_persists_evidence_and_survives_teardown(tmp_path: Path) -> None:
     """A run failure leaves a complete bundle after the stack is destroyed."""
@@ -8220,9 +8311,10 @@ async def test_failure_bundle_persists_evidence_and_survives_teardown(tmp_path: 
     bundle.record_realized({"sequence": 1, "event_ref": "op:0", "event_id": "$sent"})
 
     stack = _prepared_stack(tmp_path)
+    stack.runtime_redaction_path.write_text('{"entry": "generation one"}\n{"entry": "generation two"}\n')
+    timing = _ModelHandler.timed_observations_snapshot()[3]
     oracle = _snapshot_oracle()
-    runner = object.__new__(LiveFuzzRunner)
-    runner.oracle = oracle
+    runner = _bundle_runner(oracle)
 
     try:
         _persist_failure_bundle(bundle, stack, runner, AssertionError("reply invariant failed"))
@@ -8245,6 +8337,10 @@ async def test_failure_bundle_persists_evidence_and_survives_teardown(tmp_path: 
     assert json.loads((directory / "nio_recovery.json").read_text(encoding="utf-8")) == {"stores": {}}
     observations = json.loads((directory / "model_observations.json").read_text(encoding="utf-8"))
     assert observations["3"] == [_source_marker("op:1", ORIGINAL_REVISION)]
+    saved_timing = json.loads((directory / "model_timing_observations.json").read_text())
+    assert saved_timing["3"] == {"markers": sorted(timing.markers), "monotonic_ns": timing.monotonic_ns}
+    assert (directory / "runtime-redactions.jsonl").read_text() == stack.runtime_redaction_path.read_text()
+    assert json.loads((directory / "source_matching.json").read_text())["redacted_edit_evidence"] == {}
     diagnostics = json.loads((directory / "diagnostics.json").read_text(encoding="utf-8"))
     assert diagnostics["event_loop_stalls"] == 2
     assert "tuwunel line" in (directory / "tuwunel.log").read_text(encoding="utf-8")
@@ -8775,6 +8871,7 @@ def test_runtime_provenance_identifies_tuwunel_server(
 def test_stack_close_attempts_every_stage_before_rethrowing_first_interrupt(
     monkeypatch: pytest.MonkeyPatch,
     interruption: BaseException,
+    tmp_path: Path,
 ) -> None:
     """One teardown interrupt must not skip later cleanup stages."""
     events: list[str] = []
@@ -8808,6 +8905,7 @@ def test_stack_close_attempts_every_stage_before_rethrowing_first_interrupt(
             events.append("temp")
 
     stack = object.__new__(ManagedTuwunelStack)
+    stack.runtime_redaction_path = tmp_path / "runtime-redactions.jsonl"
 
     def stop_mindroom() -> None:
         events.append("mindroom")
@@ -8852,10 +8950,12 @@ def test_stack_close_attempts_every_stage_before_rethrowing_first_interrupt(
     assert any("snapshot runtime evidence: ValueError: snapshot failed" in note for note in interruption.__notes__)
 
 
-def test_stack_close_groups_ordinary_cleanup_failures() -> None:
+def test_stack_close_groups_ordinary_cleanup_failures(tmp_path: Path) -> None:
     """Ordinary teardown failures remain grouped after all stages finish."""
     events: list[str] = []
     stack = object.__new__(ManagedTuwunelStack)
+
+    stack.runtime_redaction_path = tmp_path / "runtime-redactions.jsonl"
 
     def stop_mindroom() -> None:
         events.append("mindroom")
@@ -9378,6 +9478,7 @@ async def test_new_runner_owes_initial_startup_maintenance(tmp_path: Path) -> No
         agent_id="@agent:example",
         router_id="@router:example",
         storage_path=tmp_path,
+        runtime_redaction_path=tmp_path / "runtime-redactions.jsonl",
     )
     try:
         runner = LiveFuzzRunner(
@@ -10113,8 +10214,7 @@ def _redaction_accounting_runner(
         optional_sources=set(),
     )
     oracle.mark_source_optional = oracle.optional_sources.add
-    runner = object.__new__(LiveFuzzRunner)
-    runner.oracle = oracle
+    runner = _bundle_runner(oracle)
     runner.redacted_targets = {}
     runner.sent_records = []
     runner._edit_event_source = {}
@@ -10194,8 +10294,7 @@ async def test_send_expected_message_defers_reply_checks_until_registration() ->
     """A fast reply cannot be rejected while its Matrix source ID is in flight."""
     matrix_client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     oracle = ExactReplyOracle(matrix_client, "@agent:example")
-    runner = object.__new__(LiveFuzzRunner)
-    runner.oracle = oracle
+    runner = _bundle_runner(oracle)
     runner.sent_records = []
 
     class FastReplyClient:
@@ -10248,8 +10347,7 @@ async def test_failure_bundle_artifact_error_preserves_primary_failure(tmp_path:
     (bundle.directory / "mindroom.log").mkdir()
     stack = _prepared_stack(tmp_path)
     oracle = _snapshot_oracle()
-    runner = object.__new__(LiveFuzzRunner)
-    runner.oracle = oracle
+    runner = _bundle_runner(oracle)
 
     try:
         # Must not raise: the primary AssertionError is re-raised by main(), not here.
@@ -10278,8 +10376,7 @@ async def test_direct_bundle_persistence_reports_writer_failure_after_other_arti
     (bundle.directory / "mindroom.log").mkdir()
     stack = _prepared_stack(tmp_path)
     oracle = _snapshot_oracle()
-    runner = object.__new__(LiveFuzzRunner)
-    runner.oracle = oracle
+    runner = _bundle_runner(oracle)
 
     try:
         with pytest.raises(ExceptionGroup, match="failure bundle artifact write failed"):
@@ -10312,8 +10409,7 @@ async def test_failure_bundle_finalizes_every_artifact_after_collector_failure(
     )
     stack = _prepared_stack(tmp_path)
     oracle = _snapshot_oracle()
-    runner = object.__new__(LiveFuzzRunner)
-    runner.oracle = oracle
+    runner = _bundle_runner(oracle)
     collector_error = RuntimeError(f"{failed_collector} exploded")
 
     if failed_collector == "diagnostics.json":
@@ -10398,8 +10494,7 @@ async def test_failure_bundle_finalizes_when_stop_mindroom_fails(tmp_path: Path)
     )
     stack = _prepared_stack(tmp_path)
     oracle = _snapshot_oracle()
-    runner = object.__new__(LiveFuzzRunner)
-    runner.oracle = oracle
+    runner = _bundle_runner(oracle)
 
     def fail_stop() -> None:
         message = "stop failed"
@@ -10771,6 +10866,7 @@ def test_main_cleanup_failure_retains_pre_teardown_evidence(
 
     class CleanupFailingStack:
         sync_mode = "classic"
+        runtime_redaction_path = tmp_path / "runtime-redactions.jsonl"
 
         def __init__(self, **_kwargs: object) -> None:
             self.runtime_provenance = {
@@ -10907,6 +11003,7 @@ def test_main_missing_runtime_provenance_captures_bundle_before_teardown(
 
     class MissingProvenanceStack:
         runtime_provenance = None
+        runtime_redaction_path = tmp_path / "runtime-redactions.jsonl"
 
         sync_mode = "classic"
 
@@ -11011,8 +11108,7 @@ async def test_failure_bundle_snapshot_omits_sync_state_end_to_end(tmp_path: Pat
     )
     stack = _prepared_stack(tmp_path)
     oracle = _snapshot_oracle()
-    runner = object.__new__(LiveFuzzRunner)
-    runner.oracle = oracle
+    runner = _bundle_runner(oracle)
 
     try:
         _persist_failure_bundle(bundle, stack, runner, AssertionError("boom"))
