@@ -126,6 +126,10 @@ class MindRoomOpenAIResponses(OpenAIResponses):
 
     approval_receipt_after_response_id: ClassVar[bool] = True
 
+    def _using_reasoning_model(self) -> bool:
+        """Include Astra in Agno's reasoning-aware response continuation."""
+        return self.id == "gpt-6-astra" or super()._using_reasoning_model()
+
     def get_request_params(
         self,
         messages: list[Message] | None = None,

@@ -154,6 +154,32 @@ def test_openai_responses_supplies_missing_tool_arguments_without_mutating_histo
     assert "arguments" not in assistant.tool_calls[0]["function"]
 
 
+def test_astra_responses_continue_tool_calls_from_the_previous_response() -> None:
+    """Astra tool results must continue the stored reasoning response."""
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")
+    assistant = Message(
+        role="assistant",
+        tool_calls=[
+            {
+                "id": "fc_1",
+                "call_id": "call_1",
+                "type": "function",
+                "function": {"name": "get_status", "arguments": "{}"},
+            },
+        ],
+        provider_data={"response_id": "resp_1"},
+    )
+    tool_result = Message(role="tool", content="ready", tool_call_id="call_1")
+    messages = [assistant, tool_result]
+
+    request_params = model.get_request_params(messages=messages)
+    formatted = model._format_messages(messages)
+
+    assert request_params["store"] is True
+    assert request_params["previous_response_id"] == "resp_1"
+    assert formatted == [{"type": "function_call_output", "call_id": "call_1", "output": "ready"}]
+
+
 @pytest.mark.parametrize(("model_cls", "_agno_cls"), _CHAT_WIRE_PAIRS)
 def test_chat_models_leave_combined_tool_results_for_agno_normalization(
     model_cls: type[OpenAIChat],
