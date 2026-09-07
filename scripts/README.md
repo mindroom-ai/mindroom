@@ -133,8 +133,8 @@ It is not claimed here because it has not been run on a GitHub runner, and shipp
 
 #### Making a red run mean the product is broken
 
-Every event in one Matrix room is handled by a single sequential lane, so a batch that asks forty-five threads for a reply is asking for forty-five agent turns back to back.
-Holding that to the same flat deadline as a single turn made the fuzz profile fail on a busy machine for reasons that had nothing to do with the code under test, so the harness now derives its deadlines from the work and from measured latency.
+A batch can owe many agent turns, including work serialized within a conversation.
+The harness derives its deadlines from the outstanding work and measured latency so healthy progress on a busy machine is not held to a single-turn deadline.
 
 - For fuzz, restart-regression, and short-stream-correctness, `--reply-timeout` is the deadline for a *single* agent turn and the floor under every larger adaptive deadline.
 - For sustained-stream-capacity, `--reply-timeout` is one fixed non-extending deadline for the complete root-release, reply, drain, and fence workflow.
@@ -145,6 +145,8 @@ Holding that to the same flat deadline as a single turn made the fuzz profile fa
 - A deadline that arrives while replies are still landing is extended up to three times, and each extension prints a `slow machine:` line to stderr.
   An extension is only granted to a window that actually produced a reply, so a wedged runtime can never extend its way out of failing.
 - A managed MindRoom child that has exited fails the wait on the next poll instead of being waited out.
+- Graceful shutdown has a separate 60-second outer watchdog so the runtime can complete its sequential cleanup phases.
+  Forced kills, unexpected exit status, and missing orderly shutdown evidence still fail the run.
 
 When a wait does fail, the harness reads the run's own `mindroom_data/tracking/event_journal.db` and reports where each missing reply's source event actually stopped: `not_admitted`, `admitted_never_dispatched`, `dispatched_never_sent`, `settled_without_reply`, or `sent_but_unobserved`.
 The report also names the per-room pending depth and the event at the head of the blocked lane.

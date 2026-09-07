@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import signal
+import subprocess
 from io import BytesIO
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
@@ -13,6 +15,54 @@ from scripts.testing import fuzz_live_matrix as live_fuzz
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.parametrize("method", ["stop_mindroom", "_stop_mindroom"])
+@pytest.mark.parametrize("cleanup_seconds", [41.0, 90.0])
+def test_graceful_shutdown_allows_staged_cleanup_but_still_kills_a_hang(
+    method: str,
+    cleanup_seconds: float,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime phase budgets can exceed twenty seconds without permitting an unbounded stop."""
+    stack = live_fuzz.ManagedTuwunelStack()
+    process = Mock(spec=subprocess.Popen)
+    process.pid = 4242
+    process.poll.return_value = None
+    process.returncode = None
+    stack._mindroom_process = process
+    signals: list[int] = []
+
+    def send_signal(_pid: int, sent_signal: int) -> None:
+        signals.append(sent_signal)
+
+    def wait(*, timeout: float) -> int:
+        if signal.SIGKILL in signals:
+            process.returncode = -signal.SIGKILL
+        elif timeout >= cleanup_seconds:
+            process.returncode = 0
+        else:
+            command = "managed runtime"
+            raise subprocess.TimeoutExpired(command, timeout)
+        return process.returncode
+
+    process.wait.side_effect = wait
+    monkeypatch.setattr(live_fuzz.os, "killpg", send_signal)
+    monkeypatch.setattr(live_fuzz, "_cleanup_surviving_process_group", lambda _: False)
+    monkeypatch.setattr(stack, "log_count", lambda *_: int(process.returncode == 0))
+    try:
+        if method == "stop_mindroom":
+            assert stack.stop_mindroom() is (cleanup_seconds == 41.0)
+        elif cleanup_seconds == 41.0:
+            stack._stop_mindroom()
+        else:
+            with pytest.raises(TimeoutError, match="required SIGKILL"):
+                stack._stop_mindroom()
+        assert signals == ([signal.SIGINT] if cleanup_seconds == 41.0 else [signal.SIGINT, signal.SIGKILL])
+        assert stack._mindroom_process is None
+    finally:
+        stack._mindroom_process = None
+        stack.close()
 
 
 @pytest.mark.asyncio

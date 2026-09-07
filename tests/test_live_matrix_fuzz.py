@@ -4071,7 +4071,7 @@ def test_stop_mindroom_targets_exact_process_group(
             return None
 
         def wait(self, *, timeout: float) -> int:
-            assert timeout in {10, 20}
+            assert timeout in {10, live_fuzz.MINDROOM_SHUTDOWN_TIMEOUT_SECONDS}
             self.waited = True
             return return_code
 
@@ -4135,7 +4135,7 @@ def test_stop_mindroom_reports_sigkill_fallback(
 
         def wait(self, *, timeout: float) -> int:
             self.waits += 1
-            if timeout == 20:
+            if timeout == live_fuzz.MINDROOM_SHUTDOWN_TIMEOUT_SECONDS:
                 command = "mindroom"
                 raise live_fuzz.subprocess.TimeoutExpired(command, timeout)
             assert timeout == 10
@@ -4172,7 +4172,7 @@ def test_stop_mindroom_rejects_nonzero_graceful_exit(
 
         @staticmethod
         def wait(*, timeout: float) -> int:
-            assert timeout == 20
+            assert timeout == live_fuzz.MINDROOM_SHUTDOWN_TIMEOUT_SECONDS
             return 3
 
     stack = object.__new__(ManagedTuwunelStack)
@@ -4207,7 +4207,7 @@ def test_stop_mindroom_accepts_sigint_exit_status(
 
         @staticmethod
         def wait(*, timeout: float) -> int:
-            assert timeout == 20
+            assert timeout == live_fuzz.MINDROOM_SHUTDOWN_TIMEOUT_SECONDS
             return return_code
 
     stack = object.__new__(ManagedTuwunelStack)
@@ -4307,7 +4307,7 @@ def test_stop_mindroom_rejects_surviving_group_after_graceful_leader_exit(
 
         @staticmethod
         def wait(*, timeout: float) -> int:
-            assert timeout == 20
+            assert timeout == live_fuzz.MINDROOM_SHUTDOWN_TIMEOUT_SECONDS
             return 128 + signal.SIGINT
 
     def killpg(_pid: int, sent_signal: signal.Signals | int) -> None:

@@ -75,6 +75,9 @@ AGENT_NAME = "general"
 ROUTER_NAME = "router"
 ROOM_KEY = "lobby"
 LIFECYCLE_COMMAND_TIMEOUT_SECONDS = 180.0
+# API, background, ingestion, and response shutdown windows can total 40s;
+# leave room for resource release while retaining a bounded outer watchdog.
+MINDROOM_SHUTDOWN_TIMEOUT_SECONDS = 60.0
 _PROCESS_GROUP_GRACE_SECONDS = 1.0
 _PROCESS_GROUP_KILL_SECONDS = 10.0
 _PROCESS_GROUP_POLL_SECONDS = 0.05
@@ -3605,7 +3608,7 @@ class ManagedTuwunelStack:
         _reset_durable_sync_cursors(self.storage_path)
         self._start_mindroom()
 
-    def stop_mindroom(self, *, timeout: float = 20) -> bool:
+    def stop_mindroom(self, *, timeout: float = MINDROOM_SHUTDOWN_TIMEOUT_SECONDS) -> bool:
         """Stop MindRoom and report whether its shutdown stayed bounded and clean."""
         process = self._mindroom_process
         if process is None:
@@ -4024,7 +4027,7 @@ class ManagedTuwunelStack:
             msg = f"MindRoom exited before managed SIGINT delivery with status {return_code}"
             raise RuntimeError(msg) from exc
         try:
-            return_code = process.wait(timeout=20)
+            return_code = process.wait(timeout=MINDROOM_SHUTDOWN_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired as exc:
             try:
                 with suppress(ProcessLookupError):
