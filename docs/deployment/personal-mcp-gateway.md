@@ -114,9 +114,18 @@ Opaque authorization codes, browser nonces, access tokens, and refresh tokens ar
 Run one API process for this gateway: active-call limits and cancellation ownership are process-local.
 Multiple independently routed replicas are not supported by this implementation.
 
-Public registration and authorization starts share an admission limit of 60 requests per minute per API process.
-Set the positive integer `MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT` to adjust it.
+Public registration and authorization starts share an aggregate admission limit of 60 requests per minute per API process and a per-source limit of 10 requests per minute.
+Set the positive integers `MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT` and `MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT` to adjust these limits.
+Keep the source limit below the aggregate limit to leave capacity for other sources.
 Excess requests receive HTTP 429 with `Retry-After`; token exchange, refresh, revocation, discovery, and existing MCP grants remain usable.
+Rejected requests do not consume another source's allowance or extend the rate-limit window.
+
+The source is the canonical client IP supplied by the ASGI server, without its port; the gateway does not read forwarding headers to identify callers.
+Behind a proxy, configure Uvicorn's `FORWARDED_ALLOW_IPS` with only the actual trusted proxy addresses or networks, and ensure those proxies sanitize the forwarded client-address chain.
+Do not trust arbitrary peers to supply that address.
+Without trusted proxy normalization, callers behind that proxy share its source allowance.
+Users behind the same NAT also share an allowance; missing or non-IP peer addresses use one shared fallback allowance.
+These limits provide bounded admission and source fairness, not protection against a distributed denial-of-service attack.
 
 Abandoned registrations expire 24 hours after registration; a live grant or pending consent preserves its registered client.
 Anonymous reads and repeat registration do not extend that retention period.

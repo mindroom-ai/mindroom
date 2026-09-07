@@ -116,10 +116,14 @@ class GatewayRuntime:
 
     def __init__(self, paths: RuntimePaths) -> None:
         self._onboarding_limit = int(paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT") or "60")
-        if self._onboarding_limit < 1:
-            msg = "MCP onboarding rate limit must be positive"
+        self._onboarding_source_limit = int(
+            paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT") or "10",
+        )
+        if self._onboarding_limit < 1 or self._onboarding_source_limit < 1:
+            msg = "MCP onboarding rate limits must be positive"
             raise ValueError(msg)
-        self._onboarding_requests: deque[float] = deque()
+        self._onboarding_requests: deque[tuple[float, str]] = deque()
+        self._onboarding_source_counts: dict[str, int] = {}
         self.provider = GatewayOAuthProvider(paths, public_url=paths.env_value("MINDROOM_PUBLIC_URL") or "")
         self.manager = MCPServerManager(paths, validate_agent_function_names=False)
         self._config_lock = asyncio.Lock()
@@ -142,14 +146,23 @@ class GatewayRuntime:
         self.token = TokenHandler(self.provider, authenticator)
         self.revoke = RevocationHandler(self.provider, authenticator)
 
-    def _allow_onboarding_request(self) -> bool:
+    def _allow_onboarding_request(self, source: str) -> bool:
         """Bound public onboarding traffic independently of current client grants."""
         now = monotonic()
-        while self._onboarding_requests and self._onboarding_requests[0] <= now - 60:
-            self._onboarding_requests.popleft()
-        if len(self._onboarding_requests) >= self._onboarding_limit:
+        while self._onboarding_requests and self._onboarding_requests[0][0] <= now - 60:
+            _, expired_source = self._onboarding_requests.popleft()
+            remaining = self._onboarding_source_counts[expired_source] - 1
+            if remaining:
+                self._onboarding_source_counts[expired_source] = remaining
+            else:
+                del self._onboarding_source_counts[expired_source]
+        if (
+            len(self._onboarding_requests) >= self._onboarding_limit
+            or self._onboarding_source_counts.get(source, 0) >= self._onboarding_source_limit
+        ):
             return False
-        self._onboarding_requests.append(now)
+        self._onboarding_requests.append((now, source))
+        self._onboarding_source_counts[source] = self._onboarding_source_counts.get(source, 0) + 1
         return True
 
     @property
@@ -252,6 +265,19 @@ def _require_form_content_type(request: Request) -> None:
         raise HTTPException(415, "URL-encoded form required", headers=PERSONAL_RESPONSE_HEADERS)
 
 
+def _onboarding_source(request: Request) -> str:
+    """Return one canonical source bucket from the trusted ASGI peer address."""
+    if request.client is None:
+        return "unknown"
+    try:
+        address = ipaddress.ip_address(request.client.host)
+    except ValueError:
+        return "unknown"
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.compressed
+
+
 def _oauth_admission(request: Request, runtime: GatewayRuntime, operation: str) -> Response | None:
     """Answer preflight and reject excess public input before reading request bodies."""
     if request.method == "OPTIONS":
@@ -263,7 +289,7 @@ def _oauth_admission(request: Request, runtime: GatewayRuntime, operation: str) 
                 "Access-Control-Allow-Headers": "Content-Type, MCP-Protocol-Version",
             },
         )
-    if operation in {"register", "authorize"} and not runtime._allow_onboarding_request():
+    if operation in {"register", "authorize"} and not runtime._allow_onboarding_request(_onboarding_source(request)):
         return JSONResponse(
             {"error": "slow_down"},
             status_code=429,

@@ -122,6 +122,22 @@ def gateway_client(gateway_app: FastAPI) -> Iterator[TestClient]:
         yield client
 
 
+def _set_peer(client: TestClient, host: str | None, port: int = 50000) -> None:
+    client._transport.client = None if host is None else (host, port)
+
+
+def _set_onboarding_limits(gateway_app: FastAPI, *, aggregate: int, source: int) -> None:
+    snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={
+            **snapshot.runtime_paths.process_env,
+            "MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT": str(aggregate),
+            "MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT": str(source),
+        },
+    )
+
+
 def _authorize(client: TestClient) -> tuple[str, str]:
     registration = client.post(
         "/mcp/oauth/register",
@@ -420,6 +436,70 @@ def test_onboarding_rate_limit_preserves_existing_grants_and_recovers(
         _authorize(client)
 
 
+def test_onboarding_rate_limit_is_fair_across_request_sources(gateway_app: FastAPI) -> None:
+    """One source cannot consume another source's onboarding allowance."""
+    _set_onboarding_limits(gateway_app, aggregate=6, source=2)
+    with TestClient(
+        gateway_app,
+        base_url=ORIGIN,
+        follow_redirects=False,
+        client=("192.0.2.10", 41000),
+    ) as client:
+        _authorize(client)
+
+        _set_peer(client, "192.0.2.10", 41001)
+        denied = client.post(
+            "/mcp/oauth/register",
+            json={},
+            headers={"Forwarded": "for=192.0.2.20", "X-Forwarded-For": "192.0.2.20"},
+        )
+        assert denied.status_code == 429
+
+        _set_peer(client, "::ffff:192.0.2.10", 41002)
+        denied = client.get(
+            "/mcp/oauth/authorize",
+            headers={"Forwarded": "for=192.0.2.30", "X-Real-IP": "192.0.2.30"},
+        )
+        assert denied.status_code == 429
+
+        _set_peer(client, "192.0.2.20", 42000)
+        _authorize(client)
+
+
+def test_onboarding_aggregate_limit_applies_across_distinct_sources(gateway_app: FastAPI) -> None:
+    """Distinct sources remain subject to the bounded aggregate allowance."""
+    _set_onboarding_limits(gateway_app, aggregate=6, source=2)
+    with TestClient(gateway_app, base_url=ORIGIN, follow_redirects=False) as client:
+        for last_octet in range(1, 4):
+            _set_peer(client, f"192.0.2.{last_octet}")
+            _authorize(client)
+
+        _set_peer(client, "192.0.2.4")
+        denied = client.post("/mcp/oauth/register", json={})
+        assert denied.status_code == 429
+        assert denied.json() == {"error": "slow_down"}
+
+
+def test_onboarding_unknown_source_groups_and_recovers_at_boundary(
+    gateway_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing and invalid peers share one allowance that expires at the window boundary."""
+    now = [100.0]
+    monkeypatch.setattr(mcp_gateway, "monotonic", lambda: now[0], raising=False)
+    _set_onboarding_limits(gateway_app, aggregate=6, source=2)
+    with TestClient(gateway_app, base_url=ORIGIN, follow_redirects=False, client=None) as client:
+        _authorize(client)
+
+        _set_peer(client, "not-an-ip", 51000)
+        assert client.post("/mcp/oauth/register", json={}).status_code == 429
+        now[0] = 159.999
+        assert client.get("/mcp/oauth/authorize").status_code == 429
+
+        now[0] = 160.0
+        _authorize(client)
+
+
 @pytest.mark.parametrize("operation", ["register", "authorize"])
 def test_onboarding_storage_capacity_returns_protocol_backpressure(gateway_app: FastAPI, operation: str) -> None:
     """Public storage exhaustion returns a controlled response through the real SDK handlers."""
@@ -461,6 +541,8 @@ def test_onboarding_storage_capacity_returns_protocol_backpressure(gateway_app: 
         ("MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS", "*"),
         ("MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT", "0"),
         ("MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT", "invalid"),
+        ("MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT", "0"),
+        ("MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT", "invalid"),
         ("MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES", "0"),
         ("MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES", "invalid"),
     ],
