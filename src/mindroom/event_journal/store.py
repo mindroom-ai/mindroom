@@ -744,6 +744,17 @@ class PrincipalStore:
             ),
         )
 
+    async def owns_matrix_response(self, *, room_id: str, event_id: str) -> bool:
+        """Return whether this journal owns the response in the current room membership."""
+        return await self._backend.read(
+            lambda transaction: outbox.owns_response(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                event_id=event_id,
+            ),
+        )
+
     async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
         """Return one delivery without claiming it."""
         return await self._backend.read(

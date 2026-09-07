@@ -1429,9 +1429,16 @@ class _MultiAgentOrchestrator:
             return
         router_bot = self._router_bot()
 
+        principals = {bot.agent_name: bot.journal_principal() for bot in bots if bot.client is not None}
+
+        async def response_is_owned(agent_name: str, room_id: str, event_id: str) -> bool:
+            principal = principals.get(agent_name)
+            return principal is not None and await principal.owns_matrix_response(room_id=room_id, event_id=event_id)
+
         result = await recover_stale_streaming_messages(
             actors,
             resume_client=router_bot.client if router_bot is not None else None,
+            response_is_owned=response_is_owned,
             config=config,
             runtime_paths=self.runtime_paths,
             startup_cutoff_ms=startup_cutoff_ms,

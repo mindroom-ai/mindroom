@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -62,6 +63,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+
+type _ResponseIsOwned = Callable[[str, str, str], Awaitable[bool]]
 
 _ROOM_HISTORY_PAGE_SIZE = 100
 # Startup cleanup receives a pre-sync cutoff and ignores messages at or after
@@ -218,6 +221,7 @@ async def recover_stale_streaming_messages(
     actors: dict[str, nio.AsyncClient],
     *,
     resume_client: nio.AsyncClient | None,
+    response_is_owned: _ResponseIsOwned,
     config: Config,
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None,
@@ -289,6 +293,7 @@ async def recover_stale_streaming_messages(
             resumed_count += await _auto_resume_interrupted_threads(
                 resume_client,
                 interrupted_threads,
+                response_is_owned=response_is_owned,
                 config=config,
                 runtime_paths=runtime_paths,
                 delay_before_first=resumed_count > 0,
@@ -351,6 +356,7 @@ async def _auto_resume_interrupted_threads(
     client: nio.AsyncClient,
     interrupted: list[_InterruptedThread],
     *,
+    response_is_owned: _ResponseIsOwned,
     config: Config,
     runtime_paths: RuntimePaths,
     delay: float = 2.0,
@@ -383,6 +389,12 @@ async def _auto_resume_interrupted_threads(
         ):
             continue
         try:
+            if not await response_is_owned(
+                interrupted_thread.agent_name,
+                interrupted_thread.room_id,
+                interrupted_thread.target_event_id,
+            ):
+                continue
             content = _build_auto_resume_content(
                 interrupted_thread,
                 config=config,

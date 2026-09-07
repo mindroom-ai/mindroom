@@ -1,19 +1,11 @@
 """Which event-journal database this install opens, and whether it is allowed to.
 
-Two callers open the same store: the bot runtime, which writes the projection
-from sync, and one thread-export pass, which reads it -- and, to read a
-conversation nobody has walked yet, writes it too. Hydration is how the
-projection acquires a thread in the first place, so an export that installs
-nothing has nothing to page over; the export is a second writer by
-construction, not by accident. What that costs the bot is the SQLite backend's
-to explain.
+The runtime opens one store and shares it across its bots and thread exports.
+Exports borrow live clients and principal-bound readers; hydration writes use
+that same store. The export CLI calls the running API, which checks that the
+requested configuration and storage paths match its installation.
 
-They have to agree on which file or DSN that is. A disagreement does not fail
--- it produces an empty store, and an export that reports every room as having
-no history at all.
-
-Worse than an empty database is a populated wrong one. Opening another
-install's journal loses turn deduplication, delivery ownership, and recovery
+Opening another install's journal loses turn deduplication, delivery ownership, and recovery
 ownership all at once, and loses them silently: nothing raises, and the damage
 surfaces later as answers sent twice or never sent at all. Emptiness cannot be
 the test, because a populated stranger sails straight through it. The database's

@@ -17441,6 +17441,8 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    The refusal leaves the admitted source pending in the event journal so the replacement runtime can replay it.
    The refusal path performs no Matrix I/O, so replacement shutdown cannot stall on an untimed send.
    Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped.
+   Before emitting a resume relay, history recovery requires a nonretired attempted outbox delivery binding the target response to the current principal and room membership.
+   A send with no known response event remains the responsibility of existing outbox and pending-source recovery.
 7. If responses never drain, either replacement flow stops deferring after 600 seconds and closes the gate over still-running responses.
    This bounded forced apply prevents a busy install from starving config or MCP replacement forever.
 8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config while admission remains open, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations after the gate closes.
@@ -17686,6 +17688,7 @@ An existing Nio 1.0 session is bound to its journal consumer; resetting that jou
 Nio classifies the first room snapshot without a known membership baseline as history.
 MindRoom stores those messages as context only, so they do not trigger replies or commands even when the fresh journal has no handled-event records.
 Encrypted events first seen as unreadable history remain context only when their keys arrive, including after a restart.
+Startup auto-resume also requires an attempted delivery owned by the current journal and room membership, so interrupted responses abandoned at cutover stay abandoned across later restarts.
 Later live messages become actionable normally, and subsequent restarts preserve pending work and duplicate protection.
 Messages sent during downtime or before the first room baseline can therefore remain unanswered; resend any request you still want handled after startup completes.
 Room-member onboarding markers now live in the event journal; the old `tracking/room_member_joins.json` file is ignored.

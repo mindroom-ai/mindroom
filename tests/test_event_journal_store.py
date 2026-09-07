@@ -8779,3 +8779,54 @@ class TestCrossProcessWriters:
             assert await bodies(principal) == ["$before", "$during"]
         finally:
             await store.close()
+
+
+@pytest.mark.parametrize("ended_by", ["leave", "rejoin"])
+async def test_resume_response_ownership_requires_current_attempted_delivery(
+    alice: PrincipalStore,
+    journal_store: EventJournalStore,
+    ended_by: str,
+) -> None:
+    """History cannot create resume authority, and old memberships cannot retain it."""
+    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
+    await alice.enqueue_matrix_delivery(
+        delivery_id="$turn",
+        stage=DeliveryStage.INITIAL,
+        room_id=ROOM,
+        thread_id="$thread",
+        payload=text("Partial response"),
+    )
+    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
+    await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.INITIAL)
+    # An unknown send result stays with outbox recovery, not a fresh resume relay.
+    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
+    await alice.acknowledge_matrix_delivery(
+        delivery_id="$turn",
+        stage=DeliveryStage.INITIAL,
+        event_id="$response",
+        delivered_projections=(),
+    )
+    assert await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
+    assert not await alice.owns_matrix_response(room_id=OTHER_ROOM, event_id="$response")
+    assert not await journal_store.principal("other@alice").owns_matrix_response(room_id=ROOM, event_id="$response")
+    await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.LOCAL)
+    if ended_by == "rejoin":
+        await admit_room_membership(alice, ROOM, "join")
+    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
+
+
+async def test_resume_response_ownership_accepts_an_attempted_edit_target(alice: PrincipalStore) -> None:
+    """A final edit can prove its original response even before its own ACK arrives."""
+    await alice.enqueue_matrix_delivery(
+        delivery_id="$turn",
+        stage=DeliveryStage.FINAL,
+        room_id=ROOM,
+        thread_id="$thread",
+        payload=text("Interrupted"),
+        edits_event_id="$response",
+    )
+    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
+    await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL)
+    assert await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
+    await alice.retire_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.FINAL, room_id=ROOM, membership_epoch=0)
+    assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
