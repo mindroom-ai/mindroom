@@ -98,10 +98,14 @@ def test_failure_bundle_preserves_incomplete_and_malformed_turn_rows(tmp_path: P
         nio_recovery_snapshot={},
         oracle_snapshot={},
         model_observations={},
+        full_request_observations={1: ["MRK[src=root:0;rev=orig]"]},
         diagnostics={},
         tuwunel_log="",
     )
     snapshot = json.loads((directory / "handled_turns.json").read_text())
+    assert json.loads((directory / "full_request_observations.json").read_text()) == {
+        "1": ["MRK[src=root:0;rev=orig]"],
+    }
     assert snapshot["rows"] == [
         {"index_event_id": "$corrupt", "anchor_event_id": "$corrupt", "record_json": "not JSON"},
         {"index_event_id": "$pending", "anchor_event_id": "$pending", "record_json": '{"completed":false}'},

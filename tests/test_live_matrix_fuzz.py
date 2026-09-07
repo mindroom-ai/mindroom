@@ -6126,8 +6126,8 @@ async def test_final_audit_reuses_one_ledger_snapshot(
     assert reads == 1
 
 
-def test_strict_ledger_read_accepts_clean_redaction_tombstone(tmp_path: Path) -> None:
-    """A fully redacted turn is terminal once durable cleanup has completed."""
+def test_strict_ledger_read_accepts_durable_redaction_tombstone(tmp_path: Path) -> None:
+    """A durable tombstone settles replay while session cleanup awaits a response."""
     ledger_path = tmp_path / "event_journal.db"
     tombstone = TurnRecord.create(
         source_event_ids=("$stop-reaction",),
@@ -6153,8 +6153,11 @@ def test_strict_ledger_read_accepts_clean_redaction_tombstone(tmp_path: Path) ->
         pending_redaction_cleanup_event_ids=("$stop-reaction",),
     )
     _write_ledger(ledger_path, {"$stop-reaction": pending_cleanup})
-    with pytest.raises(AssertionError, match=r"\$stop-reaction.*incomplete"):
-        live_fuzz.read_ledger_records(ledger_path, strict=True)
+    assert live_fuzz.read_ledger_records(ledger_path, strict=True) == {
+        "$stop-reaction": pending_cleanup,
+    }
+    oracle.refresh_ledger_attributions(min_interval=0)
+    assert oracle.source_tombstoned("$stop-reaction")
 
 
 @pytest.mark.asyncio

@@ -56,6 +56,10 @@ The `chaos` profile adds concurrent clients across multiple rooms, hot-thread tr
 It settles at generated checkpoints and audits the final Matrix view against exact source events, response bodies, redaction provenance, and durable turn records in the current event journal.
 It uses the installed `mindroom-nio` dependency from `uv.lock`; no separate source checkout is required.
 
+Generated fuzz and chaos traces append explicit follow-up probes for conversations with source redactions.
+The probes wait for durable tombstones, require deferred session cleanup, and check that redacted source markers are absent from the complete model request.
+Probe operations are additional to `--steps` and appear in the saved trace.
+
 Use `--save-trace scenario.json` to save the logical workload and `--trace scenario.json` to replay it against a fresh disposable server.
 Replay preserves batches and inputs; concurrent scheduling and runtime output can differ.
 Failure bundles retain the scenario, realized operation order, logs, runtime provenance, and audit evidence under `--artifact-root`.

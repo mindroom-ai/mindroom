@@ -211,6 +211,7 @@ class LiveOperation:
     thread: int
     target: str | None
     client: int = 0
+    cleanup_sources: tuple[str, ...] = ()
 
     @property
     def event_ref(self) -> str:
@@ -224,12 +225,17 @@ class LiveOperation:
         if raw_target is not None and not isinstance(raw_target, str):
             msg = "Live Matrix fuzz operation target must be a string or null"
             raise TypeError(msg)
+        cleanup_sources = value.get("cleanup_sources", [])
+        if not isinstance(cleanup_sources, list) or not all(isinstance(source, str) for source in cleanup_sources):
+            msg = "cleanup probe sources must be a list of logical source references"
+            raise TypeError(msg)
         return cls(
             operation_id=_required_int(value, "operation_id"),
             kind=LiveOperationKind(_required_string(value, "kind")),
             thread=_required_int(value, "thread"),
             target=raw_target,
             client=_required_int(value, "client") if "client" in value else 0,
+            cleanup_sources=tuple(cast("list[str]", cleanup_sources)),
         )
 
 
@@ -313,6 +319,7 @@ class LiveFuzzScenario:
             msg = "live Matrix fuzz traces need at least one client and one room"
             raise ValueError(msg)
         _reject_unknown_live_scenario_profile(self)
+        self._validate_cleanup_probes()
         if self.profile in {"restart-regression", "sustained-stream-capacity"}:
             _validate_fixed_profile_trace(self)
             return
@@ -332,6 +339,29 @@ class LiveFuzzScenario:
         if not state.mindroom_running:
             msg = "live Matrix fuzz traces must leave MindRoom running"
             raise ValueError(msg)
+
+    def _validate_cleanup_probes(self) -> None:
+        """Require explicit probes to name earlier source redactions in their own thread."""
+        source_threads = {f"root:{thread}": thread for thread in range(self.thread_count)}
+        redacted: set[str] = set()
+        for batch in self.batches:
+            for operation in batch:
+                if operation.cleanup_sources and (
+                    self.profile not in {"fuzz", "chaos"}
+                    or operation.kind is not LiveOperationKind.THREAD_MESSAGE
+                    or any(
+                        source not in redacted or source_threads.get(source) != operation.thread
+                        for source in operation.cleanup_sources
+                    )
+                ):
+                    msg = f"cleanup probe {operation.event_ref} must name prior source redactions in its thread"
+                    raise ValueError(msg)
+            for operation in batch:
+                if operation.kind in MESSAGE_KINDS:
+                    source_threads[operation.event_ref] = operation.thread
+                if operation.kind is LiveOperationKind.REDACTION and operation.target in source_threads:
+                    assert operation.target is not None
+                    redacted.add(operation.target)
 
     def _validate_saturation_shape(self) -> None:
         """Require the exact hot-then-parallel shape executed by the saturation driver."""
@@ -2143,20 +2173,41 @@ class _ModelHandler(BaseHTTPRequestHandler):
     # FINAL user message of one model call, keyed by that call's assigned id.
     _observation_lock = threading.Lock()
     _observed_markers: ClassVar[dict[int, frozenset[str]]] = {}
+    _full_request_markers: ClassVar[dict[int, frozenset[str]]] = {}
 
     @classmethod
     def reset_observations(cls) -> None:
         """Clear observed markers and restart call-id numbering for a fresh stack."""
         with cls._observation_lock:
             cls._observed_markers = {}
+            cls._full_request_markers = {}
         cls.call_ids = itertools.count(1)
         cls.blocked_request_started.clear()
         cls.blocked_request_release.clear()
 
     @classmethod
-    def _record_observation(cls, call_id: int, markers: frozenset[str]) -> None:
+    def _record_observation(
+        cls,
+        call_id: int,
+        markers: frozenset[str],
+        *,
+        full_request_markers: frozenset[str] = frozenset(),
+    ) -> None:
         with cls._observation_lock:
             cls._observed_markers[call_id] = markers
+            cls._full_request_markers[call_id] = full_request_markers
+
+    @classmethod
+    def full_request_markers_for(cls, call_id: int) -> frozenset[str]:
+        """Return markers anywhere in the model input, including historical turns."""
+        with cls._observation_lock:
+            return cls._full_request_markers.get(call_id, frozenset())
+
+    @classmethod
+    def full_request_observations_snapshot(cls) -> dict[int, list[str]]:
+        """Retain full-request marker evidence separately from current-turn observations."""
+        with cls._observation_lock:
+            return {call_id: sorted(markers) for call_id, markers in cls._full_request_markers.items()}
 
     @classmethod
     def observed_markers_for(cls, call_id: int) -> frozenset[str]:
@@ -2251,7 +2302,11 @@ class _ModelHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(content_length))
         call_id = next(self.call_ids)
-        self._record_observation(call_id, self._final_user_markers(payload))
+        self._record_observation(
+            call_id,
+            self._final_user_markers(payload),
+            full_request_markers=_parse_markers(json.dumps(payload)),
+        )
         model_id = payload.get("model")
         if model_id == RESTART_MODEL_ID and FRESH_RESTART_REQUEST in json.dumps(payload):
             self.blocked_request_started.set()
@@ -4382,8 +4437,9 @@ def read_ledger_records(
     outcome rather than inferring supersession from chronology alone. Final
     audits use strict mode and reject every unreadable, malformed, or
     non-terminal entry instead of letting corruption look like an empty ledger.
-    A fully redacted record whose cleanup is complete is already terminal even
-    when ``completed`` remains false.
+    A fully redacted record is a durable tombstone even when ``completed``
+    remains false. Session cleanup may remain pending until the next response;
+    explicit cleanup probes audit that separate obligation.
     """
     raw_records = _load_ledger_rows(ledger_path, strict=strict)
     if raw_records is None:
@@ -4434,7 +4490,7 @@ def _decode_ledger_rows(
     *,
     strict: bool,
 ) -> dict[str, TurnRecord]:
-    """Decode rows, retaining completed records and clean redaction tombstones."""
+    """Retain completed turns and durable tombstones, including deferred session cleanup."""
     records: dict[str, TurnRecord] = {}
     decoded_records: dict[str, TurnRecord] = {}
     for event_id, raw_record in raw_records.items():
@@ -4444,8 +4500,10 @@ def _decode_ledger_rows(
             continue
         decoded_records[event_id] = record
         fully_redacted = not record.replay_source_event_ids
-        cleanup_complete = not record.pending_redaction_cleanup_event_ids
-        if not cleanup_complete or (not record.completed and not fully_redacted):
+        # Redaction callbacks commit tombstones; the next response in this
+        # session removes the saved run and clears pending cleanup. An idle
+        # tombstoned session is therefore settled without eager cleanup.
+        if not record.completed and not fully_redacted:
             _invalid_ledger(ledger_path, f"record {event_id!r} is incomplete", strict=strict)
             continue
         records[event_id] = record
@@ -5283,6 +5341,8 @@ class FinalStateAuditor:
         source_current_markers: Mapping[str, str] | None = None,
         source_revision_markers: Mapping[str, Mapping[str, str]] | None = None,
         observed_markers_for: Callable[[int], frozenset[str]] = _ModelHandler.observed_markers_for,
+        cleanup_probes: Mapping[str, tuple[str, ...]] | None = None,
+        full_request_markers_for: Callable[[int], frozenset[str]] = _ModelHandler.full_request_markers_for,
     ) -> None:
         self.client = client
         self.oracle = oracle
@@ -5296,6 +5356,8 @@ class FinalStateAuditor:
             source_event_id: dict(revisions) for source_event_id, revisions in (source_revision_markers or {}).items()
         }
         self.observed_markers_for = observed_markers_for
+        self.cleanup_probes = dict(cleanup_probes or {})
+        self.full_request_markers_for = full_request_markers_for
 
     async def audit(
         self,
@@ -5335,6 +5397,7 @@ class FinalStateAuditor:
                 records=records,
                 redacted_source_event_ids=redacted_sources,
             )
+            self._assert_redaction_cleanup_probes(events, records)
         else:
             self._assert_direct_reply_model_sources(events, replies)
         return {
@@ -5343,6 +5406,52 @@ class FinalStateAuditor:
             "completed_final_bodies": completed,
             **ledger_metrics,
         }
+
+    def _assert_redaction_cleanup_probes(
+        self,
+        events: Mapping[str, Mapping[str, Any]],
+        records: Mapping[str, TurnRecord],
+    ) -> None:
+        """Explicit next turns must clear tombstone cleanup and omit redacted history."""
+        for probe_id, source_ids in self.cleanup_probes.items():
+            record = records.get(probe_id)
+            if record is None or record.response_event_id is None or not record.completed:
+                msg = f"redaction cleanup probe {probe_id} has no completed response"
+                raise AssertionError(msg)
+            for source_id in source_ids:
+                tombstone = records.get(source_id)
+                if (
+                    tombstone is None
+                    or source_id not in tombstone.redacted_source_event_ids
+                    or source_id in tombstone.pending_redaction_cleanup_event_ids
+                ):
+                    msg = (
+                        f"redaction cleanup probe {probe_id} left pending or missing tombstone cleanup for {source_id}"
+                    )
+                    raise AssertionError(msg)
+            call_id = _body_call_id(self._latest_agent_body(events, record.response_event_id))
+            observed = self.full_request_markers_for(call_id) if call_id is not None else frozenset()
+            forbidden = {
+                marker
+                for source_id in source_ids
+                for marker in (
+                    _source_marker(self.oracle.expected_sources[source_id], ORIGINAL_REVISION),
+                    *self.source_revision_markers.get(source_id, {}).values(),
+                )
+            }
+            # A replay may edit or redact the probe itself later. Any authored
+            # probe revision proves capture; the current-source audit above
+            # independently enforces the latest revision for live sources.
+            probe_markers = {
+                _source_marker(self.oracle.expected_sources[probe_id], ORIGINAL_REVISION),
+                *self.source_revision_markers.get(probe_id, {}).values(),
+            }
+            if not probe_markers & observed or forbidden & observed:
+                msg = (
+                    f"redaction cleanup probe {probe_id} has missing full-request evidence or redacted history: "
+                    f"{sorted(forbidden & observed)}"
+                )
+                raise AssertionError(msg)
 
     def _resolve_source_revision_markers(
         self,
@@ -7459,6 +7568,14 @@ class LiveFuzzRunner:
             ),
             source_current_markers=self.source_current_markers,
             source_revision_markers=self.source_revision_markers,
+            cleanup_probes={
+                self.event_ids[operation.event_ref]: tuple(
+                    self.event_ids[source] for source in operation.cleanup_sources
+                )
+                for batch in self.scenario.batches
+                for operation in batch
+                if operation.cleanup_sources
+            },
         )
         return await auditor.audit(
             room_ids=tuple(self.stack.room_ids.values()),
@@ -7786,6 +7903,13 @@ class LiveFuzzRunner:
         self,
         operation: LiveOperation,
     ) -> tuple[LiveOperation, str | None, _SentPayload | None]:
+        if operation.cleanup_sources:
+            # The serialized probe may start only after the preceding source
+            # redactions crossed the runtime's durable tombstone boundary.
+            await self._wait_for_pending_mutation_effects(
+                deadline_seconds=self.reply_timeout,
+                batch_index=self.executed_batches,
+            )
         if operation.kind is LiveOperationKind.REDACTION:
             return await self._apply_redaction(operation)
 
@@ -8193,6 +8317,43 @@ async def _run_live(
                 _raise_cleanup_failures(close_errors, message="Matrix client cleanup failed")
 
 
+def _with_redaction_cleanup_probes(scenario: LiveFuzzScenario) -> LiveFuzzScenario:
+    """Append explicit next-turn qualification; loading a saved trace never calls this."""
+    sources = {f"root:{thread}": thread for thread in range(scenario.thread_count)}
+    redacted_by_thread: dict[int, set[str]] = defaultdict(set)
+    operations = [operation for batch in scenario.batches for operation in batch]
+    for operation in operations:
+        if operation.kind in MESSAGE_KINDS:
+            sources[operation.event_ref] = operation.thread
+        if operation.kind is LiveOperationKind.REDACTION and operation.target in sources:
+            assert operation.target is not None
+            redacted_by_thread[sources[operation.target]].add(operation.target)
+    if not redacted_by_thread:
+        return scenario
+    next_id = max((operation.operation_id for operation in operations), default=-1) + 1
+    batches = list(scenario.batches)
+    if scenario.profile == "chaos":
+        batches.append((LiveOperation(next_id, LiveOperationKind.CHECKPOINT, 0, None),))
+        next_id += 1
+    probes = tuple(
+        LiveOperation(
+            next_id + index,
+            LiveOperationKind.THREAD_MESSAGE,
+            thread,
+            f"root:{thread}",
+            client=scenario.root_client(thread),
+            cleanup_sources=tuple(sorted(redacted_sources)),
+        )
+        for index, (thread, redacted_sources) in enumerate(sorted(redacted_by_thread.items()))
+    )
+    batches.append(probes)
+    if scenario.profile == "chaos":
+        batches.append((LiveOperation(next_id + len(probes), LiveOperationKind.CHECKPOINT, 0, None),))
+    qualified = replace(scenario, batches=tuple(batches))
+    qualified.validate()
+    return qualified
+
+
 def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
     """Build or load the requested trace."""
     if args.trace is not None:
@@ -8204,26 +8365,30 @@ def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
     if args.profile == "sustained-stream-capacity":
         return sustained_stream_capacity_scenario(root_count=args.threads or 200)
     if args.profile == "chaos":
-        return chaos_scenario_from_seed(
-            args.seed,
-            steps=args.steps,
-            tuning=ChaosTuning(
-                thread_count=args.threads or 24,
-                client_count=args.clients,
-                room_count=args.rooms,
-                max_batch_size=args.max_batch_size,
-                hot_thread_weight=args.hot_thread_weight,
-                checkpoint_interval=args.checkpoint_interval,
-                lifecycle_interval=args.lifecycle_interval,
-                downtime_batches=args.downtime_batches,
+        return _with_redaction_cleanup_probes(
+            chaos_scenario_from_seed(
+                args.seed,
+                steps=args.steps,
+                tuning=ChaosTuning(
+                    thread_count=args.threads or 24,
+                    client_count=args.clients,
+                    room_count=args.rooms,
+                    max_batch_size=args.max_batch_size,
+                    hot_thread_weight=args.hot_thread_weight,
+                    checkpoint_interval=args.checkpoint_interval,
+                    lifecycle_interval=args.lifecycle_interval,
+                    downtime_batches=args.downtime_batches,
+                ),
             ),
         )
-    return live_scenario_from_seed(
-        args.seed,
-        steps=args.steps,
-        thread_count=args.threads or 45,
-        max_batch_size=args.max_batch_size,
-        restart_interval=args.restart_interval,
+    return _with_redaction_cleanup_probes(
+        live_scenario_from_seed(
+            args.seed,
+            steps=args.steps,
+            thread_count=args.threads or 45,
+            max_batch_size=args.max_batch_size,
+            restart_interval=args.restart_interval,
+        ),
     )
 
 
@@ -8661,6 +8826,7 @@ class FailureBundle:
         model_observations: Mapping[object, object],
         diagnostics: Mapping[str, object],
         tuwunel_log: str,
+        full_request_observations: Mapping[object, object] | None = None,
     ) -> Path:
         """Copy every durable artifact before the stack is torn down."""
 
@@ -8699,6 +8865,10 @@ class FailureBundle:
             write_json({str(call_id): markers for call_id, markers in model_observations.items()}),
         )
         self._write_isolated("diagnostics.json", write_json(dict(diagnostics)))
+        self._write_isolated(
+            "full_request_observations.json",
+            write_json({str(call_id): markers for call_id, markers in (full_request_observations or {}).items()}),
+        )
         self._write_isolated(
             "tuwunel.log",
             lambda destination: destination.write_text(tuwunel_log, encoding="utf-8"),
@@ -9088,6 +9258,16 @@ def _persist_run_bundle(
             capture_errors,
         ),
     )
+    full_request_observations = cast(
+        "Mapping[object, object]",
+        _capture_bundle_collector(
+            bundle,
+            "full_request_observations.json",
+            _ModelHandler.full_request_observations_snapshot,
+            lambda error: {"_capture_error": _capture_error_text("full_request_observations.json", error)},
+            capture_errors,
+        ),
+    )
     diagnostics = cast(
         "Mapping[str, object]",
         _capture_bundle_collector(
@@ -9116,6 +9296,7 @@ def _persist_run_bundle(
         nio_recovery_snapshot=nio_recovery_snapshot,
         oracle_snapshot=oracle_snapshot,
         model_observations=model_observations,
+        full_request_observations=full_request_observations,
         diagnostics=diagnostics,
         tuwunel_log=tuwunel_log,
     )
