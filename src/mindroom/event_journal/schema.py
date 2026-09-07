@@ -431,17 +431,6 @@ def _expand_byte_order(sql: str, dialect: _SchemaDialect) -> str:
     return sql.replace(_BYTE_ORDER_MARKER, dialect.order_by_bytes)
 
 
-def require_current_schema(existing_tables: frozenset[str]) -> None:
-    """Refuse pre-durable journals before any old work can enter the runtime."""
-    if "journal_events" in existing_tables and "matrix_sync_consumers" not in existing_tables:
-        msg = (
-            "This event journal predates durable Matrix ingestion. Stop MindRoom and configure a fresh event journal; "
-            "old pending work is not migrated. Preserve Matrix credentials and encryption keys. "
-            "See docs/deployment/nio-upgrade.md for the one-time cutover."
-        )
-        raise RuntimeError(msg)
-
-
 def schema_statements(dialect: _SchemaDialect) -> tuple[str, ...]:
     """Return every DDL statement needed to create the current schema.
 

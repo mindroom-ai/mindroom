@@ -15,7 +15,8 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .offloading import ThreadOffload, settled
-from .schema import POSTGRES_DIALECT, render, require_current_schema, schema_statements
+from .schema import POSTGRES_DIALECT, render, schema_statements
+from .upgrade import upgrade_legacy_journal
 
 # An arbitrary constant that only this schema setup uses, so the lock it
 # takes cannot collide with an application advisory lock.
@@ -129,7 +130,10 @@ class PostgresBackend:
             cursor.execute(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()",
             )
-            require_current_schema(frozenset(str(row["table_name"]) for row in cursor.fetchall()))
+            upgrade_legacy_journal(
+                _PostgresTransaction(cursor),
+                frozenset(str(row["table_name"]) for row in cursor.fetchall()),
+            )
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
         self._writer.commit()

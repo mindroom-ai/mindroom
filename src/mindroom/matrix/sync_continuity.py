@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _RECORD_VERSION = "mindroom-sync-continuity-v4"
+_LEGACY_RECORD_VERSIONS = ("mindroom-sync-continuity-v2", "mindroom-sync-continuity-v3")
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,7 @@ class SyncContinuityStore:
 
     def load(self) -> SyncContinuityRecord:
         """Load pending join fences under the shared cross-process lock."""
-        with advisory_file_lock(self._lock_path, exclusive=False):
+        with advisory_file_lock(self._lock_path, exclusive=True):
             return self._load_locked()
 
     def update_join_fences(
@@ -60,18 +61,21 @@ class SyncContinuityStore:
                 revision=current.revision + 1,
                 pending_join_decrypt_fences=fences,
             )
-            write_json_file_durable(
-                self._path,
-                {
-                    "pending_join_decrypt_fences": sorted(updated.pending_join_decrypt_fences),
-                    "revision": updated.revision,
-                    "version": _RECORD_VERSION,
-                },
-                strict_atomic_replace=True,
-                sort_keys=True,
-                trailing_newline=True,
-            )
+            self._save_locked(updated)
             return updated
+
+    def _save_locked(self, record: SyncContinuityRecord) -> None:
+        write_json_file_durable(
+            self._path,
+            {
+                "pending_join_decrypt_fences": sorted(record.pending_join_decrypt_fences),
+                "revision": record.revision,
+                "version": _RECORD_VERSION,
+            },
+            strict_atomic_replace=True,
+            sort_keys=True,
+            trailing_newline=True,
+        )
 
     def _load_locked(self) -> SyncContinuityRecord:
         """Load one record while its advisory lock is held."""
@@ -88,8 +92,11 @@ class SyncContinuityStore:
         if not isinstance(payload, dict):
             raise _format_error(self._path, "unsupported version")
         version = payload.get("version")
+        legacy = version in _LEGACY_RECORD_VERSIONS
         expected_fields = {"pending_join_decrypt_fences", "revision", "version"}
-        if version != _RECORD_VERSION:
+        if legacy:
+            expected_fields.add("checkpoint")
+        elif version != _RECORD_VERSION:
             raise _format_error(self._path, "unsupported version")
 
         revision = payload.get("revision")
@@ -104,10 +111,15 @@ class SyncContinuityStore:
             or set(payload) != expected_fields
         ):
             raise _format_error(self._path, "invalid join fences")
-        return SyncContinuityRecord(
-            revision=revision,
+        record = SyncContinuityRecord(
+            revision=revision + int(legacy),
             pending_join_decrypt_fences=frozenset(cast("list[str]", raw_fences)),
         )
+        if legacy:
+            # Only the join fences remain app-owned. Nio establishes its own
+            # baseline; importing this checkpoint would skip unadmitted input.
+            self._save_locked(record)
+        return record
 
 
 def _normalize_room_id(room_id: str) -> str:

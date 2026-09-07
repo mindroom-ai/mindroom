@@ -2425,8 +2425,14 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.logging_config",
     "mindroom.matrix.client_session",
+    "mindroom.matrix.legacy_crypto_upgrade",
 ]
 visibility = ["mindroom.matrix.users"]
+
+[[modules]]
+path = "mindroom.matrix.legacy_crypto_upgrade"
+depends_on = ["mindroom.logging_config"]
+visibility = ["mindroom.matrix._owned_session"]
 
 [[modules]]
 path = "mindroom.matrix.sync_loop"

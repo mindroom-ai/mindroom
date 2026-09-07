@@ -33,7 +33,7 @@ Hard logout, missing device storage, or changed identity stops startup instead o
 Initial credentials are persisted after the local store exists and before journal binding, so an interrupted bind reopens the same device.
 The application trusts nio's typed records and does not reproduce a canonical JSON, digest, or per-record proof protocol.
 Pre-durable application journals and older continuity files are unsupported.
-Existing deployments use the explicit fresh-journal cutover in [the Nio 1.0 upgrade guide](../deployment/nio-upgrade.md), preserving their Matrix account, device, and encryption keys.
+Existing deployments use the automatic in-place migration in [the Nio 1.0 upgrade guide](../deployment/nio-upgrade.md), preserving journal identity, message history, Matrix accounts, devices, and encryption keys while retiring unfinished old work.
 
 One `SyncBatch` becomes an ordered vector of application dispositions.
 One journal transaction advances the consumer's `next_sequence` (starting at 1), applies every record, and freezes interactive associations for newly admitted actionable sources.

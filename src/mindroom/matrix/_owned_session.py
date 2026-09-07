@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn, Protocol
@@ -12,6 +13,7 @@ from nio.durable import DurableSync, DurableSyncConfig, open_durable_sync
 from nio.store.database import DefaultStore
 
 from mindroom.event_journal.models import IngestionConsumer
+from mindroom.event_journal.offloading import settled
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_session import (
     MindRoomAsyncClient,
@@ -23,6 +25,7 @@ from mindroom.matrix.client_session import (
     olm_store_exists,
     require_runtime_paths_arg,
 )
+from mindroom.matrix.legacy_crypto_upgrade import retire_legacy_crypto_recovery
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -215,6 +218,16 @@ async def open_owned_matrix_session(
     client.access_token = credentials.access_token
     session = None
     try:
+        await settled(
+            asyncio.create_task(
+                asyncio.to_thread(
+                    retire_legacy_crypto_recovery,
+                    store_path / database_name,
+                    user_id=credentials.user_id,
+                    device_id=credentials.device_id,
+                ),
+            ),
+        )
         session = open_durable_sync(
             client,
             consumer_id=consumer.generation,

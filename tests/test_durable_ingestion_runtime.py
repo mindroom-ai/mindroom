@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+import sqlite3
+from contextlib import asynccontextmanager, closing
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -33,7 +35,6 @@ from tests.test_room_invites import _handle_invite, _live_router_invite_scenario
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
-    from pathlib import Path
 
     from nio.durable import DurableSync
 
@@ -486,11 +487,36 @@ async def test_quiesce_is_bounded_when_delivery_projection_cannot_recover(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("saved_token", [None, "previous-sync"])
-async def test_fresh_journal_keeps_old_history_silent_and_preserves_crypto(
+@pytest.mark.parametrize("legacy_journal", [False, True])
+async def test_upgrade_keeps_old_history_silent_and_preserves_crypto(
     tmp_path: Path,
     saved_token: str | None,
+    legacy_journal: bool,
 ) -> None:
-    """A crypto-store upgrade must not enqueue old history, even without dedup rows."""
+    """Automatic upgrade preserves keys and never turns historical input into work."""
+    if legacy_journal:
+        tracking = tmp_path / "tracking"
+        tracking.mkdir()
+        with closing(sqlite3.connect(tracking / "event_journal.db")) as connection:
+            connection.executescript((Path(__file__).parent / "fixtures" / "pre_nio1_journal.sql").read_text())
+            connection.executescript("""
+                INSERT INTO journal_identity VALUES (TRUE, 'old-journal');
+                INSERT INTO journal_events (
+                    principal_id, event_id, room_id, thread_id, kind, sender, origin_server_ts,
+                    source_json, membership_epoch, state
+                ) VALUES ('code@@mindroom_code:localhost', '$old-request', '!room:example.org', '',
+                          'message', '@alice:example.org', 100, '{}', 9, 'pending');
+                INSERT INTO room_membership VALUES ('code@@mindroom_code:localhost', '!room:example.org', 9, 0, 1);
+            """)
+        (tracking / "event_journal_binding.json").write_text(
+            '{"generation":"old-journal","database":"sqlite tracking/event_journal.db"}',
+        )
+        continuity = tmp_path / "sync_continuity"
+        continuity.mkdir()
+        (continuity / "code.json").write_text(
+            '{"version":"mindroom-sync-continuity-v3","revision":2,"pending_join_decrypt_fences":[], '
+            '"checkpoint":{"store_generation":"old-journal","token":"old-checkpoint"}}',
+        )
     bot = _agent_bot(tmp_path)
     principal = bot.journal_principal()
     legacy = create_authenticated_client(
@@ -526,6 +552,7 @@ async def test_fresh_journal_keeps_old_history_silent_and_preserves_crypto(
         return json.dumps(body).encode()
 
     async with _owned_session(bot) as session:
+        await bot._room_lifecycle.restore_pending_join_decrypt_fences()
         assert bot.client is not None
         assert bot.client.olm is not None
         assert bot.client.olm.account.identity_keys == identity_keys
@@ -536,6 +563,10 @@ async def test_fresh_journal_keeps_old_history_silent_and_preserves_crypto(
         assert [event.event_id for event in await principal.pending()] == ["$new-request"]
         await principal.settle("$new-request")
 
+    assert bot._own_journal is not None
+    await bot._own_journal.close()
+    bot = _agent_bot(tmp_path)
+    principal = bot.journal_principal()
     async with _owned_session(bot) as session:
         await _consume_frame(bot, session, frame("$old-request", "history-repeated"))
         assert not await principal.pending()

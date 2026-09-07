@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -46,15 +47,20 @@ def test_join_fences_round_trip_without_checkpoint_metadata(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize("payload", _LEGACY_RECORD_BYTES)
-def test_old_checkpoint_records_require_explicit_reset(tmp_path: Path, payload: str) -> None:
-    """Former checkpoint records cannot silently enter the current runtime."""
+def test_old_checkpoint_records_upgrade_preserving_join_fences(tmp_path: Path, payload: str) -> None:
+    """Released checkpoints retire automatically while join fences survive."""
     path = tmp_path / "sync_continuity" / "code.json"
     path.parent.mkdir(parents=True)
     path.write_text(payload, encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="unsupported version"):
-        SyncContinuityStore(tmp_path, "code").load()
-    assert path.read_text(encoding="utf-8") == payload
+    expected = SyncContinuityRecord(revision=3, pending_join_decrypt_fences=frozenset({"!pending:localhost"}))
+    assert SyncContinuityStore(tmp_path, "code").load() == expected
+    assert json.loads(path.read_text()) == {
+        "version": "mindroom-sync-continuity-v4",
+        "revision": 3,
+        "pending_join_decrypt_fences": ["!pending:localhost"],
+    }
+    assert SyncContinuityStore(tmp_path, "code").load() == expected
 
 
 def test_join_fence_updates_retain_add_and_remove_in_one_record(tmp_path: Path) -> None:
@@ -74,6 +80,30 @@ def test_join_fence_updates_retain_add_and_remove_in_one_record(tmp_path: Path) 
     )
     assert record == expected
     assert SyncContinuityStore(tmp_path, "code").load() == expected
+
+
+@pytest.mark.parametrize("after_replace", [False, True])
+def test_interrupted_legacy_conversion_retries_without_losing_fences(tmp_path: Path, after_replace: bool) -> None:
+    """A failed upgrade leaves either the complete old record or its complete replacement."""
+    path = tmp_path / "sync_continuity" / "code.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(_LEGACY_RECORD_BYTES[1])
+
+    def crash(*args: object, **kwargs: object) -> None:
+        if after_replace:
+            write_json_file_durable(*args, **kwargs)
+        message = "interrupted upgrade"
+        raise OSError(message)
+
+    with (
+        patch("mindroom.matrix.sync_continuity.write_json_file_durable", side_effect=crash),
+        pytest.raises(OSError, match="interrupted upgrade"),
+    ):
+        SyncContinuityStore(tmp_path, "code").load()
+    assert SyncContinuityStore(tmp_path, "code").load() == SyncContinuityRecord(
+        revision=3,
+        pending_join_decrypt_fences=frozenset({"!pending:localhost"}),
+    )
 
 
 def test_crash_before_atomic_replace_preserves_old_fences(tmp_path: Path) -> None:

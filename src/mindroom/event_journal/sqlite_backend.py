@@ -23,7 +23,8 @@ from typing import TYPE_CHECKING, Any
 from mindroom.logging_config import get_logger
 
 from .offloading import ThreadOffload, settled
-from .schema import SQLITE_DIALECT, render, require_current_schema, schema_statements
+from .schema import SQLITE_DIALECT, render, schema_statements
+from .upgrade import upgrade_legacy_journal
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -197,7 +198,7 @@ class SqliteBackend:
             existing_tables = frozenset(
                 str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             )
-            require_current_schema(existing_tables)
+            upgrade_legacy_journal(_SqliteTransaction(connection), existing_tables)
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
             connection.execute("COMMIT")

@@ -1,0 +1,6 @@
+-- Recovery tables emitted by published mindroom-nio 0.40.0.
+CREATE TABLE "pendingtimelineevents" ("id" INTEGER NOT NULL PRIMARY KEY, "room_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "sequence" INTEGER NOT NULL, "event_id" TEXT NOT NULL, "event_payload" BLOB NOT NULL, "is_live" INTEGER NOT NULL, "was_encrypted" INTEGER NOT NULL, "was_completed" INTEGER NOT NULL, "admission_accepted" INTEGER NOT NULL, "provenance" TEXT NOT NULL, "apply_room_state" INTEGER NOT NULL, "account_id" INTEGER NOT NULL, FOREIGN KEY ("account_id") REFERENCES "accounts" ("id") ON DELETE CASCADE, UNIQUE(account_id,room_id,event_id));
+
+CREATE TABLE "syncrecoveryabandonedrooms" ("id" INTEGER NOT NULL PRIMARY KEY, "room_id" TEXT NOT NULL, "reason" TEXT NOT NULL, "account_id" INTEGER NOT NULL, FOREIGN KEY ("account_id") REFERENCES "accounts" ("id") ON DELETE CASCADE, UNIQUE(account_id,room_id,reason));
+
+CREATE TABLE "syncrecoverygaps" ("id" INTEGER NOT NULL PRIMARY KEY, "room_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "target_token" TEXT NOT NULL, "cursor_token" TEXT, "membership_bound" INTEGER NOT NULL, "account_id" INTEGER NOT NULL, FOREIGN KEY ("account_id") REFERENCES "accounts" ("id") ON DELETE CASCADE, UNIQUE(account_id,room_id,generation));
