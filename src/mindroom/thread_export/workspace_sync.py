@@ -15,10 +15,11 @@ from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
 from mindroom.private_instance_identity import private_instances_for_agent
+from mindroom.runtime_shutdown import gather_shutdown_phase
 from mindroom.thread_export.models import ThreadExportRoom, ThreadExportSource, ThreadExportTarget
 from mindroom.thread_export.projected_history import export_conversation_reader
 from mindroom.thread_export.selection import export_rooms
-from mindroom.thread_export.service import export_threads_to_sources
+from mindroom.thread_export.service import export_threads_once, export_threads_to_sources
 from mindroom.thread_export.storage import clear_thread_export_root
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
@@ -34,7 +35,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import PrincipalStore
     from mindroom.matrix.identity import MatrixID
-    from mindroom.thread_export.models import ThreadExportStats
+    from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.thread_export.models import ThreadExportGroup, ThreadExportStats
 
 logger = get_logger(__name__)
 
@@ -75,6 +77,7 @@ class WorkspaceThreadExportDeps:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], _ThreadExportBot | None]
+    response_admission_gate: ResponseAdmissionGate
     debounce_seconds: float = _DEBOUNCE_SECONDS
 
 
@@ -92,6 +95,7 @@ class WorkspaceThreadExportRunner:
         self._full_pass_pending = False
         self._wakeup = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._manual_exports: set[asyncio.Task[object]] = set()
 
     def start(self) -> None:
         """Start the loop once; later calls are no-ops."""
@@ -99,12 +103,69 @@ class WorkspaceThreadExportRunner:
             self._task = asyncio.create_task(self._run(), name="thread_export_workspace_sync")
 
     async def stop(self) -> None:
-        """Cancel the loop, abandoning a pass in flight; every write it makes is atomic."""
+        """Cancel and drain every export before its borrowed runtime closes."""
         task = self._task
         self._task = None
+        tasks = tuple(self._manual_exports)
         if task is not None:
+            tasks = (*tasks, task)
+        for task in tasks:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        _, cancellation = await gather_shutdown_phase(*tasks)
+        if cancellation is not None:
+            raise cancellation
+
+    async def prepare_runtime_replacement(self) -> None:
+        """Drain old readers and queue a fresh pass behind closed replacement admission."""
+        was_running = self._task is not None
+        try:
+            await self.stop()
+        finally:
+            if was_running:
+                self.queue_full_pass()
+                self.start()
+
+    async def export_once(
+        self,
+        *,
+        output_dir: Path | None = None,
+        room_filter: str | None = None,
+        max_thread_roots: int = 2000,
+        include_invited_rooms: bool = True,
+    ) -> ThreadExportStats:
+        """Run an administrative export while holding runtime replacement admission."""
+        gate = self._deps.response_admission_gate
+        if self._task is None or self._task.done() or not gate.admit():
+            msg = "MindRoom must be running and ready to export threads; retry after startup or reload"
+            raise RuntimeError(msg)
+        task = asyncio.current_task()
+        assert task is not None
+        self._manual_exports.add(task)
+        try:
+            config = self._deps.config_provider()
+            if config is None:
+                msg = "MindRoom has no running configuration"
+                raise RuntimeError(msg)
+
+            def source_for_group(group: ThreadExportGroup) -> ThreadExportSource:
+                bot = self._deps.bot_provider(group.entity_name)
+                if bot is None or not bot.running or bot.client is None:
+                    msg = f"No running Matrix owner for {group.entity_name}; retry after startup or reload"
+                    raise RuntimeError(msg)
+                return _source_for_bot(bot, group.rooms, None, config)
+
+            return await export_threads_once(
+                config=config,
+                runtime_paths=self._deps.runtime_paths,
+                source_provider=source_for_group,
+                output_dir=output_dir,
+                room_filter=room_filter,
+                max_thread_roots=max_thread_roots,
+                include_invited_rooms=include_invited_rooms,
+            )
+        finally:
+            self._manual_exports.discard(task)
+            gate.release()
 
     def mark_room_activity(self, room_id: str) -> None:
         """Queue one room for re-export."""
@@ -122,6 +183,7 @@ class WorkspaceThreadExportRunner:
             self._wakeup.clear()
             if self._deps.debounce_seconds > 0:
                 await asyncio.sleep(self._deps.debounce_seconds)
+            await self._deps.response_admission_gate.wait_until_open()
             await self._run_pass_once()
 
     async def _run_pass_once(self) -> None:
@@ -260,7 +322,7 @@ def _select_agent_rooms(
 def _source_for_bot(
     bot: _ThreadExportBot,
     rooms: tuple[ThreadExportRoom, ...],
-    targets: tuple[ThreadExportTarget, ...],
+    targets: tuple[ThreadExportTarget, ...] | None,
     config: Config,
 ) -> ThreadExportSource:
     """Read ``rooms`` through one running bot's client and projection view."""
@@ -275,7 +337,7 @@ def _source_for_bot(
             self_sender=bot.matrix_id.full_id,
         ),
         rooms=rooms,
-        target_output_dirs=tuple(target.output_dir for target in targets),
+        target_output_dirs=None if targets is None else tuple(target.output_dir for target in targets),
     )
 
 

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -690,6 +691,7 @@ def _reload_lifecycle(config_path: Path) -> ConfigReloadLifecycle:
         load_initial_config=_load_initial,
         apply_update_plan=_apply_plan,
         response_admission_gate=ResponseAdmissionGate(),
+        before_runtime_replacement=AsyncMock(),
     )
 
 

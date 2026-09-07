@@ -101,6 +101,7 @@ class ConfigReloadLifecycle:
     load_initial_config: Callable[[Config], Awaitable[bool]]
     apply_update_plan: Callable[[Config, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate
+    before_runtime_replacement: Callable[[], Awaitable[None]]
     # Shared with manual plugin reloads and MCP catalog-change handling so no
     # two publication flows can interleave their read-plan-apply sequences.
     config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -351,6 +352,7 @@ class ConfigReloadLifecycle:
         """
         assert self.response_admission_gate.closed, "admission must be closed before applying"
         try:
+            await self.before_runtime_replacement()
             await operation()
         finally:
             self.response_admission_gate.reopen()

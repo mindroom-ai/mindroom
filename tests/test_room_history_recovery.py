@@ -24,6 +24,7 @@ from mindroom.matrix.conversation_hydration import (
     ConversationHydrator,
     _HydrationError,
 )
+from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -411,7 +412,7 @@ async def test_membership_epoch_change_stops_recovery_before_final_settlement(
 
     async def fence_before_second_page(page_number: int) -> None:
         if page_number == 2:
-            await principal.fence_departure(ROOM, source=DepartureSource.LOCAL)
+            await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
 
     recovery = await principal.record_room_history_recovery(ROOM)
     assert recovery is not None
@@ -687,7 +688,7 @@ async def test_membership_movement_during_repair_installs_nothing(principal: Pri
             direction: object = None,
             limit: int = 10,
         ) -> nio.RoomMessagesResponse | nio.RoomMessagesError:
-            await principal.fence_departure(ROOM, source=DepartureSource.LOCAL)
+            await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
             return await super().room_messages(room_id, start, direction, limit)
 
     client = MovingMembershipClient(pages=[([raw("$stale", "stale", ts=1_000)], None)])
@@ -706,9 +707,9 @@ async def test_late_unknown_signal_after_departure_repairs_the_next_membership(
     """A stale Classic signal may over-repair the next epoch but cannot certify a hole."""
     await mark_complete(principal, None)
     old_epoch = await principal.membership_epoch(ROOM)
-    await principal.fence_departure(ROOM, source=DepartureSource.LOCAL)
+    await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
     assert await principal.membership_epoch(ROOM) == old_epoch + 1
-    await principal.note_membership_restarted(ROOM)
+    await admit_room_membership(principal, ROOM, "join")
 
     recovery = await principal.record_room_history_recovery(ROOM)
     client = PagedClient(pages=[([raw("$current", "current", ts=2_000)], None)])
@@ -726,7 +727,7 @@ async def test_unknown_signal_while_departure_is_fenced_is_a_no_op(
     principal: PrincipalStore,
 ) -> None:
     """A gap from an ended membership cannot create work until a join is confirmed."""
-    await principal.fence_departure(ROOM, source=DepartureSource.LOCAL)
+    await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
 
     recovery = await principal.record_room_history_recovery(ROOM)
 

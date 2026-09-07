@@ -9,10 +9,11 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.matrix.sync_loop import (
-    OwnRoomMembership,
-    own_membership_from_sliding_sync,
-    own_membership_from_sync,
+from mindroom.event_journal import (
+    DepartureSource,
+    EventKind,
+    IngestionRecordAdmission,
+    IngestionRecordDisposition,
 )
 
 if TYPE_CHECKING:
@@ -42,7 +43,6 @@ class AgentReplyMembershipSync:
         self._refresh_pending = False
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
-        self._preserve_on_next_sync_start = False
         self._live_transition_lock = asyncio.Lock()
         self._live_effects_pending = False
         self._revocation_wave_issued = False
@@ -51,22 +51,6 @@ class AgentReplyMembershipSync:
     def memberships(self) -> AgentReplyMembershipIndex:
         """Return the shared atomic index controlled by this sync lifecycle."""
         return self._memberships
-
-    def preserve_on_next_sync_start(self) -> None:
-        """Carry a pre-sync authoritative snapshot into exactly one receive loop."""
-        self._preserve_on_next_sync_start = True
-
-    def sync_loop_started(self) -> bool:
-        """Return whether a new receive generation must invalidate its snapshot."""
-        preserve = self._preserve_on_next_sync_start
-        self._preserve_on_next_sync_start = False
-        if preserve:
-            self._request_refresh()
-        return not preserve
-
-    def reset_receive_generation(self) -> None:
-        """Forget one stopped receive generation's preservation state."""
-        self._preserve_on_next_sync_start = False
 
     def _request_refresh(self) -> None:
         """Request an authoritative rebuild."""
@@ -114,45 +98,43 @@ class AgentReplyMembershipSync:
         )
         self._refresh_retry_at = time.monotonic() + backoff_seconds
 
-    def pre_admit_response(
+    def pre_admit_ingestion(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
-        response: nio.SyncResponse | nio.SlidingSyncResponse,
-        *,
-        control_user_id: str,
+        admission: IngestionRecordAdmission,
+        timeline_provenance: nio.TimelineEventProvenance | None,
     ) -> ReplyMembershipPreAdmission:
-        """Fence uncertain state and control-client departures before nio fanout."""
-        if _sync_response_has_uncertain_membership(response):
+        """Fence uncertainty and reported control departures before admission."""
+        if admission.disposition is IngestionRecordDisposition.HISTORY_LOSS:
             return ReplyMembershipPreAdmission(invalidate_reason="uncertain_sync_response")
-
-        membership = (
-            own_membership_from_sync(response, self_user_id=control_user_id)
-            if isinstance(response, nio.SyncResponse)
-            else own_membership_from_sliding_sync(response, self_user_id=control_user_id)
+        if (
+            timeline_provenance is nio.TimelineEventProvenance.RECOVERED
+            and admission.event is not None
+            and admission.event.kind is EventKind.ROOM_LIFECYCLE
+        ):
+            room_id = admission.event.room_id
+            reason = "recovered_membership"
+        elif (
+            admission.membership is not None
+            and admission.source is DepartureSource.REPORTED
+            and admission.previous_membership == "join"
+            and admission.membership != "join"
+            and admission.room_id is not None
+        ):
+            room_id = admission.room_id
+            reason = "control_client_departed"
+        else:
+            return ReplyMembershipPreAdmission()
+        authorization_changed = self._memberships.mark_room_unready(
+            config,
+            runtime_paths,
+            room_id,
+            reason=reason,
         )
-        authorization_changed = self._apply_control_membership(config, runtime_paths, membership)
-        return ReplyMembershipPreAdmission(authorization_changed=authorization_changed)
-
-    def _apply_control_membership(
-        self,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        membership: OwnRoomMembership,
-    ) -> bool:
-        """Fail grant rooms closed when the router loses membership continuity."""
-        authorization_changed = False
-        for room_id in membership.continuity_lost_room_ids:
-            changed = self._memberships.mark_control_room_unready(
-                config,
-                runtime_paths,
-                room_id,
-                reason="control_client_departed",
-            )
-            authorization_changed = changed or authorization_changed
         if authorization_changed:
             self._request_refresh()
-        return authorization_changed
+        return ReplyMembershipPreAdmission(authorization_changed=authorization_changed)
 
     async def apply_live_transition(
         self,
@@ -179,14 +161,3 @@ class AgentReplyMembershipSync:
                 return
             await reconcile_effects()
             self._live_effects_pending = False
-
-
-def _sync_response_has_uncertain_membership(
-    response: nio.SyncResponse | nio.SlidingSyncResponse,
-) -> bool:
-    """Return whether a sync response cannot prove a complete membership view."""
-    if response.unrecovered_room_ids:
-        return True
-    if isinstance(response, nio.SyncResponse):
-        return any(join_info.timeline.limited for join_info in response.rooms.join.values())
-    return any(room.limited for room in response.rooms.values())

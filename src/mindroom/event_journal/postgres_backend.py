@@ -14,10 +14,8 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
-from .migrations import finish_matrix_delivery_migration, prepare_matrix_delivery_migration
-from .offloading import ThreadOffload
-from .schema import POSTGRES_DIALECT, render, schema_statements
-from .schema_migrations import pre_schema_migration_statements
+from .offloading import ThreadOffload, settled
+from .schema import POSTGRES_DIALECT, render, require_current_schema, schema_statements
 
 # An arbitrary constant that only this schema setup uses, so the lock it
 # takes cannot collide with an application advisory lock.
@@ -72,11 +70,20 @@ class PostgresBackend:
     # repr reaches logs and tracebacks without anyone choosing to print it.
     database_url: str = field(repr=False)
     _writer: psycopg.Connection[tuple[Any, ...]] = field(init=False, repr=False)
+    _recovery_reader: psycopg.Connection[tuple[Any, ...]] = field(init=False, repr=False)
     _writer_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _readers: asyncio.Queue[psycopg.Connection[tuple[Any, ...]]] | None = field(default=None, init=False, repr=False)
     _pool: list[psycopg.Connection[tuple[Any, ...]]] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
+    _recovery_offload: ThreadOffload = field(
+        default_factory=lambda: ThreadOffload.serial(
+            thread_name_prefix="mindroom-event-journal-recovery",
+        ),
+        init=False,
+        repr=False,
+    )
 
     @classmethod
     def open(cls, database_url: str) -> PostgresBackend:
@@ -93,6 +100,7 @@ class PostgresBackend:
             backend._writer.close()
             raise
         backend._pool = [backend._connect() for _ in range(_POOL_SIZE)]
+        backend._recovery_reader = backend._connect()
         return backend
 
     def _readers_queue(self) -> asyncio.Queue[psycopg.Connection[tuple[Any, ...]]]:
@@ -119,45 +127,11 @@ class PostgresBackend:
             # statements are all no-ops once the schema exists.
             cursor.execute(cast("LiteralString", f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK_KEY})"))
             cursor.execute(
-                """
-                SELECT table_name, column_name
-                FROM information_schema.columns
-                WHERE table_schema = current_schema()
-                  AND table_name IN (
-                      'approval_continuation_calls',
-                      'interactive_questions',
-                      'matrix_delivery_outbox',
-                      'room_history_recovery'
-                  )
-                """,
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()",
             )
-            existing_columns = cursor.fetchall()
-            approval_continuation_call_columns = frozenset(
-                str(row["column_name"])
-                for row in existing_columns
-                if row["table_name"] == "approval_continuation_calls"
-            )
-            interactive_question_columns = frozenset(
-                str(row["column_name"]) for row in existing_columns if row["table_name"] == "interactive_questions"
-            )
-            matrix_delivery_outbox_columns = frozenset(
-                str(row["column_name"]) for row in existing_columns if row["table_name"] == "matrix_delivery_outbox"
-            )
-            room_history_recovery_columns = frozenset(
-                str(row["column_name"]) for row in existing_columns if row["table_name"] == "room_history_recovery"
-            )
-            for statement in pre_schema_migration_statements(
-                approval_continuation_call_columns=approval_continuation_call_columns,
-                interactive_question_columns=interactive_question_columns,
-                matrix_delivery_outbox_columns=matrix_delivery_outbox_columns,
-                room_history_recovery_columns=room_history_recovery_columns,
-            ):
-                cursor.execute(cast("LiteralString", statement))
-            transaction = _PostgresTransaction(cursor)
-            migration = prepare_matrix_delivery_migration(transaction, postgres=True)
+            require_current_schema(frozenset(str(row["table_name"]) for row in cursor.fetchall()))
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
-            finish_matrix_delivery_migration(transaction, migration=migration)
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:
@@ -220,6 +194,22 @@ class PostgresBackend:
         finally:
             self._readers_queue().put_nowait(connection)
 
+    async def recovery_read[T](self, operation: Operation[T]) -> T:
+        """Run a committed-state handoff proof on its reserved reader."""
+        if self._closed:
+            msg = "The event-journal store is closed"
+            raise RuntimeError(msg)
+
+        def apply() -> T:
+            try:
+                with self._recovery_reader.cursor(row_factory=dict_row) as cursor:
+                    cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                    return operation(_PostgresTransaction(cursor))
+            finally:
+                self._recovery_reader.rollback()
+
+        return await self._recovery_offload.run(apply)
+
     @staticmethod
     def _apply_read[T](
         connection: psycopg.Connection[tuple[Any, ...]],
@@ -232,17 +222,34 @@ class PostgresBackend:
             connection.rollback()
 
     async def close(self) -> None:
-        """Close every connection this backend owns, once nothing is using one.
+        """Close admission once and await the one owned connection teardown.
 
         Setting the closed flag first stops any further statement from
         starting; draining then waits for the ones already on worker threads,
         because closing a connection under a running statement is how psycopg
         reports someone else's cancellation as this caller's broken connection.
         """
-        if self._closed:
-            return
-        self._closed = True
-        await self._offload.drain()
-        for connection in (self._writer, *self._pool):
-            await asyncio.to_thread(connection.close)
-        self._pool.clear()
+        close_task = self._close_task
+        if close_task is None:
+            self._closed = True
+            close_task = asyncio.create_task(
+                self._finish_close(),
+                name="event_journal_postgres_close",
+            )
+            self._close_task = close_task
+        await settled(close_task)
+
+    async def _finish_close(self) -> None:
+        """Finish the teardown every close waiter shares."""
+        try:
+            await asyncio.gather(
+                self._offload.drain(),
+                self._recovery_offload.drain(),
+            )
+            for connection in (self._writer, *self._pool):
+                await self._offload.run(connection.close)
+            await self._recovery_offload.run(self._recovery_reader.close)
+            self._pool.clear()
+        finally:
+            self._offload.shutdown()
+            self._recovery_offload.shutdown()

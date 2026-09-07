@@ -195,8 +195,10 @@ async def test_detector_logs_blocking_stack_and_stall_duration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_detector_logs_process_cpu_and_other_python_thread_stacks() -> None:
+async def test_detector_logs_process_cpu_and_other_python_thread_stacks(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stall report must distinguish process activity and expose competing Python work."""
+    # Other test modules may have already started provider or journal threads.
+    monkeypatch.setattr(event_loop_stall, "_MAX_OTHER_THREAD_STACKS", len(event_loop_stall.sys._current_frames()) + 4)
     worker_started = threading.Event()
     release_worker = threading.Event()
     detector = _detector()
@@ -254,7 +256,7 @@ def test_other_thread_stacks_uses_frame_snapshot_for_low_level_thread() -> None:
         assert worker_started.wait(timeout=1.0)
         detector = _detector()
         frames = event_loop_stall.sys._current_frames()
-        stacks, omitted = detector._other_thread_stacks(frames)
+        stacks, omitted = detector._other_thread_stacks({worker_ident[0]: frames[worker_ident[0]]})
     finally:
         release_worker.set()
     assert worker_stopped.wait(timeout=1.0)

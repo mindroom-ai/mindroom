@@ -7,7 +7,6 @@ import threading
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -37,6 +36,7 @@ from mindroom.event_journal import (
     AdmissionResult,
     ApprovalContinuation,
     DeliveryStage,
+    DepartureSource,
     EventClass,
     EventKind,
     InboundEvent,
@@ -84,6 +84,8 @@ from tests.conftest import (
     runtime_paths_for,
     unwrap_extracted_collaborator,
 )
+from tests.journal_helpers import admit_dispatch_event
+from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -275,7 +277,7 @@ async def _dispatch_message(bot: AgentBot, room: nio.MatrixRoom, event: nio.Room
     source.setdefault("type", "m.room.message")
     event.source = source
     event.decrypted = False
-    await bot._journal_dispatcher.admit_out_of_band(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
+    await admit_dispatch_event(bot._journal_dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
     await bot._journal_dispatcher.drain_once()
 
 
@@ -636,8 +638,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = MagicMock()
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock(room_id="!test:localhost")
-        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
-        event.key = "✅"
+        event = _reaction_event("✅", "$reaction")
 
         with (
             patch.object(
@@ -806,7 +807,7 @@ class TestAgentBot(AgentBotTestBase):
             await _dispatch_reaction(bot, room, event)
             await bot._response_runner.drain_inbox_responses()
 
-        await bot._membership_fence.fence_local_departure(room.room_id)
+        await admit_room_membership(bot.journal_principal(), room.room_id, "leave", source=DepartureSource.LOCAL)
 
         assert event.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
         rows = await bot._journal_store.backend.read(
@@ -1011,17 +1012,20 @@ class TestAgentBot(AgentBotTestBase):
             "handle_text_event",
             handle_other_thread,
         )
+        bot._journal_dispatcher.release_turn_replay()
         bot._journal_dispatcher.start()
         try:
             with _mock_interactive_claim(bot, selection):
-                await bot._journal_dispatcher.admit_out_of_band(
+                await admit_dispatch_event(
+                    bot._journal_dispatcher,
                     room,
                     reaction,
                     EventKind.REACTION,
                     EventClass.ACTIONABLE,
                 )
                 await asyncio.wait_for(selection_started.wait(), timeout=1.0)
-                await bot._journal_dispatcher.admit_out_of_band(
+                await admit_dispatch_event(
+                    bot._journal_dispatcher,
                     room,
                     message,
                     EventKind.MESSAGE,
@@ -2093,7 +2097,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = nio.UnknownEvent.from_dict(
             {
                 "type": "io.mindroom.tool_approval_response",
@@ -2161,13 +2165,15 @@ class TestAgentBot(AgentBotTestBase):
             ignored = _approval_action_event("$legacy-action", status="approved")
             later = _approval_action_event("$later-action", status="invalid")
             with patch.object(approval_manager.logger, "warning") as warning:
-                await bot._journal_dispatcher.admit_out_of_band(
+                await admit_dispatch_event(
+                    bot._journal_dispatcher,
                     room,
                     ignored,
                     EventKind.APPROVAL,
                     EventClass.ACTIONABLE,
                 )
-                await bot._journal_dispatcher.admit_out_of_band(
+                await admit_dispatch_event(
+                    bot._journal_dispatcher,
                     room,
                     later,
                     EventKind.APPROVAL,
@@ -2229,7 +2235,8 @@ class TestAgentBot(AgentBotTestBase):
 
         journal = bot._journal_dispatcher.store
         with patch("mindroom.bot.maybe_handle_tool_approval_reply", side_effect=consume_then_crash):
-            await bot._journal_dispatcher.admit_out_of_band(
+            await admit_dispatch_event(
+                bot._journal_dispatcher,
                 room,
                 event,
                 EventKind.MESSAGE,
@@ -2385,7 +2392,8 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=failure),
             ),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
+            await admit_dispatch_event(
+                bot._journal_dispatcher,
                 room,
                 event,
                 EventKind.REACTION,
@@ -2450,7 +2458,8 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
             ),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
+            await admit_dispatch_event(
+                bot._journal_dispatcher,
                 room,
                 event,
                 EventKind.REACTION,
@@ -2511,7 +2520,8 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
             ),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
+            await admit_dispatch_event(
+                bot._journal_dispatcher,
                 room,
                 event,
                 EventKind.REACTION,
@@ -2579,7 +2589,8 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=False),
             ),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
+            await admit_dispatch_event(
+                bot._journal_dispatcher,
                 room,
                 event,
                 EventKind.REACTION,
@@ -2676,7 +2687,8 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch.object(turn_store, "get_turn_record", side_effect=tracked_lookup) as source_lookup,
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
+            await admit_dispatch_event(
+                bot._journal_dispatcher,
                 room,
                 event,
                 EventKind.REACTION,
@@ -2806,7 +2818,8 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=failure),
             ),
         ):
-            await bot._journal_dispatcher.admit_out_of_band(
+            await admit_dispatch_event(
+                bot._journal_dispatcher,
                 room,
                 event,
                 EventKind.REACTION,
@@ -2871,7 +2884,8 @@ class TestAgentBot(AgentBotTestBase):
         )
         assert admission is AdmissionResult.ADMITTED
 
-        await bot._journal_dispatcher.admit_out_of_band(
+        await admit_dispatch_event(
+            bot._journal_dispatcher,
             room,
             event,
             EventKind.REACTION,
@@ -2916,7 +2930,8 @@ class TestAgentBot(AgentBotTestBase):
 
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_then_crash])])
         with _mock_interactive_claim(bot, None):
-            await bot._journal_dispatcher.admit_out_of_band(
+            await admit_dispatch_event(
+                bot._journal_dispatcher,
                 room,
                 event,
                 EventKind.REACTION,
@@ -2968,7 +2983,8 @@ class TestAgentBot(AgentBotTestBase):
 
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [crash_after_claim])])
         with _mock_interactive_claim(bot, None):
-            await bot._journal_dispatcher.admit_out_of_band(
+            await admit_dispatch_event(
+                bot._journal_dispatcher,
                 room,
                 event,
                 EventKind.REACTION,
@@ -3011,7 +3027,7 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = MagicMock(spec=nio.ReactionEvent)
         event.key = "✅"
         event.reacts_to = "$approval"
@@ -3065,7 +3081,7 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
-        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("✅", "$alias-approval", sender=bridge_id)
 
         with patch(

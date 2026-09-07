@@ -52,6 +52,15 @@ POSTGRES_DIALECT = _SchemaDialect(
 
 _TABLES = (
     """
+    CREATE TABLE IF NOT EXISTS matrix_sync_consumers (
+        principal_id TEXT NOT NULL PRIMARY KEY,
+        consumer_generation TEXT NOT NULL,
+        stream_id TEXT UNIQUE,
+        next_sequence BIGINT NOT NULL DEFAULT 1
+            CHECK (next_sequence >= 0 AND next_sequence <= 9223372036854775807)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS journal_events (
         receipt_order {receipt_order_column},
         principal_id TEXT NOT NULL,
@@ -69,6 +78,25 @@ _TABLES = (
         membership_epoch BIGINT NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('pending', 'settled')),
         UNIQUE (principal_id, event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS room_member_joins (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        baseline_receipt_order BIGINT,
+        completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+        PRIMARY KEY (principal_id, room_id, user_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS matrix_ingestion_membership (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        membership TEXT NOT NULL CHECK (membership IN ('join', 'leave')),
+        membership_epoch BIGINT NOT NULL CHECK (membership_epoch >= 0),
+        PRIMARY KEY (principal_id, room_id)
     )
     """,
     """
@@ -112,39 +140,9 @@ _TABLES = (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
         membership_epoch BIGINT NOT NULL,
-        -- A departure has been fenced and the bot has not been seen back in
-        -- the room since. The bot cannot leave a room it is not in, so a
-        -- second local departure while this holds is the same one arriving
-        -- twice rather than a new one.
+        -- Application work may run only within an active membership tenure.
         departure_fenced INTEGER NOT NULL DEFAULT 0,
-        -- Departures already fenced locally whose sync report has not arrived.
-        -- A count rather than a flag: leave/rejoin/leave owes two reports, and
-        -- one bit would let the second echo fence a membership it did not end.
-        owed_departure_reports BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS reported_departures (
-        report_order {receipt_order_column},
-        -- Matrix may replay an old leave after a later join has re-armed the
-        -- room. Event identity, or the sync token when the event was omitted,
-        -- keeps that replay from fencing again.
-        principal_id TEXT NOT NULL,
-        observation_id {ordered_text} NOT NULL,
-        room_id TEXT NOT NULL,
-        -- The latest journal receipt visible when this observation arrived.
-        -- Synthetic sync-token observations have no event row of their own,
-        -- so this is what still orders a later explicit join after them.
-        journal_order BIGINT NOT NULL,
-        -- Consecutive leave/ban observations are aliases for one ended
-        -- membership. They share its epoch so only the run's first observation
-        -- consumes a locally owed report.
-        run_epoch BIGINT NOT NULL,
-        -- A join closes the whole alias run. Keeping closure beside every
-        -- alias lets any replayed subset recover the same answer.
-        run_closed INTEGER NOT NULL DEFAULT 0,
-        UNIQUE (principal_id, observation_id)
     )
     """,
     """
@@ -357,13 +355,8 @@ _TABLES = (
     """,
     """
     CREATE TABLE IF NOT EXISTS journal_identity (
-        -- One row, ever. A Matrix sync token is only meaningful next to the
-        -- store that consumed the events it already covers: resuming from a
-        -- token saved before this database was created would skip every event
-        -- between, and nothing downstream would notice the gap. The generation
-        -- is written once when the store is first opened and never rewritten,
-        -- so a checkpoint that names a different one is from a database that
-        -- no longer exists.
+        -- Stable database identity checked against the install's journal
+        -- binding before opening its turn, delivery, and recovery state.
         singleton BOOLEAN NOT NULL PRIMARY KEY,
         generation TEXT NOT NULL
     )
@@ -372,11 +365,6 @@ _TABLES = (
 
 
 _INDEXES = (
-    """
-    CREATE INDEX IF NOT EXISTS reported_departures_open
-    ON reported_departures (principal_id, room_id, report_order)
-    WHERE run_closed = 0
-    """,
     """
     CREATE INDEX IF NOT EXISTS interactive_selections_revision
     ON interactive_selections (principal_id, question_event_id, revision_event_id)
@@ -441,6 +429,17 @@ _INDEXES = (
 def _expand_byte_order(sql: str, dialect: _SchemaDialect) -> str:
     """Spell the byte-order pin for one backend."""
     return sql.replace(_BYTE_ORDER_MARKER, dialect.order_by_bytes)
+
+
+def require_current_schema(existing_tables: frozenset[str]) -> None:
+    """Refuse pre-durable journals before any old work can enter the runtime."""
+    if "journal_events" in existing_tables and "matrix_sync_consumers" not in existing_tables:
+        msg = (
+            "This event journal predates durable Matrix ingestion. Stop MindRoom and configure a fresh event journal; "
+            "old pending work is not migrated. Preserve Matrix credentials and encryption keys. "
+            "See docs/deployment/nio-upgrade.md for the one-time cutover."
+        )
+        raise RuntimeError(msg)
 
 
 def schema_statements(dialect: _SchemaDialect) -> tuple[str, ...]:

@@ -23,6 +23,7 @@ from mindroom.script_runs.broker import ScriptToolBroker, ScriptToolCallRequest
 from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
 from mindroom.tool_approval import BackgroundScriptToolOrigin
 from tests.conftest import test_runtime_paths
+from tests.journal_membership_helpers import admit_room_membership
 from tests.test_script_run_manager import _context as _manager_context
 from tests.test_script_run_manager import _manager
 from tests.test_script_tool_broker import _call_through_gateway, _RuntimeResolver
@@ -144,7 +145,7 @@ async def test_background_approval_fails_closed_when_room_departure_is_fenced(tm
     """A room that cannot publish a card must not hold the script call until timeout."""
     manager, journal, initial_sent = await _approval_manager(tmp_path)
     cards = journal.principal("router@shared")
-    await cards.fence_departure("!room:localhost", source=DepartureSource.LOCAL)
+    await admit_room_membership(cards, "!room:localhost", "leave", source=DepartureSource.LOCAL)
 
     try:
         decision = await asyncio.wait_for(

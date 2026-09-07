@@ -28,6 +28,7 @@ from mindroom.entity_resolution import (
 )
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
+from mindroom.matrix.room_membership import cached_member_ids
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.scheduling import (
     SchedulingRuntime,
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
@@ -123,6 +125,7 @@ class CommandHandlerContext:
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
+    controller_identity: Callable[[str], DesktopControllerIdentity] | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -258,7 +261,7 @@ def agent_owns_command(
         return True
     if command.type is not CommandType.DESKTOP:
         return False
-    return chat_pairing_desktop_error(config, agent_name) is None and set(room.users) == {
+    return chat_pairing_desktop_error(config, agent_name) is None and cached_member_ids(room) == {
         requester_user_id,
         room.own_user_id,
     }
@@ -283,7 +286,7 @@ async def _desktop_agent_for_room(
         return None
     agent_name, agent_user_id = eligible[0]
     expected_members = {requester_user_id, room.own_user_id, agent_user_id}
-    if set(room.users) != expected_members:
+    if cached_member_ids(room) != expected_members:
         return None
     return agent_name
 
@@ -330,6 +333,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 "❌ Use `!desktop` in a private room containing only you, the serving bot, "
                 "and exactly one Desktop-enabled agent."
             )
+        elif context.controller_identity is None:
+            response_text = "❌ Desktop setup is unavailable until the target agent is running."
         else:
             response_text = handle_desktop_command(
                 command.args.get("args_text", ""),
@@ -338,6 +343,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     runtime_paths=context.runtime_paths,
                     agent_name=desktop_agent_name,
                     requester_id=requester_user_id,
+                    controller_identity=context.controller_identity,
                 ),
             )
 

@@ -13,8 +13,10 @@ noticed.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, cast
+from uuid import UUID
 
 from mindroom.history_recovery import (
     HistoryRecoveryOutcome,
@@ -23,18 +25,26 @@ from mindroom.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
-from . import approvals
+from . import approvals, membership_hooks
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
+    AdmissionFacts,
     AdmissionResult,
-    DepartureObservation,
-    DepartureOutcome,
     DepartureSource,
     EventClass,
     EventKind,
+    InboundEvent,
+    IngestionBatchAdmission,
+    IngestionBatchIntegrityError,
+    IngestionBatchSequenceError,
+    IngestionBatchValidationError,
+    IngestionConsumerBindingError,
+    IngestionRecordAdmission,
+    IngestionRecordDisposition,
     JournalEvent,
     PendingPage,
+    RoomMembershipPosition,
     SemanticConsumer,
 )
 from .projection import ProjectedEvent, project
@@ -42,7 +52,6 @@ from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
     from .backend import Row, Transaction
-    from .models import InboundEvent
 
 logger = get_logger(__name__)
 
@@ -59,22 +68,314 @@ _EVENT_JOURNAL_COLUMNS = """
 # Successful repair is hidden from callers but retained as the revision carrier,
 # so a later gap cannot reuse the identity of an old in-flight walk.
 _REPAIRED_RECOVERY_STATE = "repaired"
+_MATRIX_MEMBERSHIPS = frozenset({"ban", "invite", "join", "knock", "leave"})
+
+
+def validate_ingestion_batch_admission(admission: IngestionBatchAdmission) -> None:
+    """Check sequence and application effects at the journal boundary."""
+    if (
+        not isinstance(admission, IngestionBatchAdmission)
+        or not isinstance(admission.stream_id, UUID)
+        or type(admission.sequence) is not int
+        or not 1 <= admission.sequence <= 2**63 - 2
+    ):
+        message = "Invalid batch sequence or stream"
+        raise IngestionBatchValidationError(message)
+    for record in admission.records:
+        _validate_ingestion_record(record)
+
+
+def _validate_ingestion_record(item: IngestionRecordAdmission) -> None:
+    invalid = IngestionBatchValidationError("Invalid ingestion record admission")
+
+    def require(condition: object) -> None:
+        if not condition:
+            raise invalid
+
+    require(isinstance(item, IngestionRecordAdmission))
+    require(type(item.disposition) is IngestionRecordDisposition)
+    _validate_membership_effect(item)
+    effect = item.disposition
+    room_id = item.room_id
+    e = item.event
+    p = item.projected
+    if effect is not IngestionRecordDisposition.SEMANTIC_EVENT:
+        require(e is None and p is None)
+        if effect is IngestionRecordDisposition.HISTORY_LOSS:
+            require(type(room_id) is str and bool(room_id))
+        elif effect is IngestionRecordDisposition.ROOM_LIFECYCLE:
+            require(item.membership is not None)
+        elif item.membership is None:
+            require(room_id is None)
+        return
+    if item.membership is None:
+        require(room_id is None)
+    require(type(e) is InboundEvent)
+    event = cast("InboundEvent", e)
+    require(room_id is None or room_id == event.room_id)
+    require(all(type(v) is str and v for v in (event.event_id, event.room_id, event.sender)))
+    require(event.thread_id is None or (type(event.thread_id) is str and bool(event.thread_id)))
+    require(type(event.kind) is EventKind and type(event.event_class) is EventClass)
+    require(type(event.origin_server_ts) is int and isinstance(event.source, Mapping))
+    if event.kind is EventKind.OPAQUE_HISTORY:
+        require(event.event_class is EventClass.CONTEXT_ONLY and p is None)
+    if p is None:
+        return
+    require(type(p) is ProjectedEvent and isinstance(p.content, Mapping))
+    projected = p
+    require(all(type(v) is str for v in (projected.event_id, projected.room_id, projected.sender)))
+    require(type(projected.thread_id) is type(event.thread_id) and type(projected.origin_server_ts) is int)
+    require(projected.event_id == event.event_id and projected.room_id == event.room_id)
+    require(projected.thread_id == event.thread_id and projected.sender == event.sender)
+    require(projected.origin_server_ts == event.origin_server_ts)
+    relations = projected.replaces_event_id, projected.redacts_event_id
+    require(all(v is None or (type(v) is str and v) for v in relations))
+
+
+def _validate_membership_effect(item: IngestionRecordAdmission) -> None:
+    """Validate own membership independently of the event's disposition."""
+    invalid = IngestionBatchValidationError("Invalid own-membership effect")
+    if item.membership is None:
+        if any(
+            value is not None
+            for value in (
+                item.source,
+                item.previous_membership,
+                item.previous_membership_epoch,
+                item.membership_epoch,
+            )
+        ):
+            raise invalid
+        return
+    if (
+        type(item.source) is not DepartureSource
+        or not isinstance(item.room_id, str)
+        or not item.room_id
+        or item.membership not in _MATRIX_MEMBERSHIPS
+        or type(item.previous_membership_epoch) is not int
+        or type(item.membership_epoch) is not int
+        or item.previous_membership_epoch < 0
+    ):
+        raise invalid
+    if item.previous_membership is None:
+        if (
+            item.source is not DepartureSource.REPORTED
+            or item.previous_membership_epoch != 0
+            or item.membership_epoch != 0
+        ):
+            raise invalid
+    elif (
+        item.previous_membership not in _MATRIX_MEMBERSHIPS
+        # A local command can confirm an unobserved room's initial leave/0
+        # position through HTTP even though it does not advance producer epoch.
+        or (item.previous_membership == item.membership and item.source is not DepartureSource.LOCAL)
+        or item.membership_epoch
+        != item.previous_membership_epoch + int(item.previous_membership == "join" and item.membership != "join")
+    ):
+        raise invalid
+
+
+def _require_matching_semantic_event(
+    transaction: Transaction,
+    principal_id: str,
+    event: InboundEvent,
+) -> Row:
+    row = transaction.fetchone(
+        """
+        SELECT receipt_order, room_id, thread_id, kind, sender, origin_server_ts
+        FROM journal_events
+        WHERE principal_id = ? AND event_id = ?
+        """,
+        (principal_id, event.event_id),
+    )
+    if row is None:
+        raise IngestionBatchIntegrityError
+    envelope = tuple(row[column] for column in ("room_id", "sender", "origin_server_ts"))
+    if tuple(map(type, envelope)) != (str, str, int) or envelope != (
+        event.room_id,
+        event.sender,
+        event.origin_server_ts,
+    ):
+        raise IngestionBatchIntegrityError
+    # An opaque history marker identifies an envelope, whose encrypted kind
+    # and thread are unknown. It never owns a callback or becomes actionable.
+    if EventKind.OPAQUE_HISTORY not in (row["kind"], event.kind) and (
+        row["kind"] != event.kind.value or row["thread_id"] != encode_thread_id(event.thread_id)
+    ):
+        raise IngestionBatchIntegrityError
+    return row
+
+
+def _admit_suppressed_semantic_identity(
+    transaction: Transaction,
+    principal_id: str,
+    event: InboundEvent,
+) -> None:
+    """Retain a settled identity for turn work fenced out of this tenure."""
+    result = admit(
+        transaction,
+        principal_id,
+        replace(event, event_class=EventClass.CONTEXT_ONLY),
+        None,
+    )
+    if result is AdmissionResult.ADMITTED:
+        return
+    if result is AdmissionResult.DUPLICATE:
+        _require_matching_semantic_event(transaction, principal_id, event)
+        return
+    raise IngestionBatchIntegrityError
+
+
+def _apply_semantic_ingestion_disposition(
+    transaction: Transaction,
+    principal_id: str,
+    event: InboundEvent,
+    projected: ProjectedEvent | None,
+) -> bool:
+    """Admit or deduplicate one semantic event under the locked tenure."""
+    state = _claim_membership_state(transaction, principal_id, event.room_id)
+    if event.kind in TURN_BACKED_KINDS and state.departure_fenced:
+        _admit_suppressed_semantic_identity(transaction, principal_id, event)
+        return False
+    semantic_result = admit(transaction, principal_id, event, projected)
+    if semantic_result is AdmissionResult.DUPLICATE:
+        retained = _require_matching_semantic_event(transaction, principal_id, event)
+        if retained["kind"] == EventKind.OPAQUE_HISTORY and projected is not None:
+            _project_admitted_event(
+                transaction,
+                principal_id,
+                projected,
+                receipt_order=int(retained["receipt_order"]),
+                membership_epoch=state.membership_epoch,
+            )
+    elif semantic_result is not AdmissionResult.ADMITTED:
+        raise IngestionBatchIntegrityError
+    if event.kind is EventKind.ROOM_LIFECYCLE and event.event_class is EventClass.CONTEXT_ONLY:
+        content = cast("Mapping[str, object]", event.source["content"])
+        if content.get("membership") == "join":
+            membership_hooks.record_baseline(
+                transaction,
+                principal_id,
+                event.room_id,
+                cast("str", event.source["state_key"]),
+            )
+    return semantic_result is AdmissionResult.ADMITTED and event.event_class is EventClass.ACTIONABLE
+
+
+def _apply_membership_effect(
+    transaction: Transaction,
+    principal_id: str,
+    admission: IngestionRecordAdmission,
+) -> None:
+    """Apply the tenure change before any semantic effect on the same record."""
+    room_id = cast("str", admission.room_id)
+    producer = ingestion_membership_position(transaction, principal_id, room_id)
+    previous_epoch = 0 if producer is None else producer.membership_epoch
+    if admission.previous_membership_epoch != previous_epoch:
+        raise IngestionBatchIntegrityError
+    if producer is not None and (
+        admission.previous_membership is None
+        or ("join" if admission.previous_membership == "join" else "leave") != producer.membership
+    ):
+        raise IngestionBatchIntegrityError
+    state = _claim_membership_state(transaction, principal_id, room_id)
+    if admission.membership != "join" and admission.previous_membership == "join":
+        if state.departure_fenced:
+            raise IngestionBatchIntegrityError
+        _advance_membership_epoch(transaction, principal_id, room_id)
+    transaction.execute(
+        "UPDATE room_membership SET departure_fenced = ? WHERE principal_id = ? AND room_id = ?",
+        (int(admission.membership != "join"), principal_id, room_id),
+    )
+    transaction.execute(
+        """
+        INSERT INTO matrix_ingestion_membership (principal_id, room_id, membership, membership_epoch)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (principal_id, room_id) DO UPDATE SET
+            membership = excluded.membership, membership_epoch = excluded.membership_epoch
+        """,
+        (
+            principal_id,
+            room_id,
+            "join" if admission.membership == "join" else "leave",
+            admission.membership_epoch,
+        ),
+    )
+
+
+def _apply_ingestion_disposition(
+    transaction: Transaction,
+    principal_id: str,
+    admission: IngestionRecordAdmission,
+) -> bool:
+    """Apply one validated record effect, returning whether it dispatches."""
+    disposition = admission.disposition
+    if admission.membership is not None:
+        _apply_membership_effect(transaction, principal_id, admission)
+    if disposition in {IngestionRecordDisposition.COMPATIBILITY_ONLY, IngestionRecordDisposition.ROOM_LIFECYCLE}:
+        return False
+
+    if disposition is IngestionRecordDisposition.HISTORY_LOSS:
+        room_id = cast("str", admission.room_id)
+        state = _claim_membership_state(transaction, principal_id, room_id)
+        _record_room_history_recovery_locked(
+            transaction,
+            principal_id,
+            room_id,
+            state,
+        )
+        return False
+
+    return _apply_semantic_ingestion_disposition(
+        transaction,
+        principal_id,
+        cast("InboundEvent", admission.event),
+        admission.projected,
+    )
+
+
+def admit_ingestion_batch(
+    transaction: Transaction,
+    principal_id: str,
+    admission: IngestionBatchAdmission,
+    *,
+    snapshot: Callable[[Transaction, str, InboundEvent], None],
+) -> AdmissionFacts:
+    """Commit semantic effects and the consumer's acceptance in one transaction."""
+    validate_ingestion_batch_admission(admission)
+    stream = str(admission.stream_id)
+    row = transaction.fetchone(
+        "UPDATE matrix_sync_consumers SET next_sequence = next_sequence + 1 "
+        "WHERE principal_id = ? AND stream_id = ? AND next_sequence = ? "
+        "RETURNING next_sequence",
+        (principal_id, stream, admission.sequence),
+    )
+    if row is None:
+        state = transaction.fetchone(
+            "SELECT stream_id, next_sequence FROM matrix_sync_consumers WHERE principal_id = ?",
+            (principal_id,),
+        )
+        if state is None or state["stream_id"] != stream:
+            raise IngestionConsumerBindingError
+        if admission.sequence != state["next_sequence"] - 1:
+            raise IngestionBatchSequenceError
+        return AdmissionFacts(False, False, tuple(AdmissionFacts(False, False) for _ in admission.records))
+    facts = []
+    for record in admission.records:
+        semantic_new = _apply_ingestion_disposition(transaction, principal_id, record)
+        if semantic_new and record.event is not None:
+            snapshot(transaction, principal_id, record.event)
+        facts.append(AdmissionFacts(True, semantic_new))
+    return AdmissionFacts(True, any(f.semantic_event_new for f in facts), tuple(facts))
 
 
 def store_generation(transaction: Transaction, *, new_generation: str) -> str:
     """Return this database's generation, minting it on first use.
 
-    A Matrix sync token only means something beside the store that consumed the
-    events it already covers. Resume from a token saved before this database
-    existed and every event between is skipped silently -- the homeserver
-    considers them delivered and will not send them again, and nothing
-    downstream can tell the difference between "no messages" and "the messages
-    went to a database that is gone".
-
-    So the token is saved next to a generation, and a checkpoint naming a
-    different one is refused. ``new_generation`` is only used if no row exists;
-    an established database keeps the value it was born with, which is what
-    makes the comparison mean "same database" rather than "same process".
+    The install's journal binding uses this identity to reject an accidental
+    database replacement that would lose turn, delivery, and recovery ownership.
+    ``new_generation`` is only used if no row exists; an established database
+    keeps its identity across process restarts.
     """
     transaction.execute(
         """
@@ -129,13 +430,14 @@ def room_history_recovery(
     return None if row is None else _room_history_recovery_from_row(room_id, row)
 
 
-def record_room_history_recovery(
+def _record_room_history_recovery_locked(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
+    state: _MembershipState,
 ) -> RoomHistoryRecovery | None:
-    """Record one unknown gap without scanning the room's conversation markers."""
-    if _membership_state(transaction, principal_id, room_id).departure_fenced:
+    """Record one gap after the caller has locked its membership state."""
+    if state.departure_fenced:
         return None
     row = transaction.fetchone(
         """
@@ -155,6 +457,21 @@ def record_room_history_recovery(
         msg = f"Room history recovery for {room_id!r} is missing immediately after it was written"
         raise RuntimeError(msg)
     return _room_history_recovery_from_row(room_id, row)
+
+
+def record_room_history_recovery(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+) -> RoomHistoryRecovery | None:
+    """Record one unknown gap while serialized with membership fencing."""
+    state = _claim_membership_state(transaction, principal_id, room_id)
+    return _record_room_history_recovery_locked(
+        transaction,
+        principal_id,
+        room_id,
+        state,
+    )
 
 
 def claim_room_history_recovery(
@@ -225,6 +542,51 @@ def current_membership_epoch(
         (principal_id, room_id),
     )
     return 0 if row is None else int(row["membership_epoch"])
+
+
+def membership_position(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+) -> RoomMembershipPosition:
+    """Return the journal tenure that owns this room's events and deliveries."""
+    row = transaction.fetchone(
+        "SELECT membership_epoch, departure_fenced FROM room_membership WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
+    if row is None:
+        return RoomMembershipPosition("leave", 0)
+    membership_epoch = row["membership_epoch"]
+    departure_fenced = row["departure_fenced"]
+    if (
+        type(membership_epoch) is not int
+        or membership_epoch < 0
+        or type(departure_fenced) is not int
+        or departure_fenced not in (0, 1)
+    ):
+        raise IngestionBatchIntegrityError
+    return RoomMembershipPosition(
+        "leave" if departure_fenced else "join",
+        membership_epoch,
+    )
+
+
+def ingestion_membership_position(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+) -> RoomMembershipPosition | None:
+    """Return the last admitted producer position, independent of journal tenure."""
+    row = transaction.fetchone(
+        "SELECT membership, membership_epoch FROM matrix_ingestion_membership WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
+    if row is None:
+        return None
+    membership, epoch = row["membership"], row["membership_epoch"]
+    if membership not in {"join", "leave"} or type(epoch) is not int or epoch < 0:
+        raise IngestionBatchIntegrityError
+    return RoomMembershipPosition(membership, epoch)
 
 
 def _advance_membership_epoch(
@@ -384,429 +746,46 @@ def _advance_membership_epoch(
     return epoch
 
 
-def fence_departure(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    *,
-    source: DepartureSource,
-    report_observation_id: str | None = None,
-) -> DepartureOutcome:
-    """Invalidate a room's derived state once per departure, however often it is seen.
-
-    One departure reaches the bot twice: locally, the moment it leaves, and
-    again in the sync response reporting the leave. Deciding which of the two
-    is a repeat is the whole job, and it happens inside the same transaction as
-    the invalidation so that a crash between deciding and invalidating is not a
-    state this can be left in. Recording "a report is still owed" for an
-    advance that never committed would cost the departure its only fence.
-
-    The two observers are not symmetric, so their bookkeeping is not either:
-
-    - A local departure is always followed by a sync report of it, so it leaves
-      a debt behind for that report to consume. A rejoin does not clear the
-      debt: the report is still owed, and when it comes it still describes the
-      departure that was already fenced.
-    - A sync report has no local counterpart to wait for -- most departures the
-      bot did not initiate never produce one -- so it leaves no debt. It marks
-      the room fenced instead, which is what suppresses the local observation
-      of the same departure when the sync response gets there first.
-
-    That asymmetry is in what each observation *records*, not in whether it may
-    fence a room that is already fenced. Neither may. Matrix can replay an old
-    leave after the room has rejoined, and one ended membership can appear as
-    consecutive leave/ban observations. Each report's stable observation id is
-    therefore mapped durably to its contiguous departure run in this same
-    transaction. The run spends one owed local report; its aliases spend none.
-    The Matrix event id supplies identity when visible, otherwise the sync
-    response token does. A replay then remains a replay even after a join has
-    closed the run and re-armed the room for a genuinely new departure.
-    """
-    state = _lock_membership_state(transaction, principal_id, room_id)
-    if source is DepartureSource.REPORTED and report_observation_id is not None:
-        repeated_report = transaction.fetchone(
-            """
-            SELECT room_id, run_epoch FROM reported_departures
-            WHERE principal_id = ? AND observation_id = ?
-            """,
-            (principal_id, report_observation_id),
-        )
-        if repeated_report is not None:
-            if repeated_report["room_id"] != room_id:
-                msg = f"Departure observation {report_observation_id!r} changed rooms"
-                raise ValueError(msg)
-            return DepartureOutcome(
-                observation=DepartureObservation.REPEATED_REPORT,
-                membership_epoch=state.membership_epoch,
-                owed_reports=state.owed_reports,
-                reported_run_epoch=int(repeated_report["run_epoch"]),
-            )
-
-        open_run = transaction.fetchone(
-            """
-            SELECT run_epoch FROM reported_departures
-            WHERE principal_id = ? AND room_id = ? AND run_closed = 0
-            ORDER BY report_order DESC
-            LIMIT 1
-            """,
-            (principal_id, room_id),
-        )
-        if open_run is not None:
-            run_epoch = int(open_run["run_epoch"])
-            _record_reported_departure(
-                transaction,
-                principal_id,
-                report_observation_id,
-                room_id,
-                run_epoch,
-            )
-            return DepartureOutcome(
-                observation=DepartureObservation.ALREADY_FENCED,
-                membership_epoch=state.membership_epoch,
-                owed_reports=state.owed_reports,
-                reported_run_epoch=run_epoch,
-            )
-
-    if source is DepartureSource.REPORTED and state.owed_reports > 0:
-        # Asked before the fenced check, not after: a local departure fences
-        # and *then* waits for its report, so the report always arrives at a
-        # fenced room. Reading that as a repeat would leave the debt standing
-        # forever, and it would absorb the next genuine departure instead.
-        owed_reports = state.owed_reports - 1
-        _write_departure_state(
-            transaction,
-            principal_id,
-            room_id,
-            membership_epoch=state.membership_epoch,
-            departure_fenced=state.departure_fenced,
-            owed_reports=owed_reports,
-        )
-        run_epoch = state.membership_epoch - state.owed_reports + 1
-        _record_reported_departure(
-            transaction,
-            principal_id,
-            report_observation_id,
-            room_id,
-            run_epoch,
-        )
-        return DepartureOutcome(
-            observation=DepartureObservation.OWED_REPORT_CONSUMED,
-            membership_epoch=state.membership_epoch,
-            owed_reports=owed_reports,
-            reported_run_epoch=run_epoch,
-        )
-    if state.departure_fenced:
-        # Whoever saw this departure first already fenced it, and nothing has
-        # put the bot back in the room, so there is no second departure here.
-        if source is DepartureSource.REPORTED:
-            _record_reported_departure(
-                transaction,
-                principal_id,
-                report_observation_id,
-                room_id,
-                state.membership_epoch,
-            )
-        return DepartureOutcome(
-            observation=DepartureObservation.ALREADY_FENCED,
-            membership_epoch=state.membership_epoch,
-            owed_reports=state.owed_reports,
-            reported_run_epoch=(state.membership_epoch if source is DepartureSource.REPORTED else None),
-        )
-    if source is DepartureSource.LOCAL:
-        _close_open_reported_departure_runs(transaction, principal_id, room_id)
-    membership_epoch = _advance_membership_epoch(transaction, principal_id, room_id)
-    owed_reports = state.owed_reports + 1 if source is DepartureSource.LOCAL else state.owed_reports
-    _write_departure_state(
-        transaction,
-        principal_id,
-        room_id,
-        membership_epoch=membership_epoch,
-        departure_fenced=True,
-        owed_reports=owed_reports,
-    )
-    if source is DepartureSource.REPORTED:
-        _record_reported_departure(
-            transaction,
-            principal_id,
-            report_observation_id,
-            room_id,
-            membership_epoch,
-        )
-    return DepartureOutcome(
-        observation=DepartureObservation.FENCED,
-        membership_epoch=membership_epoch,
-        owed_reports=owed_reports,
-        reported_run_epoch=(membership_epoch if source is DepartureSource.REPORTED else None),
-    )
-
-
-def _record_reported_departure(
-    transaction: Transaction,
-    principal_id: str,
-    observation_id: str | None,
-    room_id: str,
-    run_epoch: int,
-) -> None:
-    """Bind one stable observation id to its contiguous departure run."""
-    if observation_id is None:
-        return
-    exact_event = transaction.fetchone(
-        """
-        SELECT receipt_order FROM journal_events
-        WHERE principal_id = ? AND event_id = ? AND room_id = ?
-        """,
-        (principal_id, observation_id, room_id),
-    )
-    boundary = exact_event
-    if boundary is None:
-        boundary = transaction.fetchone(
-            """
-            SELECT COALESCE(MAX(receipt_order), 0) AS receipt_order
-            FROM journal_events WHERE principal_id = ? AND room_id = ?
-            """,
-            (principal_id, room_id),
-        )
-    assert boundary is not None
-    transaction.execute(
-        """
-        INSERT INTO reported_departures (
-            principal_id, observation_id, room_id, journal_order, run_epoch
-        ) VALUES (?, ?, ?, ?, ?)
-        """,
-        (principal_id, observation_id, room_id, int(boundary["receipt_order"]), run_epoch),
-    )
-
-
-def _close_open_reported_departure_runs(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-) -> None:
-    """Close the one contiguous reported-departure run a confirmed join ended."""
-    transaction.execute(
-        """
-        UPDATE reported_departures SET run_closed = 1
-        WHERE principal_id = ? AND room_id = ? AND run_closed = 0
-        """,
-        (principal_id, room_id),
-    )
-
-
-def _note_membership_restarted(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-) -> None:
-    """Record that the bot is in a room again, so its next departure fences.
-
-    Only the fenced mark is cleared. An owed sync report survives a rejoin on
-    purpose: the report describes the departure that ended the *previous*
-    membership, and letting it fence the new one is exactly the deletion of a
-    freshly hydrated conversation this whole mechanism exists to prevent.
-    """
-    transaction.execute(
-        "UPDATE room_membership SET departure_fenced = 0 WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
-    )
-    _close_open_reported_departure_runs(transaction, principal_id, room_id)
-
-
-def note_membership_restarted(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    *,
-    expected_membership_epoch: int | None = None,
-) -> None:
-    """Atomically rearm one confirmed membership.
-
-    Without an expected epoch, clearing an unfenced flag is a harmless no-op.
-    With one, rearming applies only to that exact membership.
-    """
-    if expected_membership_epoch is not None and not _claim_departure_fence(
-        transaction,
-        principal_id,
-        room_id,
-        expected_membership_epoch=expected_membership_epoch,
-    ):
-        return
-    _note_membership_restarted(transaction, principal_id, room_id)
-
-
-def close_preceding_reported_departure(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    join_event_id: str,
-) -> None:
-    """Close only the reported departure immediately preceding one join."""
-    report = transaction.fetchone(
-        """
-        SELECT reported.run_epoch
-        FROM reported_departures AS reported
-        JOIN journal_events AS rejoin
-          ON rejoin.principal_id = reported.principal_id
-         AND rejoin.event_id = ?
-        WHERE reported.principal_id = ?
-          AND reported.room_id = ?
-          AND rejoin.room_id = ?
-          AND reported.journal_order < rejoin.receipt_order
-        ORDER BY reported.journal_order DESC, reported.report_order DESC
-        LIMIT 1
-        """,
-        (join_event_id, principal_id, room_id, room_id),
-    )
-    if report is None:
-        return
-    close_reported_departure_run(
-        transaction,
-        principal_id,
-        room_id,
-        int(report["run_epoch"]),
-    )
-
-
-def close_reported_departure_run(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    run_epoch: int,
-) -> None:
-    """Close one alias run, rearming only if it is still the current fence."""
-    state = _lock_membership_state(transaction, principal_id, room_id)
-    open_run = transaction.fetchone(
-        """
-        SELECT 1 FROM reported_departures
-        WHERE principal_id = ? AND room_id = ? AND run_epoch = ? AND run_closed = 0
-        LIMIT 1
-        """,
-        (principal_id, room_id, run_epoch),
-    )
-    if open_run is None:
-        return
-    if state.departure_fenced and state.membership_epoch == run_epoch:
-        transaction.execute(
-            """
-            UPDATE room_membership SET departure_fenced = 0
-            WHERE principal_id = ? AND room_id = ? AND membership_epoch = ?
-            """,
-            (principal_id, room_id, run_epoch),
-        )
-    transaction.execute(
-        """
-        UPDATE reported_departures SET run_closed = 1
-        WHERE principal_id = ? AND room_id = ? AND run_epoch = ?
-        """,
-        (principal_id, room_id, run_epoch),
-    )
-
-
-def retire_owed_departure_reports(transaction: Transaction, principal_id: str, room_id: str) -> None:
-    """Forget reports that can no longer arrive, so a real departure still fences."""
-    transaction.execute(
-        "UPDATE room_membership SET owed_departure_reports = 0 WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
-    )
-
-
-def rooms_owing_departure_reports(transaction: Transaction, principal_id: str) -> frozenset[str]:
-    """Return every room whose local departure is still owed a sync report."""
-    rows = transaction.fetchall(
-        "SELECT room_id FROM room_membership WHERE principal_id = ? AND owed_departure_reports > 0",
-        (principal_id,),
-    )
-    return frozenset(row["room_id"] for row in rows)
-
-
 @dataclass(frozen=True, slots=True)
-class _DepartureState:
-    """One room's departure bookkeeping as the transaction found it."""
+class _MembershipState:
+    """One room's application tenure and delivery fence."""
 
     membership_epoch: int
     departure_fenced: bool
-    owed_reports: int
 
 
-def _membership_state(transaction: Transaction, principal_id: str, room_id: str) -> _DepartureState:
+def _claim_membership_state(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+) -> _MembershipState:
+    """Create or lock one membership row and decode its exact durable state."""
     row = transaction.fetchone(
         """
-        SELECT membership_epoch, departure_fenced, owed_departure_reports
-        FROM room_membership WHERE principal_id = ? AND room_id = ?
+        INSERT INTO room_membership (
+            principal_id, room_id, membership_epoch,
+            departure_fenced
+        ) VALUES (?, ?, 0, 0)
+        ON CONFLICT (principal_id, room_id) DO UPDATE SET
+            membership_epoch = room_membership.membership_epoch
+        RETURNING membership_epoch, departure_fenced
         """,
         (principal_id, room_id),
     )
     if row is None:
-        # No row means no departure has ever been fenced here, which is the
-        # same starting point as a room the bot has always been in.
-        return _DepartureState(membership_epoch=0, departure_fenced=False, owed_reports=0)
-    return _DepartureState(
-        membership_epoch=int(row["membership_epoch"]),
-        departure_fenced=bool(row["departure_fenced"]),
-        owed_reports=int(row["owed_departure_reports"]),
+        raise IngestionBatchIntegrityError
+    values = (
+        row["membership_epoch"],
+        row["departure_fenced"],
     )
-
-
-def _lock_membership_state(transaction: Transaction, principal_id: str, room_id: str) -> _DepartureState:
-    """Create and lock one room's membership row for a state transition."""
-    row = transaction.fetchone(
-        """
-        INSERT INTO room_membership (principal_id, room_id, membership_epoch)
-        VALUES (?, ?, 0)
-        ON CONFLICT (principal_id, room_id) DO UPDATE
-            SET departure_fenced = room_membership.departure_fenced
-        RETURNING membership_epoch, departure_fenced, owed_departure_reports
-        """,
-        (principal_id, room_id),
-    )
-    assert row is not None
-    return _DepartureState(
-        membership_epoch=int(row["membership_epoch"]),
-        departure_fenced=bool(row["departure_fenced"]),
-        owed_reports=int(row["owed_departure_reports"]),
-    )
-
-
-def _claim_departure_fence(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    *,
-    expected_membership_epoch: int | None = None,
-) -> bool:
-    """Lock one room's membership row and return its departure-fence state."""
-    row = transaction.fetchone(
-        """
-        UPDATE room_membership SET departure_fenced = departure_fenced
-        WHERE principal_id = ? AND room_id = ?
-        RETURNING departure_fenced, membership_epoch
-        """,
-        (principal_id, room_id),
-    )
-    return (
-        row is not None
-        and bool(row["departure_fenced"])
-        and (expected_membership_epoch is None or int(row["membership_epoch"]) == expected_membership_epoch)
-    )
-
-
-def _write_departure_state(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    *,
-    membership_epoch: int,
-    departure_fenced: bool,
-    owed_reports: int,
-) -> None:
-    transaction.execute(
-        """
-        INSERT INTO room_membership (principal_id, room_id, membership_epoch, departure_fenced, owed_departure_reports)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (principal_id, room_id) DO UPDATE SET
-            departure_fenced = excluded.departure_fenced,
-            owed_departure_reports = excluded.owed_departure_reports
-        """,
-        (principal_id, room_id, membership_epoch, int(departure_fenced), owed_reports),
+    if tuple(map(type, values)) != (int, int):
+        raise IngestionBatchIntegrityError
+    membership_epoch, departure_fenced = values
+    if membership_epoch < 0 or departure_fenced not in (0, 1):
+        raise IngestionBatchIntegrityError
+    return _MembershipState(
+        membership_epoch=membership_epoch,
+        departure_fenced=bool(departure_fenced),
     )
 
 
@@ -854,23 +833,40 @@ def admit(
     )
     if row is None:
         return AdmissionResult.DUPLICATE
-    tombstoned_event_id = None
     if projected is not None:
-        tombstoned_event_id = project(
+        _project_admitted_event(
             transaction,
             principal_id,
             projected,
             receipt_order=int(row["receipt_order"]),
             membership_epoch=epoch,
         )
+    return AdmissionResult.ADMITTED
+
+
+def _project_admitted_event(
+    transaction: Transaction,
+    principal_id: str,
+    projected: ProjectedEvent,
+    *,
+    receipt_order: int,
+    membership_epoch: int,
+) -> None:
+    """Project readable content and retire any source its redaction tombstones."""
+    tombstoned_event_id = project(
+        transaction,
+        principal_id,
+        projected,
+        receipt_order=receipt_order,
+        membership_epoch=membership_epoch,
+    )
     if tombstoned_event_id is not None:
         _settle_tombstoned_turn_source(
             transaction,
             principal_id,
-            room_id=event.room_id,
+            room_id=projected.room_id,
             event_id=tombstoned_event_id,
         )
-    return AdmissionResult.ADMITTED
 
 
 def _settle_tombstoned_turn_source(
@@ -1181,6 +1177,28 @@ def is_pending(transaction: Transaction, principal_id: str, event_id: str) -> bo
         (principal_id, event_id),
     )
     return row is not None
+
+
+def sources_settled_by_departure(
+    transaction: Transaction,
+    principal_id: str,
+    event_ids: tuple[str, ...],
+) -> bool:
+    """Prove every exact retained source is settled under an ended membership."""
+    return bool(event_ids) and all(
+        transaction.fetchone(
+            """
+            SELECT 1 AS present FROM journal_events AS event
+            JOIN room_membership AS membership
+              ON membership.principal_id = event.principal_id AND membership.room_id = event.room_id
+            WHERE event.principal_id = ? AND event.event_id = ? AND event.state = 'settled'
+              AND event.membership_epoch < membership.membership_epoch
+            """,
+            (principal_id, event_id),
+        )
+        is not None
+        for event_id in event_ids
+    )
 
 
 def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:

@@ -75,7 +75,8 @@ from mindroom.ingress_lanes import ReceiptLaneKey
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.journal_ingress import inbound_event
+from mindroom.matrix.journal_ingress import _inbound_event
+from mindroom.matrix.room_membership import cached_joined_member_ids, room_membership_is_complete
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,
@@ -84,6 +85,7 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
@@ -106,6 +108,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.journal_helpers import admit_dispatch_event
 from tests.threading_helpers import seed_hydrated_conversation, seed_unhydrated_room_event
 from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
 
@@ -186,14 +189,14 @@ async def _admit_pending_thread_event(
     land in a thread.
 
     ``kind`` is a parameter because thread membership is derived from content
-    for every kind alike -- ``inbound_event`` calls ``thread_root`` regardless
+    for every kind alike -- ``_inbound_event`` calls ``thread_root`` regardless
     -- so a non-turn-backed event can sit in a thread and be seen by a guard
     that only asks what is pending.
     """
     parsed = nio.Event.parse_event(event_source)
     assert isinstance(parsed, nio.Event)
     admitted = await bot._journal_store.principal(bot._journal_principal_id).admit(
-        inbound_event(str(event_source["room_id"]), parsed, kind, EventClass.ACTIONABLE),
+        _inbound_event(str(event_source["room_id"]), parsed, kind, EventClass.ACTIONABLE),
     )
     assert admitted is AdmissionResult.ADMITTED
 
@@ -315,6 +318,7 @@ def _handled_turn_source_event_ids(handled_turn: TurnRecord | None) -> list[str]
 def _make_room(room_id: str = "!room:localhost") -> MagicMock:
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = room_id
+    room.own_user_id = "@mindroom_general:localhost"
     room.canonical_alias = None
     room.members_synced = True
     room.users = {}
@@ -584,7 +588,7 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
     )
     dispatch = _prepared_dispatch(event_id=event.event_id, body=event.body)
     dispatcher = bot._journal_dispatcher
-    await dispatcher.admit_out_of_band(room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
+    await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
 
     plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     with (
@@ -4036,6 +4040,39 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
 
 
 @pytest.mark.asyncio
+async def test_shutdown_admission_refusal_does_not_format_coalescing_traceback() -> None:
+    """A fenced dispatch during shutdown is expected recovery work, not an exception storm."""
+    room = _make_room()
+    failure_handoffs: list[tuple[PendingEvent, ...]] = []
+
+    async def refused_dispatch_turn(_turn: object) -> None:
+        raise ResponseAdmissionRefusedError
+
+    gate = CoalescingGate(
+        dispatch_turn=refused_dispatch_turn,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+        on_dispatch_failure=failure_handoffs.append,
+    )
+
+    with patch("mindroom.coalescing.logger.exception") as mock_exception:
+        await _admit_ready(
+            gate,
+            CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+            make_pending_event(
+                _text_event(event_id="$m1", body="first"),
+                room,
+                source_kind="message",
+            ),
+        )
+        await _wait_for(lambda: _coalescing_gate_is_idle(gate))
+
+    mock_exception.assert_not_called()
+    assert [[event.event.event_id for event in handoff] for handoff in failure_handoffs] == [["$m1"]]
+    assert not gate.has_pending_source_event("$m1")
+
+
+@pytest.mark.asyncio
 async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources() -> None:
     """Failed deferred sources must reach durable retry ownership after gate cleanup."""
     room = _make_room()
@@ -4176,7 +4213,7 @@ async def test_failed_drain_dispatches_buffered_ingress_without_waiting_for_anot
 
 @pytest.mark.asyncio
 async def test_cancelled_drain_cleans_state_for_later_message() -> None:
-    """A cancelled in-flight dispatch should not prevent a fresh later drain."""
+    """A cancelled same-thread dispatch should not prevent a fresh later drain."""
     room = _make_room()
     entered_first_dispatch = asyncio.Event()
     never_release = asyncio.Event()
@@ -4197,9 +4234,9 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
 
     await _admit_ready(
         gate,
-        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         make_pending_event(
-            _text_event(event_id="$m1", body="first"),
+            _text_event(event_id="$m1", body="first", thread_id="$thread"),
             room,
             source_kind="message",
         ),
@@ -4215,9 +4252,9 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
 
     await _admit_ready(
         gate,
-        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         make_pending_event(
-            _text_event(event_id="$m2", body="second"),
+            _text_event(event_id="$m2", body="second", thread_id="$thread"),
             room,
             source_kind="message",
         ),
@@ -4229,7 +4266,7 @@ async def test_cancelled_drain_cleans_state_for_later_message() -> None:
 
 @pytest.mark.asyncio
 async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_another_event() -> None:
-    """Ingress buffered behind a cancelled dispatch should get its own follow-up drain."""
+    """Same-thread ingress buffered behind cancellation should get its own follow-up drain."""
     room = _make_room()
     entered_first_dispatch = asyncio.Event()
     never_release = asyncio.Event()
@@ -4250,9 +4287,9 @@ async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_a
 
     await _admit_ready(
         gate,
-        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         make_pending_event(
-            _text_event(event_id="$m1", body="first"),
+            _text_event(event_id="$m1", body="first", thread_id="$thread"),
             room,
             source_kind="message",
         ),
@@ -4260,9 +4297,9 @@ async def test_cancelled_drain_dispatches_buffered_ingress_without_waiting_for_a
     await entered_first_dispatch.wait()
     await _admit_ready(
         gate,
-        CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
+        CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner("@user:localhost")),
         make_pending_event(
-            _text_event(event_id="$m2", body="second"),
+            _text_event(event_id="$m2", body="second", thread_id="$thread"),
             room,
             source_kind="message",
         ),
@@ -4314,7 +4351,7 @@ async def test_coalescing_drain_logs_lifecycle_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
+async def test_stop_drains_pending_debounce_tasks(tmp_path: Path) -> None:
     """Drain pending debounce tasks when a bot is cleaned up."""
     bot = _make_bot(tmp_path, debounce_ms=1000)
     bot.client = AsyncMock()
@@ -4324,7 +4361,6 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
 
     with (
         patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock()) as mock_dispatch,
-        patch("mindroom.bot.get_joined_rooms", new=AsyncMock(return_value=[])),
         patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock()),
     ):
         await _enqueue_for_dispatch(
@@ -4336,7 +4372,7 @@ async def test_cleanup_drains_pending_debounce_tasks(tmp_path: Path) -> None:
         )
         await _wait_for(lambda: not _coalescing_gate_is_idle(bot._coalescing_gate))
 
-        await bot.cleanup()
+        await bot.stop()
 
     mock_dispatch.assert_awaited_once()
     assert _coalescing_gate_is_idle(bot._coalescing_gate)
@@ -4880,77 +4916,6 @@ async def test_backlog_replay_degraded_thread_history_uses_pending_journal_event
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     action_mock.assert_not_awaited()
     assert not bot._turn_store.is_handled("$m1")
-
-
-@pytest.mark.asyncio
-async def test_backlog_replay_degraded_thread_history_ignores_pending_undecryptable_event(
-    tmp_path: Path,
-) -> None:
-    """Only an event that can become a turn may prove an older one stale.
-
-    The guard asks the journal for pending work in the thread, and *pending*
-    alone does not mean *will answer*. Thread membership is derived from
-    content for every kind -- ``inbound_event`` calls ``thread_root``
-    unconditionally -- and an ``m.room.encrypted`` event keeps its
-    ``m.relates_to`` in the clear so servers can aggregate relations. So a
-    threaded message this bot could not decrypt is admitted pending, in the
-    thread, under the requester's own sender.
-
-    It will never produce a response. Letting it count as a newer unanswered
-    turn drops the older message with no answer, and the undecryptable one
-    produces none either, so the user is answered twice with nothing.
-    """
-    bot = _make_bot(tmp_path)
-    room = _make_room()
-    older_event = PreparedIngress(
-        sender="@user:localhost",
-        event_id="$m1",
-        body="old",
-        source={"content": {"msgtype": "m.text", "body": "old"}},
-        server_timestamp=1000,
-    )
-    dispatch = _prepared_dispatch(event_id="$m1", body="old", thread_id="$thread")
-    degraded_history = ThreadHistoryResult(
-        [],
-        is_full_history=False,
-        diagnostics={
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
-            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-        },
-    )
-    dispatch.context.am_i_mentioned = False
-    dispatch.context.thread_history = degraded_history
-    dispatch.context.replay_guard_history = degraded_history
-    dispatch.context.requires_model_history_refresh = True
-    undecryptable_source = {
-        "event_id": "$m2",
-        "sender": "@user:localhost",
-        "origin_server_ts": 2000,
-        "room_id": room.room_id,
-        "type": "m.room.encrypted",
-        "content": {
-            "algorithm": "m.megolm.v1.aes-sha2",
-            "ciphertext": "AwgAEnB2aWxsZQ",
-            "sender_key": "sender_key",
-            "device_id": "DEVICE",
-            "session_id": "session_id",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
-        },
-    }
-    await _admit_pending_thread_event(bot, undecryptable_source, kind=EventKind.DECRYPTION_FAILURE)
-
-    action_mock = AsyncMock()
-    with (
-        patch.object(
-            bot._turn_controller,
-            "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
-        ),
-        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
-    ):
-        await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
-
-    action_mock.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -7583,8 +7548,10 @@ async def test_first_router_turn_refreshes_lazy_members_before_mention_routing(t
         outcome = await bot._turn_controller.handle_text_event(room, event)
 
     assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
-    assert room.members_synced
-    assert mentioned_user_id in room.users
+    assert room_membership_is_complete(room)
+    assert mentioned_user_id in cached_joined_member_ids(room)
+    assert not room.members_synced
+    assert mentioned_user_id not in room.users
 
 
 @pytest.mark.asyncio

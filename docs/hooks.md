@@ -174,6 +174,9 @@ MindRoom does not sanitize attachments, media, tool calls, tool args, provider m
 For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation, interruption, suppression, and delivery failure recovery.
 `room:member_joined` uses at-least-once delivery because MindRoom records the durable room/user marker only after the hook completes.
 A process interruption or marker-write failure after a handler side effect can replay the same room/user pair, so handlers that create or invite resources must be idempotent.
+Historical joins and membership state snapshots silently record existing members in the journal admission transaction before Nio acknowledgement, preventing later profile updates from triggering onboarding.
+A baseline never completes a live join hook still pending in the application journal.
+Baselines and completed-hook markers are indexed journal rows scoped to the bot principal, room, and user; they survive restarts and room departures without rewriting an installation-wide file.
 `room:member_left` reads `display_name` and `avatar_url` from the joined membership state that the leave replaces.
 Actionable room-lifecycle events remain pending until their callback completes, so an interruption can replay a leave before journal settlement and handlers must be idempotent.
 

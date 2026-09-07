@@ -124,7 +124,7 @@ class _ExportClientRuntime:
 
 @dataclass(frozen=True, slots=True)
 class ProjectedThreadReader:
-    """One export login's view of the projection.
+    """One running owner's view of the export projection.
 
     Both halves are of the same principal, which is why they are built together
     rather than passed around separately: a completeness answer about one bot's
@@ -142,9 +142,9 @@ def export_conversation_reader(
     store: ExportProjectionView,
     self_sender: str,
 ) -> ProjectedThreadReader:
-    """Return the projection view one export login uses for thread bodies.
+    """Return an export reader borrowing the running owner's client and principal.
 
-    ``self_sender`` is the Matrix user ID this export logged in as, and must be
+    ``self_sender`` is the running owner's Matrix user ID, and must be
     the same account whose principal ``store`` is bound to: hydration drops that
     sender's in-flight streaming edits, exactly as live admission did, so a
     refetched conversation reduces to what the live projection holds.

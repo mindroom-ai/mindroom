@@ -38,6 +38,7 @@ from tests.conftest import (
     replace_turn_controller_deps,
     unwrap_extracted_collaborator,
 )
+from tests.journal_helpers import admit_dispatch_event
 from tests.test_live_message_coalescing import (
     _enqueue_for_dispatch,
     _image_event,
@@ -629,19 +630,17 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         on_approval=cast("Callable", noop),
         on_room_lifecycle=cast("Callable", noop),
         on_redaction=cast("Callable", noop),
-        on_decryption_failure=cast("Callable", noop),
         on_approval_continuation=AsyncMock(return_value=None),
         source_has_live_owner=gate.has_pending_source_event,
         turn_has_live_claim=lambda _event_id: False,
     )
     dispatcher = JournalDispatcher(
         store=journal_store.principal("agent@lane"),
-        self_sender="@lane:example.org",
         callbacks=callbacks,
         room_for_id=lambda _room_id: _room(),
     )
     event = _image_event(event_id=source_event_id)
-    await dispatcher.admit_out_of_band(_room(), event, EventKind.MEDIA, EventClass.ACTIONABLE)
+    await admit_dispatch_event(dispatcher, _room(), event, EventKind.MEDIA, EventClass.ACTIONABLE)
     await dispatcher.drain_once()
 
     # The gate still owns this source, so the media callback must not run and
@@ -1445,6 +1444,47 @@ async def test_abandoned_slot_does_not_deliver_after_late_readiness() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bounded_drain_shares_one_deadline_across_cancellation_resistant_lanes() -> None:
+    """Each stubborn lane consumes the same bounded-drain deadline."""
+    gate, _ = _gate(debounce_seconds=0.0)
+    release = asyncio.Event()
+    started = [asyncio.Event(), asyncio.Event()]
+    ready_tasks: list[asyncio.Task[ReadyPendingEvent | None]] = []
+
+    async def stubborn_ready(index: int) -> ReadyPendingEvent | None:
+        started[index].set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+            return None
+
+    for index in range(2):
+        sender_id = f"@user{index}:localhost"
+        slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id=sender_id))
+        ready_task = asyncio.create_task(stubborn_ready(index))
+        ready_tasks.append(ready_task)
+        gate.submit_lane_slot(
+            slot,
+            key=CoalescingKey("!room:localhost", "$thread", RequesterCoalescingOwner(sender_id)),
+            source_event_id=f"$stubborn{index}",
+            source_kind=VOICE_SOURCE_KIND,
+            ready_task=ready_task,
+        )
+
+    await asyncio.gather(*(event.wait() for event in started))
+    try:
+        async with asyncio.timeout(0.07):
+            result = await gate.drain_all(ready_timeout_seconds=0.03)
+    finally:
+        release.set()
+        await asyncio.gather(*ready_tasks, return_exceptions=True)
+
+    assert result.completed is False
+    assert result.cancelled_unready_count == 2
+
+
+@pytest.mark.asyncio
 async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> None:
     """A bounded runner drain cancels a stuck response, runs its cleanup once, and reports incomplete."""
     bot = _make_bot(tmp_path, debounce_ms=0)
@@ -1473,6 +1513,49 @@ async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> Non
     await asyncio.sleep(0)
     assert not runner._inbox_response_tasks
     assert await runner.drain_inbox_responses() is True
+
+
+@pytest.mark.asyncio
+async def test_bounded_inbox_drain_rejects_indefinitely_resistant_response(tmp_path: Path) -> None:
+    """A response that never honors cancellation cannot erase the shutdown deadline."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancel_count = 0
+
+    async def cancellation_resistant_response() -> None:
+        nonlocal cancel_count
+        started.set()
+        while True:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancel_count += 1
+                if release.is_set():
+                    raise
+
+    task = runner.track_inbox_response(
+        cancellation_resistant_response(),
+        name="test_cancellation_resistant_response",
+        recovery_proof_ready=lambda: False,
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    drain_task = asyncio.create_task(
+        runner.drain_inbox_responses(cancel_after_seconds=0.01),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="response tasks did not stop"):
+            await asyncio.wait_for(asyncio.shield(drain_task), timeout=0.25)
+        assert cancel_count >= 1
+        assert not task.done()
+        assert runner.pending_inbox_response_count == 1
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, drain_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

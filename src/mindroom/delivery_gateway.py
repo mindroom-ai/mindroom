@@ -74,6 +74,7 @@ from mindroom.matrix_delivery import (
     SendDelivery,
     TurnHandoff,
 )
+from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.streaming import (
@@ -86,6 +87,7 @@ from mindroom.streaming import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
     classify_cancel_source,
+    current_task_is_process_shutdown,
     interactive_response_for_visible_body,
     send_streaming_response,
     strip_matching_visible_tool_markers,
@@ -214,6 +216,8 @@ class ResponseHookService:
         identity: ResponseIdentity,
         response_text: str,
     ) -> FinalResponseDraft:
+        if current_task_is_process_shutdown():
+            raise asyncio.CancelledError
         draft = FinalResponseDraft(
             response_text=response_text,
             response_kind=identity.response_kind,
@@ -225,11 +229,14 @@ class ResponseHookService:
             **self.hook_context.base_kwargs(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM, identity.correlation_id),
             draft=draft,
         )
-        return await emit_final_response_transform(
+        draft = await emit_final_response_transform(
             self.hook_context.registry,
             EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
             context,
         )
+        if current_task_is_process_shutdown():
+            raise asyncio.CancelledError
+        return draft
 
     async def emit_after_response(  # noqa: D102
         self,
@@ -927,6 +934,7 @@ class DeliveryGateway:
             handoff=handoff,
             terminal_turn_for=self._terminal_turn_write,
             terminal_turn_committed=self.deps.terminal_turn_committed,
+            process_shutdown_requested=current_task_is_process_shutdown,
             delivery_locks=self._delivery_turn_locks,
         )
 
@@ -1311,7 +1319,15 @@ class DeliveryGateway:
         )
         return False
 
-    async def deliver_final(  # noqa: C901, PLR0911, PLR0912
+    async def deliver_final(
+        self,
+        request: FinalDeliveryRequest,
+    ) -> FinalDeliveryOutcome:
+        """Run final delivery under the fixed shutdown diagnostic boundary."""
+        with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
+            return await self._deliver_final(request)
+
+    async def _deliver_final(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         request: FinalDeliveryRequest,
     ) -> FinalDeliveryOutcome:
@@ -1326,6 +1342,8 @@ class DeliveryGateway:
         except asyncio.CancelledError as error:
             failure_reason = self._cancelled_error_failure_reason(error)
             cancel_source = classify_cancel_source(error)
+            if current_task_is_process_shutdown():
+                raise
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 cleanup_failure = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
@@ -1574,6 +1592,14 @@ class DeliveryGateway:
         cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=request.cancel_source)
         extra_content = {constants.STREAM_STATUS_KEY: stream_status}
         failure_reason = cancel_failure_reason(request.cancel_source)
+        if current_task_is_process_shutdown():
+            return FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id=request.event_id,
+                cancel_source=request.cancel_source,
+                failure_reason=failure_reason,
+                extra_content=extra_content,
+            )
         # A cancellation note is transport, not a turn's answer, so it never
         # reaches the outbox and nothing else would keep it out of a room this
         # bot has left.
@@ -1781,6 +1807,14 @@ class DeliveryGateway:
         self.deps.logger.error("Failed to edit compaction lifecycle notice", event_id=event_id, **target.log_context)
 
     async def deliver_stream(
+        self,
+        request: StreamingDeliveryRequest,
+    ) -> StreamTransportOutcome:
+        """Run streaming transport under the fixed shutdown diagnostic boundary."""
+        with response_shutdown_phase(ResponseShutdownPhase.STREAMING_RESPONSE):
+            return await self._deliver_stream(request)
+
+    async def _deliver_stream(
         self,
         request: StreamingDeliveryRequest,
     ) -> StreamTransportOutcome:
@@ -2064,12 +2098,30 @@ class DeliveryGateway:
             extra_content=request.extra_content,
         )
 
-    async def finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def finalize_streamed_response(
+        self,
+        request: FinalizeStreamedResponseRequest,
+    ) -> FinalDeliveryOutcome:
+        """Run streamed finalization under the fixed shutdown diagnostic boundary."""
+        with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
+            return await self._finalize_streamed_response(request)
+
+    async def _finalize_streamed_response(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
         """Apply hooks and any final edit needed after streamed delivery completes."""
         stream_outcome = request.stream_transport_outcome
+        if current_task_is_process_shutdown() and stream_outcome.terminal_status == "cancelled":
+            failure_reason = stream_outcome.failure_reason or "interrupted"
+            return FinalDeliveryOutcome(
+                terminal_status="cancelled",
+                event_id=stream_outcome.last_physical_stream_event_id or request.existing_event_id,
+                cancel_source=cancel_source_from_failure_reason(failure_reason),
+                failure_reason=failure_reason,
+                tool_trace=tuple(request.tool_trace or ()),
+                extra_content=request.extra_content,
+            )
         try:
             streamed_event_id = stream_outcome.last_physical_stream_event_id
             visible_stream_event_id = stream_outcome.visible_event_id

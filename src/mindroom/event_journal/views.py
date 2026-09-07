@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from .background_approvals import BackgroundApprovalDecision
     from .interactive_questions import InteractiveSelection
     from .models import (
+        AdmissionFacts,
         AdmissionResult,
         ConversationCursor,
         ConversationPage,
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
         EventKind,
         HydrationCoverage,
         InboundEvent,
+        IngestionBatchAdmission,
         JournalEvent,
         MatrixDelivery,
         PendingPage,
@@ -63,6 +65,14 @@ class AdmissionView(Protocol):
         projected: ProjectedEvent | None = None,
     ) -> AdmissionResult:
         """Admit one event and update the projection in a single transaction."""
+        ...
+
+
+class IngestionBatchAdmissionView(Protocol):
+    """Admitting one authenticated nio batch, and nothing else."""
+
+    async def admit_ingestion_batch(self, admission: IngestionBatchAdmission) -> AdmissionFacts:  # fmt: skip
+        """Persist one record disposition, receipt, and frontier atomically."""
         ...
 
 
@@ -88,8 +98,16 @@ class ReplayView(Protocol):
         ...
 
 
-class DispatchView(ReplayView, AdmissionView, Protocol):
-    """Everything the dispatcher coordinates: admission, replay, and claims."""
+class DispatchView(ReplayView, Protocol):
+    """Everything the dispatcher coordinates: replay and semantic claims."""
+
+    async def is_room_member_join_suppressed(self, room_id: str, event_id: str, user_id: str) -> bool:
+        """Check one admitted join against earlier baselines and completed hook delivery."""
+        ...
+
+    async def mark_room_member_join_completed(self, room_id: str, user_id: str) -> None:
+        """Record successful room-member hook delivery."""
+        ...
 
     async def settle_many(self, event_ids: tuple[str, ...]) -> None:
         """Settle every event that one terminal turn accounted for."""
@@ -487,6 +505,7 @@ __all__ = [
     "DispatchView",
     "HistoryRecoveryRecordView",
     "HydrationView",
+    "IngestionBatchAdmissionView",
     "MatrixDeliveryView",
     "PendingTurnView",
     "RelationView",

@@ -10,6 +10,7 @@ from mindroom import authorization
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.mentions import resolve_mentioned_user_ids_from_text
+from mindroom.matrix.room_membership import room_membership_is_complete
 from mindroom.matrix.visible_body import visible_content_from_content
 
 if TYPE_CHECKING:
@@ -122,7 +123,8 @@ def check_agent_mentioned(
     am_i_mentioned = agent_id in mentioned_agents
     non_agent_mentions = [uid for uid in all_mentioned_ids if not _is_bot_or_agent(uid, config, runtime_paths)]
     has_non_agent_mentions = bool(non_agent_mentions) and (
-        not room.members_synced or not authorization.cached_joined_member_ids(room).isdisjoint(non_agent_mentions)
+        not room_membership_is_complete(room)
+        or not authorization.cached_joined_member_ids(room).isdisjoint(non_agent_mentions)
     )
 
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions

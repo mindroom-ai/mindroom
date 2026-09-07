@@ -32,7 +32,7 @@ from mindroom.event_journal import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader
-from mindroom.matrix.journal_ingress import inbound_event, projected_event
+from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from tests.conftest import (
@@ -673,8 +673,8 @@ async def _resolver_on_a_cold_journal(
         principal = store.principal("agent@general")
         reply = _parse(_reply_event().source)
         await principal.admit(
-            inbound_event(_ROOM_ID, reply, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(_ROOM_ID, reply, EventKind.MESSAGE, self_sender=_BOT_USER_ID),
+            _inbound_event(_ROOM_ID, reply, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(_ROOM_ID, reply, EventKind.MESSAGE, self_sender=_BOT_USER_ID),
         )
         runtime = _RuntimeStub(
             client=cast("nio.AsyncClient", client if client is not None else _HomeserverWithAThread()),

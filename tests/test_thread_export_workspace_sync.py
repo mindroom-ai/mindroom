@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -11,7 +11,10 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadExportConfig
 from mindroom.config.main import Config
+from mindroom.event_journal import EventJournalStore
 from mindroom.matrix.identity import MatrixID
+from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportRoom, ThreadExportTarget
 from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME, write_thread_payload
@@ -29,8 +32,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
-    from mindroom.thread_export.models import ThreadExportStats
+    from mindroom.thread_export.models import ThreadExportSource, ThreadExportStats
 
 pytestmark = pytest.mark.asyncio
 
@@ -87,6 +91,7 @@ def _runner(config: Config, bots: dict[str, _ThreadExportBot]) -> WorkspaceThrea
             runtime_paths=runtime_paths_for(config),
             config_provider=lambda: config,
             bot_provider=bots.get,
+            response_admission_gate=ResponseAdmissionGate(),
             debounce_seconds=0,
         ),
     )
@@ -641,3 +646,240 @@ async def test_unreadable_private_identity_clears_that_instance_and_keeps_the_pa
         ("@mindroom_code:localhost",),
     ]
     assert not existing_thread.exists()
+
+
+async def test_manual_export_borrows_live_owner_and_reserves_reload_admission(tmp_path: Path) -> None:
+    """Administrative export uses the exact live client/principal and releases admission."""
+    config = _config(tmp_path, {})
+    write_thread_export_matrix_state(tmp_path)
+    journal = EventJournalStore.open_sqlite(tmp_path / "borrowed-journal.db")
+    principal = journal.principal("runtime-owned-principal")
+    client = Mock(close=AsyncMock())
+    bot = _FakeBot("@mindroom_router:localhost", client=client, principal=principal)
+    runner = _runner(config, _bots(bot))
+    gate = runner._deps.response_admission_gate
+
+    async def export_source(**kwargs: object) -> tuple[ThreadExportAccumulator, ...]:
+        assert gate.in_flight_response_count == 1
+        assert kwargs["client"] is client
+        reader = kwargs["reader"]
+        assert reader.completeness is principal
+        assert reader.reader.store is principal
+        assert reader.reader.hydrator.self_sender == bot.user_id
+        return tuple(ThreadExportAccumulator(target=target, rooms_exported=1) for target in kwargs["targets"])
+
+    runner.start()
+    try:
+        with patch("mindroom.thread_export.service.export_threads_for_targets_for_client", side_effect=export_source):
+            stats = await runner.export_once()
+        assert stats.rooms_exported == 1
+        assert gate.in_flight_response_count == 0
+        client.close.assert_not_awaited()
+        assert await principal.load_event("$missing") is None
+        gate.close()
+        with pytest.raises(RuntimeError, match="ready"):
+            await runner.export_once()
+        assert gate.in_flight_response_count == 0
+    finally:
+        await runner.stop()
+        await journal.close()
+    with pytest.raises(RuntimeError, match="running"):
+        await runner.export_once()
+
+
+async def test_manual_export_preserves_previous_files_when_owner_is_unavailable(tmp_path: Path) -> None:
+    """Owner loss is a failed pass, never a reason to acquire another client."""
+    config = _config(tmp_path, {})
+    write_thread_export_matrix_state(tmp_path)
+    output = tmp_path / "manual-exports"
+    prior = _write_owned_export(output)
+    runner = _runner(config, {})
+    runner.start()
+    try:
+        stats = await runner.export_once(output_dir=output)
+        assert stats.failures == 2
+        assert all("No running Matrix owner for router" in item.error for item in stats.failed_items)
+        assert prior.exists()
+        assert runner._deps.response_admission_gate.in_flight_response_count == 0
+    finally:
+        await runner.stop()
+
+
+async def test_stopping_runner_waits_for_manual_export_cleanup(tmp_path: Path) -> None:
+    """A borrowed owner's lifetime cannot end before its administrative export has drained."""
+    config = _config(tmp_path, {})
+    runner = _runner(config, {})
+    started = asyncio.Event()
+    cleaning_up = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def blocked_export(**_kwargs: object) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning_up.set()
+            await allow_cleanup.wait()
+
+    runner.start()
+    with patch("mindroom.thread_export.workspace_sync.export_threads_once", side_effect=blocked_export):
+        export = asyncio.create_task(runner.export_once())
+        await started.wait()
+        stop = asyncio.create_task(runner.stop())
+        cleanup_started = asyncio.create_task(cleaning_up.wait())
+        try:
+            await asyncio.wait((stop, cleanup_started), return_when=asyncio.FIRST_COMPLETED)
+            assert cleaning_up.is_set()
+            assert not stop.done()
+            assert runner._deps.response_admission_gate.in_flight_response_count == 1
+            allow_cleanup.set()
+            await stop
+            assert export.cancelled()
+            assert runner._deps.response_admission_gate.in_flight_response_count == 0
+        finally:
+            allow_cleanup.set()
+            export.cancel()
+            cleanup_started.cancel()
+            await asyncio.gather(export, stop, cleanup_started, return_exceptions=True)
+
+
+async def test_forced_replacement_waits_for_manual_export_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even a forced replacement cannot close an owner's resources under an export."""
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS", 0)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path, {})
+    runner = orchestrator._thread_export_runner
+    started = asyncio.Event()
+    cleaning_up = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    replaced = asyncio.Event()
+
+    async def blocked_export(**_kwargs: object) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning_up.set()
+            await allow_cleanup.wait()
+
+    async def replace_owner() -> None:
+        assert export.cancelled()
+        assert orchestrator._response_admission_gate.in_flight_response_count == 0
+        replaced.set()
+
+    runner.start()
+    with patch("mindroom.thread_export.workspace_sync.export_threads_once", side_effect=blocked_export):
+        export = asyncio.create_task(runner.export_once())
+        await started.wait()
+        replacement = asyncio.create_task(
+            orchestrator.config_reload.apply_with_response_admission(
+                replace_owner,
+                operation_name="forced export test",
+                request_is_current=lambda: True,
+            ),
+        )
+        try:
+            await asyncio.wait_for(cleaning_up.wait(), timeout=5)
+            assert not replaced.is_set()
+            allow_cleanup.set()
+            await replacement
+            assert replaced.is_set()
+            assert not orchestrator._response_admission_gate.closed
+        finally:
+            allow_cleanup.set()
+            export.cancel()
+            await asyncio.gather(export, replacement, return_exceptions=True)
+            await runner.stop()
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])
+async def test_replacement_drains_automatic_exports_and_resumes_current_owners(  # noqa: PLR0915
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    """Borrowed clients survive automatic cleanup; interrupted work resumes after publication."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+    orchestrator.config = _config(
+        tmp_path,
+        {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())},
+    )
+    write_thread_export_matrix_state(tmp_path)
+    original = _FakeBot("@mindroom_code:localhost")
+    current = _FakeBot("@mindroom_code:localhost")
+    orchestrator.agent_bots["code"] = cast("AgentBot", original)
+    runner = orchestrator._thread_export_runner
+    runner._deps = replace(runner._deps, debounce_seconds=0)
+    started, cleaning, allow_cleanup, cleaned = (asyncio.Event() for _ in range(4))
+    publishing, allow_publication, resumed = (asyncio.Event() for _ in range(3))
+    output = tmp_path / "exported.txt"
+
+    async def export_sources(**kwargs: object) -> tuple[ThreadExportStats, ...]:
+        sources = cast("Sequence[ThreadExportSource]", kwargs["sources"])
+        if sources[0].client is original.client:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await allow_cleanup.wait()
+                cleaned.set()
+        assert sources[0].client is current.client
+        assert {room.room_id for source in sources for room in source.rooms} == {"!lobby:localhost", "!dev:localhost"}
+        assert not orchestrator._response_admission_gate.closed
+        output.write_text("exported using the replacement owner")
+        resumed.set()
+        return _stats_for_targets(**kwargs)
+
+    async def publish() -> None:
+        assert cleaned.is_set(), "replacement closed a client still borrowed by an automatic export"
+        orchestrator.agent_bots["code"] = cast("AgentBot", current)
+        runner.start()  # Runtime worker synchronization also calls start during publication.
+        if outcome != "success":
+            runner.mark_room_activity("!lobby:localhost")
+        publishing.set()
+        await allow_publication.wait()
+        if outcome == "error":
+            msg = "publication interrupted after replacing the owner"
+            raise RuntimeError(msg)
+
+    with patch(EXPORT_PATH, side_effect=export_sources):
+        runner.start()
+        runner.mark_room_activity("!lobby:localhost")
+        await asyncio.wait_for(started.wait(), timeout=5)
+        replacement = asyncio.create_task(
+            orchestrator.config_reload.apply_with_response_admission(
+                publish,
+                operation_name="automatic export replacement",
+                request_is_current=lambda: True,
+            ),
+        )
+        try:
+            await asyncio.wait_for(cleaning.wait(), timeout=5)
+            assert not publishing.is_set()
+            allow_cleanup.set()
+            await asyncio.wait_for(publishing.wait(), timeout=5)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(resumed.wait(), timeout=0.05)
+            assert not output.exists()
+            if outcome == "cancelled":
+                replacement.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await replacement
+            elif outcome == "error":
+                allow_publication.set()
+                with pytest.raises(RuntimeError, match="publication interrupted"):
+                    await replacement
+            else:
+                allow_publication.set()
+                await replacement
+            await asyncio.wait_for(resumed.wait(), timeout=5)
+            assert output.read_text() == "exported using the replacement owner"
+        finally:
+            allow_cleanup.set()
+            allow_publication.set()
+            await asyncio.gather(replacement, return_exceptions=True)
+            await runner.stop()

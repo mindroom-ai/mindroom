@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.response_admission import ResponseAdmissionGate
@@ -72,6 +73,10 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Return first-sync readiness for the current entity generation."""
         ...
 
+    def desktop_controller_identity(self, entity_name: str) -> DesktopControllerIdentity:
+        """Resolve the current running bot's already-owned Matrix device pin."""
+        ...
+
     def handle_bot_ready(self, bot: AgentBot | TeamBot) -> Awaitable[None]:
         """Handle a managed bot completing its first sync."""
         ...
@@ -84,11 +89,11 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Rebuild room-backed reply grants from the router client."""
         ...
 
-    def reconcile_reply_authorized_calls(self) -> Awaitable[None]:
-        """End active calls whose requester no longer has reply access."""
+    async def reconcile_reply_authorized_calls(self) -> None:
+        """Revoke denied calls, then reconcile newly authorized joined rooms."""
         ...
 
-    def reconcile_pending_invites(self) -> Awaitable[None]:
+    async def reconcile_pending_invites(self) -> None:
         """Recheck cached room invites against each entity's invitation policy."""
         ...
 

@@ -85,15 +85,20 @@ Use `build_message_content()` from `message_builder.py` to construct thread-awar
 
 ### Sync Loop
 
-Each agent bot runs its own sync loop with a 30-second long-polling timeout.
+Each agent bot runs an owned Nio ingestion session with a five-second long-polling timeout.
 The default `matrix_sync.mode: classic` streams events through classic `/v3/sync` and backfills limited-timeline gaps from `/messages`.
-Set `matrix_sync.mode: sliding` to opt into MSC4186 Simplified Sliding Sync on homeservers that advertise `org.matrix.simplified_msc3575`.
-`matrix_sync.sliding_timeline_limit` (default 100) bounds the per-room timeline window of each sliding request.
-Sliding positions remain connection-scoped, while callback admission uses mindroom-nio's persisted per-event provenance.
-Sliding Sync classifies its validated `num_live` tail as live, ordinary continuations without `num_live` as live, and initial or expanded timelines without `num_live` as history.
-Classic Sync classifies initial timelines and `/messages` recovery as history, while `since` continuations are live.
-This provenance remains attached across recovery, restart, and decryption independently of journal checkpoint persistence.
-`matrix/journal_ingress.py` commits every inbound event to the event journal before nio treats it as delivered, and a refused write raises `nio.CallbackNotAcceptedError` so nio redelivers the event rather than advancing the checkpoint past it.
+Set `matrix_sync.mode: sliding` to use MSC4186 Simplified Sliding Sync on homeservers advertising `org.matrix.simplified_msc3575`.
+Each agent uses a stable connection ID, a discovery range of `[0,99]`, and explicit subscriptions for its configured resolved rooms.
+Subscriptions refresh after deferred joins and room configuration changes without replacing the durable session or discarding accepted input.
+`matrix_sync.sliding_timeline_limit` defaults to 100 events per room window.
+A durable store is bound to its transport; changing this setting does not convert an existing store.
+Nio owns transport cursors, crypto preparation, and persisted per-event provenance.
+Both transports distinguish initial history, live continuations, and recovered gaps; MindRoom uses the provenance Nio supplies without reclassifying it.
+This provenance remains attached across recovery, restart, and decryption independently of application turn settlement.
+`matrix/durable_ingestion.py` converts one trusted Nio batch and atomically commits its receipt, ordered membership effects, semantic events, and conversation projection in the MindRoom journal before acknowledging that batch to Nio.
+An admission failure leaves the batch unsettled for retry, and replay after a committed admission returns the original receipt without duplicating semantic work.
+Typing, presence and read receipts are excluded from durable admission.
+MindRoom requires `mindroom-nio>=1,<2`, and `uv.lock` pins the published 1.0.0 release.
 Admission is fail-closed at every provenance, not only for recovery, because an event the journal never accepted is one no later process would see again.
 Silent schedules use the custom `io.mindroom.scheduled.trigger` timeline event so clients do not render the task body as a room message.
 Ingress admits that hidden event only from a managed sender, leaves it out of the visible-message projection, and classifies cold-history copies as context-only.
@@ -108,16 +113,16 @@ Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart 
 An event reaches an agent through durable admission, never straight from the sync callback:
 
 1. Sync receives the event via long-polling, and nio states its provenance once.
-2. `JournalIngress._admit` runs first, as nio's event-admission callback, and commits the event and its projection row in one transaction before nio treats the event as delivered.
-3. Only after every admission callback succeeds do the ordinary event callbacks run, and they load already-persisted work rather than the parsed event they were handed.
+2. The owned ingestion pump validates and commits each batch through `PrincipalStore.admit_ingestion_batch()` before acknowledging it to Nio.
+3. Control-room departures and history loss revoke uncertain grants before admission; live membership grant changes run after the durable commit, before the next batch.
 4. `PendingEventWorker` drains what is still pending, so an event whose turn was interrupted is re-dispatched instead of lost.
 5. `TurnController` owns the turn and the agent responds in thread.
 
 Invites are the deliberate event-journal exception because an invite has no stable Matrix event ID to key a journal row on.
-`_on_invite_before_sync_certification` stores the pending room and inviter before starting plain background handling.
+The owned ingestion callback stores the pending room and inviter before starting background handling.
 The pending record wakes unfinished work, but it does not make Matrix repeat an already-checkpointed invite and does not grant authority.
 The stored inviter is not authorization evidence: routers and agents require nio's current invite sender after fence persistence and immediately before starting the Matrix join request.
-An authoritative departure clears nio's invited-room cache entry before asynchronous departure fencing, so a cancellation observed before the join starts revokes that sender evidence.
+Nio owns invited-room cache updates, and the join path rechecks current inviter evidence immediately before its membership command.
 A restart without current invite-cache evidence may require another invitation.
 All activity after joining uses ordinary responder conversation authorization.
 See [Bot Runtime](bot-runtime.md) for the full durable dispatch boundary.

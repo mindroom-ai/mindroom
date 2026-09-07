@@ -57,6 +57,7 @@ from mindroom.tool_approval import (
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
+from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -1451,8 +1452,8 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
         )
         is not None
     )
-    await notice_store.fence_departure(continuation.room_id, source=DepartureSource.LOCAL)
-    await notice_store.note_membership_restarted(continuation.room_id)
+    await admit_room_membership(notice_store, continuation.room_id, "leave", source=DepartureSource.LOCAL)
+    await admit_room_membership(notice_store, continuation.room_id, "join")
     await notice_store.acknowledge_matrix_delivery(
         delivery_id=stale_delivery_id,
         stage=DeliveryStage.FINAL,
@@ -1559,8 +1560,8 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
             source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "waiting"}},
         ),
     )
-    await notice_store.fence_departure(continuation.room_id, source=DepartureSource.LOCAL)
-    await notice_store.note_membership_restarted(continuation.room_id)
+    await admit_room_membership(notice_store, continuation.room_id, "leave", source=DepartureSource.LOCAL)
+    await admit_room_membership(notice_store, continuation.room_id, "join")
     client = MagicMock()
     client.user_id = "@mindroom_router:localhost"
     client.device_id = "DEVICE"

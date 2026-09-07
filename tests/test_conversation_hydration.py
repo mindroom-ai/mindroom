@@ -39,7 +39,7 @@ from mindroom.matrix.conversation_reads import (
     latest_agent_message_snapshot,
     projected_thread_history,
 )
-from mindroom.matrix.journal_ingress import inbound_event, projected_event
+from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
@@ -418,8 +418,8 @@ async def admit_all(store: PrincipalStore, sources: Iterable[dict[str, Any]]) ->
     for source in sources:
         event = parse(source)
         await store.admit(
-            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
 
@@ -1525,8 +1525,8 @@ class TestStreamingProgressIsTransport:
         for source in (answer, terminal):
             event = parse(source)
             await alice.admit(
-                inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+                _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
             )
         redaction = parse(
             {
@@ -1539,8 +1539,8 @@ class TestStreamingProgressIsTransport:
             },
         )
         await alice.admit(
-            inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
+            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
         )
         client = FakeClient(events={"$answer": answer}, relations={"$answer": [progress]})
 
@@ -1554,7 +1554,7 @@ class TestStreamingProgressIsTransport:
 def _projected(source: dict[str, Any]) -> ProjectedEvent:
     """Return the projection view of one raw event source."""
     event = parse(source)
-    projected = projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT)
+    projected = _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT)
     assert projected is not None
     return projected
 
@@ -1737,8 +1737,8 @@ class TestPointRefetch:
         )
         assert isinstance(redaction, nio.Event)
         await store.admit(
-            inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
+            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
         )
 
     async def test_the_prior_edit_is_restored_when_the_server_still_has_it(
@@ -1765,8 +1765,8 @@ class TestPointRefetch:
             },
         )
         await alice.admit(
-            inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
+            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
         )
         client = FakeClient(
             events={"$m": raw("$m", "first")},
@@ -2069,8 +2069,8 @@ class TestReadModes:
             },
         )
         await store.admit(
-            inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
+            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
         )
 
     async def test_a_non_strict_read_omits_rather_than_waits(

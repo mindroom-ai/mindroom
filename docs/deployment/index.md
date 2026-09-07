@@ -6,6 +6,8 @@ icon: lucide/cloud
 
 MindRoom can be deployed in various ways depending on your needs.
 
+Existing deployments moving from the previous Nio integration must follow the [Nio 1.0 cutover guide](nio-upgrade.md).
+
 ## Deployment Options
 
 | Method | Best For |

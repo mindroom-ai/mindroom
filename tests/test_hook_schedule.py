@@ -241,7 +241,12 @@ async def test_cron_task_cancel_log_includes_workflow_thread_context(
     setup_logging(level="INFO", runtime_paths=runtime_paths_for(config))
     capsys.readouterr()
 
+    pending_read_started = asyncio.Event()
+    release_pending_read = asyncio.Event()
+
     async def fake_get_pending_task_record(**_: object) -> SimpleNamespace:
+        pending_read_started.set()
+        await release_pending_read.wait()
         return SimpleNamespace(workflow=workflow)
 
     with patch("mindroom.scheduling._get_pending_task_record", new=fake_get_pending_task_record):
@@ -256,7 +261,7 @@ async def test_cron_task_cancel_log_includes_workflow_thread_context(
                 _conversation_reader(),
             ),
         )
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(pending_read_started.wait(), timeout=5)
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task

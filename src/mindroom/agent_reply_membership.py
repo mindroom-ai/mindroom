@@ -179,7 +179,7 @@ class AgentReplyMembershipIndex:
             grant_room_count=len(room_keys),
         )
 
-    def mark_control_room_unready(
+    def mark_room_unready(
         self,
         config: Config,
         runtime_paths: RuntimePaths,
@@ -187,7 +187,7 @@ class AgentReplyMembershipIndex:
         *,
         reason: str,
     ) -> bool:
-        """Fail one grant room closed after the control client departs it."""
+        """Fail one room closed until its current membership can be queried."""
         signature = _agent_reply_membership_policy_signature(config)
         if self._desired_signature != signature or self._snapshot.policy_signature != signature:
             return False
@@ -203,7 +203,7 @@ class AgentReplyMembershipIndex:
         if not matching_rooms and not _requires_current_room_memberships(config):
             return False
 
-        # A departure observed while an authoritative query is in flight must
+        # Invalidation while an authoritative query is in flight must
         # fence that query even when the room ID was not yet published.
         self._epoch += 1
         updated_rooms = [

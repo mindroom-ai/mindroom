@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path  # noqa: TC003 - dataclass is also the API response schema
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import nio
 
-    from mindroom.matrix.users import AgentMatrixUser
     from mindroom.thread_export.projected_history import ProjectedThreadReader
 
 
@@ -116,10 +114,10 @@ class ThreadExportAccumulator:
 
 @dataclass(frozen=True)
 class ThreadExportGroup:
-    """Rooms ready to be read with one persisted Matrix account."""
+    """Rooms to read through one running entity."""
 
     rooms: tuple[ThreadExportRoom, ...]
-    user: AgentMatrixUser
+    entity_name: str
 
 
 @dataclass(frozen=True)
@@ -134,14 +132,3 @@ class ThreadExportSource:
     reader: ProjectedThreadReader
     rooms: tuple[ThreadExportRoom, ...]
     target_output_dirs: tuple[Path, ...] | None = None
-
-
-@dataclass(frozen=True)
-class ThreadExportGroupFailure:
-    """Rooms that could not be assigned a usable Matrix account."""
-
-    rooms: tuple[ThreadExportRoom, ...]
-    error: str
-
-
-type ThreadExportGroupResult = ThreadExportGroup | ThreadExportGroupFailure

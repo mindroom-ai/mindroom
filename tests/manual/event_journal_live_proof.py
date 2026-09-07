@@ -45,7 +45,7 @@ from mindroom.event_journal import (
     EventKind,
 )
 from mindroom.matrix.conversation_hydration import ConversationHydrator
-from mindroom.matrix.journal_ingress import inbound_event, projected_event
+from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -576,8 +576,8 @@ async def _admit_from_server(
     event = fetched.event
     kind = EventKind.REDACTION if isinstance(event, nio.RedactionEvent) else EventKind.MESSAGE
     await store.admit(
-        inbound_event(room_id, event, kind, EventClass.ACTIONABLE),
-        projected_event(room_id, event, kind, self_sender=client.user_id),
+        _inbound_event(room_id, event, kind, EventClass.ACTIONABLE),
+        _projected_event(room_id, event, kind, self_sender=client.user_id),
     )
     await store.settle(event_id)
 

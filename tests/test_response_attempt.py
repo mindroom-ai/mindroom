@@ -9,10 +9,16 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from mindroom import response_attempt as response_attempt_module
-from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
+from mindroom.cancellation import (
+    SYNC_RESTART_CANCEL_MSG,
+    USER_STOP_CANCEL_MSG,
+    current_task_is_process_shutdown,
+    request_task_cancel,
+)
 from mindroom.config.main import Config
 from mindroom.message_target import MessageTarget
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
+from mindroom.stop import StopManager
 
 
 @dataclass
@@ -45,6 +51,10 @@ class _StopManager:
 
     def clear_message(self, message_id: str, _client: object, *, remove_button: bool) -> None:
         self.cleared_messages.append((message_id, remove_button))
+
+    def discard_message(self, message_id: str) -> None:
+        self.cleared_messages.append((message_id, False))
+        self.tracked_messages.pop(message_id, None)
 
 
 def _runner(
@@ -198,6 +208,122 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task() -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_shutdown_keeps_outer_attempt_owned_until_child_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Orderly shutdown cannot finish the owned runner while its response child is live."""
+    monkeypatch.setattr(response_attempt_module, "_FORWARDED_CANCEL_WAIT_SECONDS", 0.01)
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    runner, stop_manager = _runner()
+    child_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    release_child = asyncio.Event()
+    child_tasks: list[asyncio.Task[None]] = []
+    child_shutdown_markers: list[bool] = []
+
+    async def response_function(_message_id: str | None) -> None:
+        child = asyncio.current_task()
+        assert child is not None
+        child_tasks.append(child)
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_shutdown_markers.append(current_task_is_process_shutdown())
+            child_cancelled.set()
+            await release_child.wait()
+            raise
+
+    outer = asyncio.create_task(
+        runner.run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                existing_event_id="$existing",
+            ),
+        ),
+    )
+    await child_started.wait()
+    request_task_cancel(outer, process_shutdown=True)
+
+    try:
+        await asyncio.wait_for(child_cancelled.wait(), timeout=1.0)
+        await asyncio.sleep(0.02)
+        assert child_shutdown_markers == [True]
+        assert not outer.done()
+        assert "$existing" in stop_manager.tracked_messages
+    finally:
+        release_child.set()
+        results = await asyncio.gather(outer, *child_tasks, return_exceptions=True)
+
+    assert isinstance(results[0], asyncio.CancelledError)
+    assert outer.cancelled()
+    assert stop_manager.cleared_messages == [("$existing", False)]
+    runner.deps.logger.warning.assert_called_once()
+    assert runner.deps.logger.warning.call_args.kwargs["exc_info"] is False
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_during_stop_button_setup_still_owns_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during presence setup must not orphan the already-started response."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    runner, stop_manager = _runner(show_stop_button=True)
+    child_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    presence_started = asyncio.Event()
+    release_child = asyncio.Event()
+    child_tasks: list[asyncio.Task[None]] = []
+
+    async def response_function(_message_id: str | None) -> None:
+        child = asyncio.current_task()
+        assert child is not None
+        child_tasks.append(child)
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            assert current_task_is_process_shutdown()
+            child_cancelled.set()
+            await release_child.wait()
+            raise
+
+    async def wait_for_presence(*_args: object, **_kwargs: object) -> bool:
+        presence_started.set()
+        await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(response_attempt_module, "is_user_online", wait_for_presence)
+    outer = asyncio.create_task(
+        runner.run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                existing_event_id="$existing",
+                user_id="@user:localhost",
+            ),
+        ),
+    )
+    await child_started.wait()
+    await presence_started.wait()
+    request_task_cancel(outer, process_shutdown=True)
+
+    try:
+        await asyncio.wait_for(child_cancelled.wait(), timeout=1.0)
+        assert not outer.done()
+        assert "$existing" in stop_manager.tracked_messages
+    finally:
+        for child in child_tasks:
+            if not child.done():
+                child.cancel()
+        release_child.set()
+        await asyncio.gather(outer, *child_tasks, return_exceptions=True)
+
+    assert stop_manager.cleared_messages == [("$existing", False)]
+
+
+@pytest.mark.asyncio
 async def test_attempt_task_error_during_forwarded_cancellation_is_logged() -> None:
     """An attempt task that errors while unwinding the forced cancel must be reported."""
     runner, _stop_manager = _runner()
@@ -298,3 +424,42 @@ async def test_response_attempt_cancellation_records_reason_logs_provenance_and_
     log_call = getattr(runner.deps.logger, log_method).call_args
     assert log_call.args[0] == log_message
     assert log_call.kwargs["message_id"] == "$existing"
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_discards_tracking_without_delayed_cleanup_task() -> None:
+    """Orderly shutdown needs no five-second local-only tracking tail."""
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
+    stop_manager = StopManager()
+    runner = ResponseAttemptRunner(
+        ResponseAttemptDeps(
+            client=MagicMock(user_id="@mindroom_agent:localhost"),
+            stop_manager=stop_manager,
+            logger=MagicMock(),
+            show_stop_button=lambda: False,
+            config=Config(),
+        ),
+    )
+    response_started = asyncio.Event()
+
+    async def response_function(_message_id: str | None) -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    attempt = asyncio.create_task(
+        runner.run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                existing_event_id="$existing",
+            ),
+        ),
+    )
+    await response_started.wait()
+    request_task_cancel(attempt, process_shutdown=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await attempt
+
+    assert stop_manager.tracked_messages == {}
+    assert stop_manager.cleanup_tasks == []

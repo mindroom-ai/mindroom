@@ -2325,7 +2325,7 @@ class TestVersionAndHelp:
         _write_minimal_runtime_config(config_path)
 
         with patch(
-            "mindroom.thread_export.export_threads_once",
+            "mindroom.cli.thread_export.request_thread_export",
             new=AsyncMock(return_value=ThreadExportStats(output_dir=output_path)),
         ) as export_threads_once:
             result = _invoke_with_runtime(
@@ -2378,7 +2378,7 @@ class TestVersionAndHelp:
         )
 
         with patch(
-            "mindroom.thread_export.export_threads_once",
+            "mindroom.cli.thread_export.request_thread_export",
             new=AsyncMock(return_value=stats),
         ):
             result = _invoke_with_runtime(
@@ -2399,7 +2399,7 @@ class TestVersionAndHelp:
         _write_minimal_runtime_config(config_path)
 
         with patch(
-            "mindroom.thread_export.export_threads_once",
+            "mindroom.cli.thread_export.request_thread_export",
             new=AsyncMock(return_value=ThreadExportStats(output_dir=tmp_path / "exports")),
         ) as export_threads_once:
             result = _invoke_with_runtime(
@@ -2433,7 +2433,7 @@ class TestVersionAndHelp:
         ]
         with (
             patch(
-                "mindroom.thread_export.export_threads_once",
+                "mindroom.cli.thread_export.request_thread_export",
                 new=AsyncMock(side_effect=export_results),
             ) as export_once,
             patch("mindroom.cli.main.asyncio.sleep", new=sleep_once_then_stop),

@@ -337,20 +337,26 @@ class TurnRecordCodec:
         )
 
 
+@dataclass(frozen=True)
+class _PendingLedgerWrite:
+    """One provisional mutation and the identities held until its outcome settles."""
+
+    record: TurnRecord
+    superseded: dict[str, TurnRecord | None]
+    keys: frozenset[str]
+    settled: asyncio.Future[None]
+
+
 @dataclass
 class _LedgerState:
     """In-memory canonical records shared by every ledger for one agent."""
 
     responses: dict[str, TurnRecord] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
-    # Held across a whole update: the in-memory mutation and the row it
-    # implies. Without it two concurrent updates can reach the database in the
-    # opposite order from memory, and the loser durably overwrites the winner
-    # with the record it computed before being overtaken -- so memory says the
-    # turn is finished, storage says it is not, and the restart answers the
-    # message twice. The synchronous lock cannot cover this: it is not held
-    # across an await, and holding a thread lock across one would deadlock.
+    # Reserve conflicting identities briefly; cleanup holds this mutex while
+    # draining active writes. Unrelated updates may await persistence together.
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    pending_writes: dict[str, asyncio.Future[None]] = field(default_factory=dict, repr=False)
     loaded: bool = False
 
 
@@ -469,53 +475,87 @@ class HandledTurnLedger:
             lambda _existing_records: turn_record,
         )
 
+    def _write_keys(self, event_ids: Collection[str], anchor: str | None = None) -> set[str]:
+        """Include sibling identities that an anchor-based SQL upsert can delete."""
+        keys = set(event_ids)
+        if anchor is not None:
+            keys.add(anchor)
+        for event_id in event_ids:
+            if (record := self._responses.get(event_id)) is not None:
+                keys.update(record.indexed_event_ids)
+                if record.anchor_event_id is not None:
+                    keys.add(record.anchor_event_id)
+        return keys
+
+    async def _reserve_update(
+        self,
+        lookup_event_ids: tuple[str, ...],
+        update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
+    ) -> _PendingLedgerWrite | None:
+        """Derive and publish after earlier conflicting writes have settled."""
+        while True:
+            async with self._state.write_lock:
+                with self._state.lock:
+                    self._require_loaded()
+                    keys = self._write_keys(lookup_event_ids)
+                    blockers = {self._state.pending_writes[key] for key in keys if key in self._state.pending_writes}
+                    if not blockers:
+                        existing = MappingProxyType(
+                            {
+                                key: record
+                                for key in lookup_event_ids
+                                if (record := self._responses.get(key)) is not None
+                            },
+                        )
+                        updated = update(existing)
+                        candidate = canonicalize_turn_record(
+                            updated,
+                            timestamp=updated.timestamp if updated.timestamp != 0.0 else time.time(),
+                        )
+                        if not candidate.source_event_ids:
+                            return None
+                        keys.update(self._write_keys(candidate.indexed_event_ids, candidate.anchor_event_id))
+                        record = _resolve_turn_record(candidate, self._responses)
+                        if record is not None:
+                            keys.update(self._write_keys(record.indexed_event_ids, record.anchor_event_id))
+                        blockers = {
+                            self._state.pending_writes[key] for key in keys if key in self._state.pending_writes
+                        }
+                        if not blockers:
+                            if record is None:
+                                return None
+                            pending = _PendingLedgerWrite(
+                                record,
+                                {key: self._responses.get(key) for key in record.indexed_event_ids},
+                                frozenset(keys),
+                                asyncio.get_running_loop().create_future(),
+                            )
+                            self._state.pending_writes.update(dict.fromkeys(keys, pending.settled))
+                            for key in record.indexed_event_ids:
+                                self._responses[key] = record
+                            return pending
+            await asyncio.gather(*(asyncio.shield(blocker) for blocker in blockers))
+
     async def update_handled_turn(
         self,
         lookup_event_ids: Sequence[str],
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
     ) -> TurnRecord | None:
-        """Atomically update one record and store it before returning.
+        """Persist an update, serializing mutations of related identities.
 
-        The whole update runs under the write lock, so the order updates reach
-        the database is the order they reached memory. Only the synchronous
-        state lock is dropped before the write, because a reader must never
-        block on one.
-
-        There is no longer a choice about durability. The old ledger returned
-        as soon as the record reached memory and persisted behind the caller,
-        so a crash could lose a record that something had already acted on, and
-        callers who could not tolerate that passed ``wait_for_persist=True``.
-        Awaiting the write is that flag for everyone, at the cost the flag
-        always had.
+        Unrelated turns can wait for their writes independently. The synchronous
+        derivation may run again after a conflicting write settles; it must not
+        perform external effects. Provisional claims remain visible until the
+        write commits or its definite failure has been rolled back.
         """
-        normalized_lookup_event_ids = canonical_source_event_ids(lookup_event_ids)
-        if not normalized_lookup_event_ids:
+        normalized = canonical_source_event_ids(lookup_event_ids)
+        if not normalized:
             return None
-        async with self._state.write_lock:
-            with self._state.lock:
-                self._require_loaded()
-                existing_records = MappingProxyType(
-                    {
-                        event_id: record
-                        for event_id in normalized_lookup_event_ids
-                        if (record := self._responses.get(event_id)) is not None
-                    },
-                )
-                updated_record = update(existing_records)
-                candidate_record = canonicalize_turn_record(
-                    updated_record,
-                    timestamp=(updated_record.timestamp if updated_record.timestamp != 0.0 else time.time()),
-                )
-                if not candidate_record.source_event_ids:
-                    return None
-                persisted_record = _resolve_turn_record(candidate_record, self._responses)
-                if persisted_record is None:
-                    return None
-                superseded = {
-                    event_id: self._responses.get(event_id) for event_id in persisted_record.indexed_event_ids
-                }
-                for event_id in persisted_record.indexed_event_ids:
-                    self._responses[event_id] = persisted_record
+        pending = await self._reserve_update(normalized, update)
+        if pending is None:
+            return None
+        persisted_record = pending.record
+        try:
             # Canonicalization derives an anchor from the sources whenever one was
             # not supplied, and a record with no sources was already rejected above.
             assert persisted_record.anchor_event_id is not None
@@ -576,8 +616,13 @@ class HandledTurnLedger:
                 # answered -- the very outcome publishing early exists to prevent.
                 if write.cancelled() or write.exception() is None:
                     raise
-                self._restore_superseded(persisted_record, superseded)
+                self._restore_superseded(persisted_record, pending.superseded)
                 raise
+        finally:
+            with self._state.lock:
+                for key in pending.keys:
+                    del self._state.pending_writes[key]
+                pending.settled.set_result(None)
         logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
         return persisted_record
 
@@ -676,8 +721,8 @@ class HandledTurnLedger:
     ) -> None:
         """Undo one failed write's publication, leaving any later one alone.
 
-        A newer record for the same event is not rolled back. The write lock
-        makes that unreachable today, but restoring an older record over a
+        A newer record for the same event is not rolled back. Reservations
+        exclude competing writes, but restoring an older record over a
         newer one is the kind of mistake that only shows up as a turn answered
         twice, so the check is cheap insurance rather than dead code.
         """
@@ -781,7 +826,8 @@ class HandledTurnLedger:
         only way to remove an entry from it; a delete by key costs nothing and
         cannot lose the records it is not about.
 
-        The delete commits *before* memory forgets, which is the opposite
+        Cleanup blocks new reservations and drains active writes before choosing
+        the retained set. The delete commits *before* memory forgets, the opposite
         ordering to a write and for the same reason. Forgetting first would let
         a synchronous reader see "not handled" for a row the database still
         holds, and answer it again -- and if the delete then failed, that split
@@ -791,6 +837,7 @@ class HandledTurnLedger:
         the next load.
         """
         async with self._state.write_lock:
+            await asyncio.gather(*(asyncio.shield(write) for write in set(self._state.pending_writes.values())))
             with self._state.lock:
                 self._require_loaded()
                 retained = _cleaned_responses(

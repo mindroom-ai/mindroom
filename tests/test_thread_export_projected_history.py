@@ -25,13 +25,14 @@ from mindroom.matrix.conversation_hydration import (
     ConversationHydrator,
 )
 from mindroom.matrix.conversation_reads import ConversationReader
-from mindroom.matrix.journal_ingress import inbound_event, projected_event
+from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.thread_export.projected_history import (
     ProjectedThreadReader,
     ThreadExportIncompleteError,
     export_conversation_reader,
     fetch_projected_thread_history,
 )
+from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -242,8 +243,8 @@ async def admit_live(store: PrincipalStore, sources: Iterable[dict[str, Any]]) -
         event = parse(source)
         kind = EventKind.REDACTION if isinstance(event, nio.RedactionEvent) else EventKind.MESSAGE
         await store.admit(
-            inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, kind, self_sender=ROUTER),
+            _inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, kind, self_sender=ROUTER),
         )
 
 
@@ -553,8 +554,8 @@ async def test_rejoining_the_room_forces_one_fresh_hydration(router: PrincipalSt
     await export(reader)
     homeserver.reset_counts()
 
-    await router.fence_departure(ROOM, source=DepartureSource.LOCAL)
-    await router.note_membership_restarted(ROOM)
+    await admit_room_membership(router, ROOM, "leave", source=DepartureSource.LOCAL)
+    await admit_room_membership(router, ROOM, "join")
     homeserver.relations[ROOT] = [
         raw("$a:example.org", "first", ts=200, thread_id=ROOT),
         raw("$b:example.org", "second", ts=300, thread_id=ROOT),

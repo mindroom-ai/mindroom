@@ -27,28 +27,28 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
-    DeliveryProjectionPendingError,
-    DepartureSource,
     EventClass,
     EventKind,
     PendingPage,
     SemanticConsumer,
     VisibleMessage,
 )
-from mindroom.journal_dispatch import _BINDINGS, _LIFECYCLE_PAGE_SIZE, JournalCallbacks, JournalDispatcher
+from mindroom.journal_dispatch import _BINDINGS, JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_visible_messages import is_visible_room_message
 from mindroom.matrix.conversation_hydration import _projected_from_event
+from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE
 from mindroom.matrix.journal_ingress import (
     JournalCorruptionError,
-    JournalIngress,
     _event_class_for,
     _event_kind,
-    inbound_event,
+    _inbound_event,
+    _projected_event,
+    ingestion_timeline_views,
     parse_journal_event,
-    projected_event,
 )
 from mindroom.pending_event_worker import _BATCH_SIZE, PendingEventWorker
+from tests.journal_helpers import admit_dispatch_event
 from tests.test_event_journal_store import corrupt
 
 if TYPE_CHECKING:
@@ -385,9 +385,93 @@ class TestEventKinds:
 class TestAdmissionAdapter:
     """The translation from a nio event to a durable row."""
 
+    @pytest.mark.parametrize("kind", [EventKind.REACTION, EventKind.REDACTION])
+    @pytest.mark.parametrize(
+        "provenance",
+        [nio.TimelineEventProvenance.LIVE, nio.TimelineEventProvenance.RECOVERED],
+    )
+    async def test_media_extensions_do_not_change_a_non_message_event_kind(
+        self,
+        kind: EventKind,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        """Extension fields cannot turn a reaction or redaction into an image."""
+        event = (
+            reaction_event("$extended", target="$target")
+            if kind is EventKind.REACTION
+            else redaction_event("$extended", "$target")
+        )
+        event.source["content"].update(
+            {"msgtype": "m.image", "body": "extension.png", "url": "mxc://example.org/extension"},
+        )
+
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=provenance,
+        )
+
+        assert views is not None
+        inbound, projection = views
+        assert inbound.kind is kind
+        assert inbound.event_class is EventClass.ACTIONABLE
+        if kind is EventKind.REACTION:
+            assert projection is None
+        else:
+            assert projection is not None
+            assert projection.redacts_event_id == "$target"
+
+    @pytest.mark.parametrize("kind", [EventKind.REACTION, EventKind.REDACTION])
+    async def test_valid_non_message_ingress_has_no_message_validation_warning(
+        self,
+        kind: EventKind,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Valid event content is validated against its own Matrix event type."""
+        event = (
+            reaction_event("$valid", target="$target")
+            if kind is EventKind.REACTION
+            else redaction_event("$valid", "$target")
+        )
+        with caplog.at_level("WARNING", logger="nio.events.misc"):
+            views = ingestion_timeline_views(
+                room_id=ROOM,
+                source=event.source,
+                self_sender=BOT,
+                provenance=nio.TimelineEventProvenance.RECOVERED,
+            )
+
+        assert views is not None
+        assert views[0].kind is kind
+        assert not any("Error validating event" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.parametrize("encrypted", [False, True])
+    async def test_malformed_media_ingress_has_no_semantic_disposition(
+        self,
+        encrypted: bool,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The media parser choice cannot admit a missing attachment URL."""
+        source = image_event("$invalid", encrypted=encrypted).source
+        if encrypted:
+            source["content"]["file"] = {}
+        else:
+            del source["content"]["url"]
+        with caplog.at_level("WARNING", logger="nio.events.misc"):
+            views = ingestion_timeline_views(
+                room_id=ROOM,
+                source=source,
+                self_sender=BOT,
+                provenance=nio.TimelineEventProvenance.RECOVERED,
+            )
+
+        assert views is None
+        assert any("ValidationError" in record.getMessage() for record in caplog.records)
+
     async def test_a_threaded_message_lands_in_its_thread(self) -> None:
         """A threaded message lands in its thread."""
-        inbound = inbound_event(
+        inbound = _inbound_event(
             ROOM,
             text_event("$m", thread_id="$root"),
             EventKind.MESSAGE,
@@ -397,7 +481,7 @@ class TestAdmissionAdapter:
 
     async def test_an_unthreaded_message_has_no_thread(self) -> None:
         """An unthreaded message has no thread."""
-        inbound = inbound_event(ROOM, text_event("$m"), EventKind.MESSAGE, EventClass.ACTIONABLE)
+        inbound = _inbound_event(ROOM, text_event("$m"), EventKind.MESSAGE, EventClass.ACTIONABLE)
         assert inbound.thread_id is None
 
     async def test_a_delivery_echo_keeps_its_matrix_transaction_id(self) -> None:
@@ -414,7 +498,7 @@ class TestAdmissionAdapter:
         )
         assert isinstance(event, nio.Event)
 
-        projected = projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT)
+        projected = _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT)
 
         assert projected is not None
         assert projected.transaction_id == "tx-final"
@@ -431,11 +515,11 @@ class TestAdmissionAdapter:
             },
         )
         assert isinstance(event, nio.Event)
-        assert projected_event(ROOM, event, EventKind.REACTION, self_sender=BOT) is None
+        assert _projected_event(ROOM, event, EventKind.REACTION, self_sender=BOT) is None
 
     async def test_a_redaction_projects_onto_its_target(self) -> None:
         """A redaction projects onto its target."""
-        projected = projected_event(ROOM, redaction_event("$r", "$m"), EventKind.REDACTION, self_sender=BOT)
+        projected = _projected_event(ROOM, redaction_event("$r", "$m"), EventKind.REDACTION, self_sender=BOT)
         assert projected is not None
         assert projected.redacts_event_id == "$m"
 
@@ -501,8 +585,8 @@ class TestSidecarContent:
         preview = "The answer beg [Message continues in attached file]"
         event = sidecar_event("$long", preview, "mxc://server/long-answer")
         await alice.admit(
-            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -524,8 +608,8 @@ class TestSidecarContent:
         sidecar = sidecar_event("$long", "truncated [Message continues in attached file]", "mxc://server/long")
         for event in (plain, sidecar):
             await alice.admit(
-                inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+                _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
             )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -546,8 +630,8 @@ class TestSidecarContent:
         whole = "The answer begins here and runs on for many thousands of characters."
         event = text_event("$long", whole, ts=5_000)
         await alice.admit(
-            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -572,8 +656,8 @@ class TestEchoOrdering:
         """A self-authored echo is projected like any other timeline event."""
         echo = bot_event("$answer", "the answer")
         await alice.admit(
-            inbound_event(ROOM, echo, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, echo, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, echo, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, echo, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -592,8 +676,8 @@ class TestEchoOrdering:
             text_event("$follow_up", "and then?", ts=1_200),
         ):
             await alice.admit(
-                inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+                _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
             )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -620,8 +704,8 @@ class TestEchoOrdering:
         await asyncio.gather(
             *(
                 alice.admit(
-                    inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                    projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+                    _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+                    _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
                 )
                 for event in batch
             ),
@@ -647,9 +731,14 @@ class TestEchoOrdering:
         one goes through `_admit` so that a sender filter added there fails
         here, because the echo route depends on there not being one.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), bot_event("$answer", "the answer"), provenance)
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=bot_event("$answer", "the answer").source,
+            self_sender=BOT,
+            provenance=provenance,
+        )
+        assert views is not None
+        await alice.admit(*views)
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [message.logical_event_id for message in page.messages] == ["$answer"]
@@ -665,13 +754,13 @@ class TestEchoOrdering:
         """A gap-recovered echo still lands before the live message that follows."""
         recovered = bot_event("$answer", "the answer", ts=3_100)
         await alice.admit(
-            inbound_event(ROOM, recovered, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, recovered, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, recovered, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, recovered, EventKind.MESSAGE, self_sender=BOT),
         )
         live = text_event("$follow_up", "and then?", ts=3_200)
         await alice.admit(
-            inbound_event(ROOM, live, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, live, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, live, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, live, EventKind.MESSAGE, self_sender=BOT),
         )
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
@@ -697,9 +786,16 @@ class TestStreamingProgressIsTransport:
     """
 
     @staticmethod
-    async def _admit_live(ingress: JournalIngress, *events: nio.Event) -> None:
+    async def _admit_live(store: PrincipalStore, *events: nio.Event) -> None:
         for event in events:
-            await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
+            views = ingestion_timeline_views(
+                room_id=ROOM,
+                source=event.source,
+                self_sender=BOT,
+                provenance=nio.TimelineEventProvenance.LIVE,
+            )
+            assert views is not None
+            await store.admit(*views)
 
     @staticmethod
     async def _one_visible(store: PrincipalStore) -> VisibleMessage:
@@ -714,10 +810,8 @@ class TestStreamingProgressIsTransport:
         status: str,
     ) -> None:
         """A self-authored in-flight revision must not move the visible row."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event("$progress", "half an ans", status, replaces=PLACEHOLDER_ID, ts=1_100),
         )
@@ -739,7 +833,6 @@ class TestStreamingProgressIsTransport:
         one. The prompt then differed by nothing but whether the bot had
         restarted, which is the divergence the projection exists to remove.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
         summary = nio.Event.parse_event(
             {
                 "event_id": "$summary",
@@ -755,7 +848,7 @@ class TestStreamingProgressIsTransport:
         )
         assert isinstance(summary, nio.Event)
 
-        await self._admit_live(ingress, summary)
+        await self._admit_live(alice, summary)
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [message.logical_event_id for message in page.messages] == ["$summary"]
@@ -774,7 +867,6 @@ class TestStreamingProgressIsTransport:
         any member can set, so if it could promote a notice to work, decorating
         one would be a way to make the bot answer something it should not.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
         foreign = nio.Event.parse_event(
             {
                 "event_id": "$theirs",
@@ -790,9 +882,9 @@ class TestStreamingProgressIsTransport:
         )
         assert isinstance(foreign, nio.Event)
 
-        await self._admit_live(ingress, foreign)
+        await self._admit_live(alice, foreign)
 
-        assert ingress._admission_kind(foreign) is EventKind.MESSAGE
+        assert _event_kind(foreign) is EventKind.MESSAGE
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert [message.logical_event_id for message in page.messages] == ["$theirs"]
         # Admitted, projected, and never work.
@@ -810,10 +902,8 @@ class TestStreamingProgressIsTransport:
         terminal edit had no original, parked in `unresolved_edits`, and the
         conversation this projection exists to serve never saw the answer.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event(
                 "$progress",
@@ -851,10 +941,8 @@ class TestStreamingProgressIsTransport:
         replays from. Dropping the event instead of only its projection would
         make nio's redelivery of it look like something new.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event(
                 "$progress",
@@ -883,9 +971,7 @@ class TestStreamingProgressIsTransport:
         terminal edit with no logical message to revise, and the answer would
         never become visible at all.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        await self._admit_live(ingress, placeholder_event())
+        await self._admit_live(alice, placeholder_event())
 
         visible = await self._one_visible(alice)
         assert visible.logical_event_id == PLACEHOLDER_ID
@@ -913,10 +999,8 @@ class TestStreamingProgressIsTransport:
         to resume a partial reply, so a rule that kept only ``completed`` would
         strand an interrupted answer on its placeholder.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event("$progress", "half an ans", STREAM_STATUS_STREAMING, replaces=PLACEHOLDER_ID, ts=1_100),
             stream_event("$terminal", "the whole answer", status, replaces=PLACEHOLDER_ID, ts=1_200),
@@ -939,10 +1023,8 @@ class TestStreamingProgressIsTransport:
         revisions are transport, so a user's edit reduces whatever it says —
         otherwise a correction could be suppressed by spelling it right.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             text_event("$ask", "frist question", ts=1_000),
             stream_event("$fix", "first question", status, sender=ALICE, replaces="$ask", ts=1_100),
         )
@@ -962,7 +1044,6 @@ class TestStreamingProgressIsTransport:
         terminal status, and that echo reduces like any other terminal edit —
         which is what makes skipping progress safe rather than lossy.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
         progress = [
             stream_event(
                 f"$progress{index}",
@@ -974,14 +1055,14 @@ class TestStreamingProgressIsTransport:
             for index in range(1, 6)
         ]
 
-        await self._admit_live(ingress, placeholder_event(), *progress)
+        await self._admit_live(alice, placeholder_event(), *progress)
 
         crashed = await self._one_visible(alice)
         assert crashed.content["body"] == PLACEHOLDER_BODY
         assert crashed.revision_event_id == PLACEHOLDER_ID
 
         await self._admit_live(
-            ingress,
+            alice,
             stream_event(
                 "$cleanup",
                 "partial 5 [interrupted]",
@@ -1016,10 +1097,8 @@ class TestStreamingProgressIsTransport:
         decision belonged all along, rather than resting on a
         notification-semantics choice made on the delivery side.
         """
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
         await self._admit_live(
-            ingress,
+            alice,
             placeholder_event(),
             stream_event(
                 "$notice",
@@ -1042,8 +1121,8 @@ class TestReplayFidelity:
         """A message replays as itself."""
         original = text_event("$m", "hello")
         await alice.admit(
-            inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
         )
 
         stored = (await alice.pending())[0]
@@ -1066,8 +1145,8 @@ class TestReplayFidelity:
         original.session_id = "session"
 
         await alice.admit(
-            inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, original, EventKind.MESSAGE, self_sender=BOT),
         )
         replayed = parse_journal_event((await alice.pending())[0])
 
@@ -1089,8 +1168,8 @@ class TestReplayFidelity:
         """
         original = image_event("$img", "diagram.png")
         await alice.admit(
-            inbound_event(ROOM, original, EventKind.MEDIA, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MEDIA, self_sender=BOT),
+            _inbound_event(ROOM, original, EventKind.MEDIA, EventClass.ACTIONABLE),
+            _projected_event(ROOM, original, EventKind.MEDIA, self_sender=BOT),
         )
 
         replayed = parse_journal_event((await alice.pending())[0])
@@ -1105,10 +1184,15 @@ class TestReplayFidelity:
     ) -> None:
         """Without the key material the reference is a file nobody can open."""
         original = image_event("$sealed", "sealed.png", encrypted=True)
-        await alice.admit(
-            inbound_event(ROOM, original, EventKind.MEDIA, EventClass.ACTIONABLE),
-            projected_event(ROOM, original, EventKind.MEDIA, self_sender=BOT),
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=original.source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.RECOVERED,
         )
+        assert views is not None
+        assert views[0].kind is EventKind.MEDIA
+        await alice.admit(*views)
 
         replayed = parse_journal_event((await alice.pending())[0])
 
@@ -1137,8 +1221,8 @@ class TestReplayFidelity:
         for source in sources:
             kind = EventKind.MESSAGE if isinstance(source, nio.RoomMessageText) else EventKind.MEDIA
             await alice.admit(
-                inbound_event(ROOM, source, kind, EventClass.ACTIONABLE),
-                projected_event(ROOM, source, kind, self_sender=BOT),
+                _inbound_event(ROOM, source, kind, EventClass.ACTIONABLE),
+                _projected_event(ROOM, source, kind, self_sender=BOT),
             )
 
         replayed = [parse_journal_event(stored) for stored in await alice.pending()]
@@ -1158,7 +1242,7 @@ class TestReplayFidelity:
         """A corrupt payload is refused not guessed."""
         original = text_event("$m")
         await alice.admit(
-            inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _inbound_event(ROOM, original, EventKind.MESSAGE, EventClass.ACTIONABLE),
             None,
         )
         stored = (await alice.pending())[0]
@@ -1168,302 +1252,19 @@ class TestReplayFidelity:
             parse_journal_event(corrupted)
 
 
-class TestDurableAdmission:
-    """nio hears "accepted" only after the transaction commits."""
-
-    async def test_an_admitted_event_becomes_pending_work(self, alice: PrincipalStore) -> None:
-        """An admitted event becomes pending work."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
-
-        assert [event.event_id for event in await alice.pending()] == ["$m"]
-
-    async def test_cold_history_populates_context_without_work(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Cold history populates context without work."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), text_event("$m", "old"), nio.TimelineEventProvenance.HISTORY)
-
-        assert await alice.pending() == ()
-        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
-        assert [m.content["body"] for m in page.messages] == ["old"]
-
-    async def test_a_failed_admission_refuses_the_callback(self) -> None:
-        """Refusing is what keeps the event for redelivery instead of losing it."""
-
-        class Failing:
-            principal_id = "agent@alice"
-
-            async def admit(self, *_args: object, **_kwargs: object) -> None:
-                msg = "disk is full"
-                raise RuntimeError(msg)
-
-        ingress = JournalIngress(store=Failing(), self_sender=BOT)  # type: ignore[arg-type]
-
-        with pytest.raises(nio.CallbackNotAcceptedError):
-            await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
-
-    async def test_a_pending_delivery_projection_schedules_recovery_before_refusing(self) -> None:
-        """The outbox must be woken before nio retries the blocked source."""
-
-        class ProjectionPending:
-            principal_id = "agent@alice"
-
-            async def admit(self, *_args: object, **_kwargs: object) -> None:
-                msg = "projection pending"
-                raise DeliveryProjectionPendingError(msg)
-
-        recovery_requests = 0
-
-        def schedule_recovery() -> None:
-            nonlocal recovery_requests
-            recovery_requests += 1
-
-        ingress = JournalIngress(
-            store=ProjectionPending(),  # type: ignore[arg-type]
-            self_sender=BOT,
-            on_delivery_recovery_needed=schedule_recovery,
-        )
-
-        with pytest.raises(nio.CallbackNotAcceptedError):
-            await ingress._admit(room(), text_event("$m", "1"), nio.TimelineEventProvenance.LIVE)
-
-        assert recovery_requests == 1
-
-    async def test_redelivery_after_a_crash_creates_one_turn(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Nio redelivers what it was never told was accepted."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-        event = text_event("$m")
-
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
-
-        assert [journal.event_id for journal in await alice.pending()] == ["$m"]
-
-    async def test_a_settled_event_redelivered_is_not_kept_for_a_run_that_cannot_come(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Held parsed events are released by the run that uses them, and nothing else.
-
-        An event whose work is already settled is never handed to the worker
-        again, so nothing releases a parsed object kept for it. A checkpoint
-        replayed from further back redelivers a whole window of them, and every
-        distinct one stays held for the life of the process.
-        """
-        event = text_event("$m")
-        await alice.admit(
-            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
-        )
-        await alice.settle(event.event_id)
-        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
-
-        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
-
-        assert dispatcher._live_events == {}
-
-    async def test_a_live_event_is_kept_for_the_run_it_still_owes(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Replaying from the payload instead would discard nio's decryption state."""
-        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
-        event = text_event("$m")
-
-        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
-
-        assert set(dispatcher._live_events) == {"$m"}
-
-    async def test_an_event_the_fence_settled_before_its_run_is_not_kept_forever(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A row can stop being pending with no run, and the run is the only release.
-
-        A message and the departure that fences its room arrive in one sync
-        response. The fence settles the turn-backed work it has just made
-        unanswerable, so the worker is never handed that event -- and the
-        parsed object kept for the run it was going to get stays held for the
-        life of the process, message text and all.
-        """
-        dispatcher = TestOutOfBandDispatch._dispatcher(alice, cast("Any", _noop_callback))
-        event = text_event("$m")
-        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
-
-        await alice.fence_departure(ROOM, source=DepartureSource.REPORTED)
-        assert await alice.pending() == (), "the fence settled the work it made unanswerable"
-
-        await dispatcher.drain_once()
-
-        assert dispatcher._live_events == {}
-
-    async def test_an_unowned_event_is_neither_admitted_nor_rejected(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """An unowned event is neither admitted nor rejected."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-        topic = nio.Event.parse_event(
-            {
-                "event_id": "$topic",
-                "sender": ALICE,
-                "origin_server_ts": 1,
-                "type": "m.room.topic",
-                "state_key": "",
-                "content": {"topic": "hi"},
-            },
-        )
-        assert isinstance(topic, nio.Event)
-
-        await ingress._admit(room(), topic, nio.TimelineEventProvenance.LIVE)
-
-        assert await alice.pending() == ()
-
-
-class TestRoomActivity:
-    """Admission tells a consumer which rooms changed, and nothing more."""
-
-    async def test_conversation_events_report_their_room_once_each(self, alice: PrincipalStore) -> None:
-        """Messages, echoes, and redactions each name their room, whatever their class."""
-        seen: list[str] = []
-        ingress = JournalIngress(store=alice, self_sender=BOT, on_room_activity=seen.append)
-
-        await ingress._admit(room(), text_event("$hello"), nio.TimelineEventProvenance.LIVE)
-        await ingress._admit(room(), bot_event("$answer"), nio.TimelineEventProvenance.HISTORY)
-        await ingress._admit(room(), redaction_event("$gone", "$hello"), nio.TimelineEventProvenance.LIVE)
-
-        assert seen == [ROOM, ROOM, ROOM]
-
-    @pytest.mark.parametrize("provenance", list(nio.TimelineEventProvenance))
-    async def test_membership_changes_report_their_room_unless_cold_history(
-        self,
-        alice: PrincipalStore,
-        provenance: nio.TimelineEventProvenance,
-    ) -> None:
-        """Every current provenance announces a membership change, admitted or not; cold history never does.
-
-        Only the router admits other people's membership, so an agent alone in
-        an invited room relies on this to learn that a reader left.
-        """
-        seen: list[str] = []
-        ingress = JournalIngress(store=alice, self_sender=BOT, on_room_activity=seen.append)
-
-        await ingress._admit(room(), member_event("$member"), provenance)
-
-        assert seen == ([] if provenance is nio.TimelineEventProvenance.HISTORY else [ROOM])
-        assert not await alice.pending()
-
-    async def test_reactions_and_redelivered_events_stay_silent(self, alice: PrincipalStore) -> None:
-        """A reaction is not conversation, and a redelivered event changed nothing."""
-        seen: list[str] = []
-        ingress = JournalIngress(store=alice, self_sender=BOT, on_room_activity=seen.append)
-
-        await ingress._admit(room(), reaction_event("$react"), nio.TimelineEventProvenance.LIVE)
-        await ingress._admit(room(), text_event("$hello"), nio.TimelineEventProvenance.LIVE)
-        await ingress._admit(room(), text_event("$hello"), nio.TimelineEventProvenance.LIVE)
-
-        assert seen == [ROOM]
-
-
-class TestScheduleTriggerAdmission:
-    """Only the exact silent schedule event becomes durable turn work."""
-
-    @pytest.mark.parametrize(
-        "provenance",
-        [nio.TimelineEventProvenance.LIVE, nio.TimelineEventProvenance.RECOVERED],
-    )
-    async def test_schedule_trigger_is_admitted_as_actionable_turn_work(
-        self,
-        alice: PrincipalStore,
-        provenance: nio.TimelineEventProvenance,
-    ) -> None:
-        """Removing the custom predicate must drop a trigger instead of starting a turn."""
-        ingress = JournalIngress(
-            store=alice,
-            self_sender=BOT,
-            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
-        )
-        event = schedule_trigger_event(f"$schedule-{provenance.value}")
-
-        await ingress._admit(room(), event, provenance)
-
-        stored = await alice.load_event(event.event_id)
-        assert stored is not None
-        assert stored.kind.value == "schedule_trigger"
-        assert await alice.is_pending(event.event_id)
-
-    async def test_unmanaged_schedule_trigger_is_not_admitted(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """An invisible custom event from a room user must not become durable work."""
-        ingress = JournalIngress(
-            store=alice,
-            self_sender=BOT,
-            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
-        )
-        event = schedule_trigger_event("$schedule-unmanaged", sender=ALICE)
-
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
-
-        assert await alice.load_event(event.event_id) is None
-
-    async def test_schedule_trigger_from_cold_history_settles_without_a_callback(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Treating cold history as actionable would answer a schedule from the past."""
-        admitted_for_callback: list[str] = []
-        ingress = JournalIngress(
-            store=alice,
-            self_sender=BOT,
-            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
-            on_event_admitted=lambda _room, event: admitted_for_callback.append(event.event_id),
-        )
-        event = schedule_trigger_event("$schedule-history")
-
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.HISTORY)
-
-        stored = await alice.load_event(event.event_id)
-        assert stored is not None
-        assert stored.kind.value == "schedule_trigger"
-        assert not await alice.is_pending(event.event_id)
-        assert admitted_for_callback == []
-
-    async def test_schedule_trigger_admission_does_not_claim_unrelated_unknown_events(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Broadening the predicate would turn arbitrary custom events into prompts."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-        event = schedule_trigger_event("$unrelated", event_type="com.example.unrelated")
-
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.LIVE)
-
-        assert await alice.load_event(event.event_id) is None
-
-
 class TestPendingEventWorker:
     """Execution order, failure isolation, and crash behavior."""
 
     @staticmethod
     async def _admit(store: PrincipalStore, event: nio.Event, room_id: str = ROOM) -> None:
         await store.admit(
-            inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
     @staticmethod
     async def _admit_reaction(store: PrincipalStore, event: nio.Event) -> None:
-        await store.admit(inbound_event(ROOM, event, EventKind.REACTION, EventClass.ACTIONABLE))
+        await store.admit(_inbound_event(ROOM, event, EventKind.REACTION, EventClass.ACTIONABLE))
 
     async def test_a_rooms_events_run_in_receipt_order(self, alice: PrincipalStore) -> None:
         """A rooms events run in receipt order."""
@@ -2020,12 +1821,11 @@ class TestPendingEventWorker:
             deferral_is_live=lambda _event: owner_alive,
         )
 
-        # `$early` is claimed by a caller running it itself, so only `$late`
-        # reaches a lane and defers to an owner that then dies.
-        with worker.sole_handler("$early"):
-            await worker.drain_once()
-        assert handled == ["$late"]
-        handled.clear()
+        # Seed a later deferred source, then reclaim it alongside the earlier
+        # pending row. The lane must merge both in receipt order.
+        late = await alice.load_event("$late")
+        assert late is not None
+        worker._deferred["$late"] = late
 
         owner_alive = False
         await worker.drain_once()
@@ -2112,7 +1912,6 @@ class TestOutOfBandDispatch:
 
         return JournalDispatcher(
             store=store,
-            self_sender=BOT,
             callbacks=JournalCallbacks(
                 on_message=cast("Any", noop),
                 on_media=cast("Any", noop),
@@ -2120,7 +1919,6 @@ class TestOutOfBandDispatch:
                 on_approval=cast("Any", noop),
                 on_room_lifecycle=on_room_lifecycle,
                 on_redaction=cast("Any", noop),
-                on_decryption_failure=cast("Any", noop),
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
@@ -2128,20 +1926,8 @@ class TestOutOfBandDispatch:
             room_for_id=lambda _room_id: room(),
         )
 
-    async def test_admit_and_run_is_the_events_only_handler(self, alice: PrincipalStore) -> None:
-        """Running an event inline does not exempt it from having one handler.
-
-        ``admit_and_run`` wakes the pump and then awaits twice -- a load and a
-        pending check -- before it reaches the callback. The pump has no
-        in-flight filter, because an event stays pending for the whole time its
-        handler runs, so a scan inside that window collects the very event the
-        caller is already running and dispatches it into the room's lane.
-
-        The count matters as much as the concurrency. Asserting only that
-        nothing raised would pass with the bug present: a room-lifecycle
-        callback claims no semantic consumer, so the second handler runs to
-        completion and settles a row the first one is about to settle again.
-        """
+    async def test_concurrent_drains_keep_one_handler(self, alice: PrincipalStore) -> None:
+        """Concurrent pump and explicit drains must share one room lane."""
         handled: list[str] = []
         concurrent = 0
         peak_concurrent = 0
@@ -2165,10 +1951,15 @@ class TestOutOfBandDispatch:
                 concurrent -= 1
 
         dispatcher = self._dispatcher(alice, on_room_lifecycle)
-        dispatcher.start()
-        running = asyncio.create_task(
-            dispatcher.admit_and_run(room(), member_event("$join"), EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE),
+        await admit_dispatch_event(
+            dispatcher,
+            room(),
+            member_event("$join"),
+            EventKind.ROOM_LIFECYCLE,
+            EventClass.ACTIONABLE,
         )
+        running = asyncio.create_task(dispatcher.drain_once())
+        dispatcher.start()
         await asyncio.wait_for(inside_handler.wait(), timeout=5)
         with contextlib.suppress(TimeoutError):
             # A second handler has to wake the pump, read a page of pending
@@ -2202,7 +1993,6 @@ class TestDeferralOwnership:
 
         return JournalDispatcher(
             store=store,
-            self_sender=BOT,
             callbacks=JournalCallbacks(
                 on_message=cast("Any", noop),
                 on_media=cast("Any", noop),
@@ -2210,7 +2000,6 @@ class TestDeferralOwnership:
                 on_approval=cast("Any", noop),
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
-                on_decryption_failure=cast("Any", noop),
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda _event_id: turn_claimed,
@@ -2222,8 +2011,8 @@ class TestDeferralOwnership:
     async def _admitted(store: PrincipalStore, event: nio.Event, kind: EventKind) -> JournalEvent:
         """Admit one event and return the journal row the worker would see."""
         await store.admit(
-            inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, kind, self_sender=BOT),
+            _inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, kind, self_sender=BOT),
         )
         return next(item for item in await store.pending() if item.event_id == event.event_id)
 
@@ -2317,71 +2106,6 @@ class TestDeferralOwnership:
         assert dispatcher._deferral_is_live(message) is False
 
 
-class TestUnsettledLifecycleIdentities:
-    """The set a join-hook suppressor trusts has to be all of them."""
-
-    @staticmethod
-    def _dispatcher(store: PrincipalStore) -> JournalDispatcher:
-        async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
-            return None
-
-        return JournalDispatcher(
-            store=store,
-            self_sender=BOT,
-            callbacks=JournalCallbacks(
-                on_message=cast("Any", noop),
-                on_media=cast("Any", noop),
-                on_reaction=cast("Any", noop),
-                on_approval=cast("Any", noop),
-                on_room_lifecycle=cast("Any", noop),
-                on_redaction=cast("Any", noop),
-                on_decryption_failure=cast("Any", noop),
-                on_approval_continuation=AsyncMock(return_value=None),
-                source_has_live_owner=lambda _event_id: False,
-                turn_has_live_claim=lambda _event_id: False,
-            ),
-            room_for_id=lambda _room_id: room(),
-        )
-
-    async def test_every_unsettled_identity_is_returned_past_one_page(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """One page short is one join hook that never runs.
-
-        The caller records every join this set does not cover as already seen,
-        so an identity missing because the read filled up is not merely late:
-        nothing asks about it again.
-        """
-        count = _LIFECYCLE_PAGE_SIZE + 1
-        for index in range(count):
-            member = member_event(f"$join{index:04d}", user_id=f"@user{index:04d}:example.org")
-            await alice.admit(inbound_event(ROOM, member, EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE))
-
-        members = await self._dispatcher(alice).unsettled_room_lifecycle_member_ids()
-
-        assert len(members) == count
-        assert (ROOM, f"@user{count - 1:04d}:example.org") in members
-
-    async def test_an_identity_it_could_not_read_is_not_reported_as_absent(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A walk that steps over a row it cannot read finishes looking complete.
-
-        Which is worse than stopping short, because the caller writes off every
-        identity the set does not name. The hook owed to the member behind that
-        row then never runs, and nothing asks about it again.
-        """
-        for index in range(3):
-            member = member_event(f"$join{index}", user_id=f"@user{index}:example.org")
-            await alice.admit(inbound_event(ROOM, member, EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE))
-        await corrupt(alice, "$join1")
-
-        with pytest.raises(JournalCorruptionError, match="could not be read"):
-            await self._dispatcher(alice).unsettled_room_lifecycle_member_ids()
-
-
 async def _never_called(event: JournalEvent) -> bool:
     """Fail loudly, for a worker whose scan is under test rather than its lanes."""
     msg = f"no handler should have run for {event.event_id}"
@@ -2394,8 +2118,8 @@ class TestABoundedScanIsFair:
     @staticmethod
     async def _admit(store: PrincipalStore, event: nio.Event, room_id: str) -> None:
         await store.admit(
-            inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
     @classmethod
@@ -2410,7 +2134,7 @@ class TestABoundedScanIsFair:
             # Unprojected: nothing will ever read these rows as conversation,
             # and a page of this size is expensive enough to build already.
             await store.admit(
-                inbound_event(
+                _inbound_event(
                     ROOM,
                     text_event(f"$corrupt{index:04d}", ts=1_000 + index),
                     EventKind.MESSAGE,
@@ -2664,36 +2388,6 @@ class TestABoundedScanIsFair:
 
         assert [event.event_id for event in by_room[ROOM]] == ["$e0", "$e1"]
 
-    async def test_an_object_handed_over_mid_pass_is_not_read_as_unreachable(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Absent from a scan already past its row is not the same as not pending.
-
-        Releasing on that reading would take back the parsed object for an
-        event admitted moments ago, and the run it then gets replays from the
-        stored payload -- as a recovery would, with nio's decryption state
-        thrown away and a live turn treated as a replayed one.
-        """
-        retained = {"$before"}
-
-        def snapshot() -> frozenset[str]:
-            taken = frozenset(retained)
-            # Admitted while the pass was already underway.
-            retained.add("$during")
-            return taken
-
-        worker = PendingEventWorker(
-            store=alice,
-            handle=_never_called,
-            retained_event_ids=snapshot,
-            release_retained=retained.difference_update,
-        )
-
-        await worker._collect_dispatchable()
-
-        assert retained == {"$during"}
-
 
 class TestADrainSeesTheWholeBacklog:
     """A drain loops until nothing moves, so every pass has to see the same set."""
@@ -2701,8 +2395,8 @@ class TestADrainSeesTheWholeBacklog:
     @staticmethod
     async def _admit(store: PrincipalStore, event: nio.Event, room_id: str) -> None:
         await store.admit(
-            inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(room_id, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
     async def test_a_backlog_of_failures_larger_than_one_pass_still_returns(
@@ -2803,8 +2497,8 @@ class TestStoreFailuresBelongToTheLane:
     @staticmethod
     async def _admit(store: PrincipalStore, event: nio.Event) -> None:
         await store.admit(
-            inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+            _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
 
     async def test_a_read_that_fails_before_the_handler_is_retried(
@@ -2885,7 +2579,6 @@ class TestRecoveryDoesNotReenterALiveTurn:
 
         return JournalDispatcher(
             store=store,
-            self_sender=BOT,
             callbacks=JournalCallbacks(
                 on_message=cast("Any", on_turn),
                 on_media=cast("Any", on_turn),
@@ -2893,7 +2586,6 @@ class TestRecoveryDoesNotReenterALiveTurn:
                 on_approval=cast("Any", noop),
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
-                on_decryption_failure=cast("Any", noop),
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: gate_owns,
                 turn_has_live_claim=lambda event_id: event_id in live_claims,
@@ -2904,8 +2596,8 @@ class TestRecoveryDoesNotReenterALiveTurn:
     @staticmethod
     async def _admit(store: PrincipalStore, event: nio.Event, kind: EventKind = EventKind.MESSAGE) -> None:
         await store.admit(
-            inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
-            projected_event(ROOM, event, kind, self_sender=BOT),
+            _inbound_event(ROOM, event, kind, EventClass.ACTIONABLE),
+            _projected_event(ROOM, event, kind, self_sender=BOT),
         )
 
     @pytest.mark.parametrize(
@@ -3048,80 +2740,6 @@ def member_event(event_id: str, *, user_id: str = ALICE) -> nio.RoomMemberEvent:
     return event
 
 
-class TestTimelineMemberProvenance:
-    """A consumer that runs after the timeline still gets nio's verdict."""
-
-    @pytest.mark.parametrize(
-        ("provenance", "expected"),
-        [
-            (nio.TimelineEventProvenance.LIVE, EventClass.ACTIONABLE),
-            (nio.TimelineEventProvenance.RECOVERED, EventClass.ACTIONABLE),
-            (nio.TimelineEventProvenance.HISTORY, EventClass.CONTEXT_ONLY),
-        ],
-    )
-    async def test_a_declined_member_event_still_states_its_class(
-        self,
-        alice: PrincipalStore,
-        provenance: nio.TimelineEventProvenance,
-        expected: EventClass,
-    ) -> None:
-        """Declining to admit is exactly when a later consumer needs the verdict."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-        event = member_event("$join")
-
-        await ingress._admit(room(), event, provenance)
-
-        assert ingress._admission_kind(event) is None
-        assert ingress.timeline_member_event_class(event) is expected
-
-    async def test_an_event_nio_never_offered_has_no_class(self, alice: PrincipalStore) -> None:
-        """Nio skips admission for an event it accepted earlier, and silence is the answer."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        assert ingress.timeline_member_event_class(member_event("$join")) is None
-
-    async def test_only_member_events_are_recorded(self, alice: PrincipalStore) -> None:
-        """Nothing else has a consumer that runs later, so nothing else is kept."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-
-        await ingress._admit(room(), text_event("$m"), nio.TimelineEventProvenance.LIVE)
-
-        assert ingress.timeline_member_provenance.get("$m") is None
-
-    async def test_clearing_forgets_the_response_that_produced_it(self, alice: PrincipalStore) -> None:
-        """The verdict is about one delivery, so it cannot answer for the next."""
-        ingress = JournalIngress(store=alice, self_sender=BOT)
-        event = member_event("$join")
-        await ingress._admit(room(), event, nio.TimelineEventProvenance.RECOVERED)
-
-        ingress.timeline_member_provenance.clear()
-
-        assert ingress.timeline_member_event_class(event) is None
-
-
-class TestLiveRoomMembershipTransitions:
-    """Only durably admitted live membership deltas may update authorization state."""
-
-    async def test_live_transition_runs_but_recovered_and_history_do_not(self, alice: PrincipalStore) -> None:
-        """Replayed lifecycle rows must not regress a newer authoritative snapshot."""
-        on_live_transition = AsyncMock()
-        ingress = JournalIngress(
-            store=alice,
-            self_sender=BOT,
-            room_lifecycle_enabled=lambda: True,
-            on_live_room_membership_transition=on_live_transition,
-        )
-        live = member_event("$live")
-        recovered = member_event("$recovered")
-        history = member_event("$history")
-
-        await ingress._admit(room(), live, nio.TimelineEventProvenance.LIVE)
-        await ingress._admit(room(), recovered, nio.TimelineEventProvenance.RECOVERED)
-        await ingress._admit(room(), history, nio.TimelineEventProvenance.HISTORY)
-
-        on_live_transition.assert_awaited_once_with(ROOM, live)
-
-
 def message_event(
     event_id: str,
     msgtype: str,
@@ -3160,25 +2778,6 @@ _ROOM_MESSAGE_MSGTYPES = [
 ]
 
 
-class _AdmissionClient:
-    """The one nio surface ``JournalDispatcher.register`` uses.
-
-    Registering rather than reaching for the dispatcher's private ingress is
-    what makes these tests exercise the real admission callback: the same
-    function nio calls, with the provenance nio supplies.
-    """
-
-    def __init__(self) -> None:
-        self.admit: Callable[[nio.MatrixRoom, nio.Event, nio.TimelineEventProvenance], Awaitable[None]] | None = None
-
-    def add_event_admission_callback(
-        self,
-        callback: Callable[[nio.MatrixRoom, nio.Event, nio.TimelineEventProvenance], Awaitable[None]],
-    ) -> None:
-        """Capture the callback the dispatcher installs."""
-        self.admit = callback
-
-
 @dataclass(frozen=True)
 class _Delivery:
     """What one admitted event owed, and what actually ran for it."""
@@ -3210,7 +2809,6 @@ class TestAdmittedWorkReachesItsCallback:
 
         return JournalDispatcher(
             store=store,
-            self_sender=BOT,
             callbacks=JournalCallbacks(
                 on_message=cast("Any", on_message),
                 on_media=cast("Any", noop),
@@ -3218,7 +2816,6 @@ class TestAdmittedWorkReachesItsCallback:
                 on_approval=cast("Any", noop),
                 on_room_lifecycle=cast("Any", noop),
                 on_redaction=cast("Any", noop),
-                on_decryption_failure=cast("Any", noop),
                 on_approval_continuation=AsyncMock(return_value=None),
                 source_has_live_owner=lambda _event_id: False,
                 turn_has_live_claim=lambda _event_id: False,
@@ -3241,10 +2838,15 @@ class TestAdmittedWorkReachesItsCallback:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
         dispatcher = self._dispatcher(store, on_message)
-        client = _AdmissionClient()
-        dispatcher.register(cast("nio.AsyncClient", client))
-        assert client.admit is not None
-        await client.admit(room(), event, provenance)
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=provenance,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )
+        if views is not None:
+            await store.admit(*views)
         # Read before draining: "was this committed as work?" and "did anything
         # run for it?" are different questions, and a context-only event has to
         # answer no to both. Work that is committed and then refused by the
@@ -3397,12 +2999,12 @@ class TestAdmittedWorkReachesItsCallback:
         with no line anywhere saying a message had been discarded.
         """
         dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
-        await dispatcher.admit_out_of_band(
+        await admit_dispatch_event(
+            dispatcher,
             room(),
             reaction_event("$mislabelled"),
             EventKind.MESSAGE,
             EventClass.ACTIONABLE,
-            live=False,
         )
 
         with capture_logs() as logs:
@@ -3414,6 +3016,70 @@ class TestAdmittedWorkReachesItsCallback:
         assert mismatches[0]["payload_type"] == "ReactionEvent"
         assert await alice.unsettled_event_ids() == frozenset()
 
+    async def test_live_call_event_reaches_its_durable_callback(self, alice: PrincipalStore) -> None:
+        """A supported call event stays pending until its callback completes."""
+        handled: list[nio.UnknownEvent] = []
+
+        async def on_call_event(_room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+            handled.append(event)
+
+        dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
+        dispatcher.callbacks = replace(
+            dispatcher.callbacks,
+            on_rtc=on_call_event,
+        )
+        source = {
+            "event_id": "$call",
+            "sender": ALICE,
+            "origin_server_ts": 1,
+            "type": CALL_MEMBER_EVENT_TYPE,
+            "state_key": "_call",
+            "content": {},
+        }
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+        assert views is not None
+        await alice.admit(*views)
+
+        await dispatcher.drain_once()
+
+        assert [event.event_id for event in handled] == ["$call"]
+        assert not await alice.is_pending("$call")
+
+    async def test_failed_call_callback_replays_from_durable_work(self, alice: PrincipalStore) -> None:
+        """A callback failure keeps the RTC event pending for a later pass."""
+        failure = RuntimeError("call reconciliation failed")
+        on_rtc = AsyncMock(side_effect=[failure, None])
+        dispatcher = self._dispatcher(alice, cast("Any", _noop_callback))
+        dispatcher.callbacks = replace(dispatcher.callbacks, on_rtc=on_rtc)
+        source = {
+            "event_id": "$call-retry",
+            "sender": ALICE,
+            "origin_server_ts": 1,
+            "type": CALL_MEMBER_EVENT_TYPE,
+            "state_key": "_call",
+            "content": {},
+        }
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+        assert views is not None
+        await alice.admit(*views)
+
+        await dispatcher.drain_once()
+        assert await alice.is_pending("$call-retry")
+
+        await dispatcher.drain_once()
+        assert on_rtc.await_count == 2
+        assert not await alice.is_pending("$call-retry")
+
 
 class TestScheduleTriggerDispatch:
     """Silent schedule work uses the ordinary formatted-message turn path."""
@@ -3424,6 +3090,20 @@ class TestScheduleTriggerDispatch:
         on_message: Callable[[nio.MatrixRoom, nio.Event], Awaitable[TurnDispatchOutcome]],
     ) -> JournalDispatcher:
         return TestAdmittedWorkReachesItsCallback._dispatcher(store, on_message)
+
+    @staticmethod
+    async def _admit(
+        store: PrincipalStore,
+        event: nio.Event,
+        *,
+        event_class: EventClass = EventClass.ACTIONABLE,
+        kind: EventKind = EventKind.SCHEDULE_TRIGGER,
+    ) -> None:
+        """Store one already-classified event for dispatcher-focused tests."""
+        await store.admit(
+            _inbound_event(ROOM, event, kind, event_class),
+            _projected_event(ROOM, event, kind, self_sender=BOT),
+        )
 
     async def test_schedule_trigger_dispatch_preserves_the_admitted_event(
         self,
@@ -3452,7 +3132,8 @@ class TestScheduleTriggerDispatch:
         event.session_id = "session-id"
         dispatcher = self._dispatcher(alice, on_message)
 
-        await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
 
         assert len(handled) == 1
         delivered = handled[0]
@@ -3483,15 +3164,7 @@ class TestScheduleTriggerDispatch:
             "$schedule-replay",
             extra_content={SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND},
         )
-        await JournalIngress(
-            store=alice,
-            self_sender=BOT,
-            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
-        )._admit(
-            room(),
-            event,
-            nio.TimelineEventProvenance.LIVE,
-        )
+        await self._admit(alice, event)
         handled: list[nio.Event] = []
 
         async def on_message(_room: nio.MatrixRoom, message: nio.Event) -> TurnDispatchOutcome:
@@ -3517,15 +3190,7 @@ class TestScheduleTriggerDispatch:
             " \n\t",
             extra_content={SOURCE_KIND_KEY: SILENT_SCHEDULE_SOURCE_KIND},
         )
-        await JournalIngress(
-            store=alice,
-            self_sender=BOT,
-            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
-        )._admit(
-            room(),
-            event,
-            nio.TimelineEventProvenance.LIVE,
-        )
+        await self._admit(alice, event)
         on_message = AsyncMock(return_value=TurnDispatchOutcome.INTENTIONALLY_IGNORED)
         dispatcher = self._dispatcher(alice, cast("Any", on_message))
 
@@ -3543,7 +3208,15 @@ class TestScheduleTriggerDispatch:
         dispatcher = self._dispatcher(alice, cast("Any", on_message))
         event = schedule_trigger_event("$schedule-human", sender=ALICE)
 
-        await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=event.source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+            schedule_trigger_sender_is_managed=lambda sender: sender == BOT,
+        )
+        assert views is None
+        await dispatcher.drain_once()
 
         on_message.assert_not_awaited()
         assert not await alice.is_pending(event.event_id)
@@ -3560,7 +3233,8 @@ class TestScheduleTriggerDispatch:
             extra_content={SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND},
         )
 
-        await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
 
         on_message.assert_not_awaited()
         assert not await alice.is_pending(event.event_id)
@@ -3574,7 +3248,8 @@ class TestScheduleTriggerDispatch:
         dispatcher = self._dispatcher(alice, cast("Any", on_message))
         event = schedule_trigger_event("$schedule-deferred")
 
-        await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+        await self._admit(alice, event)
+        await dispatcher.drain_once()
 
         on_message.assert_awaited_once()
         delivered = on_message.await_args.args[1]
@@ -3590,7 +3265,7 @@ class TestScheduleTriggerDispatch:
         dispatcher = self._dispatcher(alice, cast("Any", on_message))
         event = schedule_trigger_event("$schedule-cold")
 
-        await dispatcher._ingress._admit(room(), event, nio.TimelineEventProvenance.HISTORY)
+        await self._admit(alice, event, event_class=EventClass.CONTEXT_ONLY)
         await dispatcher.drain_once()
 
         on_message.assert_not_awaited()
@@ -3608,7 +3283,8 @@ class TestScheduleTriggerDispatch:
         event = schedule_trigger_event("$schedule-malformed", body)
 
         with capture_logs() as logs:
-            await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+            await self._admit(alice, event)
+            await dispatcher.drain_once()
 
         on_message.assert_not_awaited()
         invalid = [entry for entry in logs if entry["event"] == "schedule_trigger_invalid"]
@@ -3630,7 +3306,8 @@ class TestScheduleTriggerDispatch:
         )
 
         with capture_logs() as logs:
-            await dispatcher.admit_and_run(room(), event, EventKind.SCHEDULE_TRIGGER, EventClass.ACTIONABLE)
+            await self._admit(alice, event)
+            await dispatcher.drain_once()
 
         on_message.assert_not_awaited()
         invalid = [entry for entry in logs if entry["event"] == "schedule_trigger_invalid"]

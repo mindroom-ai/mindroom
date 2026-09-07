@@ -10,6 +10,28 @@ from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from uuid import UUID
+
+    from .projection import ProjectedEvent
+
+
+class IngestionConsumerBindingError(RuntimeError):
+    """The durable consumer identity disagrees with a requested binding."""
+
+
+class IngestionBatchValidationError(RuntimeError): ...  # noqa: D101
+
+
+class IngestionBatchIntegrityError(RuntimeError): ...  # noqa: D101
+
+
+class IngestionBatchSequenceError(RuntimeError): ...  # noqa: D101
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionConsumer:  # noqa: D101
+    generation: UUID
+    stream_id: UUID | None
 
 
 DURABLE_DELIVERY_ID_KEY = "io.mindroom.delivery_id"
@@ -18,8 +40,9 @@ DURABLE_DELIVERY_ID_KEY = "io.mindroom.delivery_id"
 class EventClass(StrEnum):
     """Whether an admitted event may start semantic work.
 
-    Derived once, at admission, from nio's per-event provenance. MindRoom never
-    recomputes it from cursors, timestamps, or pagination shapes.
+    Timeline classes come from nio's per-event provenance at admission;
+    membership state snapshots are always context-only. MindRoom never
+    recomputes actionability from cursors, timestamps, or pagination shapes.
     """
 
     ACTIONABLE = "actionable"
@@ -35,8 +58,9 @@ class EventKind(StrEnum):
     REACTION = "reaction"
     APPROVAL = "approval"
     ROOM_LIFECYCLE = "room_lifecycle"
+    RTC = "rtc"
     REDACTION = "redaction"
-    DECRYPTION_FAILURE = "decryption_failure"
+    OPAQUE_HISTORY = "opaque_history"
 
 
 # Kinds whose work outlives its callback, because the callback only starts a
@@ -46,8 +70,8 @@ class EventKind(StrEnum):
 # them, because the journal's own reads need it too: a replay guard asking
 # "is there newer unfinished work here" means work that can still answer, and
 # pending alone does not mean that. Thread membership is derived from content
-# for every kind alike, so a pending reaction, approval, or undecryptable
-# message can sit in a thread and be mistaken for an unanswered turn.
+# for every readable kind alike, so a pending reaction or approval can sit
+# in a thread and be mistaken for an unanswered turn.
 TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER})
 
 
@@ -75,6 +99,33 @@ class AdmissionResult(StrEnum):
     DUPLICATE = "duplicate"
 
 
+class IngestionRecordDisposition(StrEnum):
+    """The one durable application owned by an ingestion record."""
+
+    SEMANTIC_EVENT = "semantic_event"
+    ROOM_LIFECYCLE = "room_lifecycle"
+    HISTORY_LOSS = "history_loss"
+    COMPATIBILITY_ONLY = "compatibility_only"
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionFacts:
+    """Receipt novelty and fresh semantic-dispatch eligibility."""
+
+    receipt_new: bool
+    semantic_event_new: bool
+    record_facts: tuple[AdmissionFacts, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Reject malformed or impossible protocol facts."""
+        if type(self.receipt_new) is not bool or type(self.semantic_event_new) is not bool:
+            msg = "Admission facts must be exact booleans"
+            raise TypeError(msg)
+        if self.semantic_event_new and not self.receipt_new:
+            msg = "A new semantic effect requires a new receipt"
+            raise ValueError(msg)
+
+
 class DeliveryProjectionPendingError(RuntimeError):
     """An interactive source arrived before a visible delivery was projected."""
 
@@ -87,43 +138,27 @@ class DeliveryStage(StrEnum):
 
 
 class DepartureSource(StrEnum):
-    """Which of the two observers of one departure is speaking."""
+    """The producer source of one admitted membership transition."""
 
-    # The bot left the room itself, and knows a sync report of it is coming.
     LOCAL = "local"
-    # A sync response reported a departure, which may be the report a local
-    # departure is owed, or a departure the bot never initiated.
     REPORTED = "reported"
 
 
-class DepartureObservation(StrEnum):
-    """What one observation of a departure did to the room's derived state."""
-
-    FENCED = "fenced"
-    # The sync report a local departure was waiting for. Fencing again would
-    # delete whatever the membership after it has already built.
-    OWED_REPORT_CONSUMED = "owed_report_consumed"
-    # The same departure observed again, by either observer, with no rejoin in
-    # between for a second departure to have happened in.
-    ALREADY_FENCED = "already_fenced"
-    # The same stable Matrix departure observation was replayed after its first
-    # application had already committed.
-    REPEATED_REPORT = "repeated_report"
-
-
 @dataclass(frozen=True, slots=True)
-class DepartureOutcome:
-    """What one durably applied departure observation decided."""
+class RoomMembershipPosition:
+    """A canonical membership and epoch within its journal or producer domain."""
 
-    observation: DepartureObservation
+    membership: str
     membership_epoch: int
-    owed_reports: int
-    reported_run_epoch: int | None = None
 
-    @property
-    def fenced(self) -> bool:
-        """Return whether this observation invalidated the room's derived state."""
-        return self.observation is DepartureObservation.FENCED
+    def __post_init__(self) -> None:
+        """Reject noncanonical membership positions at the typed boundary."""
+        if type(self.membership) is not str or self.membership not in {"join", "leave"}:
+            msg = "membership must be exactly 'join' or 'leave'"
+            raise ValueError(msg)
+        if type(self.membership_epoch) is not int or self.membership_epoch < 0:
+            msg = "membership_epoch must be a nonnegative int"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +177,28 @@ class InboundEvent:
     sender: str
     origin_server_ts: int
     source: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionRecordAdmission:  # noqa: D101
+    disposition: IngestionRecordDisposition
+    source: DepartureSource | None = None
+    room_id: str | None = None
+    previous_membership: str | None = None
+    membership: str | None = None
+    previous_membership_epoch: int | None = None
+    membership_epoch: int | None = None
+    event: InboundEvent | None = None
+    projected: ProjectedEvent | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionBatchAdmission:
+    """Ordered effects from one batch on the principal-bound stream."""
+
+    stream_id: UUID
+    sequence: int
+    records: tuple[IngestionRecordAdmission, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,6 +434,15 @@ class UnreadableMatrixDelivery:
     room_id: str
     created_at_ns: int
     error: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseRecoveryState:
+    """One consistent snapshot of a response's durable ownership or termination."""
+
+    pending_sources: tuple[bool, ...]
+    final_delivery: MatrixDelivery | None
+    sources_settled_by_departure: bool
 
 
 @dataclass(frozen=True, slots=True)

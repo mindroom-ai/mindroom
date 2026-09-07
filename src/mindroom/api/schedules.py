@@ -9,12 +9,11 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.matrix.state import get_room_alias_from_id, resolve_room_aliases, resolve_room_id
-from mindroom.matrix.users import create_agent_user, login_agent_user
+from mindroom.matrix.users import create_agent_http_client
 from mindroom.scheduling import (
     ScheduledTaskReadModel,
     ScheduledTaskRecord,
@@ -28,8 +27,6 @@ from mindroom.scheduling import (
 )
 
 if TYPE_CHECKING:
-    from nio import AsyncClient
-
     from mindroom.config.main import Config
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
@@ -116,18 +113,6 @@ def _cancel_error_status_code(detail: str) -> int:
     return 500
 
 
-async def _get_router_client(runtime_paths: RuntimePaths) -> AsyncClient:
-    """Login the router user and return an authenticated Matrix client."""
-    homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
-    router_user = await create_agent_user(
-        homeserver,
-        ROUTER_AGENT_NAME,
-        "RouterAgent",
-        runtime_paths=runtime_paths,
-    )
-    return await login_agent_user(homeserver, router_user, runtime_paths)
-
-
 @router.get("", response_model=ListSchedulesResponse)
 async def list_schedules(
     request: Request,
@@ -145,7 +130,7 @@ async def list_schedules(
     if not room_ids:
         return ListSchedulesResponse(timezone=runtime_config.timezone, tasks=[])
 
-    client = await _get_router_client(runtime_paths)
+    client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     try:
         tasks: list[ScheduledTaskReadModel] = []
         for resolved_room_id in room_ids:
@@ -175,7 +160,7 @@ async def update_schedule(
     _, runtime_paths = config_lifecycle.read_committed_runtime_config(api_request)
     resolved_room_id = resolve_room_id(request.room_id, runtime_paths=runtime_paths)
 
-    client = await _get_router_client(runtime_paths)
+    client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     try:
         existing_task = await get_scheduled_task(client=client, room_id=resolved_room_id, task_id=task_id)
         if not existing_task:
@@ -217,7 +202,7 @@ async def cancel_schedule(
     runtime_paths = api_runtime_paths(request)
     resolved_room_id = resolve_room_id(room_id, runtime_paths=runtime_paths)
 
-    client = await _get_router_client(runtime_paths)
+    client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     try:
         existing = await get_scheduled_task(client=client, room_id=resolved_room_id, task_id=task_id)
         if not existing:

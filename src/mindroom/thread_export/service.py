@@ -6,15 +6,11 @@ import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from mindroom.constants import runtime_matrix_homeserver
-from mindroom.event_journal_open import bind_event_journal, open_event_journal
 from mindroom.logging_config import get_logger
-from mindroom.matrix.users import login_agent_user
 from mindroom.thread_export.execution import export_threads_for_targets_for_client, retract_room_export
 from mindroom.thread_export.models import (
     ThreadExportAccumulator,
     ThreadExportGroup,
-    ThreadExportGroupFailure,
     ThreadExportRoom,
     ThreadExportSource,
     ThreadExportStats,
@@ -23,12 +19,10 @@ from mindroom.thread_export.models import (
     failure_for_target,
 )
 from mindroom.thread_export.policy import target_accepts_room
-from mindroom.thread_export.projected_history import export_conversation_reader
 from mindroom.thread_export.selection import (
     build_export_groups,
     export_rooms,
     invited_export_rooms,
-    select_export_account,
 )
 from mindroom.thread_export.storage import (
     canonicalize_output_dir,
@@ -37,14 +31,11 @@ from mindroom.thread_export.storage import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from pathlib import Path
-
-    import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.users import AgentMatrixUser
 
 type _UnreadableRooms = Sequence[tuple[Sequence[ThreadExportRoom], str]]
 
@@ -195,16 +186,6 @@ def _validated_targets(
     return tuple(prepared)
 
 
-def _journal_principal_id(user: AgentMatrixUser) -> str:
-    """Return the journal principal one export login reads the projection as.
-
-    The same identity the running bot for that account writes under, built the
-    same way. A different spelling would not fail: it would open an empty
-    projection and export every thread as if the room had no history.
-    """
-    return f"{user.agent_name}@{user.matrix_id.full_id}"
-
-
 async def _run_export_source(
     source: ThreadExportSource,
     *,
@@ -233,6 +214,11 @@ async def _run_export_source(
             targets=tuple(accumulator.target for accumulator in accumulators),
             max_thread_roots=max_thread_roots,
         )
+    except asyncio.CancelledError:
+        # Each export source owns its hydrator, but borrows the client's and
+        # principal's lifetime. Its shielded walks must end with the source.
+        await source.reader.reader.hydrator.cancel_pending()
+        raise
     except Exception as exc:
         await asyncio.to_thread(_record_group_failure, accumulators, source.rooms, f"Export group failed: {exc}")
         return
@@ -326,13 +312,14 @@ async def export_threads_to_sources(
 
 async def export_threads_to_targets_once(
     *,
+    source_provider: Callable[[ThreadExportGroup], ThreadExportSource],
     config: Config,
     runtime_paths: RuntimePaths,
     targets: Sequence[ThreadExportTarget],
     room_filter: str | None = None,
     max_thread_roots: int = 2000,
 ) -> tuple[ThreadExportStats, ...]:
-    """Login with persisted Matrix accounts and export once to every target.
+    """Borrow running Matrix entities and export once to every target.
 
     Rooms come from ``matrix_state.yaml`` plus every entity's persisted invited rooms.
     Invited rooms are exported with the invited entity's own account, because the primary export
@@ -354,7 +341,6 @@ async def export_threads_to_targets_once(
     if not validated_targets:
         return tuple(accumulator.stats() for accumulator in accumulators)
 
-    homeserver = runtime_matrix_homeserver(runtime_paths=runtime_paths)
     state_rooms = export_rooms(runtime_paths, room_filter)
     discovered_invited_groups = invited_export_rooms(
         config,
@@ -364,80 +350,39 @@ async def export_threads_to_targets_once(
     )
     invited_groups = await asyncio.to_thread(_requested_invited_groups, discovered_invited_groups, validated_targets)
     export_groups = build_export_groups(
-        runtime_paths=runtime_paths,
-        homeserver=homeserver,
         state_rooms=state_rooms,
         invited_groups=invited_groups,
     )
     full_pass = room_filter is None
 
     if not export_groups:
-        select_export_account(runtime_paths, homeserver)
         if full_pass:
             await asyncio.to_thread(_reconcile_full_pass, validated_targets)
         return tuple(accumulator.stats() for accumulator in accumulators)
 
-    unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = [
-        (group.rooms, group.error) for group in export_groups if isinstance(group, ThreadExportGroupFailure)
-    ]
-    ready_groups = [group for group in export_groups if isinstance(group, ThreadExportGroup)]
-
-    open_journal = open_event_journal(
-        config.event_journal,
+    unreadable_rooms: list[tuple[Sequence[ThreadExportRoom], str]] = []
+    sources: list[ThreadExportSource] = []
+    for group in export_groups:
+        try:
+            sources.append(source_provider(group))
+        except RuntimeError as exc:
+            unreadable_rooms.append((group.rooms, str(exc)))
+    await _export_sources(
+        sources,
+        config=config,
         runtime_paths=runtime_paths,
-        storage_path=runtime_paths.storage_root,
+        accumulators=validated_targets,
+        unreadable_rooms=unreadable_rooms,
+        full_pass=full_pass,
+        max_thread_roots=max_thread_roots,
     )
-    journal_store = open_journal.store
-    clients: list[nio.AsyncClient] = []
-    try:
-        # Its own process, so nothing has vouched for this database yet. An
-        # export reading a stranger's journal reports the wrong history rather
-        # than failing, which is the quietest way to be wrong.
-        await bind_event_journal(
-            journal_store,
-            journal_config=config.event_journal,
-            runtime_paths=runtime_paths,
-            storage_path=runtime_paths.storage_root,
-        )
-        sources: list[ThreadExportSource] = []
-        for group in ready_groups:
-            try:
-                client = await login_agent_user(homeserver, group.user, runtime_paths)
-            except Exception as exc:
-                unreadable_rooms.append((group.rooms, f"Matrix login failed: {exc}"))
-                continue
-            clients.append(client)
-            sources.append(
-                ThreadExportSource(
-                    client=client,
-                    reader=export_conversation_reader(
-                        client=client,
-                        config=config,
-                        store=journal_store.principal(_journal_principal_id(group.user)),
-                        self_sender=group.user.matrix_id.full_id,
-                    ),
-                    rooms=group.rooms,
-                ),
-            )
-        await _export_sources(
-            sources,
-            config=config,
-            runtime_paths=runtime_paths,
-            accumulators=validated_targets,
-            unreadable_rooms=unreadable_rooms,
-            full_pass=full_pass,
-            max_thread_roots=max_thread_roots,
-        )
-    finally:
-        # One client refusing to close must not leak the others or the journal.
-        await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
-        await open_journal.close()
 
     return tuple(accumulator.stats() for accumulator in accumulators)
 
 
 async def export_threads_once(
     *,
+    source_provider: Callable[[ThreadExportGroup], ThreadExportSource],
     config: Config,
     runtime_paths: RuntimePaths,
     output_dir: Path | None = None,
@@ -448,6 +393,7 @@ async def export_threads_once(
 ) -> ThreadExportStats:
     """Run one thread export pass for a single destination."""
     stats = await export_threads_to_targets_once(
+        source_provider=source_provider,
         config=config,
         runtime_paths=runtime_paths,
         targets=(

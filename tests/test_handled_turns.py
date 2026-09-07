@@ -24,7 +24,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore
@@ -982,6 +982,291 @@ class _CommittingWriteStore(TurnRecordStore):
             anchor_event_id=anchor_event_id,
             record_json=record_json,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _DelayedFirstWriteStore(TurnRecordStore):
+    """Delay one selected write, retaining real persistence for every other write."""
+
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    released: asyncio.Event = field(default_factory=asyncio.Event)
+    fail: bool = False
+
+    async def upsert(
+        self,
+        *,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> None:
+        """Let the test decide the first selected write's definite outcome."""
+        if "$slow" in index_event_ids and not self.started.is_set():
+            self.started.set()
+            await self.released.wait()
+            if self.fail:
+                msg = "selected write failed before commit"
+                raise RuntimeError(msg)
+        await TurnRecordStore.upsert(
+            self,
+            index_event_ids=index_event_ids,
+            anchor_event_id=anchor_event_id,
+            record_json=record_json,
+        )
+
+
+@pytest.mark.asyncio
+async def test_unrelated_turn_is_durable_while_another_write_waits(journal_store: EventJournalStore) -> None:
+    """An unrelated turn must not inherit another turn's persistence latency."""
+    agent = "independent_writes"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    sibling = _ledger(journal_store, agent)
+    slow = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$slow"])))
+    await records.started.wait()
+    fast = asyncio.create_task(sibling.record_handled_turn(TurnRecord.create(["$fast"], response_event_id="$reply")))
+    try:
+        await asyncio.wait_for(asyncio.shield(fast), timeout=5)
+        persisted = await _read_persisted_records(journal_store, agent)
+        assert set(persisted) == {"$fast"}
+        assert persisted["$fast"]["response_event_id"] == "$reply"
+        assert not slow.done()
+        assert ledger.get_turn_record("$fast") == sibling.get_turn_record("$fast")
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, fast)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lookup", ["$slow", "$alias"])
+async def test_related_update_waits_while_unrelated_turns_persist(
+    journal_store: EventJournalStore,
+    lookup: str,
+) -> None:
+    """Source and discovery aliases must derive after the prior write settles."""
+    agent = "related_writes"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    slow = asyncio.create_task(
+        ledger.record_handled_turn(TurnRecord.create(["$slow"], discovery_event_ids=["$alias"], completed=False)),
+    )
+    await records.started.wait()
+    dependent = asyncio.create_task(
+        ledger.update_handled_turn(
+            (lookup,),
+            lambda current: replace(current[lookup], visible_echo_event_id="$echo", timestamp=0),
+        ),
+    )
+    fast = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$fast"])))
+    try:
+        await asyncio.wait_for(asyncio.shield(fast), timeout=5)
+        provisional = ledger.get_turn_record("$slow")
+        assert provisional is not None
+        assert provisional.visible_echo_event_id is None
+        assert not dependent.done()
+        records.released.set()
+        await asyncio.gather(slow, dependent)
+        loaded = await _reload_ledger(journal_store, agent)
+        for event_id in ("$slow", "$alias"):
+            record = loaded.get_turn_record(event_id)
+            assert record is not None
+            assert record.visible_echo_event_id == "$echo"
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, dependent, fast, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_reanchoring_orders_writes_reusing_the_previous_anchor(journal_store: EventJournalStore) -> None:
+    """An upsert deleting old anchor rows must precede a new user of that anchor."""
+    agent = "old_anchor_writes"
+    ledger = await _open_ledger(journal_store, agent)
+    await ledger.record_handled_turn(TurnRecord.create(["$slow"], anchor_event_id="$old", completed=False))
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent)
+    sibling = HandledTurnLedger(agent, records=records)
+    slow = asyncio.create_task(
+        sibling.record_handled_turn(TurnRecord.create(["$slow"], anchor_event_id="$new", completed=False)),
+    )
+    await records.started.wait()
+    dependent = asyncio.create_task(
+        ledger.record_handled_turn(TurnRecord.create(["$other"], anchor_event_id="$old", completed=False)),
+    )
+    fast = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$fast"])))
+    try:
+        await asyncio.wait_for(asyncio.shield(fast), timeout=5)
+        assert ledger.get_turn_record("$other") is None
+        assert not dependent.done()
+        records.released.set()
+        await asyncio.gather(slow, dependent)
+        persisted = await _read_persisted_records(journal_store, agent)
+        assert set(persisted) == {"$slow", "$other", "$fast"}
+        assert persisted["$slow"]["anchor_event_id"] == "$new"
+        assert persisted["$other"]["anchor_event_id"] == "$old"
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, dependent, fast, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_dependent_update_derives_after_failed_publication_is_removed(journal_store: EventJournalStore) -> None:
+    """A failed write must not supply provisional aliases to its successor."""
+    agent = "failed_related_write"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent, fail=True)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    slow = asyncio.create_task(
+        ledger.record_handled_turn(TurnRecord.create(["$slow"], discovery_event_ids=["$alias"], completed=False)),
+    )
+    await records.started.wait()
+    dependent = asyncio.create_task(
+        ledger.update_handled_turn(
+            ("$alias",),
+            lambda current: replace(
+                current.get("$alias", TurnRecord.create(["$alias"])),
+                response_event_id="$reply",
+                completed=True,
+                timestamp=0,
+            ),
+        ),
+    )
+    fast = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$fast"])))
+    try:
+        await asyncio.wait_for(asyncio.shield(fast), timeout=5)
+        records.released.set()
+        with pytest.raises(RuntimeError, match="selected write failed before commit"):
+            await slow
+        await dependent
+        loaded = await _reload_ledger(journal_store, agent)
+        assert loaded.get_turn_record("$slow") is None
+        record = loaded.get_turn_record("$alias")
+        assert record is not None
+        assert record.source_event_ids == ("$alias",)
+        assert record.response_event_id == "$reply"
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, dependent, fast, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_fails", [False, True])
+async def test_candidate_conflict_waits_even_when_lookup_ids_are_unrelated(
+    journal_store: EventJournalStore,
+    owner_fails: bool,
+) -> None:
+    """A provisional completed owner cannot permanently reject another candidate."""
+    agent = "candidate_conflict"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent, fail=owner_fails)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    slow = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$slow"], response_event_id="$reply")))
+    await records.started.wait()
+    derived = asyncio.Event()
+
+    def derive(_current: Mapping[str, TurnRecord]) -> TurnRecord:
+        derived.set()
+        return TurnRecord.create(["$slow"], anchor_event_id="$new", completed=False)
+
+    dependent = asyncio.create_task(ledger.update_handled_turn(("$lookup",), derive))
+    try:
+        await asyncio.wait_for(derived.wait(), timeout=5)
+        assert not dependent.done()
+        records.released.set()
+        if owner_fails:
+            with pytest.raises(RuntimeError, match="selected write failed before commit"):
+                await slow
+        else:
+            await slow
+        result = await dependent
+        loaded = await _reload_ledger(journal_store, agent)
+        record = loaded.get_turn_record("$slow")
+        assert record is not None
+        if owner_fails:
+            assert result == record
+            assert record.anchor_event_id == "$new"
+            assert not record.completed
+        else:
+            assert result is None
+            assert record.response_event_id == "$reply"
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, dependent, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("owner_cancellations", "cancel_waiter"), [(0, True), (2, False)])
+async def test_cancellation_keeps_conflicting_write_ownership_until_settlement(
+    journal_store: EventJournalStore,
+    owner_cancellations: int,
+    cancel_waiter: bool,
+) -> None:
+    """Cancelling an owner or its waiter cannot release an unresolved write."""
+    agent = "cancelled_related_write"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    slow = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$slow"])))
+    await records.started.wait()
+    dependent = asyncio.create_task(
+        ledger.update_handled_turn(
+            ("$slow",),
+            lambda current: replace(current["$slow"], visible_echo_event_id="$echo", timestamp=0),
+        ),
+    )
+    fast = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$fast"])))
+    try:
+        for _ in range(owner_cancellations):
+            slow.cancel()
+            await asyncio.sleep(0)
+        await asyncio.wait_for(asyncio.shield(fast), timeout=5)
+        assert not slow.done()
+        assert not dependent.done()
+        if cancel_waiter:
+            dependent.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await dependent
+        records.released.set()
+        if owner_cancellations:
+            with pytest.raises(asyncio.CancelledError):
+                await slow
+        else:
+            await slow
+        if not cancel_waiter:
+            await dependent
+        loaded = await _reload_ledger(journal_store, agent)
+        assert loaded.has_responded("$slow")
+        record = loaded.get_turn_record("$slow")
+        assert record is not None
+        assert record.visible_echo_event_id == (None if cancel_waiter else "$echo")
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, dependent, fast, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_waits_for_active_write_and_excludes_new_reservations(journal_store: EventJournalStore) -> None:
+    """Cleanup must not be overtaken by a delayed commit that resurrects its rows."""
+    agent = "cleanup_active_write"
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    slow = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$slow"])))
+    await records.started.wait()
+    cleanup = asyncio.create_task(ledger._cleanup_old_events(max_events=0, max_age_days=0))
+    await asyncio.sleep(0)
+    fast = asyncio.create_task(ledger.record_handled_turn(TurnRecord.create(["$fast"])))
+    try:
+        await asyncio.sleep(0)
+        assert ledger.get_turn_record("$fast") is None
+        records.released.set()
+        await asyncio.gather(slow, cleanup, fast)
+        loaded = await _reload_ledger(journal_store, agent)
+        assert loaded.get_turn_record("$slow") is None
+        assert loaded.has_responded("$fast")
+        assert set(await _read_persisted_records(journal_store, agent)) == {"$fast"}
+    finally:
+        records.released.set()
+        await asyncio.gather(slow, cleanup, fast, return_exceptions=True)
 
 
 @pytest.mark.asyncio

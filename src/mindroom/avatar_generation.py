@@ -14,23 +14,22 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
-from mindroom import constants
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path, workspace_avatar_path
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import room_has_avatar, set_room_avatar_from_file
-from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.state import MatrixAccount, MatrixState, get_room_id, matrix_state_for_runtime
-from mindroom.matrix.users import AgentMatrixUser, login_agent_user
-from mindroom.matrix_identifiers import extract_server_name_from_homeserver
+from mindroom.matrix.state import MatrixState, get_room_id, matrix_state_for_runtime
+from mindroom.matrix.users import create_agent_http_client
 from mindroom.model_defaults import GOOGLE_AVATAR_IMAGE, GOOGLE_AVATAR_PROMPT
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
+
+    from mindroom import constants
 
 
 logger = get_logger(__name__)
@@ -263,24 +262,6 @@ async def _generate_avatar(
     console.print(f"[green]✓ Generated avatar for {target.entity_type}/{target.entity_name}[/green]")
 
 
-def _build_router_user(
-    router_account: MatrixAccount,
-    runtime_paths: constants.RuntimePaths,
-) -> AgentMatrixUser:
-    """Create the router user object from persisted Matrix state."""
-    server_name = extract_server_name_from_homeserver(
-        constants.runtime_matrix_homeserver(runtime_paths=runtime_paths),
-        runtime_paths=runtime_paths,
-    )
-    return AgentMatrixUser(
-        agent_name=ROUTER_AGENT_NAME,
-        user_id=MatrixID.from_username(router_account.username, router_account.domain or server_name).full_id,
-        display_name="Router",
-        password=router_account.password,
-        access_token=None,
-    )
-
-
 async def _sync_avatar_target(
     client: nio.AsyncClient,
     *,
@@ -375,22 +356,12 @@ async def set_room_avatars_in_matrix(runtime_paths: constants.RuntimePaths, *, f
     console.print("\n[bold cyan]Setting room avatars in Matrix...[/bold cyan]")
 
     state = matrix_state_for_runtime(runtime_paths)
-    router_account = state.get_account(f"agent_{ROUTER_AGENT_NAME}")
-    if not router_account:
-        msg = "No router account found in Matrix state. Make sure mindroom has been started at least once."
-        raise AvatarSyncError(msg)
-
-    router_user = _build_router_user(router_account, runtime_paths)
     try:
-        client = await login_agent_user(
-            constants.runtime_matrix_homeserver(runtime_paths=runtime_paths),
-            router_user,
-            runtime_paths,
-        )
+        client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     except ValueError as exc:
-        msg = f"Failed to log in as router for avatar sync: {exc}"
+        msg = f"Router account unavailable for avatar sync: {exc}"
         raise AvatarSyncError(msg) from exc
-    console.print("[green]✓ Logged in to Matrix as router[/green]")
+    console.print("[green]✓ Using router account[/green]")
 
     config = _load_validated_config(runtime_paths)
     failed_labels: list[str] = []

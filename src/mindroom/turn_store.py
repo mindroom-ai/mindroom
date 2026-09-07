@@ -199,11 +199,12 @@ class TurnStore:
         message has nothing to edit. Committing the two together is what closes
         that window; a startup pass used to rejoin them afterwards.
 
-        Nothing is returned when there is nothing to bind: no record for this
-        turn, or one that already names a response event. A record that already
-        names one is left alone deliberately -- it may name a later, better
-        answer than the first thing ever sent, and overwriting it would undo
-        that.
+        Nothing is returned when there is nothing to complete: no record for
+        this turn, or one that is already terminal.  An incomplete record may
+        already name the visible placeholder that a FINAL edit answers.  That
+        identity is preserved while the acknowledgement completes the record;
+        rebinding it to the edit event would make later edits target an edit
+        instead of the original visible message.
 
         Pure by design. The in-memory map is not touched here, because this is
         called *before* the transaction and the transaction may lose the
@@ -215,38 +216,23 @@ class TurnStore:
         which already owns that boundary, turns it into a row.
         """
         record = self._ledger.get_turn_record(turn_id)
-        if record is None or record.response_event_id is not None:
+        if record is None or record.completed:
             return None
-        bound = canonicalize_turn_record(record, response_event_id=response_event_id, completed=True)
+        bound = canonicalize_turn_record(
+            record,
+            response_event_id=record.response_event_id or response_event_id,
+            completed=True,
+        )
         return None if bound.anchor_event_id is None else bound
 
     async def publish_committed_response(self, turn_id: str, response_event_id: str) -> None:
-        """Re-assert the record an acknowledgement committed, through the ordinary lock.
+        """Re-assert an acknowledged record through the ledger's conflict ownership.
 
-        Bringing only memory level here looked sufficient -- the transaction
-        had already stored the record -- and it loses the answer's event ID for
-        good. Every other terminal write publishes to memory and enqueues its
-        row while holding the ledger's write lock, so the database sees writes
-        in the order memory did. A record committed outside that lock sits
-        outside that order: a mutation that derived before this call, and
-        reaches the database after the transaction, overwrites the row with a
-        record that never heard of the answer. Memory keeps the event ID,
-        storage does not, and the next start finds a delivered turn that cannot
-        name the message it produced -- so a later edit of that message is
-        dropped for having nothing to edit.
-
-        A live turn survived that because it records its terminal turn again
-        right after delivery. Recovery has no such write behind it, and nothing
-        reads an acknowledged event back into a record, which is what made the
-        loss permanent rather than momentary.
-
-        Going back through ``update_handled_turn`` puts the fact inside the
-        ordering that protects every other one: whichever of the two writes
-        lands last derives from a memory that already holds the other's, so the
-        stored row ends up carrying both. Re-deriving cannot invent a different
-        answer, because the event ID is passed in rather than looked up, and an
-        answer the record already names is kept -- it may be a later one than
-        the first thing ever sent.
+        The acknowledgement transaction already persisted the response, but a
+        ledger mutation derived before it could still overwrite that row. Going
+        through the ledger waits for conflicting writes and derives from their
+        settled state, preserving both the response identity and intervening
+        facts. An unrelated turn does not need to wait for this reconciliation.
         """
         if self._ledger.get_turn_record(turn_id) is None:
             return

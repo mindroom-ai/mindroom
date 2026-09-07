@@ -48,7 +48,6 @@ _.check_hostname  # unused attribute (src/mindroom/matrix/client_session.py)
 _.row_factory  # sqlite row-name access (src/mindroom/event_journal/sqlite_backend.py)
 _.uploaded_key_count  # consumed by nio after assignment (src/mindroom/matrix/client_session.py)
 _.verify_mode  # unused attribute (src/mindroom/matrix/client_session.py)
-_.uploaded_key_count  # nio's Olm machine state (src/mindroom/matrix/client_session.py)
 _.FAILSAFE  # configured on the optional PyAutoGUI module (src/mindroom/desktop/provider.py)
 _.PAUSE  # configured on the optional PyAutoGUI module (src/mindroom/desktop/provider.py)
 _.embedding_model  # mem0's runtime embedding adapter (src/mindroom/memory/config.py)
@@ -219,6 +218,7 @@ _reset_credentials_manager_cache  # unused function (src/mindroom/credentials.py
 _reset_handled_turn_ledger_runtime  # unused function (src/mindroom/handled_turns.py)
 _reset_primary_worker_manager  # unused function (src/mindroom/workers/runtime.py)
 _reset_visible_voice_echo_barriers  # unused function (src/mindroom/visible_voice_echo.py)
+_._reconcile_classic_sync_cursor_after_loop_exit  # retained until Task 6 removes fork recovery
 _.read_file_chunk  # unused method (src/mindroom/tools/file.py)
 _.download_file  # unused method (src/mindroom/custom_tools/google_drive.py)
 _._batch_get  # inherited Gmail tools call this override dynamically (src/mindroom/custom_tools/gmail.py)
@@ -328,6 +328,8 @@ ThreadExportTarget  # plugin-facing API class (src/mindroom/thread_export/models
 export_threads_to_targets_once  # plugin-facing API function (src/mindroom/thread_export/service.py)
 _._naive_execute_at_is_utc  # unused method (src/mindroom/scheduling.py)
 _.turn_count  # read in tests/test_matrix_rtc_transcript.py (src/mindroom/matrix_rtc/transcript.py)
+_.load_or_create_ingestion_consumer  # inactive checkpoint contract (src/mindroom/event_journal/store.py)
+_.bind_ingestion_stream  # inactive checkpoint contract (src/mindroom/event_journal/store.py)
 AudioInput  # type-only SDK interface for the custom MatrixRTC audio stream
 _.on_attached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)
 _.on_detached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)
@@ -350,3 +352,5 @@ _.upsert_sessions  # agno BaseDb interface method, overridden to keep the owner 
 _.ns_resolver  # pydantic ValidateCallWrapper attribute reset by the patch (src/mindroom/agno_tool_wrapper_patch.py)
 _.runs_from_rows  # agno SqliteDb calls it on the run-object cache (src/mindroom/agent_storage.py)
 _enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/agent_storage.py)
+
+export_threads  # FastAPI endpoint (src/mindroom/api/thread_exports.py)

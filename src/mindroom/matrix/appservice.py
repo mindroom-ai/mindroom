@@ -183,15 +183,15 @@ async def register_appservice_user(
         raise matrix_startup_error(msg, permanent=True) from exc
 
 
-async def login_appservice_user(
+async def login_appservice_credentials(
     homeserver: str,
     *,
     user_id: str,
     token: str,
     runtime_paths: RuntimePaths,
-    sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
-) -> nio.AsyncClient:
-    """Create an ordinary per-user Matrix device through application-service login."""
+    device_id: str | None = None,
+) -> tuple[str, str, str]:
+    """Return direct per-user credentials without constructing a Matrix client."""
     response = await _post(
         homeserver,
         "/_matrix/client/v3/login",
@@ -200,6 +200,7 @@ async def login_appservice_user(
             "type": _APPSERVICE_LOGIN_TYPE,
             "identifier": {"type": "m.id.user", "user": user_id},
             "initial_device_display_name": "MindRoom",
+            **({"device_id": device_id} if device_id is not None else {}),
         },
         runtime_paths=runtime_paths,
     )
@@ -209,14 +210,36 @@ async def login_appservice_user(
     body = _success_response_body("login", response)
     returned_user_id = body.get("user_id")
     access_token = body.get("access_token")
-    device_id = body.get("device_id")
-    if returned_user_id != user_id or not isinstance(access_token, str) or not isinstance(device_id, str):
+    returned_device_id = body.get("device_id")
+    if returned_user_id != user_id or not isinstance(access_token, str) or not isinstance(returned_device_id, str):
         msg = f"Matrix application-service login returned incomplete credentials for {user_id}"
         raise matrix_startup_error(msg, permanent=True)
 
+    if device_id is not None and returned_device_id != device_id:
+        msg = "Matrix application-service login changed the device; restore the original device before restarting"
+        raise matrix_startup_error(msg, permanent=True)
+    return user_id, returned_device_id, access_token
+
+
+async def login_appservice_user(
+    homeserver: str,
+    *,
+    user_id: str,
+    token: str,
+    runtime_paths: RuntimePaths,
+    sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
+) -> nio.AsyncClient:
+    """Create an ordinary per-user Matrix device through application-service login."""
+    authenticated_user_id, device_id, access_token = await login_appservice_credentials(
+        homeserver,
+        user_id=user_id,
+        token=token,
+        runtime_paths=runtime_paths,
+    )
+
     return create_authenticated_client(
         homeserver,
-        user_id,
+        authenticated_user_id,
         device_id,
         access_token,
         runtime_paths=runtime_paths,

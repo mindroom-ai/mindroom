@@ -74,7 +74,7 @@ main() entry
 
 - **Entity order**: Router first, then agents, then teams
 - **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents, teams, and users, then bots join
-- **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; the default `matrix_sync.mode: classic` uses classic `/v3/sync` and `matrix_sync.mode: sliding` opts into MSC4186 Simplified Sliding Sync
+- **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; `matrix_sync.mode: classic` uses Classic `/v3/sync`, while `sliding` uses MSC4186 Simplified Sliding Sync on a homeserver advertising `org.matrix.simplified_msc3575`
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
 ## Session Storage Upgrades
@@ -108,15 +108,17 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    The gate is global and covers the whole apply window regardless of how narrow the plan turns out to be.
    When the apply finishes, responses owned by unchanged or replacement runtimes compete for admission normally.
 6. A runtime being replaced wakes its pre-admission waiters with `ResponseAdmissionRefusedError`.
-   This is deliberately not an `asyncio.CancelledError`, because the Matrix callback must fail and invalidate the old sync checkpoint so the replacement runtime replays the source event.
+   The refusal leaves the admitted source pending in the event journal so the replacement runtime can replay it.
    The refusal path performs no Matrix I/O, so replacement shutdown cannot stall on an untimed send.
    Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped.
+   Before emitting a resume relay, history recovery requires a nonretired attempted outbox delivery binding the target response to the current principal and room membership.
+   A send with no known response event remains the responsibility of existing outbox and pending-source recovery.
 7. If responses never drain, either replacement flow stops deferring after 600 seconds and closes the gate over still-running responses.
    This bounded forced apply prevents a busy install from starving config or MCP replacement forever.
 8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config while admission remains open, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations after the gate closes.
-9. The orchestrator applies the resulting plan: changed entities are replaced, unchanged bots receive the new config, and room-only changes reconcile memberships in place while restarting only sliding receive loops to refresh their subscriptions.
+9. The orchestrator applies the resulting plan: changed entities are replaced, unchanged bots receive the new config, and room-only changes reconcile memberships in place without restarting receive loops.
    Call-enabled agents are conservatively replaced after any authored config change because active call tooling captures the full authored config snapshot.
-10. Removed entities run `cleanup()` to leave rooms and stop the bot.
+10. Removed entities prepare their response runtime for shutdown, reconcile approval work, and call `leave_rooms()` while ingestion remains active; the orchestrator then cancels the receive loop and stops the bot.
 11. New and restarted bots go through room setup.
 12. The gate reopens once the apply finishes, whether it succeeded, failed, or was cancelled, and deferred responses may then start.
 
@@ -152,7 +154,7 @@ Correctness-critical timeline callbacks cross durable journal admission before o
 
 **Inbound message flow:**
 
-1. `matrix/journal_ingress.py` commits the event before nio accepts it.
+1. `matrix/durable_ingestion.py` converts nio batches using `matrix/journal_ingress.py`, commits their application effects in one transaction, then acknowledges after ordered hooks.
 2. `journal_dispatch.py` and `pending_event_worker.py` dispatch admitted or recovered work.
 3. `turn_controller.py` runs ingress validation, normalization, conversation resolution, receipt ordering, and coalescing.
 4. `text_ingress_dispatch.py` and `turn_policy.py` decide whether to ignore, route, execute a command, or respond.
@@ -187,11 +189,18 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ### Graceful Shutdown
 
+The entry-point shutdown helper cancels and settles startup before core teardown can release resources.
+Auxiliary watchers are cancelled after core teardown.
+
 On `orchestrator.stop()`:
 
 1. Mark the runtime stopped, signal runtime shutdown, unbind external triggers, and close approval transport/runtime state.
 2. Cancel config reload, drain MCP catalog and dispatch-recovery work, and cancel startup maintenance.
 3. Stop todo-poke and memory auto-flush workers plus knowledge watching and refresh scheduling.
 4. Cancel pending bot starts and stop the MCP manager.
-5. Cancel sync tasks before stopping bots so shutdown cannot race active receive loops.
-6. Stop all bots concurrently, wait for attachment cleanup, and close the shared event journal last because bots borrow it while draining delivery work.
+5. Quiesce ingestion while its pump can still admit captured input, then cancel receive loops.
+6. Stop all bots concurrently and finish retained response recovery proofs before releasing their clients.
+7. Wait for attachment cleanup and close the shared journal only once no response owner remains.
+
+Each response keeps one ownership record through terminal cleanup and recovery-proof consumption.
+A timeout preserves the record and any in-flight proof, so shared resources remain available for deferred cleanup.

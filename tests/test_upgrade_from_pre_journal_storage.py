@@ -9,10 +9,10 @@ payload, the ``mindroom-sync-continuity-v2`` record, and the two databases this
 revision deleted the readers for -- so what is modelled is the shape of a real
 installation, not an invented one.
 
-The failure this exists to catch is silent and total. Nothing in this revision
-writes the pre-journal ledger any more, so if the path the importer reads ever
-drifts from the path that version wrote, no test fails, no error is logged, and
-the first upgraded installation re-answers its entire backlog.
+The independent handled-turn importer still preserves response identities from
+the old ledger. Initial-sync history suppression belongs to Nio and is covered
+by the durable-ingestion runtime tests; old continuity records now require
+the explicit cutover described in docs/deployment/nio-upgrade.md.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ from mindroom.event_journal_open import (
     read_event_journal_binding,
 )
 from mindroom.handled_turns import HandledTurnLedger, legacy_responses_file_path
-from mindroom.matrix.sync_continuity import SyncContinuityStore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -181,7 +180,7 @@ async def test_a_storage_root_with_no_binding_is_adopted_rather_than_refused(
 async def test_the_pre_journal_handled_turns_are_imported_from_the_path_that_version_wrote(
     pre_journal_storage: tuple[Path, RuntimePaths],
 ) -> None:
-    """Terminal truth from before the journal must survive, or the backlog is re-answered.
+    """The independent handled-turn importer preserves the original response identity.
 
     This is the whole upgrade in one assertion. The ledger file is written here
     at the literal path the pre-journal revision used, and read back through
@@ -221,28 +220,6 @@ async def test_the_pre_journal_handled_turns_are_imported_from_the_path_that_ver
     # that compaction has deliberately dropped since.
     assert not legacy_file.exists()
     assert legacy_file.with_suffix(".json.imported").exists()
-
-
-def test_the_pre_journal_sync_checkpoint_is_refused_and_repaired(
-    pre_journal_storage: tuple[Path, RuntimePaths],
-) -> None:
-    """The saved transport position must be dropped, not carried into the journal.
-
-    That checkpoint means "the event cache beside me holds everything up to
-    here", and the event cache is exactly what this revision deleted. Honouring
-    the token would resume past events the journal never saw and never will.
-    Refusing it costs a cold start, which is the safe direction.
-    """
-    storage, _runtime_paths = pre_journal_storage
-    store = SyncContinuityStore(storage, AGENT)
-
-    with pytest.raises(RuntimeError, match="unsupported version"):
-        store.load()
-
-    repaired = store.clear_checkpoint()
-
-    assert repaired.checkpoint is None
-    assert store.load().checkpoint is None
 
 
 @pytest.mark.asyncio

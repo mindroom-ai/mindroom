@@ -1530,7 +1530,6 @@ class TestConsolidatedConfigManager:
         config = Config.model_validate({"matrix_sync": None})
 
         assert config.matrix_sync.mode == "classic"
-        assert config.matrix_sync.sliding_timeline_limit == 100
 
     def test_duplicate_tool_entries_are_rejected_for_agents_and_defaults(self) -> None:
         """Duplicate tool names should be rejected even across mixed string and mapping syntax."""

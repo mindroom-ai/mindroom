@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import yaml
@@ -48,18 +48,6 @@ def mock_matrix_client() -> AsyncMock:
     return client
 
 
-@pytest.fixture
-def mock_agent_user() -> MagicMock:
-    """Create a mock agent user."""
-    user = MagicMock()
-    user.agent_name = "test_agent"
-    user.user_id = "@mindroom_test_agent:localhost"
-    user.display_name = "Test Agent"
-    user.password = "test_password"  # noqa: S105
-    user.access_token = "test_token"  # noqa: S105
-    return user
-
-
 class TestMatrixOperations:
     """Test Matrix operations API endpoints."""
 
@@ -67,15 +55,16 @@ class TestMatrixOperations:
     async def test_get_all_agents_rooms(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test getting room information for configured agents and teams."""
         _add_test_team_to_runtime_config()
 
         with (
-            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
-            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+            patch(
+                "mindroom.api.matrix_operations.create_agent_http_client",
+                return_value=mock_matrix_client,
+            ),
             patch(
                 "mindroom.api.matrix_operations.get_joined_rooms",
                 return_value=["test_room", "team_room", "!extra_room:localhost", "!dm_room:localhost"],
@@ -109,13 +98,14 @@ class TestMatrixOperations:
     async def test_get_specific_agent_rooms(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test getting room information for a specific agent."""
         with (
-            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
-            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+            patch(
+                "mindroom.api.matrix_operations.create_agent_http_client",
+                return_value=mock_matrix_client,
+            ),
             patch(
                 "mindroom.api.matrix_operations.get_joined_rooms",
                 return_value=["test_room", "!extra_room:localhost"],
@@ -135,15 +125,16 @@ class TestMatrixOperations:
     async def test_get_specific_team_rooms(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test getting rooms for a specific configured team."""
         _add_test_team_to_runtime_config()
 
         with (
-            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
-            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+            patch(
+                "mindroom.api.matrix_operations.create_agent_http_client",
+                return_value=mock_matrix_client,
+            ),
             patch(
                 "mindroom.api.matrix_operations.get_joined_rooms",
                 return_value=["team_room", "!external_room:localhost"],
@@ -162,7 +153,6 @@ class TestMatrixOperations:
     async def test_get_agent_rooms_treats_trigger_only_room_as_unconfigured(
         self,
         tmp_path: Path,
-        mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Tool-managed trigger rooms should not widen authored room membership."""
@@ -187,8 +177,10 @@ class TestMatrixOperations:
         assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is True
 
         with (
-            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
-            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+            patch(
+                "mindroom.api.matrix_operations.create_agent_http_client",
+                return_value=mock_matrix_client,
+            ),
             patch(
                 "mindroom.api.matrix_operations.get_joined_rooms",
                 return_value=["test_room", "!campground:localhost", "!extra_room:localhost"],
@@ -212,14 +204,15 @@ class TestMatrixOperations:
     async def test_leave_room(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test leaving a room."""
         with (
-            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
-            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
-            patch("mindroom.api.matrix_operations.leave_room", return_value=True),
+            patch(
+                "mindroom.api.matrix_operations.create_agent_http_client",
+                return_value=mock_matrix_client,
+            ),
+            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
         ):
             response = test_client.post(
                 "/api/matrix/rooms/leave",
@@ -233,14 +226,15 @@ class TestMatrixOperations:
     async def test_leave_room_failure(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test failing to leave a room."""
         with (
-            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
-            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
-            patch("mindroom.api.matrix_operations.leave_room", return_value=False),
+            patch(
+                "mindroom.api.matrix_operations.create_agent_http_client",
+                return_value=mock_matrix_client,
+            ),
+            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=False)),
         ):
             response = test_client.post(
                 "/api/matrix/rooms/leave",
@@ -254,16 +248,17 @@ class TestMatrixOperations:
     async def test_leave_room_for_team(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test leaving a room for a configured team."""
         _add_test_team_to_runtime_config()
 
         with (
-            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
-            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
-            patch("mindroom.api.matrix_operations.leave_room", return_value=True),
+            patch(
+                "mindroom.api.matrix_operations.create_agent_http_client",
+                return_value=mock_matrix_client,
+            ),
+            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
         ):
             response = test_client.post(
                 "/api/matrix/rooms/leave",
@@ -288,14 +283,15 @@ class TestMatrixOperations:
     async def test_leave_rooms_bulk(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test bulk leaving rooms."""
         with (
-            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
-            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
-            patch("mindroom.api.matrix_operations.leave_room", return_value=True),
+            patch(
+                "mindroom.api.matrix_operations.create_agent_http_client",
+                return_value=mock_matrix_client,
+            ),
+            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
         ):
             requests = [
                 {"agent_id": "test_agent", "room_id": "!room1:localhost"},
@@ -314,7 +310,6 @@ class TestMatrixOperations:
     async def test_leave_rooms_bulk_partial_failure(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test bulk leaving rooms with partial failure."""
@@ -323,9 +318,11 @@ class TestMatrixOperations:
         leave_room_mock = AsyncMock(side_effect=leave_room_results)
 
         with (
-            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
-            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
-            patch("mindroom.api.matrix_operations.leave_room", new=leave_room_mock),
+            patch(
+                "mindroom.api.matrix_operations.create_agent_http_client",
+                return_value=mock_matrix_client,
+            ),
+            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", leave_room_mock),
         ):
             requests = [
                 {"agent_id": "test_agent", "room_id": "!room1:localhost"},
@@ -346,7 +343,6 @@ class TestMatrixOperations:
         self,
         test_client: TestClient,
         tmp_path: Path,
-        mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -372,25 +368,26 @@ class TestMatrixOperations:
         )
 
         with (
-            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user) as create_user,
-            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+            patch(
+                "mindroom.api.matrix_operations.create_agent_http_client",
+                return_value=mock_matrix_client,
+            ) as create_client,
             patch("mindroom.api.matrix_operations.get_joined_rooms", return_value=[]),
         ):
             response = test_client.get("/api/matrix/agents/old_agent/rooms")
 
         assert response.status_code == 200
-        assert create_user.await_args.kwargs["runtime_paths"] == first_runtime
+        assert create_client.call_args.args[1] == first_runtime
 
     @pytest.mark.asyncio
-    async def test_leave_room_uses_one_runtime_snapshot(
+    async def test_leave_room_refuses_replaced_installation(
         self,
         test_client: TestClient,
         tmp_path: Path,
-        mock_agent_user: Any,  # noqa: ANN401
         mock_matrix_client: Any,  # noqa: ANN401
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Room-leave requests should not mix committed config with a newer runtime swap."""
+        """A runtime path swap clears the old membership owner before a leave can run."""
         first_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "first.yaml", process_env={})
         second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
 
@@ -420,17 +417,18 @@ class TestMatrixOperations:
         )
 
         with (
-            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user) as create_user,
-            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
-            patch("mindroom.api.matrix_operations.leave_room", return_value=True),
+            patch(
+                "mindroom.api.matrix_operations.create_agent_http_client",
+                return_value=mock_matrix_client,
+            ),
+            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
         ):
             response = test_client.post(
                 "/api/matrix/rooms/leave",
                 json={"agent_id": "old_agent", "room_id": "!room:localhost"},
             )
 
-        assert response.status_code == 200
-        assert create_user.await_args.kwargs["runtime_paths"] == first_runtime
+        assert response.status_code == 503
 
 
 @pytest.mark.parametrize(
@@ -449,7 +447,6 @@ class TestMatrixOperations:
 def test_matrix_operations_refuse_stale_config_after_invalid_reload(
     test_client: TestClient,
     temp_config_file: Path,
-    mock_agent_user: Any,  # noqa: ANN401
     mock_matrix_client: Any,  # noqa: ANN401
     method: str,
     path: str,
@@ -461,10 +458,12 @@ def test_matrix_operations_refuse_stale_config_after_invalid_reload(
     assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     with (
-        patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
-        patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+        patch(
+            "mindroom.api.matrix_operations.create_agent_http_client",
+            return_value=mock_matrix_client,
+        ),
         patch("mindroom.api.matrix_operations.get_joined_rooms", return_value=["test_room"]),
-        patch("mindroom.api.matrix_operations.leave_room", return_value=True),
+        patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
     ):
         if payload is None:
             response = getattr(test_client, method)(path)

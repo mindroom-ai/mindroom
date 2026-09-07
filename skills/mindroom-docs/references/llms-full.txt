@@ -860,9 +860,9 @@ MindRoom tracks runtime phases internally:
 When the semantic-search embedder is failing, the health payload additionally carries `"embedder": {"status": "failing", "detail": ...}` with the classified cause; this block is diagnostic only and never flips liveness.
 Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
 Ordinary Matrix transport silence still reaches the watchdog after 120 seconds and makes `/api/health` return `503` after 180 seconds without a successful sync.
-While a sync callback is actively completing its sequential durable cache phase, the watchdog and `/api/health` consume the same monotonic progress snapshot and defer for `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` (default 600).
-Both stop deferring when that grace expires.
-Successful cache-phase completion refreshes both liveness clocks, so a long healthy write does not immediately return `503`.
+While Nio commits durable ingestion progress, the watchdog and `/api/health` consume the same monotonic progress snapshot and defer for up to `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` (default 600).
+Both stop deferring when that grace expires or progress stops advancing for their respective silence timeout.
+Successful sync completion refreshes both liveness clocks and clears the ingestion grace window.
 Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ### Tools & Matrix
@@ -1088,7 +1088,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
-| `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
+| `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may defer while durable ingestion progress keeps advancing | `600` |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Complete worker-reachable background-script gateway base URL, including `/api/script-gateway`; required for Kubernetes and for Docker unless a reachable `MINDROOM_PUBLIC_URL` is configured | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | Operator attestation that the Kubernetes worker's configured script-gateway listener exposes only `/api/script-gateway`; required to admit Kubernetes background scripts and does not create network isolation itself | `false` |
 | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE` | Default Kubernetes background-script profile (`small`, `standard`, or `large`) when `start_script` omits `resource_profile` | `small` |
@@ -1096,8 +1096,8 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_SCRIPT_RETENTION_SECONDS` | Finite positive seconds to retain terminal background-script runs, tool-call receipts, approval rows, and durable approval records before lifecycle pruning | `2592000` (30 days) |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 
-The sync cache-write grace is a hang backstop rather than the ordinary Matrix transport timeout; set it above the observed healthy cache-write p99 for the deployment.
-Raising it delays both watchdog cancellation and liveness failure only while a sync callback is actively completing its sequential durable cache phase.
+The ingestion grace bounds continuous catch-up; set it above the observed healthy catch-up duration for the deployment.
+Raising it delays both watchdog cancellation and liveness failure only while durable ingestion progress keeps advancing.
 
 ### OpenAI-Compatible API
 
@@ -1498,15 +1498,11 @@ matrix_space:
 
 # Matrix sync transport (optional)
 # classic uses /v3/sync and backfills limited-timeline gaps from /messages.
-# sliding opts into MSC4186 Simplified Sliding Sync and requires a homeserver
-# advertising org.matrix.simplified_msc3575 (checked by `mindroom doctor`).
-# Sliding positions are connection-scoped, so a restarted backend replays at
-# most sliding_timeline_limit events per room; older undelivered events are
-# not recovered.
-# Changing matrix_sync restarts running agents to pick up the new transport.
+# sliding uses MSC4186 Simplified Sliding Sync on compatible homeservers.
+# A durable store remains bound to the transport it first used.
 matrix_sync:
   mode: classic                    # Default: classic
-  sliding_timeline_limit: 100      # Default: 100 (per-room window for sliding requests)
+  sliding_timeline_limit: 100       # Per-room Sliding window, minimum 1
 
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
@@ -13021,6 +13017,9 @@ MindRoom does not sanitize attachments, media, tool calls, tool args, provider m
 For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation, interruption, suppression, and delivery failure recovery.
 `room:member_joined` uses at-least-once delivery because MindRoom records the durable room/user marker only after the hook completes.
 A process interruption or marker-write failure after a handler side effect can replay the same room/user pair, so handlers that create or invite resources must be idempotent.
+Historical joins and membership state snapshots silently record existing members in the journal admission transaction before Nio acknowledgement, preventing later profile updates from triggering onboarding.
+A baseline never completes a live join hook still pending in the application journal.
+Baselines and completed-hook markers are indexed journal rows scoped to the bot principal, room, and user; they survive restarts and room departures without rewriting an installation-wide file.
 `room:member_left` reads `display_name` and `avatar_url` from the joined membership state that the leave replaces.
 Actionable room-lifecycle events remain pending until their callback completes, so an interruption can replay a leave before journal settlement and handlers must be idempotent.
 
@@ -17142,15 +17141,20 @@ Use `build_message_content()` from `message_builder.py` to construct thread-awar
 
 ### Sync Loop
 
-Each agent bot runs its own sync loop with a 30-second long-polling timeout.
+Each agent bot runs an owned Nio ingestion session with a five-second long-polling timeout.
 The default `matrix_sync.mode: classic` streams events through classic `/v3/sync` and backfills limited-timeline gaps from `/messages`.
-Set `matrix_sync.mode: sliding` to opt into MSC4186 Simplified Sliding Sync on homeservers that advertise `org.matrix.simplified_msc3575`.
-`matrix_sync.sliding_timeline_limit` (default 100) bounds the per-room timeline window of each sliding request.
-Sliding positions remain connection-scoped, while callback admission uses mindroom-nio's persisted per-event provenance.
-Sliding Sync classifies its validated `num_live` tail as live, ordinary continuations without `num_live` as live, and initial or expanded timelines without `num_live` as history.
-Classic Sync classifies initial timelines and `/messages` recovery as history, while `since` continuations are live.
-This provenance remains attached across recovery, restart, and decryption independently of journal checkpoint persistence.
-`matrix/journal_ingress.py` commits every inbound event to the event journal before nio treats it as delivered, and a refused write raises `nio.CallbackNotAcceptedError` so nio redelivers the event rather than advancing the checkpoint past it.
+Set `matrix_sync.mode: sliding` to use MSC4186 Simplified Sliding Sync on homeservers advertising `org.matrix.simplified_msc3575`.
+Each agent uses a stable connection ID, a discovery range of `[0,99]`, and explicit subscriptions for its configured resolved rooms.
+Subscriptions refresh after deferred joins and room configuration changes without replacing the durable session or discarding accepted input.
+`matrix_sync.sliding_timeline_limit` defaults to 100 events per room window.
+A durable store is bound to its transport; changing this setting does not convert an existing store.
+Nio owns transport cursors, crypto preparation, and persisted per-event provenance.
+Both transports distinguish initial history, live continuations, and recovered gaps; MindRoom uses the provenance Nio supplies without reclassifying it.
+This provenance remains attached across recovery, restart, and decryption independently of application turn settlement.
+`matrix/durable_ingestion.py` converts one trusted Nio batch and atomically commits its receipt, ordered membership effects, semantic events, and conversation projection in the MindRoom journal before acknowledging that batch to Nio.
+An admission failure leaves the batch unsettled for retry, and replay after a committed admission returns the original receipt without duplicating semantic work.
+Typing, presence and read receipts are excluded from durable admission.
+MindRoom requires `mindroom-nio>=1,<2`, and `uv.lock` pins the published 1.0.0 release.
 Admission is fail-closed at every provenance, not only for recovery, because an event the journal never accepted is one no later process would see again.
 Silent schedules use the custom `io.mindroom.scheduled.trigger` timeline event so clients do not render the task body as a room message.
 Ingress admits that hidden event only from a managed sender, leaves it out of the visible-message projection, and classifies cold-history copies as context-only.
@@ -17165,16 +17169,16 @@ Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart 
 An event reaches an agent through durable admission, never straight from the sync callback:
 
 1. Sync receives the event via long-polling, and nio states its provenance once.
-2. `JournalIngress._admit` runs first, as nio's event-admission callback, and commits the event and its projection row in one transaction before nio treats the event as delivered.
-3. Only after every admission callback succeeds do the ordinary event callbacks run, and they load already-persisted work rather than the parsed event they were handed.
+2. The owned ingestion pump validates and commits each batch through `PrincipalStore.admit_ingestion_batch()` before acknowledging it to Nio.
+3. Control-room departures and history loss revoke uncertain grants before admission; live membership grant changes run after the durable commit, before the next batch.
 4. `PendingEventWorker` drains what is still pending, so an event whose turn was interrupted is re-dispatched instead of lost.
 5. `TurnController` owns the turn and the agent responds in thread.
 
 Invites are the deliberate event-journal exception because an invite has no stable Matrix event ID to key a journal row on.
-`_on_invite_before_sync_certification` stores the pending room and inviter before starting plain background handling.
+The owned ingestion callback stores the pending room and inviter before starting background handling.
 The pending record wakes unfinished work, but it does not make Matrix repeat an already-checkpointed invite and does not grant authority.
 The stored inviter is not authorization evidence: routers and agents require nio's current invite sender after fence persistence and immediately before starting the Matrix join request.
-An authoritative departure clears nio's invited-room cache entry before asynchronous departure fencing, so a cancellation observed before the join starts revokes that sender evidence.
+Nio owns invited-room cache updates, and the join path rechecks current inviter evidence immediately before its membership command.
 A restart without current invite-cache evidence may require another invitation.
 All activity after joining uses ordinary responder conversation authorization.
 See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the full durable dispatch boundary.
@@ -17422,7 +17426,7 @@ main() entry
 
 - **Entity order**: Router first, then agents, then teams
 - **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents, teams, and users, then bots join
-- **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; the default `matrix_sync.mode: classic` uses classic `/v3/sync` and `matrix_sync.mode: sliding` opts into MSC4186 Simplified Sliding Sync
+- **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; `matrix_sync.mode: classic` uses Classic `/v3/sync`, while `sliding` uses MSC4186 Simplified Sliding Sync on a homeserver advertising `org.matrix.simplified_msc3575`
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
 ## Session Storage Upgrades
@@ -17456,15 +17460,17 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    The gate is global and covers the whole apply window regardless of how narrow the plan turns out to be.
    When the apply finishes, responses owned by unchanged or replacement runtimes compete for admission normally.
 6. A runtime being replaced wakes its pre-admission waiters with `ResponseAdmissionRefusedError`.
-   This is deliberately not an `asyncio.CancelledError`, because the Matrix callback must fail and invalidate the old sync checkpoint so the replacement runtime replays the source event.
+   The refusal leaves the admitted source pending in the event journal so the replacement runtime can replay it.
    The refusal path performs no Matrix I/O, so replacement shutdown cannot stall on an untimed send.
    Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped.
+   Before emitting a resume relay, history recovery requires a nonretired attempted outbox delivery binding the target response to the current principal and room membership.
+   A send with no known response event remains the responsibility of existing outbox and pending-source recovery.
 7. If responses never drain, either replacement flow stops deferring after 600 seconds and closes the gate over still-running responses.
    This bounded forced apply prevents a busy install from starving config or MCP replacement forever.
 8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config while admission remains open, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations after the gate closes.
-9. The orchestrator applies the resulting plan: changed entities are replaced, unchanged bots receive the new config, and room-only changes reconcile memberships in place while restarting only sliding receive loops to refresh their subscriptions.
+9. The orchestrator applies the resulting plan: changed entities are replaced, unchanged bots receive the new config, and room-only changes reconcile memberships in place without restarting receive loops.
    Call-enabled agents are conservatively replaced after any authored config change because active call tooling captures the full authored config snapshot.
-10. Removed entities run `cleanup()` to leave rooms and stop the bot.
+10. Removed entities prepare their response runtime for shutdown, reconcile approval work, and call `leave_rooms()` while ingestion remains active; the orchestrator then cancels the receive loop and stops the bot.
 11. New and restarted bots go through room setup.
 12. The gate reopens once the apply finishes, whether it succeeded, failed, or was cancelled, and deferred responses may then start.
 
@@ -17500,7 +17506,7 @@ Correctness-critical timeline callbacks cross durable journal admission before o
 
 **Inbound message flow:**
 
-1. `matrix/journal_ingress.py` commits the event before nio accepts it.
+1. `matrix/durable_ingestion.py` converts nio batches using `matrix/journal_ingress.py`, commits their application effects in one transaction, then acknowledges after ordered hooks.
 2. `journal_dispatch.py` and `pending_event_worker.py` dispatch admitted or recovered work.
 3. `turn_controller.py` runs ingress validation, normalization, conversation resolution, receipt ordering, and coalescing.
 4. `text_ingress_dispatch.py` and `turn_policy.py` decide whether to ignore, route, execute a command, or respond.
@@ -17535,18 +17541,27 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ### Graceful Shutdown
 
+The entry-point shutdown helper cancels and settles startup before core teardown can release resources.
+Auxiliary watchers are cancelled after core teardown.
+
 On `orchestrator.stop()`:
 
 1. Mark the runtime stopped, signal runtime shutdown, unbind external triggers, and close approval transport/runtime state.
 2. Cancel config reload, drain MCP catalog and dispatch-recovery work, and cancel startup maintenance.
 3. Stop todo-poke and memory auto-flush workers plus knowledge watching and refresh scheduling.
 4. Cancel pending bot starts and stop the MCP manager.
-5. Cancel sync tasks before stopping bots so shutdown cannot race active receive loops.
-6. Stop all bots concurrently, wait for attachment cleanup, and close the shared event journal last because bots borrow it while draining delivery work.
+5. Quiesce ingestion while its pump can still admit captured input, then cancel receive loops.
+6. Stop all bots concurrently and finish retained response recovery proofs before releasing their clients.
+7. Wait for attachment cleanup and close the shared journal only once no response owner remains.
+
+Each response keeps one ownership record through terminal cleanup and recovery-proof consumption.
+A timeout preserves the record and any in-flight proof, so shared resources remain available for deferred cleanup.
 
 # Deployment
 
 MindRoom can be deployed in various ways depending on your needs.
+
+Existing deployments moving from the previous Nio integration must follow the [Nio 1.0 cutover guide](https://docs.mindroom.chat/deployment/nio-upgrade/).
 
 ## Deployment Options
 
@@ -17682,6 +17697,55 @@ Direct and single-container deployments:
 See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.
 
 Hosted `mindroom.chat` deployments additionally use values from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID`, `MINDROOM_LOCAL_CLIENT_SECRET`, and `MINDROOM_NAMESPACE`) to bootstrap agent registrations and avoid collisions on shared homeservers.
+
+# Upgrading to Nio 1.0
+
+The cutover from the previous Nio integration requires a fresh MindRoom event journal.
+MindRoom rejects pre-durable journals instead of converting pending requests, deliveries, approvals, or membership ownership.
+This procedure applies to deployments that have not yet opened a Nio 1.0 durable session.
+An existing Nio 1.0 session is bound to its journal consumer; resetting that journal alone is not a supported restart procedure.
+
+## What stays silent
+
+Nio classifies the first room snapshot without a known membership baseline as history.
+MindRoom stores those messages as context only, so they do not trigger replies or commands even when the fresh journal has no handled-event records.
+Encrypted events first seen as unreadable history remain context only when their keys arrive, including after a restart.
+Startup auto-resume also requires an attempted delivery owned by the current journal and room membership, so interrupted responses abandoned at cutover stay abandoned across later restarts.
+Later live messages become actionable normally, and subsequent restarts preserve pending work and duplicate protection.
+Messages sent during downtime or before the first room baseline can therefore remain unanswered; resend any request you still want handled after startup completes.
+Room-member onboarding markers now live in the event journal; the old `tracking/room_member_joins.json` file is ignored.
+Initial historical membership baselines prevent later profile updates from onboarding existing members again.
+
+## One-time cutover
+
+1. Finish or abandon pending responses and approvals, then stop every MindRoom process using the deployment's storage or journal.
+2. Back up the configuration and persistent storage, including the event journal and encryption keys.
+3. For SQLite, archive `tracking/event_journal.db` and any `event_journal.db-wal` and `event_journal.db-shm` companions together from the storage root while all processes are stopped.
+   For PostgreSQL, configure `event_journal` to use a fresh database or an empty schema dedicated to this deployment, preserving the previous database for backup.
+4. Archive the old `sync_continuity` directory from the storage root; its checkpoint formats are no longer read.
+5. Using the new release, run `mindroom journal adopt --config config.yaml --storage-path mindroom_data` with your actual config and storage paths to bind the deployment to the fresh journal.
+6. Start MindRoom and wait until startup completes before sending a new request.
+
+Keep the same storage root, Matrix account credentials, device IDs, and `encryption_keys` directory.
+Nio owns adoption of the existing crypto store and may require outstanding transport recovery to be drained or settled using the prior release before it can proceed.
+Do not delete crypto keys to bypass that refusal.
+
+The cutover abandons the old journal's unfinished work and local conversation projection.
+Configuration, credentials, workspaces, memories, knowledge stores, and separate agent sessions remain in their existing stores.
+Matrix room messages remain on the homeserver, and accessible history can be fetched again when the required encryption keys are available.
+
+If you customized `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS`, replace it with `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS`; the watchdog now bounds Nio ingestion progress instead of MindRoom's retired callback cache writes.
+
+## Device recovery after the cutover
+
+Normal restarts reuse the existing Matrix device and durable stream.
+If the homeserver reports a soft logout, MindRoom renews credentials for that same device using the configured authentication method.
+Pending transport input, application work, encryption keys, and delivery identities remain intact.
+
+Automatic device replacement is unsupported.
+If the device store is missing, restore the deployment's matching storage backup before restarting.
+Hard logout, a deleted server device, or a changed returned identity stops startup and requires operator recovery of the bound device; clearing the journal or crypto directory is not a supported repair.
+Preserve the failed deployment's state when recovering it, because retained input and attempted deliveries may still need reconciliation.
 
 # Hosted Matrix + Local Backend
 
@@ -20279,7 +20343,8 @@ Export Matrix threads to local files.
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ export   Export Matrix threads to YAML files for grep/ripgrep search.                  │
+│ export   Export Matrix threads through a running MindRoom instance to searchable YAML  │
+│          files.                                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -20290,7 +20355,11 @@ Export Matrix threads to local files.
 ## threads export
 
 Export Matrix threads to YAML files for grep/ripgrep search.
-The command reads persisted Matrix accounts and rooms from `matrix_state.yaml`, so run MindRoom once before exporting.
+Keep MindRoom running with its API enabled while exporting; both one-shot and `--watch` exports use its live Matrix clients and journal readers.
+The CLI calls `--url`, then `MINDROOM_URL` from the selected runtime environment, or `http://127.0.0.1:8765` by default.
+Set `MINDROOM_API_KEY` when API authentication is enabled; hosted deployments require an authorized bearer token.
+The selected `--config` and `--storage-path` must match the running installation, and output paths refer to that runtime's filesystem.
+There is no offline export mode or separate Matrix login.
 Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account, unless `--no-invited-rooms` is passed.
 By default it writes to `<storage>/thread_exports`.
 For a continuously updated copy inside an agent's own workspace, set `thread_exports` on the agent instead; see [Thread Exports](https://docs.mindroom.chat/configuration/agents/#thread-exports).
@@ -20313,7 +20382,11 @@ Retracting a room whose directory still holds unrelated entries removes only the
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
 Thread bodies come from the journal projection, read as the same principal a running bot writes it under, so an exported thread reduces edits, redactions, and long-text sidecars exactly the way agent prompts do.
 A thread nobody has read yet is built from the homeserver once and then costs no Matrix history call at all, so a repeated export pass is a local read.
-Building it also writes it, into the same journal the bot is writing, from the export's own process, so a first pass over a thread competes with live admission for that database's one write lock while a later pass over the same thread does not.
+Hydration writes through the runtime's existing journal owner; export does not open another journal or crypto store.
+Normal config reloads wait for manual exports; forced replacement and shutdown cancel them and drain their history reads before closing their Matrix clients.
+Every runtime replacement also cancels and drains automatic workspace exports, then queues a full pass that waits for publication to finish before borrowing current clients.
+Automatic exports resume when replacement admission reopens, including after a failed or cancelled publication.
+An interrupted pass preserves completed files; rerun the export to finish the pass and rebuild indexes.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -20330,9 +20403,12 @@ Building it also writes it, into the same journal the bot is writing, from the e
 
  Usage: root threads export [OPTIONS]
 
- Export Matrix threads to YAML files for grep/ripgrep search.
+ Export Matrix threads through a running MindRoom instance to searchable YAML files.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --url                                         TEXT     Running MindRoom URL; defaults  │
+│                                                        to MINDROOM_URL or              │
+│                                                        localhost:8765.                 │
 │ --config            -c                        PATH     Use this config file path.      │
 │ --storage-path      -s                        PATH     Base directory for persistent   │
 │                                                        MindRoom data.                  │
@@ -20364,6 +20440,7 @@ Building it also writes it, into the same journal the bot is writing, from the e
 mindroom threads export --storage-path mindroom_data --output "$HOME/mindroom-thread-exports"
 mindroom threads export --storage-path mindroom_data --room lobby
 mindroom threads export --storage-path mindroom_data --watch --interval 300
+mindroom threads export --url http://127.0.0.1:9000 --storage-path mindroom_data
 ```
 
 ## journal

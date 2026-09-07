@@ -210,7 +210,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
-| `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
+| `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may defer while durable ingestion progress keeps advancing | `600` |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Complete worker-reachable background-script gateway base URL, including `/api/script-gateway`; required for Kubernetes and for Docker unless a reachable `MINDROOM_PUBLIC_URL` is configured | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | Operator attestation that the Kubernetes worker's configured script-gateway listener exposes only `/api/script-gateway`; required to admit Kubernetes background scripts and does not create network isolation itself | `false` |
 | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE` | Default Kubernetes background-script profile (`small`, `standard`, or `large`) when `start_script` omits `resource_profile` | `small` |
@@ -218,8 +218,8 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_SCRIPT_RETENTION_SECONDS` | Finite positive seconds to retain terminal background-script runs, tool-call receipts, approval rows, and durable approval records before lifecycle pruning | `2592000` (30 days) |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 
-The sync cache-write grace is a hang backstop rather than the ordinary Matrix transport timeout; set it above the observed healthy cache-write p99 for the deployment.
-Raising it delays both watchdog cancellation and liveness failure only while a sync callback is actively completing its sequential durable cache phase.
+The ingestion grace bounds continuous catch-up; set it above the observed healthy catch-up duration for the deployment.
+Raising it delays both watchdog cancellation and liveness failure only while durable ingestion progress keeps advancing.
 
 ### OpenAI-Compatible API
 
@@ -620,15 +620,11 @@ matrix_space:
 
 # Matrix sync transport (optional)
 # classic uses /v3/sync and backfills limited-timeline gaps from /messages.
-# sliding opts into MSC4186 Simplified Sliding Sync and requires a homeserver
-# advertising org.matrix.simplified_msc3575 (checked by `mindroom doctor`).
-# Sliding positions are connection-scoped, so a restarted backend replays at
-# most sliding_timeline_limit events per room; older undelivered events are
-# not recovered.
-# Changing matrix_sync restarts running agents to pick up the new transport.
+# sliding uses MSC4186 Simplified Sliding Sync on compatible homeservers.
+# A durable store remains bound to the transport it first used.
 matrix_sync:
   mode: classic                    # Default: classic
-  sliding_timeline_limit: 100      # Default: 100 (per-room window for sliding requests)
+  sliding_timeline_limit: 100       # Per-room Sliding window, minimum 1
 
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC

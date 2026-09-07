@@ -1,26 +1,13 @@
-"""SQLite backend: one writer task per process behind a queue, readers in WAL.
+"""SQLite backend: one queued writer per backend, readers in WAL.
 
-Concurrent writers are what produce ``database is locked`` under load, so
-within a process there is exactly one. Every write is submitted to a queue
-drained by a single task, which means that serialization is a property of the
-structure rather than of a timeout being long enough.
+The runtime shares its backend across bots and thread exports, so their writes
+are serialized by one writer task. ``mindroom threads export`` calls the running
+API and uses that same writer. Separate processes have separate queues and rely
+on SQLite's busy timeout to wait for the database write lock.
 
-Per process, and the qualifier is the whole of it. ``mindroom threads export``
-opens this same file from its own process and hydrates through it, so a
-deployment running the documented ``--watch`` pass alongside a bot has two
-writers on one database and no shared queue to put them in. What serializes
-*those* is the busy timeout, and nothing else -- exactly the arrangement the
-queue exists to avoid, arrived at from outside where the queue cannot reach.
-
-Which is survivable, and is not free. A write blocks the other process's next
-write for as long as it runs, and an export installing one hydrated
-conversation runs for as long as that conversation is large: a few hundred
-messages is milliseconds, and the ceilings in ``thread_export`` permit far
-more than the ten seconds another process is willing to wait. Past that the
-loser is refused rather than delayed. On the bot that refusal reaches
-``journal_ingress``, which declines the event instead of accepting one it did
-not commit -- the checkpoint holds, nio redelivers, and no event is lost. The
-cost is a stalled sync round trip, not a hole in the journal.
+If batch admission fails, its transaction rolls back and the Nio batch remains
+unacknowledged for retry. A successful application commit must reach disk before
+Nio is told it can release the batch.
 """
 
 from __future__ import annotations
@@ -35,10 +22,8 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 
-from .migrations import finish_matrix_delivery_migration, prepare_matrix_delivery_migration
 from .offloading import ThreadOffload, settled
-from .schema import SQLITE_DIALECT, render, schema_statements
-from .schema_migrations import pre_schema_migration_statements
+from .schema import SQLITE_DIALECT, render, require_current_schema, schema_statements
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -150,9 +135,17 @@ class SqliteBackend:
         repr=False,
     )
     _closed: bool = field(default=False, init=False, repr=False)
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _open_readers: list[sqlite3.Connection] = field(default_factory=list, init=False, repr=False)
     _reader_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _offload: ThreadOffload = field(default_factory=ThreadOffload, init=False, repr=False)
+    _recovery_offload: ThreadOffload = field(
+        default_factory=lambda: ThreadOffload.serial(
+            thread_name_prefix="mindroom-event-journal-recovery",
+        ),
+        init=False,
+        repr=False,
+    )
 
     @classmethod
     def open(cls, database_path: Path) -> SqliteBackend:
@@ -185,50 +178,28 @@ class SqliteBackend:
         return queue
 
     def _connect_writer(self) -> sqlite3.Connection:
-        # The writer runs on whichever pool thread `asyncio.to_thread` picks, so
-        # the connection has to outlive its creating thread. Only ever one write
-        # is in flight, because a single task drains the queue.
+        # The writer runs on whichever owned-pool thread is free, so the
+        # connection has to outlive its creating thread. Only ever one write is
+        # in flight, because a single task drains the queue.
         connection = sqlite3.connect(
             self.database_path,
             isolation_level=None,
             check_same_thread=False,
         )
-        # The only connection that commits, and the only one whose commits have
-        # to reach the disk before they are reported as landed. A Matrix sync
-        # checkpoint is written through `write_json_file_durable`, so it is
-        # fsynced; under `synchronous = NORMAL` the WAL frames it certifies are
-        # not, and a host reset can leave the checkpoint pointing past events
-        # the journal no longer holds. Nothing re-delivers those: the token says
-        # they were consumed, and history debt is only recorded for a recovery
-        # gap the certifier can see. Readers commit nothing, so this is the
-        # writer's cost alone.
+        # Application effects must reach disk before the ingestion pump
+        # acknowledges their Nio batch. Under synchronous=NORMAL, a host reset
+        # could lose committed WAL frames after Nio has released that batch.
+        # FULL makes the application commit durable before acknowledgement.
+        # Readers commit nothing, so this is the writer's cost alone.
         _configure(connection, synchronous="FULL")
         connection.execute("BEGIN IMMEDIATE")
         try:
-            interactive_question_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(interactive_questions)")
+            existing_tables = frozenset(
+                str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             )
-            approval_continuation_call_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuation_calls)")
-            )
-            matrix_delivery_outbox_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")
-            )
-            room_history_recovery_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(room_history_recovery)")
-            )
-            for statement in pre_schema_migration_statements(
-                approval_continuation_call_columns=approval_continuation_call_columns,
-                interactive_question_columns=interactive_question_columns,
-                matrix_delivery_outbox_columns=matrix_delivery_outbox_columns,
-                room_history_recovery_columns=room_history_recovery_columns,
-            ):
-                connection.execute(statement)
-            transaction = _SqliteTransaction(connection)
-            migration = prepare_matrix_delivery_migration(transaction, postgres=False)
+            require_current_schema(existing_tables)
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
-            finish_matrix_delivery_migration(transaction, migration=migration)
             connection.execute("COMMIT")
         except BaseException:
             connection.close()
@@ -367,11 +338,26 @@ class SqliteBackend:
 
         return await self._offload.run(apply)
 
+    async def recovery_read[T](self, operation: Operation[T]) -> T:
+        """Run a committed-state handoff proof on its reserved WAL reader."""
+        if self._closed:
+            raise RuntimeError(_CLOSED_MESSAGE)
+
+        def apply() -> T:
+            connection = self._reader()
+            connection.execute("BEGIN")
+            try:
+                return operation(_SqliteTransaction(connection))
+            finally:
+                connection.execute("ROLLBACK")
+
+        return await self._recovery_offload.run(apply)
+
     def _apply_read[T](self, operation: Operation[T]) -> T:
         return operation(_SqliteTransaction(self._reader()))
 
     async def close(self) -> None:
-        """Stop the writer task and close every connection.
+        """Close admission once and await the one owned connection teardown.
 
         Cancelling the writer task is safe only because ``_settle`` refuses to
         return while its worker thread is still executing: the cancellation
@@ -388,14 +374,23 @@ class SqliteBackend:
         write already admitted is in the queue, and callbacks for claimed
         handoffs later see that they no longer own an admission and do nothing.
         """
-        with self._admission_lock:
-            if self._closed:
-                return
-            self._closed = True
-            pending_admissions = tuple(self._pending_admissions.values())
-            self._pending_admissions.clear()
-        for queued in pending_admissions:
-            _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
+        close_task = self._close_task
+        if close_task is None:
+            with self._admission_lock:
+                self._closed = True
+                pending_admissions = tuple(self._pending_admissions.values())
+                self._pending_admissions.clear()
+            for queued in pending_admissions:
+                _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
+            close_task = asyncio.create_task(
+                self._finish_close(),
+                name="event_journal_sqlite_close",
+            )
+            self._close_task = close_task
+        await settled(close_task)
+
+    async def _finish_close(self) -> None:
+        """Finish the teardown every close waiter shares."""
         writer_task = self._writer_task
         self._writer_task = None
         if writer_task is not None:
@@ -409,13 +404,20 @@ class SqliteBackend:
             queued = queue.get_nowait()
             _deliver(queued.future, _WriteOutcome(error=RuntimeError(_CLOSED_MESSAGE)))
             queue.task_done()
-        await self._offload.drain()
-        await asyncio.to_thread(self._writer.close)
-        with self._reader_lock:
-            readers = tuple(self._open_readers)
-            self._open_readers.clear()
-        for reader in readers:
-            await asyncio.to_thread(reader.close)
+        try:
+            await asyncio.gather(
+                self._offload.drain(),
+                self._recovery_offload.drain(),
+            )
+            await self._offload.run(self._writer.close)
+            with self._reader_lock:
+                readers = tuple(self._open_readers)
+                self._open_readers.clear()
+            for reader in readers:
+                await self._offload.run(reader.close)
+        finally:
+            self._offload.shutdown()
+            self._recovery_offload.shutdown()
 
 
 def _report(future: asyncio.Future[Any], work: asyncio.Future[Any]) -> None:

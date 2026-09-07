@@ -28,7 +28,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
-from tests.bot_helpers import make_test_agent_bot
+from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -496,8 +496,7 @@ class TestBotTaskRestoration:
 
             # Mock the necessary methods
             with (
-                patch("mindroom.matrix.users.login") as mock_login,
-                patch("mindroom.bot.set_before_sync_response_callback") as set_before_sync_response_callback,
+                patch("mindroom.bot.login_agent_owned_session") as mock_login,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
@@ -509,7 +508,7 @@ class TestBotTaskRestoration:
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
                 mock_client.rooms = {}
-                mock_login.return_value = mock_client
+                mock_login.return_value = owned_matrix_login(mock_client)
 
                 # Mock the client.join method to return JoinResponse
                 mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
@@ -524,10 +523,6 @@ class TestBotTaskRestoration:
                 # Verify restore was called for the room with config
                 mock_restore.assert_called_once()
                 assert mock_restore.call_args.args[1] == "!test:server"
-                set_before_sync_response_callback.assert_called_once_with(
-                    mock_client,
-                    bot._before_sync_response_admission,
-                )
 
                 # Just verify restore was called - logger testing is complex with the bind() method
                 assert mock_restore.called
@@ -555,7 +550,7 @@ class TestBotTaskRestoration:
             install_runtime_journal_support(bot)
 
             with (
-                patch("mindroom.matrix.users.login") as mock_login,
+                patch("mindroom.bot.login_agent_owned_session") as mock_login,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
                 patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
             ):
@@ -568,7 +563,7 @@ class TestBotTaskRestoration:
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
                 mock_client.rooms = {}
-                mock_login.return_value = mock_client
+                mock_login.return_value = owned_matrix_login(mock_client)
 
                 # Mock the client.join method to return JoinResponse
                 mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
@@ -878,9 +873,9 @@ class TestCommandHandling:
 
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
             room.users = {
-                "@mindroom_router:localhost": None,
-                "@mindroom_code:localhost": None,
-                "@bob:localhost": None,
+                "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+                "@mindroom_code:localhost": nio.MatrixUser("@mindroom_code:localhost"),
+                "@bob:localhost": nio.MatrixUser("@bob:localhost"),
             }
             event = nio.RoomMessageText.from_dict(
                 {
@@ -1638,10 +1633,10 @@ class TestRouterSkipsSingleAgent:
 
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         event = nio.RoomMessageText.from_dict(
@@ -1709,10 +1704,10 @@ class TestRouterSkipsSingleAgent:
 
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         event = nio.RoomMessageText.from_dict(
@@ -1786,9 +1781,9 @@ class TestRouterSkipsSingleAgent:
         # Create room with only general agent (router is also there but excluded from available agents)
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Create user message
@@ -1872,10 +1867,10 @@ class TestRouterSkipsSingleAgent:
         # Create room with multiple agents
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Create user message
@@ -1976,11 +1971,11 @@ class TestRouterSkipsSingleAgent:
 
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@alice:localhost": None,
-            "@bob:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@alice:localhost": nio.MatrixUser("@alice:localhost"),
+            "@bob:localhost": nio.MatrixUser("@bob:localhost"),
         }
 
         event = nio.RoomMessageText.from_dict(
@@ -2060,9 +2055,9 @@ class TestRouterSkipsSingleAgent:
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Unknown command from human
@@ -2128,9 +2123,9 @@ class TestRouterSkipsSingleAgent:
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Schedule command from human
@@ -2197,9 +2192,9 @@ class TestRouterSkipsSingleAgent:
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Voice transcription relay from router on behalf of a human user
@@ -2287,10 +2282,10 @@ class TestRouterSkipsSingleAgent:
         # Room with router + two agents + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Valid command from human (help)

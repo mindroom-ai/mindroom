@@ -7,15 +7,10 @@ from typing import TYPE_CHECKING
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import MissingManagedEntityAccountError
 from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
-from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.invited_rooms_store import invited_room_entity_names, invited_rooms_path, load_invited_rooms
 from mindroom.matrix.state import MatrixRoom, matrix_state_for_runtime
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, AgentMatrixUser
-from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 from mindroom.thread_export.models import (
     ThreadExportGroup,
-    ThreadExportGroupFailure,
-    ThreadExportGroupResult,
     ThreadExportRoom,
 )
 
@@ -24,7 +19,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.state import MatrixAccount
 
 
 def export_rooms(runtime_paths: RuntimePaths, room_filter: str | None) -> list[ThreadExportRoom]:
@@ -96,101 +90,12 @@ def trusted_sender_ids_for_export(config: Config, runtime_paths: RuntimePaths) -
         return frozenset()
 
 
-def _account_user_from_state(
-    *,
-    account_key: str,
-    account: MatrixAccount,
-    homeserver: str,
-    runtime_paths: RuntimePaths,
-) -> AgentMatrixUser:
-    """Build one login-ready Matrix user from persisted state credentials."""
-    domain = account.domain or extract_server_name_from_homeserver(homeserver, runtime_paths=runtime_paths)
-    entity_name = (
-        INTERNAL_USER_AGENT_NAME if account_key == INTERNAL_USER_ACCOUNT_KEY else account_key.removeprefix("agent_")
-    )
-    return AgentMatrixUser(
-        agent_name=entity_name,
-        user_id=MatrixID.from_username(account.username, domain).full_id,
-        display_name=entity_name,
-        password=account.password,
-        device_id=account.device_id,
-        access_token=account.access_token,
-    )
-
-
-def select_export_account(runtime_paths: RuntimePaths, homeserver: str) -> AgentMatrixUser:
-    """Select a persisted Matrix account for export reads.
-
-    The router first, and the internal user last. Export reads thread bodies
-    from the journal projection of whichever principal it logs in as, and only
-    an account something is actually syncing has one: the internal user runs no
-    bot, so choosing it would mean hydrating every thread from the homeserver on
-    every pass. The router is the one managed entity that joins every configured
-    room, which is what the rooms in ``matrix_state.yaml`` are.
-    """
-    state = matrix_state_for_runtime(runtime_paths)
-    candidate_keys = [
-        managed_account_key(ROUTER_AGENT_NAME),
-        *(account_key for account_key in state.accounts if account_key != INTERNAL_USER_ACCOUNT_KEY),
-        INTERNAL_USER_ACCOUNT_KEY,
-    ]
-    seen_keys: set[str] = set()
-
-    for account_key in candidate_keys:
-        if account_key in seen_keys:
-            continue
-        seen_keys.add(account_key)
-        account = state.accounts.get(account_key)
-        if account is None:
-            continue
-        return _account_user_from_state(
-            account_key=account_key,
-            account=account,
-            homeserver=homeserver,
-            runtime_paths=runtime_paths,
-        )
-
-    msg = "No persisted Matrix account found in matrix_state.yaml. Run MindRoom once before exporting threads."
-    raise RuntimeError(msg)
-
-
 def build_export_groups(
     *,
-    runtime_paths: RuntimePaths,
-    homeserver: str,
     state_rooms: Sequence[ThreadExportRoom],
     invited_groups: Sequence[tuple[str, list[ThreadExportRoom]]],
-) -> list[ThreadExportGroupResult]:
-    """Build account-specific export groups, retaining missing-account failures."""
-    groups: list[ThreadExportGroupResult] = []
-    if state_rooms:
-        groups.append(
-            ThreadExportGroup(
-                user=select_export_account(runtime_paths, homeserver),
-                rooms=tuple(state_rooms),
-            ),
-        )
-    accounts = matrix_state_for_runtime(runtime_paths).accounts
-    for entity_name, entity_rooms in invited_groups:
-        account_key = managed_account_key(entity_name)
-        account = accounts.get(account_key)
-        if account is None:
-            groups.append(
-                ThreadExportGroupFailure(
-                    rooms=tuple(entity_rooms),
-                    error=f"No persisted Matrix account for invited-room entity '{entity_name}'",
-                ),
-            )
-            continue
-        groups.append(
-            ThreadExportGroup(
-                user=_account_user_from_state(
-                    account_key=account_key,
-                    account=account,
-                    homeserver=homeserver,
-                    runtime_paths=runtime_paths,
-                ),
-                rooms=tuple(entity_rooms),
-            ),
-        )
+) -> list[ThreadExportGroup]:
+    """Use the router for configured rooms and each invited room's own entity."""
+    groups = [ThreadExportGroup(entity_name=ROUTER_AGENT_NAME, rooms=tuple(state_rooms))] if state_rooms else []
+    groups.extend(ThreadExportGroup(entity_name=name, rooms=tuple(rooms)) for name, rooms in invited_groups)
     return groups

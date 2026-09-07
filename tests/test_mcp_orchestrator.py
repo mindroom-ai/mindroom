@@ -1343,7 +1343,7 @@ async def test_router_removal_unbinds_external_trigger_runtime_before_cleanup(tm
         order.append("cleanup")
 
     router_bot = MagicMock(spec=AgentBot)
-    router_bot.cleanup = AsyncMock(side_effect=cleanup)
+    router_bot.leave_rooms = AsyncMock(side_effect=cleanup)
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
 
     def unbind_external_trigger_runtime() -> None:

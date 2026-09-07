@@ -40,6 +40,10 @@ The row is kept and the payload is dropped, which is the smallest thing that sur
 
 A context-only event never carries a payload at all: it is admitted already settled, so the field it would have used is written empty from the start.
 
+Unreadable historical ciphertext keeps only a settled envelope identity, without its encrypted payload.
+A later decrypted observation may populate conversation context but cannot make that identity actionable.
+Unreadable live and recovered ciphertext remains Nio's recovery responsibility and never owns application journal work; runtime diagnostics issue authorized, best-effort key requests and warnings separately.
+
 `visible_messages.content_json` holds the current visible body of one logical message and is the general long-lived conversation-body projection.
 
 The projection keeps no edit history, so an edit overwrites the body and the previous text is gone.
@@ -63,10 +67,8 @@ A team continuation without the versioned structured presentation is rejected in
 
 The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.
 
-During the delivery-outbox schema upgrade, already-decided legacy calls keep their first decision and undecided calls expire atomically.
-Known card event IDs are tombstoned so every late click remains inert.
-All legacy approval delivery debt is dropped because its Matrix outcome cannot be reconciled safely without retaining the removed delivery protocol.
-An existing generic outbox without membership and retirement columns is rejected at startup with reset guidance because its rows lack the ownership facts the current schema requires.
+Pre-durable event journals are rejected at startup before their pending work can enter the runtime.
+There are no journal schema or delivery-state conversions during the Nio 1.0 cutover; operators explicitly bind a fresh journal using the [cutover procedure](../deployment/nio-upgrade.md).
 
 ## Sidecar previews are never stored as bodies
 
@@ -144,23 +146,23 @@ Old-membership recovery never sends and retires the row only after exact reconci
 
 Every outbox row freezes the membership epoch that authorized it, and acknowledgement projects its Matrix event only while that exact membership remains current.
 
-One departure reaches the bot twice, locally and again in the sync response that reports it, and both must fence exactly once.
-
-Fencing twice is not merely wasteful — if the bot rejoined in between, the second fence deletes the conversation it has already hydrated under the new membership, along with any answer queued for it.
-
-The bookkeeping that decides which observation is a repeat is durable and counted rather than a flag, because leave/rejoin/leave owes two reports and it has to survive a restart between a local departure and its report.
+Nio owns durable recognition of local membership commands and their later sync echoes.
+MindRoom applies the producer's ordered membership transitions once per admitted batch and retains application tenure fencing without a second echo protocol.
+A departure advances that tenure and invalidates work authorized by the ended membership.
+A rejoin retains the advanced tenure, so a late acknowledgement cannot project an older delivery into the new conversation.
+Response shutdown can prove intentional termination from the exact retained sources: each must be settled and belong to an older membership epoch than its own room's current epoch.
+That proof uses one journal recovery snapshot and needs no final delivery; missing sources, current-epoch settlement, and sources spanning ended and current memberships do not qualify.
 
 ## Restart
 
-A Matrix sync token is only meaningful next to the store that consumed the events it already covers.
-
-`journal_identity` holds a single generation, written once when the database is first opened and never rewritten.
-
-A saved sync checkpoint records that generation, and a checkpoint naming a different one is refused, so a bot resuming against a database that no longer exists starts cold instead of skipping every event in between.
-
-Only startup refuses a checkpoint this way.
-
-A room departure deliberately does not discard the global position, because that room is already fenced by its own membership epoch and dropping the checkpoint would resync every other room with it.
+`matrix_sync_consumers` binds each principal's durable consumer generation to one nio stream and records its next batch sequence.
+The owned session reuses that consumer identity on restart and rejects a mismatched stream binding.
+Soft-logout renewal requests the existing Matrix device and preserves its keys, stream, producer positions, and delivery identity.
+Hard logout, missing device storage, or changed account/device identity stops startup; automatic device replacement is unsupported.
+Initial login persists its exact credentials after the local store exists and before journal binding, so interrupted startup can reopen the same device.
+A batch committed before a crash is recognized on redelivery, while its pending semantic work remains recoverable from the journal.
+Nio owns the receive cursor; MindRoom's continuity file contains only pending join/decrypt fences.
+Pre-durable membership tenures and older continuity-file formats are not adopted.
 
 ## Storage and connections
 
@@ -173,3 +175,14 @@ SQL structure is authored only from fixed internal constants and controlled frag
 Both rewrites are plain string substitution, so both refuse a statement that places their marker adjacent to a string literal rather than trusting that no statement does.
 
 Caller-provided values are bound by the driver in every case and are never formatted into SQL.
+
+### Auxiliary Matrix operations
+
+Dashboard room reads, schedule state operations, and avatar updates use saved access tokens on HTTP-only clients with encryption disabled and no store path.
+They never provision an account, renew credentials, or open the owned crypto store.
+Dashboard departures use the running bot's serialized durable membership gateway.
+CLI thread exports require the running API and borrow the same clients and principal-bound readers used by workspace exports.
+The CLI sends its config and storage paths so the API can reject a request aimed at a different installation before writing files.
+Manual exports hold existing runtime replacement admission; automatic workspace exports are cancelled and drained at every replacement boundary.
+Both paths drain their hydration tasks before borrowed clients or journals close.
+The workspace runner queues a fresh full pass and waits for replacement admission to reopen before borrowing current owners.

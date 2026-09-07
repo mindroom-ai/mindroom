@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
     from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
     from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
@@ -117,6 +118,8 @@ class _MindroomAppState:
     orchestrator_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
+    thread_export_runner: WorkspaceThreadExportRunner | None = None
+    leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
     script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
 

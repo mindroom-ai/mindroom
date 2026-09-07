@@ -543,7 +543,8 @@ Export Matrix threads to local files.
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ export   Export Matrix threads to YAML files for grep/ripgrep search.                  │
+│ export   Export Matrix threads through a running MindRoom instance to searchable YAML  │
+│          files.                                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -554,7 +555,11 @@ Export Matrix threads to local files.
 ## threads export
 
 Export Matrix threads to YAML files for grep/ripgrep search.
-The command reads persisted Matrix accounts and rooms from `matrix_state.yaml`, so run MindRoom once before exporting.
+Keep MindRoom running with its API enabled while exporting; both one-shot and `--watch` exports use its live Matrix clients and journal readers.
+The CLI calls `--url`, then `MINDROOM_URL` from the selected runtime environment, or `http://127.0.0.1:8765` by default.
+Set `MINDROOM_API_KEY` when API authentication is enabled; hosted deployments require an authorized bearer token.
+The selected `--config` and `--storage-path` must match the running installation, and output paths refer to that runtime's filesystem.
+There is no offline export mode or separate Matrix login.
 Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account, unless `--no-invited-rooms` is passed.
 By default it writes to `<storage>/thread_exports`.
 For a continuously updated copy inside an agent's own workspace, set `thread_exports` on the agent instead; see [Thread Exports](https://docs.mindroom.chat/configuration/agents/#thread-exports).
@@ -577,7 +582,11 @@ Retracting a room whose directory still holds unrelated entries removes only the
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
 Thread bodies come from the journal projection, read as the same principal a running bot writes it under, so an exported thread reduces edits, redactions, and long-text sidecars exactly the way agent prompts do.
 A thread nobody has read yet is built from the homeserver once and then costs no Matrix history call at all, so a repeated export pass is a local read.
-Building it also writes it, into the same journal the bot is writing, from the export's own process, so a first pass over a thread competes with live admission for that database's one write lock while a later pass over the same thread does not.
+Hydration writes through the runtime's existing journal owner; export does not open another journal or crypto store.
+Normal config reloads wait for manual exports; forced replacement and shutdown cancel them and drain their history reads before closing their Matrix clients.
+Every runtime replacement also cancels and drains automatic workspace exports, then queues a full pass that waits for publication to finish before borrowing current clients.
+Automatic exports resume when replacement admission reopens, including after a failed or cancelled publication.
+An interrupted pass preserves completed files; rerun the export to finish the pass and rebuild indexes.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -594,9 +603,12 @@ Building it also writes it, into the same journal the bot is writing, from the e
 
  Usage: root threads export [OPTIONS]
 
- Export Matrix threads to YAML files for grep/ripgrep search.
+ Export Matrix threads through a running MindRoom instance to searchable YAML files.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --url                                         TEXT     Running MindRoom URL; defaults  │
+│                                                        to MINDROOM_URL or              │
+│                                                        localhost:8765.                 │
 │ --config            -c                        PATH     Use this config file path.      │
 │ --storage-path      -s                        PATH     Base directory for persistent   │
 │                                                        MindRoom data.                  │
@@ -628,6 +640,7 @@ Building it also writes it, into the same journal the bot is writing, from the e
 mindroom threads export --storage-path mindroom_data --output "$HOME/mindroom-thread-exports"
 mindroom threads export --storage-path mindroom_data --room lobby
 mindroom threads export --storage-path mindroom_data --watch --interval 300
+mindroom threads export --url http://127.0.0.1:9000 --storage-path mindroom_data
 ```
 
 ## journal

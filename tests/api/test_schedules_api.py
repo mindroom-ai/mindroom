@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 from typing import Literal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -49,16 +49,6 @@ def _task(
     )
 
 
-def _mock_agent_user() -> MagicMock:
-    user = MagicMock()
-    user.agent_name = "router"
-    user.user_id = "@mindroom_router:localhost"
-    user.display_name = "RouterAgent"
-    user.password = "test_password"  # noqa: S105
-    user.access_token = "test_token"  # noqa: S105
-    return user
-
-
 def _mock_matrix_client() -> AsyncMock:
     client = AsyncMock()
     client.close = AsyncMock()
@@ -88,8 +78,7 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     ]
 
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
     ):
         response = test_client.get("/api/schedules")
@@ -124,8 +113,7 @@ def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> N
     ]
 
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
     ):
         response = test_client.get("/api/schedules")
@@ -169,8 +157,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     save_mock = AsyncMock(return_value=updated_task)
 
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
@@ -214,8 +201,7 @@ def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> Non
     )
 
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(
@@ -237,8 +223,7 @@ def test_cancel_schedule_success(test_client: TestClient) -> None:
     existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
     cancel_mock = AsyncMock(return_value="✅ Cancelled task `abc12345`")
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
     ):
@@ -256,8 +241,7 @@ def test_cancel_schedule_returns_server_error_when_backend_cancel_fails(test_cli
     existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
     cancel_mock = AsyncMock(return_value="❌ Failed to cancel task `abc12345`: Matrix rejected state write")
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
     ):
@@ -273,8 +257,7 @@ def test_cancel_schedule_returns_not_found_when_backend_cancel_reports_missing(t
     existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
     cancel_mock = AsyncMock(return_value="❌ Task `abc12345` not found.")
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
     ):
@@ -288,8 +271,7 @@ def test_cancel_schedule_not_found(test_client: TestClient) -> None:
     """Cancel endpoint should return 404 when task does not exist."""
     mock_client = _mock_matrix_client()
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=None),
     ):
         response = test_client.delete("/api/schedules/missing?room_id=test_room")
@@ -309,8 +291,7 @@ def test_update_schedule_once_to_cron(test_client: TestClient) -> None:
     save_mock = AsyncMock()
 
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
@@ -340,8 +321,7 @@ def test_update_schedule_cron_to_once(test_client: TestClient) -> None:
     save_mock = AsyncMock()
 
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
     ):
@@ -370,8 +350,7 @@ def test_update_schedule_conflicting_fields(test_client: TestClient) -> None:
     )
 
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(
@@ -396,8 +375,7 @@ def test_update_schedule_empty_message(test_client: TestClient) -> None:
     )
 
     with (
-        patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
-        patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
         patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
     ):
         response = test_client.put(

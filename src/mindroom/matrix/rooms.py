@@ -669,23 +669,22 @@ async def filter_non_dm_rooms(client: nio.AsyncClient, room_ids: list[str]) -> l
     return [room_id for room_id in room_ids if not await is_dm_room(client, room_id)]
 
 
-async def _leave_room_and_cleanup(
+async def _leave_room(
     client: nio.AsyncClient,
     room_id: str,
     *,
-    on_room_left: Callable[[str], Awaitable[None]],
+    leave_room_action: Callable[[str], Awaitable[bool]] | None,
 ) -> None:
-    """Finish one leave outcome and its confirmed cleanup as one operation."""
-    success = await leave_room(client, room_id)
+    """Run one leave action and report its outcome."""
+    success = await leave_room(client, room_id) if leave_room_action is None else await leave_room_action(room_id)
     if success:
         logger.info("room_left", room_id=room_id)
-        await on_room_left(room_id)
     else:
         logger.error("room_leave_failed", room_id=room_id)
 
 
 async def _await_leave_operation(task: asyncio.Task[None]) -> asyncio.CancelledError | None:
-    """Await a leave operation to completion without letting caller cancellation abort cleanup."""
+    """Await a leave operation to completion despite caller cancellation."""
     cancellation: asyncio.CancelledError | None = None
     while True:
         try:
@@ -703,20 +702,20 @@ async def leave_non_dm_rooms(
     client: nio.AsyncClient,
     room_ids: list[str],
     *,
-    on_room_left: Callable[[str], Awaitable[None]],
+    leave_room_action: Callable[[str], Awaitable[bool]] | None = None,
 ) -> None:
-    """Leave non-DM rooms and clean each confirmed departure before continuing."""
+    """Leave non-DM rooms and settle each departure before continuing."""
     for room_id in room_ids:
         if await is_dm_room(client, room_id):
             logger.debug("dm_room_preserved", room_id=room_id)
             continue
         operation = asyncio.create_task(
-            _leave_room_and_cleanup(
+            _leave_room(
                 client,
                 room_id,
-                on_room_left=on_room_left,
+                leave_room_action=leave_room_action,
             ),
-            name="matrix_leave_room_and_cleanup",
+            name="matrix_leave_room",
         )
         cancellation = await _await_leave_operation(operation)
         if cancellation is not None:

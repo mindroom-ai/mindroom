@@ -97,10 +97,10 @@ class TestAgentBot(AgentBotTestBase):
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         event = nio.RoomMessageImage.from_dict(
@@ -226,10 +226,10 @@ class TestAgentBot(AgentBotTestBase):
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         event = nio.RoomMessageFile.from_dict(
@@ -530,10 +530,10 @@ class TestAgentBot(AgentBotTestBase):
         router_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         general_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
         room_users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
         router_room.users = room_users
         general_room.users = room_users

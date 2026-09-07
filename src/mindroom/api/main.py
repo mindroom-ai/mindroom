@@ -37,6 +37,7 @@ from mindroom.api.schedules import router as schedules_router
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.api.skills import router as skills_router
+from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.background_tasks import run_blocking_until_complete
@@ -47,7 +48,7 @@ from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
-from mindroom.orchestration.runtime import matrix_sync_cache_write_grace_seconds, matrix_sync_startup_timeout_seconds
+from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
@@ -281,6 +282,8 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
     previous_state = app_state.api_state
     if previous_state is None:
+        app_state.thread_export_runner = None
+        app_state.leave_matrix_room = None
         app_state.external_trigger_runtime = None
         app_state.script_worker_keepalive = None
         bind_script_tool_broker(api_app, None)
@@ -311,6 +314,8 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         )
         source_files = current_snapshot.source_files if current_snapshot.runtime_paths == runtime_paths else None
         if current_snapshot.runtime_paths != runtime_paths:
+            app_state.thread_export_runner = None
+            app_state.leave_matrix_room = None
             app_state.external_trigger_runtime = None
             app_state.script_worker_keepalive = None
             bind_script_tool_broker(api_app, None)
@@ -707,6 +712,7 @@ app.include_router(credentials_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
 app.include_router(integrations_router, dependencies=[Depends(verify_user)])
 app.include_router(matrix_router, dependencies=[Depends(verify_user)])
+app.include_router(thread_exports_router, dependencies=[Depends(verify_user)])
 app.include_router(oauth_router)
 app.include_router(schedules_router, dependencies=[Depends(verify_user)])
 app.include_router(knowledge_router, dependencies=[Depends(verify_user)])
@@ -727,7 +733,7 @@ async def health_check(request: Request) -> JSONResponse:
     runtime_paths = _api_runtime_paths(request)
     sync_health = get_matrix_sync_health_snapshot(
         startup_grace_seconds=matrix_sync_startup_timeout_seconds(runtime_paths),
-        cache_write_grace_seconds=matrix_sync_cache_write_grace_seconds(runtime_paths),
+        ingestion_grace_seconds=matrix_ingestion_grace_seconds(runtime_paths),
     )
 
     response: dict[str, object] = {

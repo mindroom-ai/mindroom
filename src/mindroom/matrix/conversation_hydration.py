@@ -453,6 +453,15 @@ class ConversationHydrator:
     # the other under a shared key is a deadlock.
     _recoveries: dict[str, asyncio.Task[HistoryRecoveryOutcome]] = field(default_factory=dict, init=False, repr=False)
 
+    async def cancel_pending(self) -> None:
+        """Drain private hydration work when its owning export is cancelled."""
+        tasks = (*self._in_flight.values(), *self._recoveries.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._in_flight.clear()
+        self._recoveries.clear()
+
     def _client(self) -> nio.AsyncClient:
         """Return the Matrix client, which only exists once the bot has logged in.
 

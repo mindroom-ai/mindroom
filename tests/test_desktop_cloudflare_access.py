@@ -18,7 +18,7 @@ from mindroom.desktop.cloudflare_access import (
     CloudflareAccessTokenProvider,
     cloudflare_access_headers,
 )
-from mindroom.matrix.client_session import _MindRoomAsyncClient, matrix_client_config
+from mindroom.matrix.client_session import MindRoomAsyncClient, matrix_client_config
 
 
 def _jwt(*, expires_at: int, marker: str) -> str:
@@ -122,7 +122,7 @@ async def test_nio_refreshes_access_header_for_each_transport_attempt(monkeypatc
     """An expired JWT is refreshed during nio's internal transport retry."""
     provider = _TestTokenProvider("first-token", "second-token")
     headers = CloudflareAccessHeaders(provider)
-    client = _MindRoomAsyncClient(
+    client = MindRoomAsyncClient(
         "https://matrix.example.org",
         config=matrix_client_config(http_headers=headers),
     )

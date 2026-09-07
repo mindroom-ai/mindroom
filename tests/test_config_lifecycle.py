@@ -43,6 +43,7 @@ def _make_lifecycle(
         load_initial_config=AsyncMock(return_value=False),
         apply_update_plan=AsyncMock(return_value=True),
         response_admission_gate=gate,
+        before_runtime_replacement=AsyncMock(),
     )
 
 

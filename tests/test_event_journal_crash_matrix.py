@@ -36,10 +36,11 @@ from mindroom.event_journal import (
     EventKind,
 )
 from mindroom.event_journal.store import _DEFAULT_UNACKNOWLEDGED_LIMIT as _UNACKNOWLEDGED_BATCH
-from mindroom.matrix.journal_ingress import inbound_event, projected_event
+from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
 from mindroom.pending_event_worker import PendingEventWorker
 from tests.conftest import CrashError, DiesAfterAcknowledgement, DiesAfterNextWriteCommit, ignore_delivered_projection
+from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from mindroom.event_journal import JournalEvent, MatrixDelivery, MatrixDeliveryView, PrincipalStore
@@ -236,8 +237,8 @@ async def admit(store: PrincipalStore, event: nio.Event | None = None) -> None:
     """Admit one inbound message durably."""
     event = event or inbound()
     await store.admit(
-        inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-        projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
+        _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+        _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
     )
 
 
@@ -600,7 +601,7 @@ class TestModelIsNotRerun:
         await runtime.worker().drain_once()
         assert runtime.homeserver.visible_messages == 1
 
-        await runtime.store.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await admit_room_membership(runtime.store, ROOM, "leave", source=DepartureSource.LOCAL)
         await runtime.delivery.recover()
         await runtime.worker().drain_once()
 
@@ -624,7 +625,7 @@ class TestModelIsNotRerun:
         # The claim committed and the send did not, so the server holds nothing.
         assert runtime.homeserver.visible_messages == 0
 
-        await runtime.store.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await admit_room_membership(runtime.store, ROOM, "leave", source=DepartureSource.LOCAL)
         await runtime.delivery.recover()
 
         assert runtime.homeserver.visible_messages == 0
@@ -733,7 +734,7 @@ class TestTheHandoffIsOneTransaction:
         offered, re-run, and refused again on every restart.
         """
         await admit(runtime.store)
-        await runtime.store.fence_departure(ROOM, source=DepartureSource.LOCAL)
+        await admit_room_membership(runtime.store, ROOM, "leave", source=DepartureSource.LOCAL)
         assert await runtime.store.pending() == (), "the fence left unanswerable work offered"
 
         transaction_id = await runtime.store.enqueue_matrix_delivery(

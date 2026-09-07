@@ -323,7 +323,6 @@ def test_pairing_receiver_registration_owns_desktop_enablement_check(tmp_path: P
 
 def test_setup_command_uses_public_homeserver_and_access_flag(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hosted runtimes can print one reachable Desktop setup command."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -340,19 +339,17 @@ def test_setup_command_uses_public_homeserver_and_access_flag(
         },
         runtime_paths,
     )
-    monkeypatch.setattr(
-        "mindroom.commands.desktop_commands.controller_identity_for_entity",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            user_id="@computer:example.org",
-            device_id="CLOUD",
-            ed25519="cloud-fingerprint",
-        ),
+    controller_identity = lambda _entity_name: SimpleNamespace(  # noqa: E731
+        user_id="@computer:example.org",
+        device_id="CLOUD",
+        ed25519="cloud-fingerprint",
     )
     scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="computer",
         requester_id="@alice:example.org",
+        controller_identity=controller_identity,
     )
 
     setup_response = handle_desktop_command("setup", scope=scope)
@@ -392,7 +389,6 @@ def test_setup_command_uses_public_homeserver_and_access_flag(
 
 def test_confirmation_keeps_claim_retryable_when_controller_lookup_fails(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Startup-guidance failure must not consume a valid pairing claim."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -409,12 +405,12 @@ def test_confirmation_keeps_claim_retryable_when_controller_lookup_fails(
         ed25519="cloud-fingerprint",
     )
     identity_lookup = Mock(return_value=controller)
-    monkeypatch.setattr("mindroom.commands.desktop_commands.controller_identity_for_entity", identity_lookup)
     scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="computer",
         requester_id="@alice:example.org",
+        controller_identity=identity_lookup,
     )
     setup_response = handle_desktop_command("setup", scope=scope)
     token_match = re.search(r"--code ([A-Za-z0-9_-]+)", setup_response)
@@ -438,7 +434,6 @@ def test_confirmation_keeps_claim_retryable_when_controller_lookup_fails(
 
 def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A normal agent stores each requester's Desktop separately from every other scope."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -461,31 +456,31 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
         },
         runtime_paths,
     )
-    monkeypatch.setattr(
-        "mindroom.commands.desktop_commands.controller_identity_for_entity",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            user_id="@computer:example.org",
-            device_id="CLOUD",
-            ed25519="cloud-fingerprint",
-        ),
+    controller_identity = lambda _entity_name: SimpleNamespace(  # noqa: E731
+        user_id="@computer:example.org",
+        device_id="CLOUD",
+        ed25519="cloud-fingerprint",
     )
     alice_scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="computer",
         requester_id="@alice:example.org",
+        controller_identity=controller_identity,
     )
     bob_scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="computer",
         requester_id="@bob:example.org",
+        controller_identity=controller_identity,
     )
     alice_other_agent_scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="other",
         requester_id="@alice:example.org",
+        controller_identity=controller_identity,
     )
 
     setup_response = handle_desktop_command("setup", scope=alice_scope)

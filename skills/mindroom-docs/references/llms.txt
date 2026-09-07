@@ -59,6 +59,7 @@
 - [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/)
 - [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/)
 - [Overview](https://docs.mindroom.chat/deployment/)
+- [Nio 1.0 Upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/)
 - [Hosted Matrix + Local Backend](https://docs.mindroom.chat/deployment/hosted-matrix/)
 - [Overview](https://docs.mindroom.chat/deployment/bridges/)
 - [Telegram](https://docs.mindroom.chat/deployment/bridges/telegram/)

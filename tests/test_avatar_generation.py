@@ -20,7 +20,6 @@ from mindroom.prompts import (
     AVATAR_ROOM_SYSTEM_PROMPT,
     AVATAR_TEAM_SYSTEM_PROMPT,
 )
-from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,16 +41,6 @@ def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> consta
         config_path=config_path,
         storage_path=tmp_path / "storage",
     )
-
-
-def test_build_router_user_uses_persisted_account_domain(tmp_path: Path) -> None:
-    """Avatar sync should log in with the router's actual persisted Matrix ID."""
-    runtime_paths = _runtime_paths(tmp_path)
-    router_account = SimpleNamespace(username="actual_router", domain="matrix.example", password=TEST_PASSWORD)
-
-    router_user = generate_avatars._build_router_user(router_account, runtime_paths)
-
-    assert router_user.user_id == "@actual_router:matrix.example"
 
 
 def _config_with_runtime_paths(
@@ -761,15 +750,10 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
-    monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(generate_avatars, "create_agent_http_client", MagicMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "room_has_avatar", AsyncMock(return_value=False))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
     monkeypatch.setattr(generate_avatars, "get_room_id", _get_room_id)
-    monkeypatch.setattr(
-        generate_avatars.constants,
-        "runtime_matrix_homeserver",
-        lambda *_args, **_kwargs: "http://localhost:8008",
-    )
 
     await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
 
@@ -826,7 +810,7 @@ async def test_set_room_avatars_in_matrix_skips_rooms_with_existing_matrix_avata
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
-    monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(generate_avatars, "create_agent_http_client", MagicMock(return_value=client))
     monkeypatch.setattr(
         generate_avatars,
         "set_room_avatar_from_file",
@@ -836,11 +820,6 @@ async def test_set_room_avatars_in_matrix_skips_rooms_with_existing_matrix_avata
         generate_avatars,
         "get_room_id",
         lambda room_name, _runtime_paths: "!war:localhost" if room_name == "war_room" else None,
-    )
-    monkeypatch.setattr(
-        generate_avatars.constants,
-        "runtime_matrix_homeserver",
-        lambda *_args, **_kwargs: "http://localhost:8008",
     )
 
     await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
@@ -891,18 +870,13 @@ async def test_set_room_avatars_in_matrix_force_replaces_existing_matrix_avatar(
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
-    monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(generate_avatars, "create_agent_http_client", MagicMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "room_has_avatar", room_has_avatar)
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
     monkeypatch.setattr(
         generate_avatars,
         "get_room_id",
         lambda room_name, _runtime_paths: "!war:localhost" if room_name == "war_room" else None,
-    )
-    monkeypatch.setattr(
-        generate_avatars.constants,
-        "runtime_matrix_homeserver",
-        lambda *_args, **_kwargs: "http://localhost:8008",
     )
 
     await generate_avatars.set_room_avatars_in_matrix(
@@ -955,18 +929,13 @@ async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
-    monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(generate_avatars, "create_agent_http_client", MagicMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "room_has_avatar", AsyncMock(return_value=False))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", AsyncMock(return_value=False))
     monkeypatch.setattr(
         generate_avatars,
         "get_room_id",
         lambda room_name, _runtime_paths: "!war:localhost" if room_name == "war_room" else None,
-    )
-    monkeypatch.setattr(
-        generate_avatars.constants,
-        "runtime_matrix_homeserver",
-        lambda *_args, **_kwargs: "http://localhost:8008",
     )
 
     with pytest.raises(
@@ -1018,13 +987,8 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
-    monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(generate_avatars, "create_agent_http_client", MagicMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
-    monkeypatch.setattr(
-        generate_avatars.constants,
-        "runtime_matrix_homeserver",
-        lambda *_args, **_kwargs: "http://localhost:8008",
-    )
 
     await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
 
@@ -1044,53 +1008,23 @@ async def test_set_room_avatars_in_matrix_requires_initialized_router_account(
 
     with pytest.raises(
         generate_avatars.AvatarSyncError,
-        match="No router account found in Matrix state",
+        match="Router account unavailable for avatar sync",
     ):
         await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(tmp_path))
 
 
 @pytest.mark.asyncio
-async def test_set_room_avatars_in_matrix_wraps_router_login_failures(
+async def test_set_room_avatars_in_matrix_wraps_missing_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Router login failures should surface as AvatarSyncError for the CLI."""
-    raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
-        "router": {"model": "default"},
-        "agents": {
-            "general": {
-                "display_name": "General",
-                "model": "default",
-            },
-        },
-        "matrix_space": {"enabled": False},
-    }
-    router_account = SimpleNamespace(username="router", domain=None)
-    router_account.password = b"pw".decode()
-    state = SimpleNamespace(get_account=lambda key: router_account if key == "agent_router" else None)
-
+    """Missing credentials should surface as AvatarSyncError for the CLI."""
     monkeypatch.setattr(
         generate_avatars,
-        "_load_validated_config",
-        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, tmp_path),
+        "create_agent_http_client",
+        MagicMock(side_effect=ValueError("Saved access token missing")),
     )
-    monkeypatch.setattr(generate_avatars, "matrix_state_for_runtime", lambda *_args, **_kwargs: state)
-    monkeypatch.setattr(
-        generate_avatars,
-        "login_agent_user",
-        AsyncMock(side_effect=ValueError("Failed to login @router:localhost: M_FORBIDDEN")),
-    )
-    monkeypatch.setattr(
-        generate_avatars.constants,
-        "runtime_matrix_homeserver",
-        lambda *_args, **_kwargs: "http://localhost:8008",
-    )
-
-    with pytest.raises(
-        generate_avatars.AvatarSyncError,
-        match="Failed to log in as router for avatar sync",
-    ):
+    with pytest.raises(generate_avatars.AvatarSyncError, match="Router account unavailable for avatar sync"):
         await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(tmp_path))
 
 

@@ -25,6 +25,7 @@ from mindroom.dispatch_handoff import PreparedIngress, payload_metadata_from_sou
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
+from mindroom.matrix.room_membership import cached_member_ids
 from mindroom.response_admission import admitted_response_decision
 from mindroom.turn_origin import original_sender_for_router_relay
 
@@ -284,7 +285,8 @@ class VisibleVoiceEchoLifecycle:
         if orchestrator is None or orchestrator.entity_first_sync_complete(ROUTER_AGENT_NAME) is not True:
             return False
         if not any(
-            self.deps.ingress.managed_entity_name_for_sender(user_id) == ROUTER_AGENT_NAME for user_id in room.users
+            self.deps.ingress.managed_entity_name_for_sender(user_id) == ROUTER_AGENT_NAME
+            for user_id in cached_member_ids(room)
         ):
             return False
         return is_sender_allowed_for_agent_reply_in_room(

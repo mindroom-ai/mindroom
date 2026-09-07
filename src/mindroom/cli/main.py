@@ -316,6 +316,11 @@ def avatars_sync(
 
 @threads_app.command("export")
 def _threads_export_command(
+    url: str | None = typer.Option(
+        None,
+        "--url",
+        help="Running MindRoom URL; defaults to MINDROOM_URL or localhost:8765.",
+    ),
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
@@ -361,10 +366,11 @@ def _threads_export_command(
         help="Include rooms joined through authorized invites (user-created rooms).",
     ),
 ) -> None:
-    """Export Matrix threads to YAML files for grep/ripgrep search."""
+    """Export Matrix threads through a running MindRoom instance to searchable YAML files."""
     asyncio.run(
         _threads_export(
             config_path=config_path,
+            url=url,
             storage_path=storage_path,
             output=output,
             room=room,
@@ -493,6 +499,7 @@ def _is_connection_os_error(exc: BaseException) -> bool:
 async def _threads_export(
     *,
     config_path: Path | None,
+    url: str | None = None,
     storage_path: Path | None,
     output: Path | None,
     room: str | None,
@@ -502,10 +509,9 @@ async def _threads_export(
     include_invited_rooms: bool,
 ) -> None:
     """Run one thread export command."""
-    from mindroom.thread_export import export_threads_once  # noqa: PLC0415
+    from mindroom.cli.thread_export import request_thread_export  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
-    config = _load_active_config_or_exit(runtime_paths)
     if interval < 1:
         console.print("[red]Error:[/red] --interval must be at least 1 second")
         raise typer.Exit(1)
@@ -515,8 +521,8 @@ async def _threads_export(
 
     while True:
         try:
-            stats = await export_threads_once(
-                config=config,
+            stats = await request_thread_export(
+                url=url,
                 runtime_paths=runtime_paths,
                 output_dir=output,
                 room_filter=room,

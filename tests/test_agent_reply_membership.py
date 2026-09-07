@@ -398,7 +398,7 @@ async def test_authoritative_control_departure_fences_inflight_initial_snapshot(
     await query_started.wait()
 
     try:
-        assert index.mark_control_room_unready(
+        assert index.mark_room_unready(
             config,
             runtime_paths,
             room_id,
@@ -639,7 +639,7 @@ async def test_control_departure_marks_current_room_snapshot_unready(tmp_path: P
     await index.refresh(config, runtime_paths, client)
     assert index.is_current_room_member("@alice:example.com", room_id, config, runtime_paths)
 
-    changed = index.mark_control_room_unready(
+    changed = index.mark_room_unready(
         config,
         runtime_paths,
         room_id,

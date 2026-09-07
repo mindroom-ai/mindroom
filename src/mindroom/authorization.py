@@ -6,8 +6,6 @@ from collections.abc import Iterable, Mapping
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
-import nio
-
 from mindroom.access_policy import resolve_responder_access
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.dispatch_source import source_kind_allows_trusted_original_sender, source_kind_from_content
@@ -18,10 +16,13 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix.room_membership import cached_joined_member_ids, ensure_room_membership_synced
 from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
@@ -236,11 +237,6 @@ def get_available_responders_in_room(
     return _available_responders_from_member_ids(cached_joined_member_ids(room), config, runtime_paths)
 
 
-def cached_joined_member_ids(room: nio.MatrixRoom) -> frozenset[str]:
-    """Return cached room members that are joined rather than merely invited."""
-    return frozenset(room.users).difference(room.invited_users)
-
-
 def _get_available_responders_for_sender(
     room: nio.MatrixRoom,
     sender_id: str,
@@ -257,75 +253,6 @@ def _get_available_responders_for_sender(
         membership_index,
         room.room_id,
     )
-
-
-def _apply_authoritative_joined_members(
-    room: nio.MatrixRoom,
-    members: Sequence[nio.RoomMember],
-) -> None:
-    """Replace one room's cached joined-member snapshot with authoritative data."""
-    members_by_user_id = {member.user_id: member for member in members}
-
-    for user_id in tuple(room.users):
-        cached_user = room.users[user_id]
-        if not cached_user.invited and user_id not in members_by_user_id:
-            room.remove_member(user_id)
-
-    for member in members:
-        cached_user = room.users.get(member.user_id)
-        if (
-            cached_user is not None
-            and not cached_user.invited
-            and cached_user.display_name == member.display_name
-            and cached_user.avatar_url == member.avatar_url
-        ):
-            continue
-        if cached_user is not None:
-            room.remove_member(member.user_id)
-        room.add_member(member.user_id, member.display_name, member.avatar_url)
-
-    room.members_synced = True
-
-
-async def ensure_room_membership_synced(
-    client: nio.AsyncClient,
-    room: nio.MatrixRoom,
-    *,
-    sender_id: str,
-) -> bool:
-    """Refresh an incomplete room-member cache before membership-sensitive decisions."""
-    if room.members_synced:
-        return True
-
-    cached_member_count = len(cached_joined_member_ids(room))
-    try:
-        response = await client.joined_members(room.room_id)
-    except Exception as exc:
-        logger.warning(
-            "authoritative_room_membership_fetch_failed",
-            room_id=room.room_id,
-            sender_id=sender_id,
-            error=str(exc),
-        )
-        return False
-    if not isinstance(response, nio.JoinedMembersResponse):
-        logger.warning(
-            "authoritative_room_membership_fetch_failed",
-            room_id=room.room_id,
-            sender_id=sender_id,
-            error=str(response),
-        )
-        return False
-
-    _apply_authoritative_joined_members(room, response.members)
-    logger.info(
-        "authoritative_room_membership_refreshed",
-        room_id=room.room_id,
-        sender_id=sender_id,
-        cached_member_count=cached_member_count,
-        refreshed_member_count=len(response.members),
-    )
-    return True
 
 
 async def _get_available_responders_for_sender_authoritative(

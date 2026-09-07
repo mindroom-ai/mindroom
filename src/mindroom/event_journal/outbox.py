@@ -69,7 +69,7 @@ def matrix_delivery_payload(
     return frozen
 
 
-def delivery_payload_json(
+def _delivery_payload_json(
     principal_id: str,
     delivery_id: str,
     stage: DeliveryStage,
@@ -224,7 +224,7 @@ def enqueue(
             membership_epoch,
             encode_thread_id(thread_id),
             transaction_id,
-            delivery_payload_json(principal_id, delivery_id, stage, payload),
+            _delivery_payload_json(principal_id, delivery_id, stage, payload),
             _delivery_result_json(result),
             edits_event_id,
             int(edit_target_pending),
@@ -588,6 +588,26 @@ def claim_active_delivery_ownership(
         stage=stage,
     )
     return ownership if membership_is_current and locked_ownership == ownership else None
+
+
+def owns_response(transaction: Transaction, principal_id: str, *, room_id: str, event_id: str) -> bool:
+    """Require a current attempted delivery before history can trigger auto-resume."""
+    row = transaction.fetchone(
+        """
+        SELECT 1 FROM matrix_delivery_outbox AS delivery
+        JOIN room_membership AS membership
+          ON membership.principal_id = delivery.principal_id
+         AND membership.room_id = delivery.room_id
+         AND membership.membership_epoch = delivery.membership_epoch
+        WHERE delivery.principal_id = ? AND delivery.room_id = ?
+          AND delivery.attempted = 1 AND delivery.retired = 0
+          AND membership.departure_fenced = 0
+          AND (delivery.acknowledged_event_id = ? OR delivery.edits_event_id = ?)
+        LIMIT 1
+        """,
+        (principal_id, room_id, event_id, event_id),
+    )
+    return row is not None
 
 
 def event_belongs_to_membership(
