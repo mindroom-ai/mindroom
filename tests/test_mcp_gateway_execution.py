@@ -14,6 +14,7 @@ from starlette.routing import Route
 
 from mindroom import agents
 from mindroom.mcp_gateway import server
+from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, get_worker_runtime_context
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
@@ -115,7 +116,7 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
             assert _code(await client.post("/mcp", json=_call(13, arguments={"query": "probe"}))) == "busy"
             assert bodies == (["work"] if phase in {"body", "close"} else [])
             close_release.set()
-            await gateway.drain_gateway_tool_cleanup()
+            await gateway_toolkits.drain_gateway_tool_cleanup()
             assert closed.is_set()
             # The original typed request ID becomes reusable only after its owner exits.
             response = await client.post("/mcp", json=_call(12))
@@ -124,7 +125,7 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
             release.set()
             close_release.set()
             await asyncio.gather(first, return_exceptions=True)
-            await gateway.drain_gateway_tool_cleanup()
+            await gateway_toolkits.drain_gateway_tool_cleanup()
 
 
 @pytest.mark.parametrize("phase", ["metadata", "entry", "plugins"])
@@ -184,7 +185,7 @@ async def test_cancelled_discovery_offload_keeps_capacity_until_thread_exits(
             release.set()
             await asyncio.gather(first, return_exceptions=True)
             await _wait(finished)
-            await gateway.drain_gateway_tool_cleanup()
+            await gateway_toolkits.drain_gateway_tool_cleanup()
 
 
 async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity(
@@ -241,13 +242,13 @@ async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity
             async with _client(probe) as other:
                 assert _code(await other.post("/mcp", json=_call(1))) is None
             release.set()
-            await gateway.drain_gateway_tool_cleanup()
+            await gateway_toolkits.drain_gateway_tool_cleanup()
             assert closed.is_set()
             assert not cleanup_cancelled
         finally:
             release.set()
             await asyncio.gather(first, return_exceptions=True)
-            await gateway.drain_gateway_tool_cleanup()
+            await gateway_toolkits.drain_gateway_tool_cleanup()
 
 
 async def test_server_shutdown_drains_cancelled_metadata_work(

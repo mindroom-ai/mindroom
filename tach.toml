@@ -2254,7 +2254,7 @@ depends_on = [
 path = "mindroom.mcp.toolkit"
 depends_on = ["mindroom.mcp.function_surface"]
 visibility = [
-    "mindroom.mcp_gateway.tools",
+    "mindroom.mcp_gateway.toolkits",
     "mindroom.agents",
     "mindroom.mcp.registry",
     "mindroom.orchestrator",
@@ -4997,11 +4997,22 @@ depends_on = [
     "mindroom.api.personal_agent",
     "mindroom.logging_config",
     "mindroom.mcp.manager",
+    "mindroom.mcp_gateway.admission",
+    "mindroom.mcp_gateway.consent",
     "mindroom.mcp_gateway.oauth",
     "mindroom.mcp_gateway.server",
     "mindroom.mcp_gateway.store",
+    "mindroom.mcp_gateway.toolkits",
     "mindroom.mcp_gateway.tools",
 ]
+
+[[modules]]
+path = "mindroom.mcp_gateway.admission"
+depends_on = []
+
+[[modules]]
+path = "mindroom.mcp_gateway.consent"
+depends_on = []
 
 [[modules]]
 path = "mindroom.mcp_gateway.oauth"
@@ -5013,22 +5024,33 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.mcp_gateway.server"
-depends_on = ["mindroom.logging_config", "mindroom.mcp_gateway.execution"]
+depends_on = ["mindroom.logging_config", "mindroom.mcp_gateway.execution", "mindroom.mcp_gateway.types"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.execution"
 depends_on = []
 
 [[modules]]
-path = "mindroom.mcp_gateway.tools"
+path = "mindroom.mcp_gateway.toolkits"
 depends_on = [
     "mindroom.agents",
     "mindroom.credentials",
-    "mindroom.hooks",
     "mindroom.mcp.toolkit",
     "mindroom.mcp_gateway.execution",
-    "mindroom.oauth.providers",
+    "mindroom.mcp_gateway.types",
     "mindroom.runtime_resolution",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.tool_hooks",
+]
+
+[[modules]]
+path = "mindroom.mcp_gateway.tools"
+depends_on = [
+    "mindroom.hooks",
+    "mindroom.mcp_gateway.execution",
+    "mindroom.mcp_gateway.toolkits",
+    "mindroom.mcp_gateway.types",
+    "mindroom.oauth.providers",
     "mindroom.tool_approval",
     "mindroom.tool_schema_cache",
     "mindroom.tool_system.catalog",
@@ -5039,6 +5061,10 @@ depends_on = [
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.worker_routing",
 ]
+
+[[modules]]
+path = "mindroom.mcp_gateway.types"
+depends_on = []
 
 [[interfaces]]
 expose = ["bind_script_tool_broker", "router"]

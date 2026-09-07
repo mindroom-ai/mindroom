@@ -23,6 +23,7 @@ from mindroom.credentials import get_runtime_credentials_manager, save_scoped_cr
 from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, hook
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.manager import MCPServerManager
+from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.catalog import TOOL_METADATA, ConfigField, ensure_tool_registry_loaded
@@ -87,9 +88,12 @@ async def test_metadata_search_never_constructs_toolkit(
 
     monkeypatch.setattr("mindroom.agents.build_agent_toolkit", forbidden)
     result = await gateway.search_tools(context)
+    assert "error" not in result
     assert {item["toolkit"] for item in result["results"]} == {"calculator", "duckduckgo"}
     assert "inputSchema" not in json.dumps(result)
-    assert len((await gateway.search_tools(context, limit=1))["results"]) == 1
+    limited = await gateway.search_tools(context, limit=1)
+    assert "error" not in limited
+    assert len(limited["results"]) == 1
 
 
 @pytest.mark.asyncio
@@ -106,8 +110,10 @@ async def test_selected_schema_builds_only_selected_toolkit(
 
     monkeypatch.setattr(agents, "build_agent_toolkit", selected)
     result = await gateway.get_tool(context, toolkit="calculator", function="add")
+    assert "error" not in result
     assert result["inputSchema"]["properties"]["a"]["type"] == "number"
     call = await gateway.invoke_tool(context, toolkit="calculator", function="add", arguments={"a": 2, "b": 3})
+    assert "error" not in call
     assert json.loads(call["result"])["result"] == 5
 
 
@@ -116,6 +122,8 @@ async def test_unassigned_tool_and_unknown_function_fail_closed(context: Persona
     """Unassigned tool and unknown function fail closed."""
     for toolkit, function in [("shell", "run_shell_command"), ("calculator", "run_shell_command")]:
         result = await gateway.invoke_tool(context, toolkit=toolkit, function=function, arguments={})
+        assert "result" not in result
+        assert "error" in result
         assert result["error"]["code"] == "tool_not_found"
 
 
@@ -124,6 +132,8 @@ async def test_invalid_arguments_are_rejected_before_tool_body(context: Personal
     """Invalid arguments are rejected before tool body."""
     for arguments in [{"a": "wrong", "b": 1}, {"a": 1}, {"a": float("nan"), "b": 1}, {"x": "a" * 65536}]:
         result = await gateway.invoke_tool(context, toolkit="calculator", function="add", arguments=arguments)
+        assert "result" not in result
+        assert "error" in result
         assert result["error"]["code"] == "invalid_arguments"
 
 
@@ -133,11 +143,20 @@ async def test_policy_approval_is_excluded_and_rejected(context: PersonalAgentCo
     config = context.config.model_copy(deep=True)
     config.tool_approval.default = "require_approval"
     context = replace(context, config=config)
-    assert (await gateway.search_tools(context, toolkit="calculator"))["results"] == []
-    for operation in [gateway.get_tool, gateway.invoke_tool]:
-        extra = {"arguments": {"a": 1, "b": 2}} if operation is gateway.invoke_tool else {}
-        result = await operation(context, toolkit="calculator", function="add", **extra)
-        assert result["error"]["code"] == "approval_required"
+    search_result = await gateway.search_tools(context, toolkit="calculator")
+    assert "error" not in search_result
+    assert search_result["results"] == []
+    schema_result = await gateway.get_tool(context, toolkit="calculator", function="add")
+    assert "inputSchema" not in schema_result
+    assert schema_result["error"]["code"] == "approval_required"
+    invocation_result = await gateway.invoke_tool(
+        context,
+        toolkit="calculator",
+        function="add",
+        arguments={"a": 1, "b": 2},
+    )
+    assert "result" not in invocation_result
+    assert invocation_result["error"]["code"] == "approval_required"
 
 
 def _replace_calculator(monkeypatch: pytest.MonkeyPatch, toolkit: Toolkit) -> None:
@@ -161,6 +180,8 @@ async def test_missing_connection_is_redacted_with_portal_link(
 
     _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[account]))
     result = await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={})
+    assert "result" not in result
+    assert "error" in result
     assert result["error"]["code"] == "connection_required"
     assert result["error"]["connection_url"] == "https://assistant.example.org/connections"
     assert "secret" not in json.dumps(result)
@@ -180,6 +201,8 @@ async def test_authored_confirmation_never_runs_body(
     toolkit.functions["account"].requires_confirmation = True
     _replace_calculator(monkeypatch, toolkit)
     result = await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={})
+    assert "result" not in result
+    assert "error" in result
     assert result["error"]["code"] == "approval_required"
 
 
@@ -193,6 +216,8 @@ async def test_schema_and_result_bounds(context: PersonalAgentContext, monkeypat
     toolkit = Toolkit(name="calculator", tools=[large])
     _replace_calculator(monkeypatch, toolkit)
     result = await gateway.invoke_tool(context, toolkit="calculator", function="large", arguments={})
+    assert "result" not in result
+    assert "error" in result
     assert result["error"]["code"] == "result_too_large"
     toolkit.functions["large"] = Function(
         name="large",
@@ -200,6 +225,8 @@ async def test_schema_and_result_bounds(context: PersonalAgentContext, monkeypat
         skip_entrypoint_processing=True,
     )
     result = await gateway.get_tool(context, toolkit="calculator", function="large")
+    assert "inputSchema" not in result
+    assert "error" in result
     assert result["error"]["code"] == "schema_too_large"
 
 
@@ -219,6 +246,8 @@ async def test_backend_failure_does_not_leak_or_block_another(
 
     monkeypatch.setattr(agents, "build_agent_toolkit", selected)
     result = await gateway.search_tools(context, toolkit="duckduckgo")
+    assert "results" not in result
+    assert "error" in result
     assert result["error"]["code"] == "tool_unavailable"
     assert "secret" not in json.dumps(result)
     assert "inputSchema" in await gateway.get_tool(context, toolkit="calculator", function="add")
@@ -360,8 +389,11 @@ async def test_native_deferred_filters_remain_authoritative(context: PersonalAge
     raw["agents"]["personal"]["tools"] = [{"calculator": {"defer": True, "include_tools": ["add"]}}]
     context = replace(context, config=Config.model_validate(raw))
     result = await gateway.search_tools(context, toolkit="calculator")
+    assert "error" not in result
     assert [item["function"] for item in result["results"]] == ["add"]
     result = await gateway.invoke_tool(context, toolkit="calculator", function="multiply", arguments={"a": 2, "b": 3})
+    assert "result" not in result
+    assert "error" in result
     assert result["error"]["code"] == "tool_not_found"
 
 
@@ -401,7 +433,7 @@ async def test_cancelled_sync_preparation_keeps_cleanup_owner(
         assert not closed.is_set()
     finally:
         release.set()
-        await gateway.drain_gateway_tool_cleanup()
+        await gateway_toolkits.drain_gateway_tool_cleanup()
         assert closed.is_set()
 
 
@@ -457,6 +489,8 @@ async def test_arguments_cannot_fetch_remote_schema(
     )
     _replace_calculator(monkeypatch, toolkit)
     result = await gateway.invoke_tool(context, toolkit="calculator", function="unsafe", arguments={})
+    assert "result" not in result
+    assert "error" in result
     assert result["error"]["code"] == "invalid_arguments"
 
 
@@ -677,6 +711,8 @@ async def test_mcp_policy_approval_blocks_discovery_schema_and_dispatch(
         result = await gateway.search_tools(context, toolkit="mcp_example", manager=manager)
         assert result == {"results": []}
         result = await gateway.get_tool(context, toolkit="mcp_example", function="example_echo", manager=manager)
+        assert "inputSchema" not in result
+        assert "error" in result
         assert result["error"]["code"] == "approval_required"
         result = await gateway.invoke_tool(
             context,
@@ -685,6 +721,8 @@ async def test_mcp_policy_approval_blocks_discovery_schema_and_dispatch(
             arguments={},
             manager=manager,
         )
+        assert "result" not in result
+        assert "error" in result
         assert result["error"]["code"] == "approval_required"
         assert _FakeClientSession.call_tool_invocation_count == 0
         assert _FakeClientSession.call_tool_arguments == []
@@ -713,6 +751,7 @@ async def test_mcp_oauth_bridge_handles_cannot_bypass_typed_dispatch(
     try:
         await manager.sync_servers(context.config, discover=False)
         catalog = await gateway.search_tools(context, toolkit="mcp_example", manager=manager)
+        assert "error" not in catalog
         assert [item["function"] for item in catalog["results"]] == ["example_echo"]
         result = await gateway.invoke_tool(
             context,
@@ -721,6 +760,8 @@ async def test_mcp_oauth_bridge_handles_cannot_bypass_typed_dispatch(
             arguments=arguments,
             manager=manager,
         )
+        assert "result" not in result
+        assert "error" in result
         assert result["error"]["code"] == "tool_not_found"
         assert _FakeClientSession.call_tool_invocation_count == 0
         assert _FakeClientSession.call_tool_arguments == []
@@ -747,6 +788,7 @@ async def test_mcp_selected_catalog_preserves_filters_and_never_initializes_othe
     try:
         await manager.sync_servers(context.config, discover=False)
         result = await gateway.search_tools(context, toolkit="mcp_example", manager=manager)
+        assert "error" not in result
         assert [item["function"] for item in result["results"]] == ["example_echo"]
         assert not manager._states["unrelated"].connected
         result = await gateway.invoke_tool(
@@ -756,6 +798,8 @@ async def test_mcp_selected_catalog_preserves_filters_and_never_initializes_othe
             arguments={},
             manager=manager,
         )
+        assert "result" not in result
+        assert "error" in result
         assert result["error"]["code"] == "tool_not_found"
         result = await gateway.invoke_tool(
             context,
@@ -806,8 +850,11 @@ async def test_unconnected_mcp_is_discoverable_but_cannot_borrow_shared_connecti
     try:
         await manager.sync_servers(context.config, discover=False)
         result = await gateway.search_tools(context, query="calendar", manager=manager)
+        assert "error" not in result
         assert result["results"][0]["toolkit"] == "mcp_example"
         result = await gateway.search_tools(context, toolkit="mcp_example", manager=manager)
+        assert "results" not in result
+        assert "error" in result
         assert result["error"]["code"] == "connection_required"
         assert result["error"]["connection_url"].endswith("/connections")
     finally:
@@ -825,6 +872,8 @@ async def test_changed_manager_config_rejects_old_request_before_backend_contact
         changed.agents["personal"].tools = []
         await manager.sync_servers(changed, discover=False)
         result = await gateway.search_tools(context, toolkit="mcp_example", manager=manager)
+        assert "results" not in result
+        assert "error" in result
         assert result["error"]["code"] == "tool_unavailable"
         assert not manager._states["example"].connected
     finally:

@@ -15,9 +15,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mindroom import constants
-from mindroom.api import config_lifecycle, main, mcp_gateway
+from mindroom.api import config_lifecycle, main
 from mindroom.api.mcp_gateway import gateway_lifespan, install_gateway_routes
 from mindroom.config.main import Config
+from mindroom.mcp_gateway import admission
 from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
 
 if TYPE_CHECKING:
@@ -400,7 +401,7 @@ def test_onboarding_rate_limit_preserves_existing_grants_and_recovers(
 ) -> None:
     """Public onboarding has bounded admission without blocking current client grants."""
     now = [100.0]
-    monkeypatch.setattr(mcp_gateway, "monotonic", lambda: now[0], raising=False)
+    monkeypatch.setattr(admission, "monotonic", lambda: now[0])
     snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
     snapshot.runtime_paths = replace(
         snapshot.runtime_paths,
@@ -486,7 +487,7 @@ def test_onboarding_unknown_source_groups_and_recovers_at_boundary(
 ) -> None:
     """Missing and invalid peers share one allowance that expires at the window boundary."""
     now = [100.0]
-    monkeypatch.setattr(mcp_gateway, "monotonic", lambda: now[0], raising=False)
+    monkeypatch.setattr(admission, "monotonic", lambda: now[0])
     _set_onboarding_limits(gateway_app, aggregate=6, source=2)
     with TestClient(gateway_app, base_url=ORIGIN, follow_redirects=False, client=None) as client:
         _authorize(client)

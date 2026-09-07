@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-from collections import deque
 from contextlib import asynccontextmanager, suppress
-from html import escape
-from time import monotonic
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
@@ -28,10 +25,13 @@ from mindroom.api.config_lifecycle import app_state, rebind_current_request_snap
 from mindroom.api.personal_agent import PERSONAL_RESPONSE_HEADERS, resolve_personal_agent
 from mindroom.logging_config import get_logger
 from mindroom.mcp.manager import MCPServerManager
+from mindroom.mcp_gateway.admission import OnboardingRateLimiter
+from mindroom.mcp_gateway.consent import render_consent_page
 from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 from mindroom.mcp_gateway.server import GatewayServer, read_gateway_body, replay_gateway_body
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
-from mindroom.mcp_gateway.tools import drain_gateway_tool_cleanup, get_tool, invoke_tool, search_tools
+from mindroom.mcp_gateway.toolkits import drain_gateway_tool_cleanup
+from mindroom.mcp_gateway.tools import get_tool, invoke_tool, search_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.api.personal_agent import PersonalAgentContext
     from mindroom.constants import RuntimePaths
     from mindroom.mcp_gateway.oauth import GatewayAccessToken
+    from mindroom.mcp_gateway.types import GatewayToolResponse
 
 logger = get_logger(__name__)
 _MACHINE_HEADERS = {**PERSONAL_RESPONSE_HEADERS, "Access-Control-Allow-Origin": "*"}
@@ -115,15 +116,10 @@ class GatewayRuntime:
     """Own client grants, lazy upstream sessions and one stateless MCP server."""
 
     def __init__(self, paths: RuntimePaths) -> None:
-        self._onboarding_limit = int(paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT") or "60")
-        self._onboarding_source_limit = int(
-            paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT") or "10",
+        self._onboarding_limiter = OnboardingRateLimiter(
+            int(paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT") or "60"),
+            int(paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT") or "10"),
         )
-        if self._onboarding_limit < 1 or self._onboarding_source_limit < 1:
-            msg = "MCP onboarding rate limits must be positive"
-            raise ValueError(msg)
-        self._onboarding_requests: deque[tuple[float, str]] = deque()
-        self._onboarding_source_counts: dict[str, int] = {}
         self.provider = GatewayOAuthProvider(paths, public_url=paths.env_value("MINDROOM_PUBLIC_URL") or "")
         self.manager = MCPServerManager(paths, validate_agent_function_names=False)
         self._config_lock = asyncio.Lock()
@@ -145,25 +141,6 @@ class GatewayRuntime:
         )
         self.token = TokenHandler(self.provider, authenticator)
         self.revoke = RevocationHandler(self.provider, authenticator)
-
-    def _allow_onboarding_request(self, source: str) -> bool:
-        """Bound public onboarding traffic independently of current client grants."""
-        now = monotonic()
-        while self._onboarding_requests and self._onboarding_requests[0][0] <= now - 60:
-            _, expired_source = self._onboarding_requests.popleft()
-            remaining = self._onboarding_source_counts[expired_source] - 1
-            if remaining:
-                self._onboarding_source_counts[expired_source] = remaining
-            else:
-                del self._onboarding_source_counts[expired_source]
-        if (
-            len(self._onboarding_requests) >= self._onboarding_limit
-            or self._onboarding_source_counts.get(source, 0) >= self._onboarding_source_limit
-        ):
-            return False
-        self._onboarding_requests.append((now, source))
-        self._onboarding_source_counts[source] = self._onboarding_source_counts.get(source, 0) + 1
-        return True
 
     @property
     def origin(self) -> str:
@@ -199,7 +176,7 @@ class GatewayRuntime:
         token, _ = await self.principal(request)
         return token.grant_id
 
-    async def dispatch(self, request: Request, name: str, arguments: dict[str, Any]) -> dict[str, object]:
+    async def dispatch(self, request: Request, name: str, arguments: dict[str, Any]) -> GatewayToolResponse:
         """Recheck access immediately before selecting one tool operation."""
         _, context = await self.principal(request)
         async with self._config_lock:
@@ -289,7 +266,7 @@ def _oauth_admission(request: Request, runtime: GatewayRuntime, operation: str) 
                 "Access-Control-Allow-Headers": "Content-Type, MCP-Protocol-Version",
             },
         )
-    if operation in {"register", "authorize"} and not runtime._allow_onboarding_request(_onboarding_source(request)):
+    if operation in {"register", "authorize"} and not runtime._onboarding_limiter.allow(_onboarding_source(request)):
         return JSONResponse(
             {"error": "slow_down"},
             status_code=429,
@@ -402,18 +379,15 @@ async def _consent(request: Request) -> Response:
             "Consent is invalid, expired, or belongs to another user",
             headers=PERSONAL_RESPONSE_HEADERS,
         ) from exc
-    callback = urlsplit(consent.redirect_uri)
-    callback_origin = f"{callback.scheme}://{callback.netloc}"
     agent = context.config.get_agent(context.agent_name).display_name
-    html = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect to MindRoom</title>
-<style>body{{font:16px system-ui;background:#f7f8fa;color:#17212b;margin:0;padding:8vh 24px}}main{{max-width:560px;margin:auto;padding:32px;background:white;border-radius:16px;box-shadow:0 4px 24px #0001}}button{{font:inherit;padding:10px 20px;margin:12px 12px 0 0;cursor:pointer}}p{{line-height:1.6}}small{{overflow-wrap:anywhere}}</style></head>
-<body><main><h1>Connect to MindRoom</h1><p><strong>{escape(consent.client_name)}</strong> wants to use tools from your <strong>{escape(agent)}</strong>.</p>
-<p>This client can discover and run your assigned tools using your personal connections. Some tools can create or change data. You can connect services separately in Connections.</p>
-<p><small>Client callback: {escape(callback_origin)}</small></p><form method="post" action="/connections/mcp/authorize">
-<input type="hidden" name="state" value="{escape(state, quote=True)}"><input type="hidden" name="csrf_token" value="{escape(consent.csrf_token, quote=True)}">
-<button name="decision" value="allow" type="submit">Allow access</button><button name="decision" value="deny" type="submit">Cancel</button></form></main></body></html>"""
     return HTMLResponse(
-        html,
+        render_consent_page(
+            client_name=consent.client_name,
+            agent_name=agent,
+            redirect_uri=consent.redirect_uri,
+            state=state,
+            csrf_token=consent.csrf_token,
+        ),
         headers={
             **PERSONAL_RESPONSE_HEADERS,
             # Native browser form POSTs send Origin:null under no-referrer.

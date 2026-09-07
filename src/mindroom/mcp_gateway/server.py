@@ -20,9 +20,10 @@ from starlette.responses import JSONResponse, Response
 
 from mindroom.logging_config import get_logger
 from mindroom.mcp_gateway.execution import ExecutionLease, execution_scope
+from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayErrorResponse
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     from starlette.types import Message, Receive, Scope, Send
 
@@ -83,19 +84,22 @@ def _meta_tools() -> list[types.Tool]:
     ]
 
 
-def _error(code: str, message: str) -> dict[str, object]:
+def _error(code: GatewayErrorCode, message: str) -> GatewayErrorResponse:
     return {"error": {"code": code, "message": message}}
 
 
-def _result(payload: dict[str, object]) -> types.CallToolResult:
-    text = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+def _result(payload: Mapping[str, object]) -> types.CallToolResult:
+    structured_content = dict(payload)
+    text = json.dumps(structured_content, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     result = types.CallToolResult(
         content=[types.TextContent(type="text", text=text)],
-        structuredContent=payload,
-        isError="error" in payload,
+        structuredContent=structured_content,
+        isError="error" in structured_content,
     )
     if len(result.model_dump_json().encode()) > _MAX_RESPONSE_BYTES - _RESPONSE_ENVELOPE_BYTES:
-        return _result(_error("result_too_large", "The tool response exceeds the gateway response limit."))
+        return _result(
+            _error(GatewayErrorCode.RESULT_TOO_LARGE, "The tool response exceeds the gateway response limit."),
+        )
     return result
 
 
@@ -145,7 +149,7 @@ class GatewayServer:
         self,
         *,
         authenticate: Callable[[Request], Awaitable[str]],
-        dispatch: Callable[[Request, str, dict[str, Any]], Awaitable[dict[str, object]]],
+        dispatch: Callable[[Request, str, dict[str, Any]], Awaitable[Mapping[str, object]]],
         public_url: str,
         allowed_origins: tuple[str, ...] | None = None,
         timeout_seconds: float = 60,
@@ -205,21 +209,23 @@ class GatewayServer:
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:  # noqa: PLR0911
         if name not in {"search_tools", "get_tool", "invoke_tool"}:
-            return _result(_error("tool_not_found", "Unknown gateway operation."))
+            return _result(_error(GatewayErrorCode.TOOL_NOT_FOUND, "Unknown gateway operation."))
         schema = next(tool.inputSchema for tool in _meta_tools() if tool.name == name)
         if not Draft202012Validator(schema).is_valid(arguments):
-            return _result(_error("invalid_arguments", "Gateway operation arguments are invalid."))
+            return _result(_error(GatewayErrorCode.INVALID_ARGUMENTS, "Gateway operation arguments are invalid."))
         identity = self._request_identity()
         if identity is None:
-            return _result(_error("unauthorized", "Gateway request identity is unavailable."))
+            return _result(_error(GatewayErrorCode.UNAUTHORIZED, "Gateway request identity is unavailable."))
         request, key = identity
         if key in self._active:
-            return _result(_error("duplicate_request", "A call with this request ID is already running."))
+            return _result(
+                _error(GatewayErrorCode.DUPLICATE_REQUEST, "A call with this request ID is already running."),
+            )
         if self._closing or len(self._active) >= _MAX_ACTIVE_CALLS:
-            return _result(_error("busy", "Gateway call capacity is currently unavailable."))
+            return _result(_error(GatewayErrorCode.BUSY, "Gateway call capacity is currently unavailable."))
         task = asyncio.current_task()
         if task is None:
-            return _result(_error("tool_unavailable", "Gateway execution is unavailable."))
+            return _result(_error(GatewayErrorCode.TOOL_UNAVAILABLE, "Gateway execution is unavailable."))
         lease = ExecutionLease(task, lambda completed: self._release(key, completed))
         self._active[key] = lease
         try:
@@ -228,15 +234,23 @@ class GatewayServer:
                     return _result(await self._dispatch(request, name, arguments))
         except TimeoutError:
             return _result(
-                _error("timeout", "Tool call timed out; its outcome may be unknown. Do not retry automatically."),
+                _error(
+                    GatewayErrorCode.TIMEOUT,
+                    "Tool call timed out; its outcome may be unknown. Do not retry automatically.",
+                ),
             )
         except asyncio.CancelledError:
             return _result(
-                _error("cancelled", "Tool call cancelled; its outcome may be unknown. Do not retry automatically."),
+                _error(
+                    GatewayErrorCode.CANCELLED,
+                    "Tool call cancelled; its outcome may be unknown. Do not retry automatically.",
+                ),
             )
         except Exception as exc:
             logger.warning("mcp_gateway_call_failed", error_type=type(exc).__name__)
-            return _result(_error("tool_unavailable", "Tool execution failed. Its outcome may be unknown."))
+            return _result(
+                _error(GatewayErrorCode.TOOL_UNAVAILABLE, "Tool execution failed. Its outcome may be unknown."),
+            )
 
     def _cancel(self, payload: object, grant: str) -> Response | None:
         if not isinstance(payload, dict):
