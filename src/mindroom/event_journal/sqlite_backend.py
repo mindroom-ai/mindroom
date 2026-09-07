@@ -1,26 +1,13 @@
-"""SQLite backend: one writer task per process behind a queue, readers in WAL.
+"""SQLite backend: one queued writer per backend, readers in WAL.
 
-Concurrent writers are what produce ``database is locked`` under load, so
-within a process there is exactly one. Every write is submitted to a queue
-drained by a single task, which means that serialization is a property of the
-structure rather than of a timeout being long enough.
+The runtime shares its backend across bots and thread exports, so their writes
+are serialized by one writer task. ``mindroom threads export`` calls the running
+API and uses that same writer. Separate processes have separate queues and rely
+on SQLite's busy timeout to wait for the database write lock.
 
-Per process, and the qualifier is the whole of it. ``mindroom threads export``
-opens this same file from its own process and hydrates through it, so a
-deployment running the documented ``--watch`` pass alongside a bot has two
-writers on one database and no shared queue to put them in. What serializes
-*those* is the busy timeout, and nothing else -- exactly the arrangement the
-queue exists to avoid, arrived at from outside where the queue cannot reach.
-
-Which is survivable, and is not free. A write blocks the other process's next
-write for as long as it runs, and an export installing one hydrated
-conversation runs for as long as that conversation is large: a few hundred
-messages is milliseconds, and the ceilings in ``thread_export`` permit far
-more than the ten seconds another process is willing to wait. Past that the
-loser is refused rather than delayed. On the bot that refusal reaches
-``journal_ingress``, which declines the event instead of accepting one it did
-not commit -- the checkpoint holds, nio redelivers, and no event is lost. The
-cost is a stalled sync round trip, not a hole in the journal.
+If batch admission fails, its transaction rolls back and the Nio batch remains
+unacknowledged for retry. A successful application commit must reach disk before
+Nio is told it can release the batch.
 """
 
 from __future__ import annotations
@@ -199,15 +186,11 @@ class SqliteBackend:
             isolation_level=None,
             check_same_thread=False,
         )
-        # The only connection that commits, and the only one whose commits have
-        # to reach the disk before they are reported as landed. A Matrix sync
-        # checkpoint is written through `write_json_file_durable`, so it is
-        # fsynced; under `synchronous = NORMAL` the WAL frames it certifies are
-        # not, and a host reset can leave the checkpoint pointing past events
-        # the journal no longer holds. Nothing re-delivers those: the token says
-        # they were consumed, and history debt is only recorded for a recovery
-        # gap the certifier can see. Readers commit nothing, so this is the
-        # writer's cost alone.
+        # Application effects must reach disk before the ingestion pump
+        # acknowledges their Nio batch. Under synchronous=NORMAL, a host reset
+        # could lose committed WAL frames after Nio has released that batch.
+        # FULL makes the application commit durable before acknowledgement.
+        # Readers commit nothing, so this is the writer's cost alone.
         _configure(connection, synchronous="FULL")
         connection.execute("BEGIN IMMEDIATE")
         try:
