@@ -11,6 +11,7 @@ import pytest
 from agno.tools import Toolkit
 from starlette.applications import Starlette
 from starlette.routing import Route
+from structlog.testing import capture_logs
 
 from mindroom import agents
 from mindroom.mcp_gateway import server
@@ -249,6 +250,69 @@ async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity
             release.set()
             await asyncio.gather(first, return_exceptions=True)
             await gateway_toolkits.drain_gateway_tool_cleanup()
+
+
+async def test_cancelled_native_cleanup_failure_is_safely_logged_and_releases_capacity(
+    context: PersonalAgentContext,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed retained cleanup reports only its type and still releases its server slot."""
+    started, close_started, close_release = (asyncio.Event() for _ in range(3))
+    provider_detail = "private cleanup provider detail"
+
+    class FailingCloseToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.work])
+            self._requires_connect = True
+
+        async def connect(self) -> None:  # ty: ignore[invalid-method-override]
+            pass
+
+        async def work(self) -> str:
+            started.set()
+            await asyncio.Event().wait()
+            return "never"
+
+        async def close(self) -> None:  # ty: ignore[invalid-method-override]
+            close_started.set()
+            await close_release.wait()
+            raise RuntimeError(provider_detail)
+
+    monkeypatch.setattr(server, "_MAX_ACTIVE_CALLS", 1)
+    monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: FailingCloseToolkit())
+
+    async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
+        if arguments.get("query") == "probe":
+            return {"ok": True}
+        return await gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={})
+
+    with capture_logs() as logs:
+        async with _client(dispatch) as client:
+            first = asyncio.create_task(client.post("/mcp", json=_call(1)))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                await client.post("/mcp", json=_cancel(1))
+                assert _code(await asyncio.wait_for(first, 2)) == "cancelled"
+                await asyncio.wait_for(close_started.wait(), 2)
+                assert _code(await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))) == "busy"
+                close_release.set()
+                await gateway_toolkits.drain_gateway_tool_cleanup()
+                response = await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))
+                assert _code(response) is None
+            finally:
+                close_release.set()
+                await asyncio.gather(first, return_exceptions=True)
+                await gateway_toolkits.drain_gateway_tool_cleanup()
+
+    failures = [entry for entry in logs if entry.get("event") == "mcp_gateway_tool_cleanup_failed"]
+    assert failures == [
+        {
+            "error_type": "RuntimeError",
+            "event": "mcp_gateway_tool_cleanup_failed",
+            "log_level": "warning",
+        },
+    ]
+    assert provider_detail not in str(logs)
 
 
 async def test_server_shutdown_drains_cancelled_metadata_work(

@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import httpx
+    from starlette.requests import Request
+    from starlette.responses import Response
 
 ORIGIN = "https://assistant.example.org"
 RESOURCE = ORIGIN + "/mcp"
@@ -465,6 +467,43 @@ def test_onboarding_rate_limit_is_fair_across_request_sources(gateway_app: FastA
 
         _set_peer(client, "192.0.2.20", 42000)
         _authorize(client)
+
+
+def test_invalid_onboarding_consumes_source_allowance_before_oauth_validation(
+    gateway_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admitted malformed requests cannot bypass source limits by failing validation."""
+    _set_onboarding_limits(gateway_app, aggregate=6, source=2)
+    with TestClient(
+        gateway_app,
+        base_url=ORIGIN,
+        follow_redirects=False,
+        client=("192.0.2.10", 41000),
+    ) as client:
+        runtime = config_lifecycle.app_state(gateway_app).mcp_gateway_runtime
+        assert runtime is not None
+        calls = 0
+        original_handle = runtime.register.handle
+
+        async def tracked_handle(request: Request) -> Response:
+            nonlocal calls
+            calls += 1
+            return await original_handle(request)
+
+        monkeypatch.setattr(runtime.register, "handle", tracked_handle)
+        for _ in range(2):
+            response = client.post("/mcp/oauth/register", json={})
+            assert response.status_code == 400
+
+        rejected = client.post("/mcp/oauth/register", json={})
+        assert rejected.status_code == 429
+        assert rejected.json() == {"error": "slow_down"}
+        assert calls == 2
+
+        _set_peer(client, "192.0.2.20", 42000)
+        _, redirect = _authorize(client)
+        assert redirect.startswith(ORIGIN + "/connections/mcp/authorize?")
 
 
 def test_onboarding_aggregate_limit_applies_across_distinct_sources(gateway_app: FastAPI) -> None:

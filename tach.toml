@@ -5035,6 +5035,7 @@ path = "mindroom.mcp_gateway.toolkits"
 depends_on = [
     "mindroom.agents",
     "mindroom.credentials",
+    "mindroom.logging_config",
     "mindroom.mcp.toolkit",
     "mindroom.mcp_gateway.execution",
     "mindroom.mcp_gateway.types",

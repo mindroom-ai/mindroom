@@ -18553,7 +18553,8 @@ Public registration and authorization starts share an aggregate admission limit 
 Set the positive integers `MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT` and `MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT` to adjust these limits.
 Keep the source limit below the aggregate limit to leave capacity for other sources.
 Excess requests receive HTTP 429 with `Retry-After`; token exchange, refresh, revocation, discovery, and existing MCP grants remain usable.
-Rejected requests consume neither the per-source nor aggregate allowance, and they extend neither rate-limit window.
+Requests rejected by the limiter consume neither allowance and do not extend either rate-limit window.
+Admitted requests count even when later OAuth validation fails.
 
 The source is the canonical client IP supplied by the ASGI server, without its port; the gateway does not read forwarding headers to identify callers.
 Behind a proxy, configure Uvicorn's `FORWARDED_ALLOW_IPS` with only the actual trusted proxy addresses or networks, and ensure those proxies sanitize the forwarded client-address chain.

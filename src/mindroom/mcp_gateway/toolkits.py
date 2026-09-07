@@ -8,6 +8,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sync
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from mindroom.mcp.manager import MCPServerManager
 
 _CLEANUP_TASKS: set[asyncio.Task[None]] = set()
+logger = get_logger(__name__)
 
 
 async def _lifecycle(operation: Callable[[], object]) -> None:
@@ -45,8 +47,10 @@ def _retain(cleanup: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
 
     def finished(completed: asyncio.Task[None]) -> None:
         _CLEANUP_TASKS.discard(completed)
-        if not completed.cancelled():
-            completed.exception()
+        if completed.cancelled():
+            return
+        if (error := completed.exception()) is not None:
+            logger.warning("mcp_gateway_tool_cleanup_failed", error_type=type(error).__name__)
 
     task.add_done_callback(finished)
     return task
