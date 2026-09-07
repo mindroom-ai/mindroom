@@ -67,7 +67,6 @@ A team continuation without the versioned structured presentation is rejected in
 
 The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.
 
-Pre-durable event journals are rejected at startup before their pending work can enter the runtime.
 The [automatic Nio 1.0 migration](../deployment/nio-upgrade.md) settles old pending events and recreates execution, approval, and membership state atomically while preserving journal identity and message history; it never converts old unfinished work into new requests.
 
 ## Sidecar previews are never stored as bodies
@@ -162,7 +161,7 @@ Hard logout, missing device storage, or changed account/device identity stops st
 Initial login persists its exact credentials after the local store exists and before journal binding, so interrupted startup can reopen the same device.
 A batch committed before a crash is recognized on redelivery, while its pending semantic work remains recoverable from the journal.
 Nio owns the receive cursor; MindRoom's continuity file contains only pending join/decrypt fences.
-Pre-durable membership tenures and older continuity-file formats are not adopted.
+The one-time upgrade resets pre-durable membership tenures and converts v2/v3 continuity files to v4 while preserving pending join/decrypt fences.
 
 ## Storage and connections
 

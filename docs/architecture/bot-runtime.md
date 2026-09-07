@@ -114,7 +114,7 @@ Unreadable history retains a settled identity so a late key can add context with
 Unreadable live and recovered ciphertext belongs to Nio recovery, with separate best-effort runtime diagnostics for authorized key requests and warnings; it does not claim or settle an application message ID.
 The same event-scoped provenance gates auxiliary room callbacks, so one live event cannot license unrelated historical call-state mutations.
 `SyncContinuityStore` persists only pending join/decrypt fences, with locked fresh-read updates and crash-atomic replacement.
-Only the v4 fence format is accepted; older continuity files must be archived during the explicit upgrade cutover.
+The store automatically converts v2/v3 files to v4, preserving pending fences and discarding obsolete sync checkpoints.
 Malformed fence records fail closed, and reads and writes run off the event loop.
 Live `room-member-joined` hooks remain at-least-once because hook emission happens before durable settlement.
 Invite callbacks have no stable event ID for a semantic journal row, so their pending room and inviter are persisted before background handling starts.

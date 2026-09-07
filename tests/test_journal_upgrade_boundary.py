@@ -14,9 +14,18 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from mindroom.event_journal import EventJournalStore, postgres_backend, sqlite_backend
+from mindroom.event_journal import (
+    EventClass,
+    EventJournalStore,
+    EventKind,
+    IngestionBatchAdmission,
+    IngestionRecordAdmission,
+    IngestionRecordDisposition,
+    postgres_backend,
+    sqlite_backend,
+)
 from tests.conftest import postgres_journal_schema_url
-from tests.test_event_journal_store import admit
+from tests.test_event_journal_store import admit, message
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -133,6 +142,94 @@ async def test_released_journal_upgrades_and_preserves_new_work(legacy_database:
         assert await reopened.existing_generation() == "original-journal-generation"
     finally:
         await reopened.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_epoch", [0, 7])
+async def test_upgrade_preserves_pending_history_repair(legacy_database: _LegacyDatabase, old_epoch: int) -> None:
+    """An unresolved historical body stays repairable after membership is rebased."""
+    legacy_database.execute(_OLD_EVENT)
+    legacy_database.execute(f"""
+        INSERT INTO visible_messages VALUES (
+            '@bot:example.org', '!room:example.org', '$old', '', '@user:example.org', 1,
+            '$old', 1, NULL, 37, {old_epoch});
+    """)  # noqa: S608 -- epoch is a fixed test parameter
+    store = legacy_database.open()
+    try:
+        page = await store.principal(_ACCOUNT).read_conversation(room_id="!room:example.org", thread_id=None, limit=10)
+        assert not page.messages
+        (repair,) = page.refresh_pending
+        assert repair.membership_epoch == 0
+    finally:
+        await store.close()
+
+    reopened = legacy_database.open()
+    try:
+        principal = reopened.principal(_ACCOUNT)
+        assert await principal.install_refetched_revision(
+            repair,
+            revision_event_id="$old",
+            revision_ts=1,
+            revision_sender="@user:example.org",
+            content={"body": "Recovered historical body", "msgtype": "m.text"},
+        )
+        page = await principal.read_conversation(room_id="!room:example.org", thread_id=None, limit=10)
+        assert not page.refresh_pending
+        assert [message.content["body"] for message in page.messages] == ["Recovered historical body"]
+        assert not await principal.pending()
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_state", ["pending", "settled"])
+@pytest.mark.parametrize("event_class", [EventClass.CONTEXT_ONLY, EventClass.ACTIONABLE])
+async def test_upgrade_keeps_late_decrypted_history_silent(
+    legacy_database: _LegacyDatabase,
+    old_state: str,
+    event_class: EventClass,
+) -> None:
+    """Old unreadable identities accept later plaintext without owning a new turn."""
+    legacy_database.execute(
+        _OLD_EVENT.replace("'message'", "'decryption_failure'").replace("'pending'", f"'{old_state}'"),
+    )
+    stream = uuid4()
+    for sequence in (1, 2):
+        store = legacy_database.open()
+        try:
+            principal = store.principal(_ACCOUNT)
+            old = await principal.load_event("$old")
+            assert old is not None
+            assert old.kind is EventKind.OPAQUE_HISTORY
+            consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
+            await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=stream)
+            event, projected = message(
+                "$old",
+                room_id="!room:example.org",
+                sender="@user:example.org",
+                ts=1,
+                event_class=event_class,
+                content={"body": "Decrypted old text", "msgtype": "m.text"},
+            )
+            facts = await principal.admit_ingestion_batch(
+                IngestionBatchAdmission(
+                    stream,
+                    sequence,
+                    (
+                        IngestionRecordAdmission(
+                            IngestionRecordDisposition.SEMANTIC_EVENT,
+                            event=event,
+                            projected=projected,
+                        ),
+                    ),
+                ),
+            )
+            assert not facts.semantic_event_new
+            assert not await principal.pending()
+            page = await principal.read_conversation(room_id="!room:example.org", thread_id=None, limit=10)
+            assert [item.content["body"] for item in page.messages] == ["Decrypted old text"]
+        finally:
+            await store.close()
 
 
 @pytest.mark.asyncio

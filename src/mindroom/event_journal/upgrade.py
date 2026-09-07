@@ -54,10 +54,9 @@ def upgrade_legacy_journal(transaction: Transaction, existing_tables: frozenset[
         "UPDATE journal_events SET state = 'settled', source_json = '', semantic_consumer = NULL "
         "WHERE state = 'pending'",
     )
+    # Late keys may add historical context, but must never revive an old turn.
+    transaction.execute("UPDATE journal_events SET kind = 'opaque_history' WHERE kind = 'decryption_failure'")
     # Nio begins its own membership epochs at zero. Old content remains history,
     # while empty membership/hydration tables require a fresh source baseline.
     transaction.execute("UPDATE journal_events SET membership_epoch = 0 WHERE membership_epoch != 0")
-    transaction.execute(
-        "UPDATE visible_messages SET membership_epoch = 0, refresh_token = NULL "
-        "WHERE membership_epoch != 0 OR refresh_token IS NOT NULL",
-    )
+    transaction.execute("UPDATE visible_messages SET membership_epoch = 0 WHERE membership_epoch != 0")
