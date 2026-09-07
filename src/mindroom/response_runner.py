@@ -26,7 +26,7 @@ from mindroom.approval_response import (
     identify_approval_tools,
     require_ordered_pause_presentation,
 )
-from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
+from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -2410,7 +2410,8 @@ class ResponseRunner:
                     isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
                 )
                 if (
-                    early_placeholder.placeholder_event_id is None
+                    isinstance(error, ReplyMembershipPendingError)
+                    or early_placeholder.placeholder_event_id is None
                     or early_placeholder.settlement_started
                     or already_linked
                 ):
@@ -2461,6 +2462,7 @@ class ResponseRunner:
             owned.room_id,
             self.deps.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
+            require_resolved_membership=True,
         ):
             return await self._settle_unauthorized_approval_continuation(owned)
         claimed = await self.deps.approval_store.claim_approval_continuation(
@@ -2991,6 +2993,7 @@ class ResponseRunner:
             request.room_id,
             self.deps.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
+            require_resolved_membership=True,
         ):
             return True
         self.deps.logger.info(

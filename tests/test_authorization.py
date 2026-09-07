@@ -8,12 +8,17 @@ import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import (
+    ReplyMembershipPendingError,
+    _ReplyAuthorizationDecision,
+    _responder_reply_authorization,
     get_effective_sender_id_for_reply_permissions,
     is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
     is_sender_allowed_for_agent_reply_in_room,
+    is_sender_allowed_for_entity_replies_in_room,
     is_sender_allowed_for_responder,
 )
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from tests.access_schema_support import membership_config, membership_index, unresolved_membership_index
 from tests.conftest import runtime_paths_for
@@ -248,3 +253,106 @@ def test_human_sender_cannot_spoof_original_requester(tmp_path: Path) -> None:
         )
         == "@human:example.com"
     )
+
+
+@pytest.mark.asyncio
+async def test_relevant_membership_certainty_and_alternative_grants(tmp_path: Path) -> None:
+    """Unrelated uncertainty cannot block proven grants or turn ready denials into retries."""
+    config = membership_config(
+        tmp_path,
+        administrators=["@admin:example.com"],
+        agent_rooms=["grant", "other"],
+        access={"members_of_rooms": ["grant", "other"], "users": ["@owner*:example.com"]},
+    )
+    config.authorization.aliases = {"@owner:example.com": ["@bridge:example.com"]}
+    paths = runtime_paths_for(config)
+    index = await membership_index(config, {"grant": {"@member:example.com"}, "other": set()})
+    index.mark_room_unready(config, paths, "!other:example.com", reason="refresh_failed")
+    for sender in (
+        "@member:example.com",
+        "@admin:example.com",
+        "@owner:example.com",
+        "@bridge:example.com",
+        entity_ids(config, paths)["talent"].full_id,
+    ):
+        assert is_sender_allowed_for_agent_reply_in_room(
+            sender,
+            "talent",
+            config,
+            "!current:example.com",
+            paths,
+            index,
+            require_resolved_membership=True,
+        )
+    with pytest.raises(ReplyMembershipPendingError):
+        is_sender_allowed_for_agent_reply_in_room(
+            "@outsider:example.com",
+            "talent",
+            config,
+            "!current:example.com",
+            paths,
+            index,
+            require_resolved_membership=True,
+        )
+    # Refresh a narrower relevant grant while an unrelated configured room is still unknown.
+    config.agents["talent"].access = ResponderAccessConfig(members_of_rooms=["grant"])
+    config.router.access = ResponderAccessConfig(members_of_rooms=["other"])
+    index = await membership_index(config, {"grant": set(), "other": set()})
+    index.mark_room_unready(config, paths, "!other:example.com", reason="refresh_failed")
+    assert (
+        _responder_reply_authorization(
+            "@outsider:example.com",
+            "talent",
+            "!current:example.com",
+            config,
+            paths,
+            index,
+        )
+        is _ReplyAuthorizationDecision.DENIED
+    )
+    assert not is_sender_allowed_for_entity_replies_in_room(
+        "@outsider:example.com",
+        ("router", "talent"),
+        config,
+        "!current:example.com",
+        paths,
+        index,
+        require_resolved_membership=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_current_room_absence_differs_from_unknown_joined_rooms(tmp_path: Path) -> None:
+    """A missing current room is denied only after authoritative joined-room discovery."""
+    config = membership_config(
+        tmp_path,
+        agent_rooms=["other"],
+        access={"current_room_members": True, "members_of_rooms": []},
+    )
+    paths = runtime_paths_for(config)
+    index = await membership_index(config, {"other": set()})
+    index.mark_room_unready(config, paths, "!other:example.com", reason="refresh_failed")
+    assert (
+        _responder_reply_authorization(
+            "@outsider:example.com",
+            "talent",
+            "!absent:example.com",
+            config,
+            paths,
+            index,
+        )
+        is _ReplyAuthorizationDecision.DENIED
+    )
+    index.invalidate(config, reason="uncertain_sync_response")
+    assert (
+        _responder_reply_authorization(
+            "@outsider:example.com",
+            "talent",
+            "!absent:example.com",
+            config,
+            paths,
+            index,
+        )
+        is _ReplyAuthorizationDecision.PENDING
+    )
+    assert not _allowed("@outsider:example.com", config, index, room_id="!absent:example.com")

@@ -34,6 +34,7 @@ from mindroom import approval_receipt, interactive, response_runner
 from mindroom import background_tasks as background_tasks_module
 from mindroom.agent_storage import get_agent_session
 from mindroom.approval_response import require_ordered_pause_presentation
+from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.access import ResponderAccessConfig
@@ -1141,7 +1142,11 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycle_lock(tmp_path: Path) -> None:
+@pytest.mark.parametrize("uncertain", [False, True])
+async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycle_lock(  # noqa: PLR0915
+    tmp_path: Path,
+    uncertain: bool,
+) -> None:
     """A room-backed grant revoked during lock wait must prevent model execution."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -1196,8 +1201,8 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
     ):
         first = asyncio.create_task(runner.generate_response(first_request))
         await asyncio.wait_for(first_started.wait(), timeout=2)
+        assert await runner._request_remains_authorized(second_request)
         second = asyncio.create_task(runner.generate_response(second_request))
-        await asyncio.sleep(0)
         leave = nio.RoomMemberEvent.from_dict(
             {
                 "type": "m.room.member",
@@ -1217,13 +1222,24 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
             leave,
             control_user_id="@mindroom_router:localhost",
         )
+        if uncertain:
+            memberships.invalidate(config, reason="uncertain_sync_response")
         release_first.set()
 
         assert await asyncio.wait_for(first, timeout=2) == "$response"
-        assert await asyncio.wait_for(second, timeout=2) is None
+        if uncertain:
+            with pytest.raises(ReplyMembershipPendingError):
+                await asyncio.wait_for(second, timeout=2)
+            assert model_sources == ["$first"]
+            second_suppressed.assert_not_awaited()
+            await memberships.refresh(config, runner.deps.runtime_paths, membership_client)
+            assert await runner.generate_response(second_request) == "$response"
+        else:
+            assert await asyncio.wait_for(second, timeout=2) is None
 
-    assert model_sources == ["$first"]
-    second_suppressed.assert_awaited_once_with()
+    assert model_sources == (["$first", "$second"] if uncertain else ["$first"])
+    if not uncertain:
+        second_suppressed.assert_awaited_once_with()
 
 
 def _async_callback[**Args](callback: Callable[Args, object]) -> Callable[Args, Coroutine[Any, Any, None]]:
@@ -2840,7 +2856,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("revoked_layer", ["room", "entity"])
+@pytest.mark.parametrize("revoked_layer", ["room", "entity", "pending"])
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_ready_approval_replay_rechecks_current_authorization(
     tmp_path: Path,
@@ -2865,10 +2881,18 @@ async def test_ready_approval_replay_rechecks_current_authorization(
         state="ready",
     )
     assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
-    if revoked_layer == "room":
+    if revoked_layer in {"room", "pending"}:
         runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(
             current_room_members=True,
         )
+        membership_client = AsyncMock(spec=nio.AsyncClient)
+        membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
+        if revoked_layer == "room":
+            await runner.deps.runtime.agent_reply_memberships.refresh(
+                runner.deps.runtime.config,
+                runner.deps.runtime_paths,
+                membership_client,
+            )
     else:
         runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(users=[])
     failing = replace(
@@ -2890,6 +2914,25 @@ async def test_ready_approval_replay_rechecks_current_authorization(
             new=AsyncMock(side_effect=AssertionError("revoked continuation executed")),
         ) as execute,
     ):
+        if revoked_layer == "pending":
+            with pytest.raises(ReplyMembershipPendingError):
+                await runner._run_owned_or_locked_response(
+                    request,
+                    target=request.response_envelope.target,
+                    early_placeholder=response_runner._EarlyPlaceholderState(),
+                    locked_operation=AsyncMock(side_effect=AssertionError("approval source regenerated")),
+                )
+            assert await runner.deps.approval_store.approval_continuation(continuation.approval_id) == continuation
+            assert await runner.deps.approval_store.is_pending("$source")
+            request_failure.assert_not_awaited()
+            settle_failure.assert_not_awaited()
+            execute.assert_not_awaited()
+            # The same owned source becomes a definitive denial after refresh.
+            await runner.deps.runtime.agent_reply_memberships.refresh(
+                runner.deps.runtime.config,
+                runner.deps.runtime_paths,
+                membership_client,
+            )
         event_id = await runner._run_owned_or_locked_response(
             request,
             target=request.response_envelope.target,

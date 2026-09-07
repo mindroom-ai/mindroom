@@ -4819,6 +4819,58 @@ async def test_restart_observation_attributes_auto_resumed_response_to_original_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing",
+        "duplicate_original",
+        "wrong_target",
+        "wrong_sender",
+        "wrong_root",
+        "wrong_room",
+        "uninterrupted",
+        "duplicate_recovered",
+    ],
+)
+async def test_restart_observation_rejects_broken_resume_chain(
+    seeded_restart_observation_stack: tuple[ManagedTuwunelStack, list[float]],
+    fault: str,
+) -> None:
+    """A relay answer cannot erase missing provenance or duplicate direct originals."""
+    stack, _stop_calls = seeded_restart_observation_stack
+    interrupted = _restart_response(
+        "$interrupted",
+        stack.agent_id,
+        "$fresh",
+        body=f"partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}",
+    )
+    relay = _restart_response("$relay", stack.router_id, "$interrupted", body=AUTO_RESUME_MESSAGE)
+    relay["content"][SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    relay["content"]["m.relates_to"]["event_id"] = "$fresh"
+    recovered = _restart_response("$recovered", stack.agent_id, "$relay")
+    recovered["content"]["m.relates_to"]["event_id"] = "$fresh"
+    events = [interrupted, relay, recovered]
+    if fault == "missing":
+        events.remove(interrupted)
+    elif fault == "duplicate_original":
+        events.append({**interrupted, "event_id": "$duplicate"})
+    elif fault == "wrong_target":
+        relay["content"]["m.relates_to"]["m.in_reply_to"]["event_id"] = "$unrelated"
+    elif fault == "wrong_sender":
+        interrupted["sender"] = "@outsider:example"
+    elif fault == "wrong_root":
+        recovered["content"]["m.relates_to"]["event_id"] = "$unrelated"
+    elif fault == "wrong_room":
+        interrupted["room_id"] = "!unrelated:example"
+    elif fault == "uninterrupted":
+        interrupted["content"]["body"] = "original completed END call=0"
+    else:
+        events.append({**recovered, "event_id": "$duplicate"})
+    observation = await _collect_seeded_restart_observation(stack, log=_RESTART_OBSERVATION_LOG, events=tuple(events))
+    assert not observation.fresh_response_complete
+
+
+@pytest.mark.asyncio
 async def test_exact_reply_oracle_flags_reply_to_unrelated_router_traffic() -> None:
     """An agent reply to ordinary router traffic is unexpected, not exempt."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
@@ -7023,9 +7075,9 @@ async def test_matrix_quiet_window_repairs_limited_sync_before_advancing_cursor(
         await client.wait_until_quiet(deadline_seconds=1.0, quiet_seconds=0.0)
         assert client.next_batch == "truncated"
         assert client.seen_events == {
-            "$recovered": {"event_id": "$recovered"},
-            "$live-suffix": {"event_id": "$live-suffix"},
-            "$shared": {"event_id": "$shared", "view": "backfill"},
+            "$recovered": {"event_id": "$recovered", "_audit_room_id": "!room:example"},
+            "$live-suffix": {"event_id": "$live-suffix", "_audit_room_id": "!room:example"},
+            "$shared": {"event_id": "$shared", "view": "backfill", "_audit_room_id": "!room:example"},
         }
     finally:
         await client.close()

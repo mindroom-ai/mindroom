@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from enum import Enum
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +34,21 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class _ReplyAuthorizationDecision(Enum):
+    """Separate a proven denial from temporarily unresolved membership."""
+
+    ALLOWED = "allowed"
+    DENIED = "denied"
+    PENDING = "pending"
+
+
+class ReplyMembershipPendingError(RuntimeError):
+    """The exact journal source must retry after authoritative membership refresh."""
+
+    def __init__(self) -> None:
+        super().__init__("Reply authorization awaits authoritative room membership")
+
+
 def is_sender_allowed_for_responder(
     sender_id: str,
     entity_name: str,
@@ -40,8 +56,32 @@ def is_sender_allowed_for_responder(
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
+    *,
+    require_resolved_membership: bool = False,
 ) -> bool:
-    """Apply the complete membership policy for one responder."""
+    """Apply the complete membership policy, failing closed on uncertainty."""
+    decision = _responder_reply_authorization(
+        sender_id,
+        entity_name,
+        room_id,
+        config,
+        runtime_paths,
+        membership_index,
+    )
+    if require_resolved_membership and decision is _ReplyAuthorizationDecision.PENDING:
+        raise ReplyMembershipPendingError
+    return decision is _ReplyAuthorizationDecision.ALLOWED
+
+
+def _responder_reply_authorization(
+    sender_id: str,
+    entity_name: str,
+    room_id: str | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+) -> _ReplyAuthorizationDecision:
+    """Allow any proven grant before considering unresolved relevant membership."""
     allowed = sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
     resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     access = resolve_responder_access(config, entity_name)
@@ -52,7 +92,7 @@ def is_sender_allowed_for_responder(
         and access.current_room_members
         and membership_index.is_current_room_member(resolved_sender, room_id, config, runtime_paths)
     )
-    return allowed or (
+    allowed = allowed or (
         bool(access.members_of_rooms)
         and membership_index.is_allowed(
             resolved_sender,
@@ -61,6 +101,15 @@ def is_sender_allowed_for_responder(
             runtime_paths,
         )
     )
+    if allowed:
+        return _ReplyAuthorizationDecision.ALLOWED
+    if membership_index.grants_pending(
+        config,
+        joined_rooms=access.members_of_rooms,
+        current_room_id=room_id if access.current_room_members else None,
+    ):
+        return _ReplyAuthorizationDecision.PENDING
+    return _ReplyAuthorizationDecision.DENIED
 
 
 def is_sender_allowed_for_agent_reply_in_room(
@@ -70,6 +119,8 @@ def is_sender_allowed_for_agent_reply_in_room(
     room_id: str,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
+    *,
+    require_resolved_membership: bool = False,
 ) -> bool:
     """Require both current-room access and entity reply access."""
     return is_sender_allowed_for_entity_replies_in_room(
@@ -79,6 +130,7 @@ def is_sender_allowed_for_agent_reply_in_room(
         room_id,
         runtime_paths,
         membership_index,
+        require_resolved_membership=require_resolved_membership,
     )
 
 
@@ -89,10 +141,12 @@ def is_sender_allowed_for_entity_replies_in_room(
     room_id: str,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
+    *,
+    require_resolved_membership: bool = False,
 ) -> bool:
     """Require membership access for every execution entity."""
-    return all(
-        is_sender_allowed_for_responder(
+    decisions = {
+        _responder_reply_authorization(
             sender_id,
             entity_name,
             room_id,
@@ -101,7 +155,14 @@ def is_sender_allowed_for_entity_replies_in_room(
             membership_index,
         )
         for entity_name in entity_names
-    )
+    }
+    if _ReplyAuthorizationDecision.DENIED in decisions:
+        return False
+    if _ReplyAuthorizationDecision.PENDING in decisions:
+        if require_resolved_membership:
+            raise ReplyMembershipPendingError
+        return False
+    return True
 
 
 def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:

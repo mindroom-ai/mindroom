@@ -4286,7 +4286,7 @@ class LiveMatrixClient:
                 event_id = event.get("event_id")
                 if isinstance(event_id, str):
                     new_event_count += event_id not in self.seen_events
-                    self.seen_events[event_id] = event
+                    self.seen_events[event_id] = {**event, "_audit_room_id": room_id}
         self.next_batch = next_batch
         return new_event_count
 
@@ -7087,6 +7087,7 @@ class LiveFuzzRunner:
             events,
             agent,
             fresh_event_id,
+            room_id=dormant.room_id,
         )
         fresh_router_response_ids = router.get(fresh_event_id, set())
         fresh_response_bodies = tuple(
@@ -7490,9 +7491,23 @@ class LiveFuzzRunner:
         events: Collection[Mapping[str, Any]],
         agent_responses: Mapping[str, set[str]],
         source_event_id: str,
+        *,
+        room_id: str,
     ) -> set[str]:
-        """Return direct or auto-resumed final responses for one restart source."""
+        """Require one direct answer or one exact interrupted-response resume chain."""
         direct_response_ids = set(agent_responses.get(source_event_id, set()))
+        # Cardinality is evidence: one relay must never hide several originals.
+        if len(direct_response_ids) > 1:
+            return direct_response_ids
+        # /sync omits room_id; ingestion annotates its enclosing room timeline.
+        room_events = tuple(
+            event
+            for event in events
+            if event.get("room_id", room_id) == room_id and event.get("_audit_room_id", room_id) == room_id
+        )
+        proven_responses = self._canonical_response_ids(room_events, root_event_id=source_event_id)
+        if direct_response_ids != proven_responses.get(source_event_id, set()):
+            return set()
         relay_response_ids: set[str] = set()
         for event in events:
             event_id = event.get("event_id")
@@ -7503,17 +7518,23 @@ class LiveFuzzRunner:
                 relay_senders=(self.stack.router_id,),
             )
             if relay_target is not None and relay_target[1] == source_event_id:
-                relay_response_ids.update(agent_responses.get(event_id, set()))
+                answers = agent_responses.get(event_id, set())
+                if not answers:
+                    continue
+                interrupted_id = relay_target[0]
+                if (
+                    direct_response_ids != {interrupted_id}
+                    or event not in room_events
+                    or answers != proven_responses.get(event_id, set())
+                    or not _latest_response_body(room_events, interrupted_id, sender_id=self.stack.agent_id).endswith(
+                        (INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE),
+                    )
+                ):
+                    return set()
+                relay_response_ids.update(answers)
         if not relay_response_ids:
             return direct_response_ids
-        uninterrupted_direct_ids = {
-            response_id
-            for response_id in direct_response_ids
-            if not self._latest_event_body(events, response_id).endswith(
-                (INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE),
-            )
-        }
-        return uninterrupted_direct_ids | relay_response_ids
+        return relay_response_ids
 
     @staticmethod
     def _latest_event_body(

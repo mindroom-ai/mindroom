@@ -295,7 +295,7 @@ class TurnPolicy:
     deps: TurnPolicyDeps
 
     def can_reply_to_sender_in_room(self, sender_id: str, room_id: str) -> bool:
-        """Return whether this entity may reply to a sender in one room."""
+        """Decide durable turn access, retrying unresolved membership before settlement."""
         return is_sender_allowed_for_agent_reply_in_room(
             sender_id,
             self.deps.agent_name,
@@ -303,6 +303,7 @@ class TurnPolicy:
             room_id,
             self.deps.runtime_paths,
             self.deps.agent_reply_memberships,
+            require_resolved_membership=True,
         )
 
     def responder_availability(self) -> _ResponderAvailability:

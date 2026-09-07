@@ -1750,6 +1750,8 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
     use_beta: bool,
 ) -> None:
     """Cancellation during worker setup must dispose the SDK request coroutine."""
+    # Collect prior tests' unreachable coroutines before observing this operation.
+    gc.collect()
     transport_calls = 0
 
     class _RecordingTransport(httpx.AsyncBaseTransport):

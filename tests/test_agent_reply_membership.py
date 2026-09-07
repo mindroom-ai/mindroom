@@ -562,28 +562,44 @@ def test_current_room_only_invalidation_requests_authoritative_refresh(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_new_current_room_transition_requests_authoritative_refresh(tmp_path: Path) -> None:
+@pytest.mark.parametrize("transition", ["live", "unready"])
+@pytest.mark.parametrize("named_room", [False, True])
+async def test_new_current_room_transition_requests_authoritative_refresh(
+    tmp_path: Path,
+    transition: str,
+    named_room: bool,
+) -> None:
     """A newly joined room absent from the snapshot must become fail-closed refresh work."""
     config, runtime_paths = _current_room_runtime_config(tmp_path)
     room_id = "!new-room:example.com"
     control_user_id = "@mindroom_router:example.com"
+    if named_room:
+        config.agents["assistant"].rooms = ["project"]
+        config.router.access = ResponderAccessConfig(current_room_members=False, members_of_rooms=["project"])
+        _persist_room(runtime_paths, "project", room_id)
     client = AsyncMock()
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
     index = AgentReplyMembershipIndex()
     await index.refresh(config, runtime_paths, client)
-    assert not index.needs_refresh(config)
+    assert index.needs_refresh(config) is named_room
+    assert not index.grants_pending(config, joined_rooms=(), current_room_id=room_id)
 
-    changed = index.apply_member_event(
-        config,
-        runtime_paths,
-        room_id,
-        _member_event(control_user_id, "join"),
-        control_user_id=control_user_id,
-    )
+    if transition == "live":
+        changed = index.apply_member_event(
+            config,
+            runtime_paths,
+            room_id,
+            _member_event(control_user_id, "join"),
+            control_user_id=control_user_id,
+        )
+    else:
+        changed = index.mark_room_unready(config, runtime_paths, room_id, reason="recovered_membership")
 
     assert changed
     assert index.needs_refresh(config)
     assert not index.is_current_room_member(control_user_id, room_id, config, runtime_paths)
+    assert index.grants_pending(config, joined_rooms=(), current_room_id=room_id)
+    assert not index.grants_pending(config, joined_rooms=(), current_room_id="!still-absent:example.com")
 
 
 @pytest.mark.asyncio
@@ -753,3 +769,39 @@ async def test_old_policy_refresh_cannot_publish_after_policy_replacement(tmp_pa
     assert index.snapshot.policy_signature == _agent_reply_membership_policy_signature(changed_config)
     assert index.needs_refresh(changed_config)
     assert not index.is_allowed("@alice:example.com", ["secondary"], changed_config, runtime_paths)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_names_room", [False, True])
+async def test_current_room_absence_is_independent_of_other_named_grants(
+    tmp_path: Path,
+    other_names_room: bool,
+) -> None:
+    """Another responder's unready named row cannot override proven current-room absence."""
+    config, paths = _current_room_runtime_config(tmp_path)
+    config.agents["assistant"].rooms = ["project"]
+    config.router.access = ResponderAccessConfig(
+        current_room_members=False,
+        members_of_rooms=["project"] if other_names_room else [],
+    )
+    room_id = "!project:example.com"
+    _persist_room(paths, "project", room_id)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
+    index = AgentReplyMembershipIndex()
+    await index.refresh(config, paths, client)
+
+    assert not index.grants_pending(config, joined_rooms=(), current_room_id=room_id)
+    if other_names_room:
+        assert index.grants_pending(config, joined_rooms=["project"], current_room_id=None)
+
+    # Presence with an unresolved membership query remains uncertain.
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
+    client.joined_members.return_value = nio.JoinedMembersError("unavailable", "M_UNKNOWN")
+    await index.refresh(config, paths, client)
+    assert index.grants_pending(config, joined_rooms=(), current_room_id=room_id)
+
+    # Unknown joined-room discovery cannot prove absence.
+    client.joined_rooms.return_value = nio.JoinedRoomsError("unavailable", "M_UNKNOWN")
+    await index.refresh(config, paths, client)
+    assert index.grants_pending(config, joined_rooms=(), current_room_id=room_id)

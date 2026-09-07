@@ -1585,6 +1585,7 @@ class _MultiAgentOrchestrator:
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_bot.client)
         self.agent_reply_membership_sync.record_authoritative_refresh(config)
+        self._schedule_ready_turn_dispatch_recovery()
         for bot in self.agent_bots.values():
             bot.schedule_pending_invite_reconciliation()
         await self.revoke_reply_authorized_calls()

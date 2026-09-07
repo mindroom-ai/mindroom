@@ -163,10 +163,11 @@ The `--threads` and `--max-batch-size` defaults are unchanged.
 The `restart-regression` profile is a manual opt-in oracle for config replacement, cold-history suppression, and durable callback recovery across a hard MindRoom restart.
 It creates a dormant public room, writes explicitly agent-mentioned historical text and media there, then atomically adds that room and switches only the managed agent to the replacement model used by the in-flight latch.
 The disposable room is world-readable so replacement bots can project events authored before they joined.
-The run waits for config-reload shutdown of both old bots, setup of both replacement bots, configuration-update completion, and the historical-room projection boundary.
-It sends the fresh request only after that cold-history boundary, then waits for the exact callback, its pending journal event, a deterministic model request held in flight, and durable producer settlement after projection of the fresh event.
+The run waits for config-reload shutdown of both old bots, setup of both replacement bots, and configuration-update completion.
+It then sends the fresh request and waits for the exact callback, its pending journal event, a deterministic model request held in flight, and durable producer settlement after projection of the fresh event.
 The harness hard-kills MindRoom, switches to a recovery-only deterministic model while the process is down, boots a new process, and waits for both recovered bots to complete setup.
 The run passes only when the pending journal event becomes settled, the exact fresh event reaches semantic ingress once before and once after restart, and the recovered generation produces exactly one complete agent response and no router response.
+After the recovered answer, the harness explicitly reads the historical room projection; historical hydration is lazy and is not a prerequisite for sending the fresh request.
 Transport callback entry may repeat while Matrix sync and durable recovery race, so the oracle counts the `Received message` boundary after durable dedup instead of the lower-level callback-entry log.
 Neither historical event may start a callback, reach the fresh prompt, or produce output.
 An orderly final shutdown must complete without the production durable-recovery drain-failure marker.

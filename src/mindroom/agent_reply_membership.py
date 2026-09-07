@@ -80,6 +80,9 @@ class _AgentReplyMembershipSnapshot:
     policy_signature: _AgentReplyMembershipPolicySignature | None = None
     rooms: tuple[_GrantRoomMembership, ...] = ()
     refresh_required: bool = True
+    # Refresh supplies the exact joined set; local uncertainty adds only the
+    # affected room until the next refresh. None means discovery is unknown.
+    possible_joined_room_ids: frozenset[str] | None = None
 
 
 class AgentReplyMembershipIndex:
@@ -141,6 +144,29 @@ class AgentReplyMembershipIndex:
             and _raw_membership_matches_sender(room.raw_joined_user_ids, sender_id, config, runtime_paths)
             for room in snapshot.rooms
         )
+
+    def grants_pending(
+        self,
+        config: Config,
+        *,
+        joined_rooms: Sequence[str],
+        current_room_id: str | None,
+    ) -> bool:
+        """Return whether any relevant grant still lacks authoritative membership."""
+        if not joined_rooms and current_room_id is None:
+            return False
+        snapshot = self._snapshot
+        if snapshot.policy_signature != _agent_reply_membership_policy_signature(config):
+            return True
+        ready_keys = {room.room_key for room in snapshot.rooms if room.ready}
+        if any(room_key not in ready_keys for room_key in joined_rooms):
+            return True
+        if current_room_id is None:
+            return False
+        # Another responder's unready named row cannot override proven absence.
+        if snapshot.possible_joined_room_ids is not None and current_room_id not in snapshot.possible_joined_room_ids:
+            return False
+        return not any(room.ready for room in snapshot.rooms if room.room_id == current_room_id)
 
     def invalidate(self, config: Config, *, reason: str) -> None:
         """Revoke every room-backed grant until an authoritative refresh succeeds."""
@@ -223,6 +249,11 @@ class AgentReplyMembershipIndex:
             self._snapshot,
             rooms=tuple(updated_rooms),
             refresh_required=True,
+            possible_joined_room_ids=(
+                None
+                if self._snapshot.possible_joined_room_ids is None
+                else self._snapshot.possible_joined_room_ids | {room_id}
+            ),
         )
         logged_rooms = matching_rooms or (updated_rooms[-1],)
         for matched_room in logged_rooms:
@@ -323,12 +354,16 @@ class AgentReplyMembershipIndex:
         if len(updated_rooms_tuple) > len(snapshot.rooms):
             changed_room_keys.append(None)
 
-        if not changed_room_keys:
+        possible_joined_room_ids = (
+            None if snapshot.possible_joined_room_ids is None else snapshot.possible_joined_room_ids | {room_id}
+        )
+        if not changed_room_keys and possible_joined_room_ids == snapshot.possible_joined_room_ids:
             return False
         self._snapshot = replace(
             snapshot,
             rooms=updated_rooms_tuple,
             refresh_required=any(not room.ready for room in updated_rooms_tuple),
+            possible_joined_room_ids=possible_joined_room_ids,
         )
         for room_key in changed_room_keys:
             logger.info(
@@ -423,6 +458,7 @@ async def _build_authoritative_snapshot(
         policy_signature=signature,
         rooms=frozen_rooms,
         refresh_required=(joined_room_ids is None or any(not room.ready for room in frozen_rooms)),
+        possible_joined_room_ids=joined_room_ids,
     )
 
 

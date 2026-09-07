@@ -459,9 +459,9 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
     """The exceptional command notice must not publish after its requester is revoked."""
     sender_id = "@user:localhost"
     bot = _make_bot(tmp_path, agent_name="router")
-    bot.config.router.access = ResponderAccessConfig(users=[sender_id])
+    bot.config.router.access = ResponderAccessConfig(current_room_members=False, users=[sender_id])
     replacement_config = bot.config.model_copy(deep=True)
-    replacement_config.router.access = ResponderAccessConfig(users=[])
+    replacement_config.router.access = ResponderAccessConfig(current_room_members=False, users=[])
     room = _make_room()
     command_event = _text_event(
         event_id="$cmd-during-reload",

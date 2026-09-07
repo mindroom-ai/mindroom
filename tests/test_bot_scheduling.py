@@ -788,7 +788,7 @@ class TestCommandHandling:
             Config(
                 router=RouterConfig(
                     model="default",
-                    access=ResponderAccessConfig(users=["@alice:server"]),
+                    access=ResponderAccessConfig(current_room_members=False, users=["@alice:server"]),
                 ),
             ),
         )
