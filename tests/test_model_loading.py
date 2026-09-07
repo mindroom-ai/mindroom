@@ -70,6 +70,26 @@ def test_first_party_openai_gpt_5_4_and_newer_use_responses(tmp_path: Path) -> N
     assert isinstance(compatible, MindRoomOpenAIChat)
 
 
+def test_openai_gpt_6_astra_uses_responses_through_compatible_proxy(tmp_path: Path) -> None:
+    """Astra must keep function tools on the Responses API when proxied."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "astra": ModelConfig(
+                    provider="openai",
+                    id="gpt-6-astra",
+                    extra_kwargs={"api_key": "dummy-key", "base_url": "http://localhost:9292/v1"},
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    model = get_model_instance(config, runtime_paths_for(config), "astra")
+
+    assert isinstance(model, MindRoomOpenAIResponses)
+
+
 def test_openai_wire_providers_use_replay_compatible_models(tmp_path: Path) -> None:
     """Every OpenAI-wire chat provider must use the tool-call replay-compatible subclass."""
     expected = {
