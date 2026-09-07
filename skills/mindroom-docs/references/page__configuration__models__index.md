@@ -37,6 +37,16 @@ Each model configuration supports the following fields:
 For Azure OpenAI, `id` is the Azure deployment name, not the underlying base-model name.
 Provider credentials come from supported environment variables, stored credentials, CLI authentication, or deliberately supplied `extra_kwargs`; the top-level `ModelConfig.api_key` field is not used during model construction.
 
+## Hot Reload
+
+After a successful config reload, edits to a referenced definition under `models` apply to the next agent, team, or router response without restarting its Matrix bot.
+Response models, team members, and compaction budgets are resolved from the current config for each response.
+This includes changes to provider options, model IDs, and `context_window`, including definitions selected by `compaction.model` or `compaction.fallback_model`.
+Call-enabled agents can still restart because their call runtime retains configuration between responses.
+
+Increasing `context_window` does not remove an explicit, smaller `compaction.replay_window_tokens` cap.
+Update that cap too if you want a larger replay window.
+
 ## Configuration Examples
 
 ```yaml
