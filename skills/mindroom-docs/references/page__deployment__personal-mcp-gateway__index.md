@@ -114,7 +114,7 @@ Public registration and authorization starts share an aggregate admission limit 
 Set the positive integers `MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT` and `MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT` to adjust these limits.
 Keep the source limit below the aggregate limit to leave capacity for other sources.
 Excess requests receive HTTP 429 with `Retry-After`; token exchange, refresh, revocation, discovery, and existing MCP grants remain usable.
-Rejected requests do not consume another source's allowance or extend the rate-limit window.
+Rejected requests consume neither the per-source nor aggregate allowance, and they extend neither rate-limit window.
 
 The source is the canonical client IP supplied by the ASGI server, without its port; the gateway does not read forwarding headers to identify callers.
 Behind a proxy, configure Uvicorn's `FORWARDED_ALLOW_IPS` with only the actual trusted proxy addresses or networks, and ensure those proxies sanitize the forwarded client-address chain.
@@ -140,6 +140,10 @@ These controls bound anonymous onboarding state; they do not impose a user or de
 - Search returns at most 10 items and 16 KiB. A selected schema is limited to 32 KiB; tool arguments and result payloads to 64 KiB each.
 - HTTP request bodies and MCP tool responses are limited to 128 KiB. JSON-encoded request IDs are limited to 128 bytes. Calls have a 60-second gateway deadline, with at most 128 active calls per process. A cancelled or timed-out call retains its capacity until its local background work and toolkit cleanup finish.
 - Explicit MCP cancellation applies only to a matching request ID within the same client grant. Cancellation and timeout stop waiting, but a synchronous or remote action may already have taken effect. Do not automatically retry a potentially mutating call.
+
+Synchronous native tool work shares the API process and cannot be forcibly stopped by request cancellation.
+A stuck provider call or toolkit cleanup can retain capacity and delay graceful shutdown indefinitely; a bounded process shutdown requires termination by the deployment supervisor.
+The gateway does not provide process isolation for native integrations.
 
 The gateway does not automatically retry an invocation whose outcome is unknown.
 Upstream MCP reconnection can refresh a failed session for a later call without replaying the failed action.
