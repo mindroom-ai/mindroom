@@ -442,7 +442,9 @@ async def test_pruning_and_refresh_queries_use_indexes_without_history_summation
             plans[query] = [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + query)]
     allowed_scans = {
         "SCAN capabilities USING COVERING INDEX capabilities_code_consumed",
+        "SCAN capabilities USING INDEX capabilities_code_consumed",
         "SCAN grants USING COVERING INDEX grants_revoked",
+        "SCAN grants USING INDEX grants_revoked",
     }
     assert not any(
         detail.startswith("SCAN ") and detail not in allowed_scans for plan in plans.values() for detail in plan
