@@ -583,7 +583,7 @@ Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symli
 Thread bodies come from the journal projection, read as the same principal a running bot writes it under, so an exported thread reduces edits, redactions, and long-text sidecars exactly the way agent prompts do.
 A thread nobody has read yet is built from the homeserver once and then costs no Matrix history call at all, so a repeated export pass is a local read.
 Hydration writes through the runtime's existing journal owner; export does not open another journal or crypto store.
-Normal config reloads wait for an export pass, while forced replacement or shutdown can interrupt it.
+Normal config reloads wait for an export pass; forced replacement and shutdown cancel active administrative exports and drain their history reads before closing their Matrix clients.
 An interrupted pass preserves completed files; rerun the export to finish the pass and rebuild indexes.
 
 <!-- CODE:START -->

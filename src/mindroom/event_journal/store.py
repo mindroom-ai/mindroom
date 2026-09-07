@@ -24,6 +24,7 @@ from . import (
     background_approvals,
     interactive_questions,
     journal,
+    membership_hooks,
     outbox,
     reads,
     turn_records,
@@ -50,6 +51,7 @@ from .models import (
     DeliveryStage,
     IngestionConsumer,
     IngestionConsumerBindingError,
+    ResponseRecoveryState,
 )
 from .projection import discard_delivery_event, drop_refetched_message, install_refetched_revision, project
 
@@ -217,10 +219,10 @@ class PrincipalStore:
         *,
         source_event_ids: tuple[str, ...],
         turn_id: str | None,
-    ) -> tuple[tuple[bool, ...], MatrixDelivery | None]:
+    ) -> ResponseRecoveryState:
         """Read one response's durable handoff through the reserved recovery lane."""
 
-        def load(transaction: Transaction) -> tuple[tuple[bool, ...], MatrixDelivery | None]:
+        def load(transaction: Transaction) -> ResponseRecoveryState:
             pending = tuple(
                 journal.is_pending(transaction, self._principal_id, event_id) for event_id in source_event_ids
             )
@@ -234,9 +236,34 @@ class PrincipalStore:
                     stage=DeliveryStage.FINAL,
                 )
             )
-            return pending, delivery
+            return ResponseRecoveryState(
+                pending_sources=pending,
+                final_delivery=delivery,
+                sources_settled_by_departure=(
+                    not any(pending)
+                    and journal.sources_settled_by_departure(transaction, self._principal_id, source_event_ids)
+                ),
+            )
 
         return await self._backend.recovery_read(load)
+
+    async def is_room_member_join_suppressed(self, room_id: str, event_id: str, user_id: str) -> bool:
+        """Check one admitted join against earlier baselines and completed hook delivery."""
+        return await self._backend.read(
+            lambda transaction: membership_hooks.is_suppressed(
+                transaction,
+                self._principal_id,
+                room_id,
+                event_id,
+                user_id,
+            ),
+        )
+
+    async def mark_room_member_join_completed(self, room_id: str, user_id: str) -> None:
+        """Record successful hook delivery without rewriting any other member's marker."""
+        await self._backend.write(
+            lambda transaction: membership_hooks.mark_completed(transaction, self._principal_id, room_id, user_id),
+        )
 
     async def settle(self, event_id: str) -> None:
         """Mark one event's semantic work terminal."""

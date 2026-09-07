@@ -437,6 +437,15 @@ class UnreadableMatrixDelivery:
 
 
 @dataclass(frozen=True, slots=True)
+class ResponseRecoveryState:
+    """One consistent snapshot of a response's durable ownership or termination."""
+
+    pending_sources: tuple[bool, ...]
+    final_delivery: MatrixDelivery | None
+    sources_settled_by_departure: bool
+
+
+@dataclass(frozen=True, slots=True)
 class DeliveryAcknowledgement:
     """What one delivery's row names afterwards, and who put it there.
 

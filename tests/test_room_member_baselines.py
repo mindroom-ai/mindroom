@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.event_journal import membership_hooks
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
-from mindroom.matrix import room_member_joins
 from tests.test_durable_ingestion_runtime import ROOM, _consume_frame, _joined_frame, _owned_session
 from tests.test_room_member_hooks import _plugin, _room_member_event, _router_bot
 
@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
+
+    from mindroom.event_journal.backend import Transaction
 
 
 def _frame(
@@ -36,6 +38,22 @@ def _registry(seen: list[str]) -> HookRegistry:
         seen.append(context.event_id)
 
     return HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+
+
+@pytest.mark.asyncio
+async def test_membership_baselines_do_not_rewrite_an_installation_wide_json_file(tmp_path: Path) -> None:
+    """Nio's per-member batches must not each serialize all earlier membership markers."""
+    bot = _router_bot(tmp_path)
+    members = tuple(
+        _room_member_event(event_id=f"$baseline-{index}", user_id=f"@human{index}:localhost", prev_membership=None)
+        for index in range(100)
+    )
+    try:
+        async with _owned_session(bot) as session:
+            await _consume_frame(bot, session, _frame("baseline", timeline=members))
+        assert not (bot.runtime_paths.storage_root / "tracking" / "room_member_joins.json").exists()
+    finally:
+        await bot._journal_store.close()
 
 
 @pytest.mark.asyncio
@@ -101,22 +119,22 @@ async def test_baseline_persistence_retries_before_nio_ack(
     monkeypatch: pytest.MonkeyPatch,
     baseline: str,
 ) -> None:
-    """A committed journal receipt cannot make an interrupted baseline write disappear."""
+    """Baseline failure rolls back the receipt, and retained Nio input retries before acknowledgement."""
     bot = _router_bot(tmp_path)
     seen: list[str] = []
     bot.hook_registry = _registry(seen)
-    save = room_member_joins._save_room_member_joins
+    save = membership_hooks.record_baseline
     calls = 0
 
-    def interrupted_save(path: Path, members: dict[str, set[str]]) -> None:
+    def interrupted_save(transaction: Transaction, principal_id: str, room_id: str, user_id: str) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
             message = "baseline write interrupted"
             raise RuntimeError(message)
-        save(path, members)
+        save(transaction, principal_id, room_id, user_id)
 
-    monkeypatch.setattr(room_member_joins, "_save_room_member_joins", interrupted_save)
+    monkeypatch.setattr(membership_hooks, "record_baseline", interrupted_save)
     try:
         async with _owned_session(bot) as session:
             existing = _room_member_event(event_id="$baseline", prev_membership=None)

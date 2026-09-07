@@ -146,6 +146,8 @@ Nio owns durable recognition of local membership commands and their later sync e
 MindRoom applies the producer's ordered membership transitions once per admitted batch and retains application tenure fencing without a second echo protocol.
 A departure advances that tenure and invalidates work authorized by the ended membership.
 A rejoin retains the advanced tenure, so a late acknowledgement cannot project an older delivery into the new conversation.
+Response shutdown can prove intentional termination from the exact retained sources: each must be settled and belong to an older membership epoch than its own room's current epoch.
+That proof uses one journal recovery snapshot and needs no final delivery; missing sources, current-epoch settlement, and sources spanning ended and current memberships do not qualify.
 
 ## Restart
 

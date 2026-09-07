@@ -81,6 +81,16 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS room_member_joins (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        baseline_receipt_order BIGINT,
+        completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+        PRIMARY KEY (principal_id, room_id, user_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS matrix_ingestion_membership (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,

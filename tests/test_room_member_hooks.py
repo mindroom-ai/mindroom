@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import stat
-import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
@@ -21,7 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import mindroom_user_id
-from mindroom.event_journal import EventClass, EventKind
+from mindroom.event_journal import EventClass, EventKind, membership_hooks
 from mindroom.hooks import (
     EVENT_ROOM_MEMBER_JOINED,
     EVENT_ROOM_MEMBER_LEFT,
@@ -30,7 +27,6 @@ from mindroom.hooks import (
     RoomMemberLeftContext,
     hook,
 )
-from mindroom.matrix import room_member_joins
 from mindroom.matrix.users import AgentMatrixUser
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -45,6 +41,8 @@ from tests.journal_helpers import admit_dispatch_event
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.event_journal import PrincipalStore
 
 
 def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
@@ -172,6 +170,12 @@ def _agent_bot(tmp_path: Path) -> AgentBot:
     )
 
 
+async def _dispatch_member(bot: AgentBot, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
+    """Provide the durable source that production callbacks always receive."""
+    await admit_dispatch_event(bot._journal_dispatcher, room, event, EventKind.ROOM_LIFECYCLE, EventClass.ACTIONABLE)
+    await bot._on_room_member(room, event)
+
+
 def test_room_member_joined_is_a_builtin_hook_event() -> None:
     """room:member_joined should be accepted as a built-in hook event."""
 
@@ -211,8 +215,8 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
 
-    await bot._on_room_member(room, _room_member_event(event_id="$join1"))
-    await bot._on_room_member(room, _room_member_event(event_id="$join2"))
+    await _dispatch_member(bot, room, _room_member_event(event_id="$join1"))
+    await _dispatch_member(bot, room, _room_member_event(event_id="$join2"))
 
     assert len(seen) == 1
     context = seen[0]
@@ -240,7 +244,8 @@ async def test_router_emits_room_member_left_for_human_self_leave(tmp_path: Path
     bot = _router_bot(tmp_path)
     bot.hook_registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
 
-    await bot._on_room_member(
+    await _dispatch_member(
+        bot,
         _room("!personal:localhost"),
         _room_member_event(
             event_id="$leave1",
@@ -336,61 +341,9 @@ async def test_router_ignores_non_human_or_non_self_room_member_leaves(tmp_path:
         ),
     )
     for event in events:
-        await bot._on_room_member(room, event)
+        await _dispatch_member(bot, room, event)
 
     assert seen == []
-
-
-def test_room_member_marker_returns_normally_or_raises_without_boolean_status(tmp_path: Path) -> None:
-    """A duplicate marker is successful idempotence, not a false write result."""
-    bot = _router_bot(tmp_path)
-    join = room_member_joins._room_member_join_from_event(
-        _room(),
-        _room_member_event(),
-        config=bot.config,
-        runtime_paths=bot.runtime_paths,
-    )
-    assert join is not None
-
-    first_result = room_member_joins._record_room_member_join_seen(
-        bot.runtime_paths.storage_root,
-        join,
-    )
-    duplicate_result = room_member_joins._record_room_member_join_seen(
-        bot.runtime_paths.storage_root,
-        join,
-    )
-
-    assert first_result is None
-    assert duplicate_result is None
-
-
-def test_room_member_marker_fsyncs_payload_and_directory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A completed hook marker must survive the same crash as its certified checkpoint."""
-    bot = _router_bot(tmp_path)
-    join = room_member_joins._room_member_join_from_event(
-        _room(),
-        _room_member_event(),
-        config=bot.config,
-        runtime_paths=bot.runtime_paths,
-    )
-    assert join is not None
-    fsynced_directory_flags: list[bool] = []
-
-    def track_fsync(file_descriptor: int) -> None:
-        fsynced_directory_flags.append(stat.S_ISDIR(os.fstat(file_descriptor).st_mode))
-
-    monkeypatch.setattr("mindroom.durable_write.os.fsync", track_fsync)
-
-    room_member_joins._record_room_member_join_seen(
-        bot.runtime_paths.storage_root,
-        join,
-    )
-
-    assert fsynced_directory_flags == [False, True]
 
 
 @pytest.mark.asyncio
@@ -413,12 +366,12 @@ async def test_cancelled_room_member_hook_does_not_suppress_durable_retry(tmp_pa
     room = _room()
     event = _room_member_event(event_id="$retry")
 
-    first = asyncio.create_task(bot._on_room_member(room, event))
+    first = asyncio.create_task(_dispatch_member(bot, room, event))
     await entered.wait()
     first.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first
-    await bot._on_room_member(room, event)
+    await _dispatch_member(bot, room, event)
 
     assert attempts == 2
 
@@ -435,7 +388,7 @@ async def test_room_member_joined_supports_router_agent_scope(tmp_path: Path) ->
     bot = _router_bot(tmp_path)
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
-    await bot._on_room_member(_room(), _room_member_event())
+    await _dispatch_member(bot, _room(), _room_member_event())
 
     assert seen == ["@alice:localhost"]
 
@@ -452,7 +405,7 @@ async def test_router_emits_live_room_member_join_without_previous_membership(tm
     bot = _router_bot(tmp_path)
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
-    await bot._on_room_member(_room(), _room_member_event(event_id="$sso-autojoin", prev_membership=None))
+    await _dispatch_member(bot, _room(), _room_member_event(event_id="$sso-autojoin", prev_membership=None))
 
     assert len(seen) == 1
     assert seen[0].event_id == "$sso-autojoin"
@@ -475,24 +428,20 @@ async def test_room_member_joined_save_failure_remains_retryable(
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
 
-    def failing_write(
-        path: Path,
-        payload: object,
-        *,
-        indent: int,
-        trailing_newline: bool,
-    ) -> None:
-        del path, payload, indent, trailing_newline
-        raise OSError
+    def failing_write(*_args: object) -> None:
+        message = "marker write interrupted"
+        raise OSError(message)
 
-    monkeypatch.setattr(room_member_joins, "write_json_file_durable", failing_write)
+    event = _room_member_event(event_id="$join")
+    with monkeypatch.context() as failure:
+        failure.setattr(membership_hooks, "mark_completed", failing_write)
+        with pytest.raises(OSError, match="marker write interrupted"):
+            await _dispatch_member(bot, room, event)
 
-    with pytest.raises(RuntimeError, match="Failed to persist completed room-member join") as exc_info:
-        await bot._on_room_member(room, _room_member_event(event_id="$join"))
-
-    assert isinstance(exc_info.value.__cause__, OSError)
     assert seen == ["$join"]
-    assert not (bot.runtime_paths.storage_root / "tracking" / "room_member_joins.json").exists()
+    assert await bot.journal_principal().is_pending(event.event_id)
+    await _dispatch_member(bot, room, event)
+    assert seen == ["$join", "$join"]
 
 
 @pytest.mark.asyncio
@@ -510,26 +459,27 @@ async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
     bot = _router_bot(tmp_path)
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
-    save_started = threading.Event()
-    release_save = threading.Event()
-    original_save = room_member_joins._save_room_member_joins
+    save_started = asyncio.Event()
+    release_save = asyncio.Event()
+    principal_type = type(bot.journal_principal())
+    original_save = principal_type.mark_room_member_join_completed
 
-    def delayed_save(path: Path, seen: dict[str, set[str]]) -> None:
+    async def delayed_save(store: PrincipalStore, room_id: str, user_id: str) -> None:
         save_started.set()
-        assert release_save.wait(timeout=2.0)
-        original_save(path, seen)
+        await release_save.wait()
+        await original_save(store, room_id, user_id)
 
-    monkeypatch.setattr(room_member_joins, "_save_room_member_joins", delayed_save)
+    monkeypatch.setattr(principal_type, "mark_room_member_join_completed", delayed_save)
 
     first_task: asyncio.Task[None] | None = None
     second_task: asyncio.Task[None] | None = None
     try:
         first_task = asyncio.create_task(
-            bot._on_room_member(room, _room_member_event(event_id="$join1")),
+            _dispatch_member(bot, room, _room_member_event(event_id="$join1")),
         )
-        assert await asyncio.to_thread(save_started.wait, 2.0)
+        await asyncio.wait_for(save_started.wait(), timeout=2.0)
         second_task = asyncio.create_task(
-            bot._on_room_member(room, _room_member_event(event_id="$join2")),
+            _dispatch_member(bot, room, _room_member_event(event_id="$join2")),
         )
         await asyncio.sleep(0.05)
         release_save.set()
@@ -567,9 +517,9 @@ async def test_room_member_joined_ignores_bot_accounts_and_agents(tmp_path: Path
     internal_user_id = mindroom_user_id(bot.config, bot.runtime_paths)
     assert internal_user_id is not None
 
-    await bot._on_room_member(_room(), _room_member_event(event_id="$bridge", user_id="@bridge:localhost"))
-    await bot._on_room_member(_room(), _room_member_event(event_id="$agent", user_id="@mindroom_router:localhost"))
-    await bot._on_room_member(_room(), _room_member_event(event_id="$internal", user_id=internal_user_id))
+    await _dispatch_member(bot, _room(), _room_member_event(event_id="$bridge", user_id="@bridge:localhost"))
+    await _dispatch_member(bot, _room(), _room_member_event(event_id="$agent", user_id="@mindroom_router:localhost"))
+    await _dispatch_member(bot, _room(), _room_member_event(event_id="$internal", user_id=internal_user_id))
 
     assert seen == []
 
@@ -586,6 +536,6 @@ async def test_non_router_bots_do_not_emit_room_member_joined(tmp_path: Path) ->
     bot = _agent_bot(tmp_path)
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
-    await bot._on_room_member(cast("nio.MatrixRoom", _room()), _room_member_event())
+    await _dispatch_member(bot, cast("nio.MatrixRoom", _room()), _room_member_event())
 
     assert seen == []

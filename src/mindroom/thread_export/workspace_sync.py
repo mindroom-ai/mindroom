@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
 from mindroom.private_instance_identity import private_instances_for_agent
+from mindroom.runtime_shutdown import gather_shutdown_phase
 from mindroom.thread_export.models import ThreadExportRoom, ThreadExportSource, ThreadExportTarget
 from mindroom.thread_export.projected_history import export_conversation_reader
 from mindroom.thread_export.selection import export_rooms
@@ -94,6 +95,7 @@ class WorkspaceThreadExportRunner:
         self._full_pass_pending = False
         self._wakeup = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._manual_exports: set[asyncio.Task[object]] = set()
 
     def start(self) -> None:
         """Start the loop once; later calls are no-ops."""
@@ -106,7 +108,22 @@ class WorkspaceThreadExportRunner:
         self._task = None
         if task is not None:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        try:
+            await self.cancel_manual_exports()
+        finally:
+            if task is not None:
+                _, cancellation = await gather_shutdown_phase(task)
+                if cancellation is not None:
+                    raise cancellation
+
+    async def cancel_manual_exports(self) -> None:
+        """Drain administrative readers before their borrowed runtime can be replaced."""
+        tasks = tuple(self._manual_exports)
+        for task in tasks:
+            task.cancel()
+        _, cancellation = await gather_shutdown_phase(*tasks)
+        if cancellation is not None:
+            raise cancellation
 
     async def export_once(
         self,
@@ -121,6 +138,9 @@ class WorkspaceThreadExportRunner:
         if self._task is None or self._task.done() or not gate.admit():
             msg = "MindRoom must be running and ready to export threads; retry after startup or reload"
             raise RuntimeError(msg)
+        task = asyncio.current_task()
+        assert task is not None
+        self._manual_exports.add(task)
         try:
             config = self._deps.config_provider()
             if config is None:
@@ -144,6 +164,7 @@ class WorkspaceThreadExportRunner:
                 include_invited_rooms=include_invited_rooms,
             )
         finally:
+            self._manual_exports.discard(task)
             gate.release()
 
     def mark_room_activity(self, room_id: str) -> None:

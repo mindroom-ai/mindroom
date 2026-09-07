@@ -101,6 +101,14 @@ class ReplayView(Protocol):
 class DispatchView(ReplayView, Protocol):
     """Everything the dispatcher coordinates: replay and semantic claims."""
 
+    async def is_room_member_join_suppressed(self, room_id: str, event_id: str, user_id: str) -> bool:
+        """Check one admitted join against earlier baselines and completed hook delivery."""
+        ...
+
+    async def mark_room_member_join_completed(self, room_id: str, user_id: str) -> None:
+        """Record successful room-member hook delivery."""
+        ...
+
     async def settle_many(self, event_ids: tuple[str, ...]) -> None:
         """Settle every event that one terminal turn accounted for."""
         ...

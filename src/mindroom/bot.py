@@ -98,7 +98,6 @@ from .dispatch_callback_outcome import TurnDispatchOutcome
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
-    EventClass,
     EventJournalStore,
     EventKind,
     PrincipalStore,
@@ -123,7 +122,6 @@ from .matrix.room_member_joins import (
     RoomMemberJoin,
     RoomMemberLeave,
     emit_room_member_join_at_least_once,
-    record_room_member_baseline,
     room_member_left_from_event,
 )
 from .matrix.to_device import AuthenticatedToDeviceEvent
@@ -1588,20 +1586,10 @@ class AgentBot:
         }
         if facts.receipt_new and (admission.projected is not None or member_activity):
             self._room_activity_observer(event.room_id)
-        if event.kind is EventKind.ROOM_LIFECYCLE:
+        if live_member:
             parsed = nio.RoomMemberEvent.from_dict(dict(event.source))
             assert isinstance(parsed, nio.RoomMemberEvent)
-            if live_member:
-                await self._apply_live_reply_membership_transition(event.room_id, parsed)
-            elif self.agent_name == ROUTER_AGENT_NAME and event.event_class is EventClass.CONTEXT_ONLY:
-                await record_room_member_baseline(
-                    event.room_id,
-                    parsed,
-                    config=self.config,
-                    runtime_paths=self.runtime_paths,
-                    store=self.journal_principal(),
-                    lock=self._room_member_join_lock,
-                )
+            await self._apply_live_reply_membership_transition(event.room_id, parsed)
 
     async def _apply_ingestion_membership(self, admission: IngestionRecordAdmission) -> None:
         """Reconcile app state only while this admitted membership is still current."""
@@ -1873,11 +1861,12 @@ class AgentBot:
             return False
         principal = self._journal_store.principal(self._journal_principal_id)
         turn_id = turn_record.anchor_event_id
-        pending_sources, final_delivery = await principal.response_recovery_state(
+        recovery_state = await principal.response_recovery_state(
             source_event_ids=turn_record.source_event_ids,
             turn_id=turn_id,
         )
-        if all(pending_sources):
+        pending_sources = recovery_state.pending_sources
+        if all(pending_sources) or (turn_id is not None and recovery_state.sources_settled_by_departure):
             return True
         if any(pending_sources):
             self._record_response_recovery_not_ready(
@@ -1893,6 +1882,7 @@ class AgentBot:
                 pending_source_count=0,
             )
             return False
+        final_delivery = recovery_state.final_delivery
         if final_delivery is None:
             self._record_response_recovery_not_ready(
                 reason="missing_final_delivery",
@@ -2538,7 +2528,7 @@ class AgentBot:
             event,
             config=self.config,
             runtime_paths=self.runtime_paths,
-            storage_root=self.runtime_paths.storage_root,
+            store=self.journal_principal(),
             lock=self._room_member_join_lock,
             emit=self._emit_room_member_joined_hooks,
         )

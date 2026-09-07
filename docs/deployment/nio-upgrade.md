@@ -11,6 +11,8 @@ Nio classifies the first room snapshot without a known membership baseline as hi
 MindRoom stores those messages as context only, so they do not trigger replies or commands even when the fresh journal has no handled-event records.
 Later live messages become actionable normally, and subsequent restarts preserve pending work and duplicate protection.
 Messages sent during downtime or before the first room baseline can therefore remain unanswered; resend any request you still want handled after startup completes.
+Room-member onboarding markers now live in the event journal; the old `tracking/room_member_joins.json` file is ignored.
+Initial historical membership baselines prevent later profile updates from onboarding existing members again.
 
 ## One-time cutover
 

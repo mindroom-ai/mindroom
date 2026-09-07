@@ -25,7 +25,7 @@ from mindroom.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
-from . import approvals
+from . import approvals, membership_hooks
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
@@ -242,12 +242,20 @@ def _apply_semantic_ingestion_disposition(
         _admit_suppressed_semantic_identity(transaction, principal_id, event)
         return False
     semantic_result = admit(transaction, principal_id, event, projected)
-    if semantic_result is AdmissionResult.ADMITTED:
-        return event.event_class is EventClass.ACTIONABLE
     if semantic_result is AdmissionResult.DUPLICATE:
         _require_matching_semantic_event(transaction, principal_id, event)
-        return False
-    raise IngestionBatchIntegrityError
+    elif semantic_result is not AdmissionResult.ADMITTED:
+        raise IngestionBatchIntegrityError
+    if event.kind is EventKind.ROOM_LIFECYCLE and event.event_class is EventClass.CONTEXT_ONLY:
+        content = cast("Mapping[str, object]", event.source["content"])
+        if content.get("membership") == "join":
+            membership_hooks.record_baseline(
+                transaction,
+                principal_id,
+                event.room_id,
+                cast("str", event.source["state_key"]),
+            )
+    return semantic_result is AdmissionResult.ADMITTED and event.event_class is EventClass.ACTIONABLE
 
 
 def _apply_membership_effect(
@@ -1148,6 +1156,28 @@ def is_pending(transaction: Transaction, principal_id: str, event_id: str) -> bo
         (principal_id, event_id),
     )
     return row is not None
+
+
+def sources_settled_by_departure(
+    transaction: Transaction,
+    principal_id: str,
+    event_ids: tuple[str, ...],
+) -> bool:
+    """Prove every exact retained source is settled under an ended membership."""
+    return bool(event_ids) and all(
+        transaction.fetchone(
+            """
+            SELECT 1 AS present FROM journal_events AS event
+            JOIN room_membership AS membership
+              ON membership.principal_id = event.principal_id AND membership.room_id = event.room_id
+            WHERE event.principal_id = ? AND event.event_id = ? AND event.state = 'settled'
+              AND event.membership_epoch < membership.membership_epoch
+            """,
+            (principal_id, event_id),
+        )
+        is not None
+        for event_id in event_ids
+    )
 
 
 def settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
