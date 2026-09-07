@@ -8428,6 +8428,7 @@ async def test_every_live_profile_runs_the_shared_final_audit(profile: str) -> N
     runner._startup_maintenance_pending = True
     runner._send_roots = send_roots  # type: ignore[method-assign]
     runner._await_first_baseline_response = AsyncMock()
+    runner._await_room_baselines = AsyncMock()
     runner._wait_for_pending_mutation_effects = AsyncMock()
     runner._run_batches = run_profile  # type: ignore[method-assign]
     runner._run_chaos = run_profile  # type: ignore[method-assign]
@@ -8710,6 +8711,7 @@ async def test_startup_phase_failure_prevents_shared_final_audit() -> None:
     runner._startup_maintenance_pending = True
     runner._send_roots = send_roots  # type: ignore[method-assign]
     runner._await_first_baseline_response = AsyncMock()
+    runner._await_room_baselines = AsyncMock()
     runner._wait_for_pending_mutation_effects = AsyncMock()
     runner._run_batches = run_batches  # type: ignore[method-assign]
     runner._audit_final_state = audit_final_state  # type: ignore[method-assign]
@@ -8774,6 +8776,7 @@ async def test_dead_runtime_prevents_shared_final_audit() -> None:
     runner._startup_maintenance_pending = True
     runner._send_roots = send_roots  # type: ignore[method-assign]
     runner._await_first_baseline_response = AsyncMock()
+    runner._await_room_baselines = AsyncMock()
     runner._wait_for_pending_mutation_effects = AsyncMock()
     runner._run_batches = run_batches  # type: ignore[method-assign]
     runner._audit_final_state = audit_final_state  # type: ignore[method-assign]
@@ -8841,6 +8844,7 @@ async def test_runtime_exit_during_final_audit_prevents_pass() -> None:  # noqa:
     runner._startup_maintenance_pending = True
     runner._send_roots = send_roots  # type: ignore[method-assign]
     runner._await_first_baseline_response = AsyncMock()
+    runner._await_room_baselines = AsyncMock()
     runner._wait_for_pending_mutation_effects = AsyncMock()
     runner._run_batches = run_batches  # type: ignore[method-assign]
     runner._audit_final_state = audit_final_state  # type: ignore[method-assign]

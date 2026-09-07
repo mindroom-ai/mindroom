@@ -294,3 +294,43 @@ def test_malformed_abandoned_manifest_reports_its_path_without_cleanup(tmp_path:
         assert manifest.read_text() == '{"instance_name":'
     finally:
         stack.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["fuzz", "chaos", "short-stream-correctness", "saturation"])
+async def test_initial_traffic_waits_for_durable_room_baselines(profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No startup request may enter the first cold timeline as ignored history."""
+    stack = live_fuzz.ManagedTuwunelStack()
+    client = live_fuzz.LiveMatrixClient("http://matrix.invalid", "!room:test")
+    runner = live_fuzz.LiveFuzzRunner(
+        stack,
+        (client,),
+        live_fuzz.LiveFuzzScenario(1, (), profile=profile),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    checks = 0
+
+    def baseline_ready() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 2
+
+    async def first_traffic() -> None:
+        assert checks >= 2
+        msg = "traffic started after baseline"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(stack, "managed_room_baseline_ready", baseline_ready)
+    monkeypatch.setattr(client, "register", AsyncMock())
+    monkeypatch.setattr(client, "join_room", AsyncMock())
+    monkeypatch.setattr(client, "sync_incremental", AsyncMock())
+    monkeypatch.setattr(runner.oracle, "initialize", AsyncMock())
+    monkeypatch.setattr(runner, "_await_first_baseline_response", first_traffic)
+    monkeypatch.setattr(runner, "_run_short_stream_correctness", first_traffic)
+    try:
+        with pytest.raises(RuntimeError, match="traffic started after baseline"):
+            await runner.run()
+    finally:
+        await client.close()
+        stack.close()

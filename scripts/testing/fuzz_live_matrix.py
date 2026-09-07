@@ -3298,22 +3298,29 @@ class ManagedTuwunelStack:
         return access_token, device_id
 
     def managed_room_baseline_ready(self) -> bool:
-        """Wait for durable room history before sending the warm-up request."""
+        """Require the agent's durable joined baseline in every configured room."""
+        if not all(room_key in self.room_ids for room_key in self.room_keys):
+            return False
+        required_rooms = {self.room_ids[room_key] for room_key in self.room_keys}
+        ready_rooms: set[str] = set()
         for path in (self.storage_path / "encryption_keys").glob("*/*.db"):
             with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
                 if not database.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='NioDurableRoom'",
                 ).fetchone():
                     continue
-                row = database.execute(
-                    "SELECT metadata FROM NioDurableRoom WHERE room_id=?",
-                    (self.room_id,),
-                ).fetchone()
-            if row is not None:
-                metadata = json.loads(row[0])
-                if metadata.get("own_user_id") == self.agent_id:
-                    return metadata.get("baseline") is True and metadata.get("membership") == "join"
-        return False
+                rows = database.execute("SELECT room_id, metadata FROM NioDurableRoom").fetchall()
+            for room_id, raw_metadata in rows:
+                if room_id not in required_rooms:
+                    continue
+                metadata = json.loads(raw_metadata)
+                if (
+                    metadata.get("own_user_id") == self.agent_id
+                    and metadata.get("baseline") is True
+                    and metadata.get("membership") == "join"
+                ):
+                    ready_rooms.add(room_id)
+        return bool(required_rooms) and ready_rooms >= required_rooms
 
     def managed_stream_health_sample(self) -> ManagedStreamHealthSample:
         """Read and parse one managed-stream API health sample."""
@@ -6226,6 +6233,7 @@ class LiveFuzzRunner:
         if self.scenario.profile == "restart-regression":
             return {**await self._run_restart_regression()}
         await self.oracle.initialize()
+        await self._await_room_baselines()
         if self.scenario.profile in {"short-stream-correctness", "saturation"}:
             await asyncio.gather(
                 *(client.sync_incremental(timeout_ms=0, allow_limited=True) for client in self.clients),
@@ -6363,12 +6371,16 @@ class LiveFuzzRunner:
             ),
         )
 
-    async def _prepare_managed_stream_baseline(self, *, run_id: str) -> ManagedStreamBaseline:
-        """Complete one warm turn before snapshotting observer and log state."""
+    async def _await_room_baselines(self) -> None:
+        """Fence initial traffic after Nio has committed each room's cold history."""
         async with asyncio.timeout(self.reply_timeout):
             while not await asyncio.to_thread(self.stack.managed_room_baseline_ready):
                 self.stack.require_runtime_alive()
                 await asyncio.sleep(0.1)
+
+    async def _prepare_managed_stream_baseline(self, *, run_id: str) -> ManagedStreamBaseline:
+        """Complete one warm turn before snapshotting observer and log state."""
+        await self._await_room_baselines()
         await self.client.sync_incremental(timeout_ms=0, allow_limited=True)
         warm_baseline = frozenset(self.client.seen_events)
         warm_event_id = await self.client.send_event(
@@ -7815,16 +7827,10 @@ class LiveFuzzRunner:
     async def _await_first_baseline_response(self) -> None:
         """Send one message and wait for its reply before the scenario starts.
 
-        MindRoom's no-loss guarantee begins after its first baseline response,
-        not when its API reports healthy. Until then the agent is still doing
-        its initial Matrix sync, and everything in that first timeline is
-        classified as room history the agent must not answer — correctly, since
-        a bot joining a room may not reply to the backlog it finds there.
-
-        Traffic sent before that boundary is therefore outside the contract,
-        and a scenario that starts there measures the race rather than the
-        behaviour under test. One warm-up exchange establishes that the agent
-        is answering, which is the only observable that actually means it.
+        The runner first waits for the agent's durable joined-room baselines,
+        because first timelines are history and cannot start new responses.
+        This single exchange then verifies semantic readiness without retrying
+        or discarding a missed request after that admission boundary.
         """
         marker = _source_marker("warm-up", ORIGINAL_REVISION)
         content = self._message_content("Live fuzz warm up", marker=marker)

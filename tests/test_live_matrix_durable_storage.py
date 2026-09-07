@@ -110,3 +110,38 @@ def test_failure_bundle_preserves_incomplete_and_malformed_turn_rows(tmp_path: P
         {"index_event_id": "$corrupt", "anchor_event_id": "$corrupt", "record_json": "not JSON"},
         {"index_event_id": "$pending", "anchor_event_id": "$pending", "record_json": '{"completed":false}'},
     ]
+
+
+@pytest.mark.parametrize("second_room", [None, "cold", "other_agent", "joined"])
+def test_room_baseline_requires_every_configured_room_for_exact_agent(tmp_path: Path, second_room: str | None) -> None:
+    """A ready lobby or another account's baseline cannot qualify a cold chaos room."""
+    path = _durable_database(tmp_path)
+    stack = live_fuzz.ManagedTuwunelStack(room_keys=("lobby", "chaos1"))
+    stack.storage_path = tmp_path
+    stack.agent_id = "@agent:test"
+    stack.room_id = "!lobby:test"
+    stack.room_ids = {"lobby": "!lobby:test", "chaos1": "!chaos:test"}
+    with closing(sqlite3.connect(path)) as database:
+        database.execute(
+            "INSERT INTO NioDurableRoom VALUES(?,?)",
+            (stack.room_id, json.dumps({"own_user_id": stack.agent_id, "baseline": True, "membership": "join"})),
+        )
+        if second_room is not None:
+            database.execute(
+                "INSERT INTO NioDurableRoom VALUES(?,?)",
+                (
+                    "!chaos:test",
+                    json.dumps(
+                        {
+                            "own_user_id": "@other:test" if second_room == "other_agent" else stack.agent_id,
+                            "baseline": second_room != "cold",
+                            "membership": "join",
+                        },
+                    ),
+                ),
+            )
+        database.commit()
+    try:
+        assert stack.managed_room_baseline_ready() is (second_room == "joined")
+    finally:
+        stack.close()
