@@ -4,15 +4,16 @@ icon: lucide/wrench
 
 # Agent Orchestration
 
-Use these tools and presets to coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
+Use these tools and presets to recover scoped OAuth connections, coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `agent-orchestration` group.
-Use these tools when you need multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, or persistent Claude Agent SDK sessions.
+Use these tools when you need OAuth recovery, multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, persistent Claude Agent SDK sessions, or retained usage statistics.
 
 ## Tools On This Page
 
+- [`oauth_connections`] - Issue a browser-confirmed reset for one authorized OAuth connection.
 - [`subagents`] - Spawn Matrix-backed sub-agent sessions and message them later by session key or label.
 - [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
 - [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
@@ -21,10 +22,12 @@ Use these tools when you need multi-agent coordination, reusable workflow runs, 
 - [`self_config`] - Let an agent read and update only its own configuration.
 - [`openclaw_compat`] - Config-only preset that expands to native MindRoom tools.
 - [`claude_agent`] - Persistent Claude Agent SDK sessions with optional gateway support and per-session labels.
+- [`usage_stats`] - Local, read-only summaries of retained Agno run usage.
 
 ## Common Setup Notes
 
-All eight entries on this page are MindRoom-native orchestration features rather than third-party OAuth integrations.
+All ten entries on this page are MindRoom-native orchestration features rather than third-party toolkits.
+[`oauth_connections`] manages connections used by other provider-backed tools and has no credentials of its own.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
 `agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
@@ -36,6 +39,134 @@ Only [`claude_agent`] has tool-specific credential fields.
 [`openclaw_compat`] is a config preset, not a runtime toolkit.
 `Config.expand_tool_names()` expands presets and implied tools while deduping and preserving order.
 For [`openclaw_compat`], that means `matrix_message` is added directly and `attachments` is added indirectly through `Config.IMPLIED_TOOLS`.
+
+## [`oauth_connections`]
+
+`oauth_connections` lets an agent recover a stuck or revoked MindRoom-managed OAuth connection without exposing broader credential-management controls.
+
+### What It Does
+
+The toolkit exposes only `reset_oauth_connection(provider_id)`.
+The provider must back one of the current agent's configured tools.
+The call returns a temporary browser link and does not change the connection by itself.
+After you confirm, MindRoom removes its saved connection and opens the provider's sign-in page so you can reconnect.
+It does not revoke access at the provider itself.
+
+### Configuration
+
+Enable the tool alongside the OAuth-backed tools the agent may recover.
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Work with connected documents and recover revoked connections
+    model: sonnet
+    worker_scope: user_agent
+    tools:
+      - oauth_connections
+      - google_drive
+```
+
+### Who Can Reset A Connection
+
+| Connection type | Who confirms the reset | What the reset affects |
+| --- | --- | --- |
+| Shared (`shared`) | An administrator or configured credential manager can request the link. Anyone with the complete link can confirm it before it expires. | Everyone using this agent |
+| Personal (`user`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection across agents |
+| Personal for one agent (`user_agent`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection for this agent only |
+
+A shared connection belongs to the agent rather than to one MindRoom user.
+On a private agent, users can manage their own personal connections.
+On other agents, requesting a reset requires platform `administrator` access or an entry in `agents.<name>.credential_managers`.
+Some providers always use personal connections, regardless of the agent's configured scope.
+
+### Reset A Connection
+
+1. Ask the agent to call `reset_oauth_connection()` for the affected provider.
+2. Open the returned link within 10 minutes.
+3. Review which agent and connection type will be affected, then confirm the reset.
+4. Sign in at the provider and retry the original request.
+
+Keep a shared reset link private.
+Anyone with the complete link can confirm it before it expires, and confirming it can disconnect the service for everyone using that agent until reconnection finishes.
+
+### Notes
+
+- `oauth_connections` always runs in the primary MindRoom runtime, even if it appears in `worker_tools`.
+- Opening a reset link without confirming it does not change the connection.
+- MindRoom refuses an expired, unauthorized, or outdated link before deleting credentials.
+- A shared reset link works once. Run `reset_oauth_connection()` again if you need a new one.
+- Installation-level connections that are not assigned to an agent scope must be reset from the dashboard.
+- Normal `tool_approval` rules still apply when the agent creates the link.
+
+For implementation details and lifecycle guarantees, see [OAuth Credential Lifecycle Design](../dev/oauth-credential-lifecycle-design.md#browser-reset).
+
+## [`usage_stats`]
+
+`usage_stats` returns aggregate retained usage for the caller without modifying session storage.
+All operations are local and read-only.
+`get_my_usage()` always scopes the result to the current agent and the canonical current requester.
+For a private agent, `get_my_usage()` remains inside the current user's exact private instance.
+Shared-agent self reports cover retained Agno runs, while private self reports use the isolated Agno session aggregate.
+The result excludes the in-flight tool call, and shared-agent self reports can be incomplete after compaction.
+Provider billing, embedding usage, and speech-to-text usage are outside version one.
+
+### Self-Service Configuration
+
+Configure a normal agent with `usage_stats` to make only `get_my_usage()` available.
+
+```yaml
+agents:
+  usage_assistant:
+    display_name: Usage Assistant
+    role: Report the caller's retained MindRoom usage
+    tools:
+      - usage_stats
+```
+
+### Admin Configuration
+
+Configure an admin agent with the per-agent `admin_scope` override to make `get_all_usage()` available.
+Admin access requires both `admin_scope: true` and platform-administrator authority.
+
+```yaml
+administrators:
+  - "@usage-admin:example.com"
+
+agents:
+  usage_admin:
+    display_name: Usage Administrator
+    role: Report retained MindRoom usage across configured entities
+    tools:
+      - usage_stats:
+          admin_scope: true
+```
+
+Both functions are intentionally parameter-free.
+`get_my_usage()` reports requester-attributed direct runs for a shared agent or the isolated session aggregate for a private agent.
+`get_all_usage()` reports all retained Agno session aggregates across configured agents and teams.
+
+### Response And Coverage
+
+Both functions return a JSON custom-tool envelope with `status` and `tool` fields.
+A successful response also includes `scope`, token `totals`, `session_count`, an entity `breakdown`, `coverage`, a `model_breakdown`, and `model_coverage`.
+Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
+
+The admin response groups session aggregates by configured agent or team ID.
+The self-response omits only the entity breakdown because its scope is already one agent and requester; it still includes `model_breakdown` and `model_coverage`.
+Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
+Both responses group retained top-level runs by provider and model in `model_breakdown`.
+Model rows include token totals and run counts and are sorted by total tokens.
+Coverage reports scanned sources, unavailable or partially unreadable sources, and the retained-history limitation.
+Model coverage is reported separately because compacted history and nested team-member usage can contribute to report totals without model attribution.
+Consequently, model rows do not necessarily sum to the top-level totals.
+The tool does not change Agno persistence settings.
+Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
+Compacted shared-agent self-service runs and deleted sessions are unavailable to this read-only report.
+
+Errors use the same envelope with a stable code.
+Common codes are `authorization_error` and `context_unavailable`.
 
 ## [`subagents`]
 
@@ -206,8 +337,9 @@ Participants can be `ephemeral_agent` or `room_agent`.
 An `ephemeral_agent` can declare `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
 Ephemeral participant `tools` may grant any registered tool except agent-infrastructure tools (`memory`, `delegate`, `self_config`, `compact_context`, `dynamic_workflow`, `dynamic_tools`).
 Every participant tool must also be listed in `permissions.tools`.
-Participant tool calls require per-call user approval in the originating room unless the tool is pre-approved by the caller's `dynamic_workflow` `allowed_tools` config.
-Setting `allowed_tools` to `["*"]` pre-approves every granted tool.
+Dynamic Workflow participants cannot suspend and resume a model run for human approval.
+A participant grant is rejected when any exposed function would require approval under the operator's `tool_approval` policy and the caller's `dynamic_workflow` `allowed_tools` config.
+Setting `allowed_tools` to `["*"]` makes every granted tool eligible except system-mutating tools and functions still gated by an operator-authored approval rule.
 A `room_agent` can declare `id`, `agent`, and an empty `tools` list.
 Room-agent participants must already be available to the requester in the current room, use their configured model, and run without tools, skills, knowledge, durable state, or preloaded context files.
 Step types are `transform_step`, `agent_step`, and `report_step`.
@@ -268,9 +400,9 @@ list_workflows()
 get_workflow_run("brief-report", "run_...")
 ```
 
-### Pre-approving participant tools
+### Allowing participant tools
 
-Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to skip per-call approval for trusted tools.
+Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to make trusted tools eligible for embedded participants.
 
 ```yaml
 agents:
@@ -281,15 +413,17 @@ agents:
           allowed_tools: [duckduckgo, website]
 ```
 
-Use `allowed_tools: ["*"]` to pre-approve every tool a workflow grants.
-Tools outside `allowed_tools` still run, but each call posts an approval card in the originating room and waits for the requester's decision.
+Use `allowed_tools: ["*"]` to make every granted non-system-mutating tool eligible.
+Tools outside `allowed_tools` are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
+Operator-authored approval rules retain precedence, so a matching `require_approval` rule still makes that function unavailable.
+System-mutating tools (`claude_agent`, `config_manager`, `scheduler`, and `subagents`) are always unavailable to embedded participants.
 
 ### Notes
 
 - Dynamic Workflow runs execute synchronously on the current tool call path today.
 - Long-running background workflow management, workflow-activation approval cards, Matrix history grants, attachment grants, and knowledge-base grants are future work.
 - Ephemeral agents can only use models allowed by both the workflow permissions and the caller's current model policy.
-- Granted tools run with the calling agent's tool routing (credentials, worker sandboxing, and egress proxying), and the tool-hook bridge applies plugin gating plus the per-call approval flow.
+- Granted tools run with the calling agent's tool routing (credentials, worker sandboxing, and egress proxying), and the tool-hook bridge applies plugin gating.
 - Room-agent participants can reuse only agents that normal room routing would expose to the requester.
 - Runtime caps are enforced for sync and async runs, and async runs are marked failed at the deadline even if participant cancellation is delayed.
 
@@ -501,7 +635,7 @@ update_own_config(
 `openclaw_compat` is not a runtime toolkit.
 The registered factory returns an empty `Toolkit`, and the real behavior comes from `Config.TOOL_PRESETS`.
 `Config.expand_tool_names()` expands `openclaw_compat` into `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
-`matrix_message` then implies `attachments`, so the effective enabled set also includes `attachments` even though the preset does not list it directly.
+`matrix_message` then implies `attachments` and `matrix_room`, so the effective enabled set includes both companion toolkits even though the preset does not list them directly.
 Preset expansion dedupes while preserving order, so adding `openclaw_compat` alongside one of its member tools does not create duplicates.
 This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom rather than for cloning the full OpenClaw gateway control plane.
 

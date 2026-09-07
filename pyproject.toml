@@ -16,7 +16,7 @@ classifiers = [
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agno[anthropic,google,ollama,openai]==2.6.12",
+  "agno[anthropic,google,ollama,openai]==3.0.5",
   "aiohttp>=3.13.3",
   "aiosqlite>=0.20",
   "anthropic>=0.120.2",
@@ -30,12 +30,11 @@ dependencies = [
   "fastapi[standard]>=0.116.1",
   "filetype>=1.2",
   "google-auth>=2.40.3",
-  # agno 2.6.12 imports the pre-2.9 google-genai streaming delta layout (google.genai.interactions.step_delta);
-  # google-genai >=2.9 removed it. Drop the cap when bumping agno to >=2.6.21 (which has a version compat shim).
-  "google-genai>=2,<2.9",
+  "google-genai>=2",
   "groq>=0.31",
   "httpx>=0.27",
   "humanize>=4.12.3",
+  "idna>=3.13",
   "jinja2>=3.1",
   "json5>=0.13",
   "markdown-it-py>=4",
@@ -43,7 +42,7 @@ dependencies = [
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
-  "mindroom-nio[e2e]==0.34.1",
+  "mindroom-nio[e2e]>=1,<2",
   "openai",
   "packaging>=24",
   "pydantic>=2",
@@ -203,7 +202,8 @@ giphy = [
   "httpx>=0.27",
 ]
 github = [
-  "pygithub>=2.5",
+  # PyGithub 2.9 injects URL metadata into dictionary responses, breaking Agno's numeric language parser.
+  "pygithub>=2.5,<2.9",
 ]
 gmail = [
   "google-api-python-client>=2.178",
@@ -256,6 +256,7 @@ hackernews = [
 homeassistant = [
   "httpx>=0.27",
 ]
+invite_router = []
 jina = [
   "httpx>=0.27",
   "pydantic>=2",
@@ -300,6 +301,7 @@ newspaper = [
 notion = [
   "notion-client",
 ]
+oauth_connections = []
 openai = [
   "openai",
 ]
@@ -337,6 +339,7 @@ resend = [
   "resend",
 ]
 scheduler = []
+script = []
 scrapegraph = [
   "scrapegraph-py>=2.1",
 ]
@@ -381,6 +384,7 @@ tavily = [
 ]
 telegram = [
   "httpx>=0.27",
+  "pytelegrambotapi>=4.32",
 ]
 thread_model = []
 thread_resolution = []
@@ -401,6 +405,7 @@ twilio = [
 ]
 unsplash = []
 update_awareness = []
+usage_stats = []
 visualization = [
   "matplotlib",
 ]
@@ -552,22 +557,27 @@ sort_by_size = true
 
 [tool.ty.environment]
 python-version = "3.13"
+# Mock patterns cause many false positives in tests (e.g., mock.call_args
+# returns _Call | None, attribute access on MagicMock, passing mocks as typed
+# arguments).
 [[tool.ty.overrides]]
 include = [ "tests/" ]
-[tool.ty.overrides.rules]
-# Mock patterns cause many false positives in tests (e.g., mock.call_args
-# returns _Call | None, attribute access on MagicMock, passing mocks as
-# typed arguments).
-call-non-callable = "ignore"
-invalid-argument-type = "ignore"
-invalid-assignment = "ignore"
-invalid-return-type = "ignore"
-no-matching-overload = "ignore"
-not-iterable = "ignore"
-not-subscriptable = "ignore"
-too-many-positional-arguments = "ignore"
-unresolved-attribute = "ignore"
-unsupported-operator = "ignore"
+rules = { call-non-callable = "ignore", invalid-argument-type = "ignore", invalid-assignment = "ignore", invalid-return-type = "ignore", no-matching-overload = "ignore", not-iterable = "ignore", not-subscriptable = "ignore", too-many-positional-arguments = "ignore", unresolved-attribute = "ignore", unsupported-operator = "ignore" }
+
+# The macOS accessibility backend imports pyobjc, declared
+# `sys_platform=='darwin'` and so genuinely absent everywhere else. Checking on
+# another platform cannot resolve it and should not pretend to; the alternative
+# is declaring the whole project macOS-targeted, which would hide real errors in
+# the paths that are not. The imports are already function-level.
+#
+# `unused-ignore-comment` goes with it: the per-attribute ignores in those files
+# are load-bearing on macOS, where pyobjc resolves and ty sees real types, and
+# necessarily unused wherever the import does not resolve. One file cannot
+# satisfy both platforms, so the warning is scoped off rather than the
+# directives deleted.
+[[tool.ty.overrides]]
+include = [ "src/mindroom/desktop/" ]
+rules = { unresolved-import = "ignore", unused-ignore-comment = "ignore" }
 [tool.ty.rules]
 deprecated = "ignore"  # FastAPI on_event deprecation; refactor to lifespan separately
 [tool.ty.src]
@@ -593,6 +603,7 @@ markers = [
   "requires_matrix: marks tests that require a real Matrix server connection (deselect with '-m \"not requires_matrix\"')",
   "e2e: marks end-to-end tests",
   "slow: marks tests as slow",
+  "ledger_loads_from_disk: the test warms its own handled-turn ledger and needs the real database read",
 ]
 
 [tool.coverage.report]

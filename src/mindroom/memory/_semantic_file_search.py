@@ -12,7 +12,7 @@ from mindroom.knowledge import (
     KnowledgeAvailability,
     KnowledgeRefreshScheduler,
     list_knowledge_files,
-    resolve_knowledge_base_access,
+    resolve_knowledge_base_access_async,
 )
 from mindroom.logging_config import get_logger
 from mindroom.memory._shared import MemoryResult
@@ -157,7 +157,7 @@ async def search_semantic_file_memories(
 
     access_start = time.monotonic()
     resolve_start = time.monotonic()
-    resolution = resolve_knowledge_base_access(
+    resolution = await resolve_knowledge_base_access_async(
         file_memory.base_id,
         file_memory.config,
         runtime_paths,

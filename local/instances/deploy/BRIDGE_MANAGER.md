@@ -27,7 +27,7 @@ The `bridge.py` script provides a unified interface for managing Matrix bridges 
 ./bridge.py register telegram --instance my-instance
 
 # For Tuwunel: Follow the manual registration steps shown
-# For Synapse: Restart Matrix server after registration
+# For Synapse: Mount the generated registration file, then restart Matrix
 
 # Start the bridge
 ./bridge.py start telegram --instance my-instance
@@ -168,8 +168,9 @@ instance_data/
 
 ### For Synapse
 1. The script adds registration to `homeserver.yaml`
-2. Restart Synapse: `./deploy.py restart --only-matrix`
-3. Bridge is automatically registered on startup
+2. The local Compose layout does not mount the generated registration file into the Synapse container
+3. Manually expose the generated file at the configured `app_service_config_files` path
+4. Restart Synapse: `./deploy.py restart --only-matrix`
 
 ## Port Allocation
 
@@ -182,11 +183,9 @@ Ports are automatically allocated and tracked to prevent conflicts.
 
 ## Docker Network
 
-All bridges join the `matrix-bridges` network for communication:
-```bash
-docker network create matrix-bridges
-```
-This is created automatically when starting bridges.
+Generated bridge services join the external `<instance>_mindroom-network` and `mynetwork` networks.
+`./bridge.py register <type> --instance <name>` creates either network when it is missing before generating the appservice registration.
+Run registration before `./bridge.py start <type> --instance <name>` so both networks exist.
 
 ## Troubleshooting
 
@@ -197,11 +196,11 @@ This is created automatically when starting bridges.
 
 ### Registration Issues
 - **Tuwunel**: Ensure you're in the admin room and have admin privileges
-- **Synapse**: Check that homeserver.yaml has correct registration path
+- **Synapse**: Check that `homeserver.yaml` has the correct registration path and that the generated file is mounted there
 
 ### Connection Issues
 - Verify Matrix server is running: `./deploy.py status`
-- Check network: `docker network ls | grep matrix-bridges`
+- Check networks: `docker network inspect <instance>_mindroom-network` and `docker network inspect mynetwork`
 - Ensure firewall allows bridge ports
 
 ## Integration with deploy.py

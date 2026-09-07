@@ -71,6 +71,13 @@ if TYPE_CHECKING:
             default=True,
         ),
         ConfigField(
+            name="enable_code_generation",
+            label="Enable Code Generation",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
             name="save_files",
             label="Save Files",
             type="boolean",
@@ -88,6 +95,7 @@ if TYPE_CHECKING:
     dependencies=["python-docx", "reportlab"],
     docs_url="https://docs.agno.com/tools/toolkits/others/file_generation",
     function_names=(
+        "generate_code_file",
         "generate_csv_file",
         "generate_docx_file",
         "generate_html_file",

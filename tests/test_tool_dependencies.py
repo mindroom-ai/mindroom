@@ -98,7 +98,6 @@ def test_core_runtime_imports_are_declared_as_base_dependencies() -> None:
     required_runtime_dependencies = {
         "src/mindroom/constants.py": "pydantic-settings",
         "src/mindroom/matrix/client.py": "aiohttp",
-        "src/mindroom/matrix/cache/sqlite_event_cache.py": "aiosqlite",
         "src/mindroom/mcp/transports.py": "anyio",
     }
 

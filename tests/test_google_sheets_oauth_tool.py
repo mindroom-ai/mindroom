@@ -53,7 +53,7 @@ def test_google_sheets_missing_credentials_raises_structured_connect_instruction
     )
 
     with pytest.raises(OAuthConnectionRequired) as exc_info:
-        tool._auth()
+        tool._authenticate()
 
     assert exc_info.value.provider_id == "google_sheets"
     assert exc_info.value.connect_url is not None

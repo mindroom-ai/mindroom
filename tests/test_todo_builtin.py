@@ -19,10 +19,13 @@ from mindroom.session_ids import create_session_id
 from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_cache_mock,
-    make_event_cache_mock,
+    make_conversation_reader_mock,
+    make_relation_lookup,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -50,7 +53,7 @@ def _tool_context(
     thread_id: str | None = None,
     resolved_thread_id: str | None = "$thread-root",
 ) -> ToolRuntimeContext:
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget(
             room_id=room_id,
@@ -63,8 +66,8 @@ def _tool_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
         room=MagicMock(),
         storage_path=None,
     )

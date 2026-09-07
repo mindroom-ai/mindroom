@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from agno.models.metrics import Metrics
+from agno.metrics import RunMetrics
 from agno.run.base import RunStatus
 
 from mindroom.constants import AI_RUN_METADATA_KEY
@@ -32,7 +32,7 @@ def empty_request_metric_totals() -> dict[str, int]:
     }
 
 
-def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, Any] | None:
+def _serialize_metrics(metrics: RunMetrics | dict[str, Any] | None) -> dict[str, Any] | None:
     def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         sanitized: dict[str, Any] = {}
         for key, value in payload.items():
@@ -44,7 +44,7 @@ def _serialize_metrics(metrics: Metrics | dict[str, Any] | None) -> dict[str, An
 
     if metrics is None:
         return None
-    if isinstance(metrics, Metrics):
+    if isinstance(metrics, RunMetrics):
         metrics_dict = metrics.to_dict()
         if not isinstance(metrics_dict, dict):
             return None
@@ -183,7 +183,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     status: RunStatus | str | None,
     model: str | None,
     model_provider: str | None,
-    metrics: Metrics | dict[str, Any] | None = None,
+    metrics: RunMetrics | dict[str, Any] | None = None,
     metrics_fallback: dict[str, Any] | None = None,
     context_raw_input_tokens: int | None = None,
     context_input_tokens: int | None = None,

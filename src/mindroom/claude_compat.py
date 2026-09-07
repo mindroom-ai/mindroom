@@ -41,8 +41,14 @@ class ClaudeProviderCompat:
             tools=tools,
         )
         if self.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
+            # Agno 3 routes sampling controls into ``extra_body`` before returning.
+            extra_body = request_params.get("extra_body")
             for parameter_name in _SAMPLING_CONTROL_NAMES:
                 request_params.pop(parameter_name, None)
+                if isinstance(extra_body, dict):
+                    extra_body.pop(parameter_name, None)
+            if isinstance(extra_body, dict) and not extra_body:
+                del request_params["extra_body"]
         return request_params
 
     def _raise_for_safeguard_refusal(self, provider_response: object) -> None:

@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 #: Bumped whenever the persisted candidate layout changes incompatibly. An
 #: unknown version is treated as "no resumable candidate" rather than an error.
-_CANDIDATE_CHECKPOINT_SCHEMA_VERSION = 1
+_CANDIDATE_CHECKPOINT_SCHEMA_VERSION = 2
 
 _CANDIDATE_CHECKPOINT_FILENAME = "candidate_index.json"
 _CANDIDATE_JOURNAL_FILENAME = "candidate_index.jsonl"
@@ -344,5 +344,7 @@ def append_candidate_journal(
 
 def delete_candidate_checkpoint(base_storage_path: Path) -> None:
     """Remove candidate state once the candidate is published or discarded."""
-    _candidate_checkpoint_path(base_storage_path).unlink(missing_ok=True)
+    # Retire the journal first so a failure before the final unlink leaves the
+    # authoritative snapshot available for a safe retry.
     _candidate_journal_path(base_storage_path).unlink(missing_ok=True)
+    _candidate_checkpoint_path(base_storage_path).unlink(missing_ok=True)

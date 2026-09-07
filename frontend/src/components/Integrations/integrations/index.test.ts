@@ -235,4 +235,51 @@ describe("Generic OAuth integration provider", () => {
       oauth_client_config_service: "google_oauth_client",
     });
   });
+
+  it("maps an unreadable OAuth status to a reset-required integration", async () => {
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        connected: false,
+        has_client_config: true,
+        has_custom_client_config: false,
+        has_service_account_config: false,
+        client_config_service: "google_oauth_client",
+        reset_required: true,
+      }),
+    });
+
+    const status = await integrationProviders.google_drive.loadStatus!();
+
+    expect(status).toMatchObject({
+      status: "not_connected",
+      oauth_client_configured: true,
+      oauth_reset_required: true,
+    });
+  });
+
+  it("keeps service-account auth connected while offering unreadable OAuth reset", async () => {
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        connected: true,
+        has_client_config: false,
+        has_custom_client_config: false,
+        has_service_account_config: true,
+        client_config_service: "google_oauth_client",
+        reset_required: true,
+      }),
+    });
+
+    const status = await integrationProviders.google_drive.loadStatus!();
+
+    expect(status).toMatchObject({
+      status: "connected",
+      connected: true,
+      oauth_service_account_configured: true,
+      oauth_reset_required: true,
+      helper_text:
+        "Stored OAuth credentials cannot be read. Reset the OAuth connection to remove them.",
+    });
+  });
 });

@@ -15,10 +15,12 @@ from mindroom.tool_system.events import (
     _format_tool_started,
     build_tool_trace_content,
     complete_pending_tool_block,
+    deserialize_tool_trace,
     ensure_visible_tool_marker_spacing,
     extract_tool_completed_info,
     format_tool_combined,
     format_tool_completed_event,
+    serialize_tool_trace,
 )
 
 TEST_CURSOR = "cursor_1234567890"
@@ -411,6 +413,33 @@ def test_streaming_tool_tracker_prefers_call_id_over_newest_same_named_tool() ->
     assert [pending.tool_call_id for pending in tracker.pending_tools] == ["second"]
 
 
+def test_streaming_tool_tracker_scopes_reused_call_ids_to_team_members() -> None:
+    """Independent member runs may reuse one provider call ID without sharing state."""
+    tracker = StreamingToolTracker()
+    tracker.start(
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "first"}),
+        scope_key="agent:first",
+        tool_index=1,
+    )
+    tracker.start(
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "second"}),
+        scope_key="agent:second",
+        tool_index=2,
+    )
+
+    completed = tracker.complete(
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="first done"),
+        scope_key="agent:first",
+    )
+
+    assert completed is not None
+    assert completed[2] is not None
+    assert completed[2].scope_key == "agent:first"
+    assert [(pending.scope_key, pending.tool_call_id) for pending in tracker.pending_tools] == [
+        ("agent:second", "call-1"),
+    ]
+
+
 def test_streaming_tool_tracker_updates_visible_trace_slot() -> None:
     """Visible tool trace snapshots should be converted from started to completed in-place."""
     tracker = StreamingToolTracker()
@@ -612,6 +641,53 @@ def test_format_tool_completed_event_formats_combined_block() -> None:
     assert trace.tool_name == "run_shell"
     assert trace.args_preview == "cmd=pwd"
     assert trace.result_preview == "/app"
+
+
+def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None:
+    """Restart state keeps exact call/scope identity without exposing it to Matrix clients."""
+    trace = ToolTraceEntry(
+        type="tool_call_started",
+        tool_name="inspect",
+        args_preview="path=report.txt",
+        tool_call_id="call-1",
+        scope_key="member:GeneralAgent",
+    )
+
+    durable = serialize_tool_trace([trace], include_internal=True)
+    public = build_tool_trace_content([trace])
+    restored = deserialize_tool_trace(durable)
+
+    assert durable == (
+        {
+            "type": "tool_call_started",
+            "tool_name": "inspect",
+            "args_preview": "path=report.txt",
+            "tool_call_id": "call-1",
+            "scope_key": "member:GeneralAgent",
+        },
+    )
+    assert public is not None
+    public_event = public[_TOOL_TRACE_KEY]["events"][0]
+    assert "tool_call_id" not in public_event
+    assert "scope_key" not in public_event
+    assert restored[0].tool_call_id == "call-1"
+    assert restored[0].scope_key == "member:GeneralAgent"
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"type": "unknown", "tool_name": "inspect"},
+        {"type": "tool_call_started", "tool_name": 7},
+        {"type": "tool_call_started", "tool_name": "inspect", "tool_call_id": 7},
+        {"type": "tool_call_started", "tool_name": "inspect", "scope_key": []},
+        {"type": "tool_call_completed", "tool_name": "inspect", "truncated": "yes"},
+    ],
+)
+def test_durable_tool_trace_rejects_malformed_events(malformed: dict[str, object]) -> None:
+    """Corrupt continuation metadata must fail closed instead of dropping an ordered slot."""
+    with pytest.raises(RuntimeError, match="malformed event"):
+        deserialize_tool_trace([malformed])
 
 
 # --- markdown_to_html: v2 plain markers + unsupported tag escaping ---

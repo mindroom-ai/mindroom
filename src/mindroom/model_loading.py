@@ -14,6 +14,7 @@ from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
 from mindroom.prompt_cache_key import derive_session_prompt_cache_key
+from mindroom.provider_media_fallback import install_provider_media_fallback
 from mindroom.runtime_env_policy import (
     AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
@@ -294,7 +295,10 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         from mindroom.openai_tool_search import openai_native_tool_search_supported  # noqa: PLC0415
 
         base_url = extra_kwargs.get("base_url") or runtime_paths.env_value("OPENAI_BASE_URL")
-        if openai_native_tool_search_supported(canonical_provider_key, model_id, base_url=base_url):
+        if model_config.api == "responses" or (
+            model_config.api is None
+            and openai_native_tool_search_supported(canonical_provider_key, model_id, base_url=base_url)
+        ):
             from mindroom.openai_models import MindRoomOpenAIResponses  # noqa: PLC0415
 
             return MindRoomOpenAIResponses(id=model_id, **extra_kwargs)
@@ -403,4 +407,8 @@ def get_model_instance(
     )
     install_claude_prompt_cache_hook(model)
     install_claude_stream_retry_hook(model)
+    install_provider_media_fallback(
+        model,
+        fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
+    )
     return model

@@ -225,6 +225,15 @@ test-backend-coverage *args:
 test-standard:
     ./run-tests.sh
 
+# Boots a disposable Tuwunel, a deterministic model stub, and this worktree's
+# MindRoom, then restarts MindRoom mid-turn around forty times. Needs Docker,
+# free ports, and a mostly idle machine for 30-60 minutes. Deliberately not in
+# CI; scripts/README.md explains why and says what a pass has to show.
+# Live pre-merge gate for Matrix ingress, journal, dispatch, and shutdown changes
+test-live-journal-gate *args:
+    uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45 --restart-interval 5 {{args}}
+    uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression {{args}}
+
 # Check for public symbols that should be private
 check-module-privacy:
     uv run privata --methods .

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+import mindroom.attachments as attachments_module
 import mindroom.matrix.media as media_module
 from mindroom.attachment_ids import merge_attachment_ids, unique_attachment_ids
 from mindroom.attachment_media import attachment_records_to_media, resolve_scoped_attachments
@@ -355,6 +357,262 @@ def test_register_local_attachment_throttles_cleanup_runs(tmp_path: Path) -> Non
     assert first is not None
     assert second is not None
     mock_cleanup.assert_called_once_with(tmp_path.resolve())
+
+
+@pytest.mark.asyncio
+async def test_attachment_cleanup_does_not_block_event_loop(tmp_path: Path) -> None:
+    """Cleanup metadata scans should yield event loop while a worker reads disk."""
+    slow_read_started = threading.Event()
+    release_slow_read = threading.Event()
+    slow_read_timed_out = threading.Event()
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def slow_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path.suffix == ".json" and path.parent.name == "attachments":
+            slow_read_started.set()
+            if not release_slow_read.wait(timeout=1):
+                slow_read_timed_out.set()
+        return original_read_text(path, *args, **kwargs)
+
+    async def heartbeat() -> None:
+        assert await asyncio.to_thread(slow_read_started.wait, 2)
+        release_slow_read.set()
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    with patch.object(Path, "read_text", new=slow_read_text):
+        registered = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_responsive_cleanup",
+            room_id="!room:localhost",
+        )
+        await heartbeat_task
+        assert registered is not None
+        assert not slow_read_timed_out.is_set()
+        assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+
+@pytest.mark.asyncio
+async def test_attachment_cleanup_does_not_resolve_storage_path_on_event_loop(tmp_path: Path) -> None:
+    """Cleanup storage resolution should run in a worker, not event loop."""
+    slow_resolution_started = threading.Event()
+    release_slow_resolution = threading.Event()
+    slow_resolution_timed_out = threading.Event()
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+    original_resolve = Path.resolve
+
+    def slow_resolve(path: Path, strict: bool = False) -> Path:
+        if path == tmp_path:
+            slow_resolution_started.set()
+            if not release_slow_resolution.wait(timeout=1):
+                slow_resolution_timed_out.set()
+        return original_resolve(path, strict=strict)
+
+    async def heartbeat() -> None:
+        assert await asyncio.to_thread(slow_resolution_started.wait, 2)
+        release_slow_resolution.set()
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    with patch.object(Path, "resolve", new=slow_resolve):
+        registered = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_responsive_cleanup_resolution",
+            room_id="!room:localhost",
+        )
+        await heartbeat_task
+        assert registered is not None
+        assert not slow_resolution_timed_out.is_set()
+        assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+
+@pytest.mark.asyncio
+async def test_attachment_cleanup_deduplicates_in_flight_storage_path(tmp_path: Path) -> None:
+    """Only one cleanup may run for a storage path while its scan is active."""
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    cleanup_calls = 0
+    cleanup_claims: dict[Path, object] = {}
+    scheduled_cleanups: dict[Path, object] = {}
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+
+    def blocking_cleanup(_storage_path: Path) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        cleanup_started.set()
+        assert release_cleanup.wait(timeout=1)
+
+    with (
+        patch("mindroom.attachments._attachment_cleanup_claim_tokens_by_storage_path", cleanup_claims),
+        patch("mindroom.attachments._attachment_cleanup_scheduled_tokens_by_storage_path", scheduled_cleanups),
+        patch("mindroom.attachments._cleanup_attachment_storage", side_effect=blocking_cleanup),
+        patch(
+            "mindroom.attachments.create_background_task",
+            wraps=attachments_module.create_background_task,
+        ) as mock_create_background_task,
+    ):
+        first = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_first_cleanup_claim",
+            room_id="!room:localhost",
+        )
+        assert await asyncio.to_thread(cleanup_started.wait, 2)
+        assert tmp_path in scheduled_cleanups
+        assert tmp_path.resolve() in cleanup_claims
+        second = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_second_cleanup_claim",
+            room_id="!room:localhost",
+        )
+        release_cleanup.set()
+        assert await attachments_module.wait_for_attachment_cleanup_tasks()
+        assert cleanup_calls == 1
+        assert mock_create_background_task.call_count == 1
+        assert scheduled_cleanups == {}
+        assert cleanup_claims == {}
+
+    assert first is not None
+    assert second is not None
+
+
+@pytest.mark.asyncio
+async def test_attachment_cleanup_failure_retries_without_throttle_or_stranded_claim(tmp_path: Path) -> None:
+    """Failed cleanup must release its claim and leave its path due for retry."""
+    file_path = tmp_path / "payload.txt"
+    file_path.write_text("payload", encoding="utf-8")
+    last_cleanup_times: dict[Path, datetime] = {}
+    cleanup_claims: dict[Path, object] = {}
+
+    with (
+        patch("mindroom.attachments._last_cleanup_time_by_storage_path", last_cleanup_times),
+        patch("mindroom.attachments._attachment_cleanup_claim_tokens_by_storage_path", cleanup_claims),
+        patch(
+            "mindroom.attachments._cleanup_attachment_storage",
+            side_effect=[RuntimeError("first cleanup fails"), None],
+        ) as mock_cleanup,
+    ):
+        first = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_failed_cleanup",
+            room_id="!room:localhost",
+        )
+        assert await attachments_module.wait_for_attachment_cleanup_tasks()
+        assert last_cleanup_times == {}
+        assert cleanup_claims == {}
+
+        second = register_local_attachment(
+            tmp_path,
+            file_path,
+            kind="file",
+            attachment_id="att_retried_cleanup",
+            room_id="!room:localhost",
+        )
+        assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    assert first is not None
+    assert second is not None
+    assert mock_cleanup.call_count == 2
+    assert tmp_path.resolve() in last_cleanup_times
+    assert cleanup_claims == {}
+
+
+@pytest.mark.asyncio
+async def test_media_registration_cancellation_drains_attachment_cleanup_worker(tmp_path: Path) -> None:
+    """Cancelling media registration waits for its cleanup worker to finish."""
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    cleanup_finished = threading.Event()
+    cleanup_claims: dict[Path, object] = {}
+
+    def blocking_cleanup(_storage_path: Path) -> None:
+        cleanup_started.set()
+        assert release_cleanup.wait(timeout=2)
+        cleanup_finished.set()
+
+    with (
+        patch("mindroom.attachments._attachment_cleanup_claim_tokens_by_storage_path", cleanup_claims),
+        patch("mindroom.attachments._cleanup_attachment_storage", side_effect=blocking_cleanup),
+    ):
+        registration_task = asyncio.create_task(
+            _register_media_attachment(
+                storage_path=tmp_path,
+                event_id="$cancel_cleanup",
+                media_bytes=b"payload",
+                mime_type="application/octet-stream",
+                room_id="!room:localhost",
+                thread_id=None,
+                sender="@sender:localhost",
+                event_timestamp=1,
+                filename="payload.bin",
+                kind="file",
+            ),
+        )
+        assert await asyncio.to_thread(cleanup_started.wait, 2)
+        registration_task.cancel()
+        await asyncio.sleep(0)
+        assert not registration_task.done()
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await registration_task
+
+    assert cleanup_finished.is_set()
+    assert await attachments_module.wait_for_attachment_cleanup_tasks()
+    assert cleanup_claims == {}
+
+
+def test_attachment_cleanup_logs_scan_and_deletion_counts(tmp_path: Path) -> None:
+    """Cleanup log should expose scan and successful deletion totals."""
+    active_media_path = tmp_path / "active.txt"
+    active_media_path.write_text("active", encoding="utf-8")
+    registered = register_local_attachment(
+        tmp_path,
+        active_media_path,
+        kind="file",
+        attachment_id="att_active_cleanup_metrics",
+        room_id="!room:localhost",
+    )
+    assert registered is not None
+
+    stale_metadata_path = tmp_path / "attachments" / "att_stale_cleanup_metrics.json"
+    stale_metadata_path.write_text("not json", encoding="utf-8")
+    orphan_media_path = tmp_path / "incoming_media" / "orphan.bin"
+    orphan_media_path.parent.mkdir(parents=True, exist_ok=True)
+    orphan_media_path.write_bytes(b"orphan")
+    stale_timestamp = (datetime.now(UTC) - timedelta(days=45)).timestamp()
+    os.utime(stale_metadata_path, (stale_timestamp, stale_timestamp))
+    os.utime(orphan_media_path, (stale_timestamp, stale_timestamp))
+
+    original_unlink = Path.unlink
+
+    def unlink_after_concurrent_removal(path: Path, *, missing_ok: bool = False) -> None:
+        if path == stale_metadata_path and path.exists():
+            original_unlink(path)
+        original_unlink(path, missing_ok=missing_ok)
+
+    with (
+        patch.object(Path, "unlink", new=unlink_after_concurrent_removal),
+        patch("mindroom.attachments.logger.debug") as mock_debug,
+    ):
+        attachments_module._cleanup_attachment_storage(tmp_path)
+
+    cleanup_log = mock_debug.call_args.kwargs
+    assert cleanup_log["metadata_files_scanned"] == 2
+    assert cleanup_log["incoming_media_files_scanned"] == 1
+    assert cleanup_log["files_scanned"] == 3
+    assert cleanup_log["expired_records_deleted"] == 0
+    assert cleanup_log["files_deleted"] == 1
 
 
 def test_merge_attachment_ids_preserves_order() -> None:

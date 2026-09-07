@@ -13,12 +13,21 @@ def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in credentials.items() if not k.startswith("_")}
 
 
-def filter_credentials_for_response(credentials: dict[str, Any], *, is_oauth_service: bool) -> dict[str, Any]:
+def filter_credentials_for_response(
+    credentials: dict[str, Any],
+    *,
+    is_oauth_service: bool,
+    oauth_fallback_fields: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     """Return credentials safe for dashboard config responses."""
     filtered = _filter_internal_keys(credentials)
     if not is_oauth_service and not looks_like_oauth_credentials(credentials):
         return filtered
-    return filter_oauth_credential_fields(filtered)
+    safe_credentials = filter_oauth_credential_fields(filtered)
+    safe_credentials.update(
+        {field_name: filtered[field_name] for field_name in oauth_fallback_fields if field_name in filtered},
+    )
+    return safe_credentials
 
 
 def filter_oauth_client_config_for_response(credentials: dict[str, Any]) -> dict[str, Any]:

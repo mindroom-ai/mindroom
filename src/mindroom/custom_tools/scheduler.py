@@ -28,7 +28,13 @@ class SchedulerTools(Toolkit):
             tools=[self.schedule, self.edit_schedule, self.list_schedules, self.cancel_schedule],
         )
 
-    async def schedule(self, request: str, new_thread: bool, history_limit: int | None = None) -> str:
+    async def schedule(
+        self,
+        request: str,
+        new_thread: bool,
+        history_limit: int | None = None,
+        silent: bool | None = None,
+    ) -> str:
         """Schedule a task using natural language.
 
         This uses the exact same scheduling backend as the `!schedule` command.
@@ -38,10 +44,16 @@ class SchedulerTools(Toolkit):
             new_thread: Required delivery choice. Use `False` to post in the current
                 room/thread scope. Use `True` to start a fresh thread per fire: each
                 fire posts a room-level root and the responding agent answers in a
-                new thread under it with a fresh session.
+                new thread under it with a fresh session. When `silent=True`, the
+                trigger stays hidden instead, and any finding or failure is posted
+                as a room-level root rather than beneath the hidden trigger.
             history_limit: Max recent thread messages included as context each time
                 the task fires. Use 0 for no history (recommended for recurring
                 polling tasks), or leave unset for full history.
+            silent: Keep the trigger hidden and omit a final response when it is empty,
+                whitespace-only, or exactly `NO_REPLY`. Findings, failures, and
+                independently sent tool messages remain visible. Leave unset to infer
+                the mode from the scheduling request.
 
         Returns:
             The scheduling result message.
@@ -60,12 +72,19 @@ class SchedulerTools(Toolkit):
             full_text=request,
             new_thread=new_thread,
             history_limit=history_limit,
+            silent=silent,
         )
         if task_id is None:
             raise RuntimeError(response_text)
         return response_text
 
-    async def edit_schedule(self, task_id: str, request: str, history_limit: int | None = None) -> str:
+    async def edit_schedule(
+        self,
+        task_id: str,
+        request: str,
+        history_limit: int | None = None,
+        silent: bool | None = None,
+    ) -> str:
         """Edit an existing scheduled task by replacing its timing and content.
 
         Args:
@@ -74,6 +93,10 @@ class SchedulerTools(Toolkit):
             history_limit: Max recent thread messages included as context each time
                 the task fires. Use 0 for no history. Leave unset to keep the task's
                 existing history limit. To restore full history, say so in request.
+            silent: Whether to update quiet delivery. Silent tasks hide their trigger
+                and omit empty, whitespace-only, or exact `NO_REPLY` finals while
+                keeping findings, failures, and independently sent tool messages
+                visible. Leave unset to preserve the existing mode.
 
         Returns:
             The edit result message.
@@ -92,6 +115,7 @@ class SchedulerTools(Toolkit):
             scheduled_by=context.requester_id,
             thread_id=context.resolved_thread_id,
             history_limit=history_limit,
+            silent=silent,
         )
         _raise_for_scheduler_error(response_text)
         return response_text

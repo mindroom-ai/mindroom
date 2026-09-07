@@ -67,6 +67,12 @@ If `metadata.openclaw` is present, MindRoom filters skills using these rules:
 
 Skills without `metadata.openclaw` are always eligible.
 
+## Installing and managing skills
+
+Install a user skill manually at `~/.mindroom/skills/<name>/SKILL.md`, or use the dashboard Skills page to create, view, edit, and delete user skills.
+Bundled and plugin-provided skills are visible but read-only in the dashboard.
+Add a bundled, plugin, or user skill name to the agent's `skills:` allowlist before that agent can use it.
+
 ## Skill locations and precedence
 
 MindRoom resolves skills for each agent from these locations, in this order:
@@ -84,9 +90,9 @@ Agent workspace skills are only available to the owning agent at runtime. They d
 
 Agents never need write access to a global skill root to create skills.
 The bundled, plugin, and user roots can be read-only at runtime, for example in container or Kubernetes deployments where the image filesystem and `~/.mindroom` are not writable.
-An agent can always author skills in its own workspace at `<workspace>/skills/<skill-name>/SKILL.md`, using the same `SKILL.md` format described above.
+An agent with a canonical workspace and authorized workspace-rooted file or shell tools can author skills at `<workspace>/skills/<skill-name>/SKILL.md`, using the same `SKILL.md` format described above.
 Workspace-rooted file tools address this location as the relative path `skills/<skill-name>/SKILL.md`.
-Agents with a workspace receive this guidance in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which can be overridden via the root `prompts` block (see [Built-In Prompt Overrides](configuration/index.md#built-in-prompt-overrides)).
+Agents with the required workspace and authoring access receive this guidance in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which can be overridden via the root `prompts` block (see [Built-In Prompt Overrides](configuration/index.md#built-in-prompt-overrides)).
 A new or edited workspace skill is picked up on the agent's next run without a config change.
 
 ## Configuring skills
@@ -130,7 +136,7 @@ Agents that have shell or file execution permissions can still read and execute 
 | --- | --- | --- |
 | Definition | Markdown + YAML | Python code |
 | Location | File system | Code/plugins |
-| Filtering | Automatic by requirements | Always available |
+| Filtering | Automatic by requirements | Configured per agent; may be deferred or disabled |
 | Instructions | Rich markdown | Docstrings |
 | Invocation | Model via skill tools | Model only |
 

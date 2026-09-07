@@ -71,13 +71,6 @@ if TYPE_CHECKING:
             default=False,
         ),
         ConfigField(
-            name="headers",
-            label="Headers",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="crawl_poll_interval",
             label="Crawl Poll Interval",
             type="number",

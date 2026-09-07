@@ -13,17 +13,10 @@ from mindroom.api.worker_responses import (
     SandboxWorkerResponse,
     serialize_sandbox_worker_response,
 )
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
-from mindroom.workers.runtime import (
-    get_primary_worker_manager,
-    primary_worker_backend_available,
-    primary_worker_backend_name,
-    serialized_kubernetes_worker_config_snapshot,
-    serialized_kubernetes_worker_validation_snapshot,
-)
+from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
-    from mindroom.workers.backend import WorkerBackend
+    from mindroom.workers.runtime import PrimaryWorkerManagerLease
 
 
 __all__ = [
@@ -38,50 +31,38 @@ __all__ = [
 router = APIRouter(prefix="/api/workers", tags=["workers"])
 
 
-def _worker_manager(request: Request) -> WorkerBackend:
+def _worker_manager_lease(request: Request) -> PrimaryWorkerManagerLease:
     runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    proxy_config = sandbox_proxy_config(runtime_paths)
-    if not primary_worker_backend_available(
+    lease = lease_configured_primary_worker_manager(
         runtime_paths,
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-    ):
-        raise HTTPException(status_code=503, detail="Worker backend is not configured.")
-
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
-    kubernetes_config_snapshot: dict[str, object] | None = None
-    if primary_worker_backend_name(runtime_paths) == "kubernetes":
-        kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
-            runtime_paths,
-            runtime_config=runtime_config,
-        )
-        kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
-    return get_primary_worker_manager(
-        runtime_paths,
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-        storage_root=runtime_paths.storage_root,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
-        kubernetes_config_snapshot=kubernetes_config_snapshot,
-        worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
+        runtime_config=runtime_config,
     )
+    if lease is None:
+        raise HTTPException(status_code=503, detail="Worker backend is not configured.")
+    return lease
 
 
 @router.get("", response_model=SandboxWorkerListResponse)
 async def list_workers(request: Request, include_idle: bool = True) -> SandboxWorkerListResponse:
     """List known workers from the configured primary-runtime backend."""
-    worker_manager = _worker_manager(request)
-    workers = [
-        serialize_sandbox_worker_response(worker) for worker in worker_manager.list_workers(include_idle=include_idle)
-    ]
+    with _worker_manager_lease(request) as worker_manager:
+        workers = [
+            serialize_sandbox_worker_response(worker)
+            for worker in worker_manager.list_workers(include_idle=include_idle)
+        ]
     return SandboxWorkerListResponse(workers=workers)
 
 
 @router.post("/cleanup", response_model=SandboxWorkerCleanupResponse)
 async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse:
     """Run one idle-worker cleanup pass on the configured backend."""
-    worker_manager = _worker_manager(request)
-    cleaned_workers = [serialize_sandbox_worker_response(worker) for worker in worker_manager.cleanup_idle_workers()]
+    with _worker_manager_lease(request) as worker_manager:
+        touch_live_workers = config_lifecycle.app_state(request.app).script_worker_keepalive
+        if touch_live_workers is not None:
+            touch_live_workers(worker_manager)
+        cleaned_workers = [
+            serialize_sandbox_worker_response(worker) for worker in worker_manager.cleanup_idle_workers()
+        ]
     return SandboxWorkerCleanupResponse(
         idle_timeout_seconds=worker_manager.idle_timeout_seconds,
         cleaned_workers=cleaned_workers,

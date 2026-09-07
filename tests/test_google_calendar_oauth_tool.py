@@ -54,7 +54,7 @@ def test_google_calendar_missing_credentials_raises_structured_connect_instructi
     )
 
     with pytest.raises(OAuthConnectionRequired) as exc_info:
-        tool._auth()
+        tool._authenticate()
 
     assert exc_info.value.provider_id == "google_calendar"
     assert exc_info.value.connect_url is not None

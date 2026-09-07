@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import logging.config
 import os
+import sys
 from datetime import UTC, datetime
 from io import StringIO
 from typing import TYPE_CHECKING
@@ -174,7 +175,7 @@ def setup_logging(
         _redact_log_event_preserving_exc_info,
     ]
     log_format = os.getenv("MINDROOM_LOG_FORMAT", "text").strip().lower()
-    renderer_name = "json" if log_format == "json" else "text"
+    renderer_name = "json" if log_format == "json" else ("colored" if sys.stderr.isatty() else "text")
     handler_level, loggers = _build_logger_levels(
         global_level=level,
         override_config=os.getenv("MINDROOM_LOGGER_LEVELS"),
@@ -240,7 +241,7 @@ def setup_logging(
                     "level": handler_level,
                     "class": "logging.StreamHandler",
                     "stream": "ext://sys.stderr",
-                    "formatter": "json" if renderer_name == "json" else "colored",
+                    "formatter": renderer_name,
                     "filters": ["nio_validation"],
                 },
                 "file": {

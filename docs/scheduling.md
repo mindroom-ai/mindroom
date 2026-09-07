@@ -69,6 +69,40 @@ Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`,
 
 Use `!help schedule` for detailed inline help on scheduling commands.
 
+Schedules are room-managed resources rather than creator-private resources.
+Thread context filters schedule listings for usability, but it is not an authorization boundary.
+An authorized participant in the room can edit or cancel any room schedule by task ID, and `!cancel_schedule all` applies to the whole room.
+
+## Silent Delivery
+
+Schedules are visible by default.
+Add `silently` or `quietly` to a natural-language request when the trigger and routine no-report result should stay out of the room timeline.
+
+```
+!schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives
+!schedule Daily at 9am, silently check whether the backup failed and report failures
+```
+
+A silent schedule does not post its trigger as a visible room message.
+MindRoom sends no final message when a successful run returns only whitespace or the standalone marker `NO_REPLY`, matched case-insensitively after trimming.
+Findings, failures, and messages explicitly sent by tools remain visible.
+Silent runs also omit typing indicators, progress placeholders, stop controls, streaming updates, and tool-only final presentation.
+
+Schedule confirmations and `!list_schedules` label each task as `Silent` or `Visible`.
+An edit preserves the current mode when visibility is omitted.
+Say `make this schedule silent` or `make this schedule visible` to change the mode through `!edit_schedule`.
+
+Silent delivery controls room presentation, not storage or transport.
+The task body still travels through Matrix as a custom timeline event and remains subject to homeserver retention, encrypted transport where enabled, and MindRoom's local durable recovery journal.
+Every admitted silent run also writes a versioned JSON receipt to `<agent-workspace>/.mindroom/scheduled_runs/<sha256(source-event-id)>.json`.
+The receipt starts with `status: "started"` before generation and is atomically replaced with `status: "completed"`, a `result` of `reported`, `no_report`, or `suppressed`, and the final response text after response hooks.
+A receipt left in `started` shows that the run began but did not reach a final response decision.
+Version 1 always includes `schema_version`, `source_event_id`, `entity_name`, `agent_name`, `room_id`, `thread_id`, `prompt`, `status`, `result`, `response_text`, `started_at`, and `completed_at`, with `result`, `response_text`, `thread_id`, and `completed_at` set to `null` until applicable.
+Timestamps use UTC RFC 3339 strings ending in `Z`.
+Replaying the same source event rewrites the same file and preserves a valid original `started_at` value.
+Team runs write one receipt to each member agent's workspace, and private agents write inside the matching requester-scoped workspace.
+The hidden `.mindroom` directory keeps receipts out of default workspace knowledge indexing.
+
 ## Agent and Team Mentions
 
 Include `@agent_name` or `@team_name` in your schedule to have specific responders answer.
@@ -120,7 +154,8 @@ Edits are state-only Matrix writes.
 
 Running tasks pick up edited state on their next poll instead of relying on caller-supplied cache or restart hooks.
 
-Past one-time tasks are automatically skipped during restoration.
+Past one-time tasks within the recovery grace window are queued and started in order after Matrix sync is ready.
+Older missed one-time tasks are marked failed instead of executing unexpectedly.
 
 Only the router restores persisted schedules after startup — individual agents do not restore their own.
 

@@ -1,0 +1,1555 @@
+{
+  "capacity_runs": [
+    {
+      "acceptance_passed": true,
+      "clean_shutdown": true,
+      "driver_directory": "transaction-path/trace-200-20260906T153922Z",
+      "event_loop_stalls": 0,
+      "evidence_directory": "mindroom-live-matrix-fuzz-68e81282",
+      "label": "sql_trace",
+      "metrics": {
+        "complete_workload_flushes": 200,
+        "completed_reply_count": 200,
+        "first_input_to_last_completed_reply_seconds": 80.015,
+        "flush_start_spread_seconds": 12.328433990478516,
+        "input_to_completed_reply_median_seconds": 72.74549999999999,
+        "input_to_completed_reply_p95_seconds": 79.81224999999999,
+        "pending_journal_rows_after_cleanup": 0,
+        "post_terminal_reaction_distinct_events": 1,
+        "post_terminal_reaction_principals": 3,
+        "post_terminal_reaction_settled_rows": 3,
+        "root_count": 200,
+        "root_release_span_seconds": 0.154,
+        "unacknowledged_outbox_rows_after_cleanup": 0,
+        "visible_full_overlap_seconds": 49.427,
+        "visible_initial_spread_seconds": 14.056
+      },
+      "producer_debt_before_cleanup": 0,
+      "result_sha256": "9bb4c9336b20f75562073af31c62c9ac8ae6e9889178aade2d0bc0589e1a6d84",
+      "runtime_source_matches": true,
+      "source_unchanged": true
+    },
+    {
+      "acceptance_passed": true,
+      "clean_shutdown": true,
+      "driver_directory": "transaction-path/trace-200-20260906T154420Z",
+      "event_loop_stalls": 0,
+      "evidence_directory": "mindroom-live-matrix-fuzz-bc2989a3",
+      "label": "all_waits_trace",
+      "metrics": {
+        "complete_workload_flushes": 200,
+        "completed_reply_count": 200,
+        "first_input_to_last_completed_reply_seconds": 79.677,
+        "flush_start_spread_seconds": 12.576787948608398,
+        "input_to_completed_reply_median_seconds": 72.36850000000001,
+        "input_to_completed_reply_p95_seconds": 79.0095,
+        "pending_journal_rows_after_cleanup": 0,
+        "post_terminal_reaction_distinct_events": 1,
+        "post_terminal_reaction_principals": 3,
+        "post_terminal_reaction_settled_rows": 3,
+        "root_count": 200,
+        "root_release_span_seconds": 0.171,
+        "unacknowledged_outbox_rows_after_cleanup": 0,
+        "visible_full_overlap_seconds": 49.518,
+        "visible_initial_spread_seconds": 13.726
+      },
+      "producer_debt_before_cleanup": 0,
+      "result_sha256": "0fe1beba6f84eb46092cf2be1c736b94285b6ab7715fe83de846ed24a915e978",
+      "runtime_source_matches": true,
+      "source_unchanged": true
+    },
+    {
+      "acceptance_passed": true,
+      "clean_shutdown": true,
+      "driver_directory": "startup-waits/control-200-20260906T154923Z",
+      "event_loop_stalls": 0,
+      "evidence_directory": "mindroom-live-matrix-fuzz-71dab4e7",
+      "label": "normal_control",
+      "metrics": {
+        "complete_workload_flushes": 200,
+        "completed_reply_count": 200,
+        "first_input_to_last_completed_reply_seconds": 76.334,
+        "flush_start_spread_seconds": 10.800461053848267,
+        "input_to_completed_reply_median_seconds": 69.7295,
+        "input_to_completed_reply_p95_seconds": 75.56095,
+        "pending_journal_rows_after_cleanup": 0,
+        "post_terminal_reaction_distinct_events": 1,
+        "post_terminal_reaction_principals": 3,
+        "post_terminal_reaction_settled_rows": 3,
+        "root_count": 200,
+        "root_release_span_seconds": 0.2,
+        "unacknowledged_outbox_rows_after_cleanup": 0,
+        "visible_full_overlap_seconds": 49.873,
+        "visible_initial_spread_seconds": 11.983
+      },
+      "producer_debt_before_cleanup": 0,
+      "result_sha256": "ad5b7d4607a2282884baabde319ee30aa32ad2af250f1f73561b14808a7849a4",
+      "runtime_source_matches": true,
+      "source_unchanged": true
+    },
+    {
+      "acceptance_passed": true,
+      "clean_shutdown": true,
+      "driver_directory": "transaction-path/inline-200-20260906T155552Z",
+      "event_loop_stalls": 0,
+      "evidence_directory": "mindroom-live-matrix-fuzz-ecc9c42a",
+      "label": "inline_diagnostic",
+      "metrics": {
+        "complete_workload_flushes": 200,
+        "completed_reply_count": 200,
+        "first_input_to_last_completed_reply_seconds": 77.636,
+        "flush_start_spread_seconds": 10.567098140716553,
+        "input_to_completed_reply_median_seconds": 71.04249999999999,
+        "input_to_completed_reply_p95_seconds": 76.8475,
+        "pending_journal_rows_after_cleanup": 0,
+        "post_terminal_reaction_distinct_events": 1,
+        "post_terminal_reaction_principals": 3,
+        "post_terminal_reaction_settled_rows": 3,
+        "root_count": 200,
+        "root_release_span_seconds": 0.23,
+        "unacknowledged_outbox_rows_after_cleanup": 0,
+        "visible_full_overlap_seconds": 50.813,
+        "visible_initial_spread_seconds": 11.768
+      },
+      "producer_debt_before_cleanup": 0,
+      "result_sha256": "63c8f35c79e08e55b36bb2845e4cfc6288be720788b4b58bf45ed14dcd44a640",
+      "runtime_source_matches": true,
+      "source_unchanged": true
+    }
+  ],
+  "date": "2026-09-06",
+  "delivery_transaction_trial": {
+    "baseline_source_revision": "1b10db6072db7b2950a929e94984f52381ade0f7",
+    "candidate_a_focused_tests_passed": 231,
+    "candidate_a_net_production_lines": 2,
+    "candidate_b_additional_net_production_lines": 82,
+    "candidate_b_focused_tests_passed": 244,
+    "capacity_runs": [
+      {
+        "acceptance_passed": true,
+        "clean_shutdown": true,
+        "competing_test_processes": 0,
+        "driver_directory": "startup-waits/control-200-20260906T154923Z",
+        "event_loop_stalls": 0,
+        "evidence_directory": "mindroom-live-matrix-fuzz-71dab4e7",
+        "label": "earlier_baseline",
+        "metrics": {
+          "complete_workload_flushes": 200,
+          "completed_reply_count": 200,
+          "excluded_noncohort_flush_starts": 3,
+          "first_input_to_last_completed_reply_seconds": 76.334,
+          "first_input_to_last_initial_reply_seconds": 12.699,
+          "flush_elapsed_sum_seconds": 87.46170377731323,
+          "flush_nonoverlap": false,
+          "flush_start_spread_seconds": 10.800461053848267,
+          "input_to_completed_reply_median_seconds": 69.7295,
+          "input_to_completed_reply_p95_seconds": 75.56095,
+          "input_to_initial_reply_median_seconds": 6.0120000000000005,
+          "input_to_initial_reply_p95_seconds": 11.92375,
+          "pending_journal_rows_after_cleanup": 0,
+          "post_terminal_reaction_distinct_events": 1,
+          "post_terminal_reaction_principals": 3,
+          "post_terminal_reaction_settled_rows": 3,
+          "provenance": "Exact retained workload-root cohort; physical Matrix timestamps. Cleanup-state counts do not replace harness drain/fence acceptance.",
+          "root_count": 200,
+          "root_release_span_seconds": 0.2,
+          "unacknowledged_outbox_rows_after_cleanup": 0,
+          "visible_full_overlap_seconds": 49.873,
+          "visible_initial_spread_seconds": 11.983
+        },
+        "producer_debt_before_cleanup": 0,
+        "result_sha256": "ad5b7d4607a2282884baabde319ee30aa32ad2af250f1f73561b14808a7849a4",
+        "revisions": {
+          "mindroom": "e276982fdbd3f58b8d471376c417767654819da4",
+          "nio": "ce18a1fed0a592b93b789de4480ac3e61e8c3145"
+        },
+        "runtime_source_matches": true,
+        "source_unchanged": true
+      },
+      {
+        "acceptance_passed": true,
+        "clean_shutdown": true,
+        "competing_test_processes": 0,
+        "driver_directory": "startup-waits/control-200-20260906T162827Z",
+        "event_loop_stalls": 0,
+        "evidence_directory": "mindroom-live-matrix-fuzz-ba6c5689",
+        "label": "fresh_claim_only",
+        "metrics": {
+          "complete_workload_flushes": 200,
+          "completed_reply_count": 200,
+          "excluded_noncohort_flush_starts": 3,
+          "first_input_to_last_completed_reply_seconds": 77.255,
+          "first_input_to_last_initial_reply_seconds": 13.318,
+          "flush_elapsed_sum_seconds": 94.83948612213135,
+          "flush_nonoverlap": false,
+          "flush_start_spread_seconds": 11.62564992904663,
+          "input_to_completed_reply_median_seconds": 70.066,
+          "input_to_completed_reply_p95_seconds": 76.30015,
+          "input_to_initial_reply_median_seconds": 6.1485,
+          "input_to_initial_reply_p95_seconds": 12.626,
+          "pending_journal_rows_after_cleanup": 0,
+          "post_terminal_reaction_distinct_events": 1,
+          "post_terminal_reaction_principals": 3,
+          "post_terminal_reaction_settled_rows": 3,
+          "provenance": "Exact retained workload-root cohort; physical Matrix timestamps. Cleanup-state counts do not replace harness drain/fence acceptance.",
+          "root_count": 200,
+          "root_release_span_seconds": 0.21,
+          "unacknowledged_outbox_rows_after_cleanup": 0,
+          "visible_full_overlap_seconds": 49.651,
+          "visible_initial_spread_seconds": 12.726
+        },
+        "producer_debt_before_cleanup": 0,
+        "result_sha256": "27b8c1d15119fb7736aef5ab35ba941b4b300368759e031463fd981441ab1b6e",
+        "revisions": {
+          "mindroom": "91eb091976b36e233d63eab4897e1bfb4832910c",
+          "nio": "3f161fb5c864ff69fa4de08b866d8aa6cd3843be"
+        },
+        "runtime_source_matches": true,
+        "source_unchanged": true
+      },
+      {
+        "acceptance_passed": true,
+        "clean_shutdown": true,
+        "competing_test_processes": 0,
+        "driver_directory": "startup-waits/control-200-20260906T163429Z",
+        "event_loop_stalls": 0,
+        "evidence_directory": "mindroom-live-matrix-fuzz-d1624107",
+        "label": "combined_enqueue_claim",
+        "metrics": {
+          "complete_workload_flushes": 200,
+          "completed_reply_count": 200,
+          "excluded_noncohort_flush_starts": 3,
+          "first_input_to_last_completed_reply_seconds": 76.564,
+          "first_input_to_last_initial_reply_seconds": 13.003,
+          "flush_elapsed_sum_seconds": 96.06157994270325,
+          "flush_nonoverlap": false,
+          "flush_start_spread_seconds": 11.833773136138916,
+          "input_to_completed_reply_median_seconds": 69.8245,
+          "input_to_completed_reply_p95_seconds": 75.8351,
+          "input_to_initial_reply_median_seconds": 5.58,
+          "input_to_initial_reply_p95_seconds": 12.273049999999998,
+          "pending_journal_rows_after_cleanup": 0,
+          "post_terminal_reaction_distinct_events": 1,
+          "post_terminal_reaction_principals": 3,
+          "post_terminal_reaction_settled_rows": 3,
+          "provenance": "Exact retained workload-root cohort; physical Matrix timestamps. Cleanup-state counts do not replace harness drain/fence acceptance.",
+          "root_count": 200,
+          "root_release_span_seconds": 0.164,
+          "unacknowledged_outbox_rows_after_cleanup": 0,
+          "visible_full_overlap_seconds": 49.713,
+          "visible_initial_spread_seconds": 12.516
+        },
+        "producer_debt_before_cleanup": 0,
+        "result_sha256": "b3d58f68d699c6f7f50f06c1419ca5133316d7dbcb62050b52d71bb002205d5b",
+        "revisions": {
+          "mindroom": "92c19b9dc9c0cd1b4f16b7a6fa90f14c762cc0a1",
+          "nio": "3f161fb5c864ff69fa4de08b866d8aa6cd3843be"
+        },
+        "runtime_source_matches": true,
+        "source_unchanged": true
+      },
+      {
+        "acceptance_passed": true,
+        "clean_shutdown": true,
+        "competing_test_processes": 0,
+        "driver_directory": "query-reuse/control-200-20260906T163755Z",
+        "event_loop_stalls": 0,
+        "evidence_directory": "mindroom-live-matrix-fuzz-22048dac",
+        "label": "fresh_baseline",
+        "metrics": {
+          "complete_workload_flushes": 200,
+          "completed_reply_count": 200,
+          "excluded_noncohort_flush_starts": 3,
+          "first_input_to_last_completed_reply_seconds": 81.781,
+          "first_input_to_last_initial_reply_seconds": 14.218,
+          "flush_elapsed_sum_seconds": 96.44392275810242,
+          "flush_nonoverlap": false,
+          "flush_start_spread_seconds": 11.898864984512329,
+          "input_to_completed_reply_median_seconds": 74.1065,
+          "input_to_completed_reply_p95_seconds": 80.15015000000001,
+          "input_to_initial_reply_median_seconds": 6.593,
+          "input_to_initial_reply_p95_seconds": 13.172699999999999,
+          "pending_journal_rows_after_cleanup": 0,
+          "post_terminal_reaction_distinct_events": 1,
+          "post_terminal_reaction_principals": 3,
+          "post_terminal_reaction_settled_rows": 3,
+          "provenance": "Exact retained workload-root cohort; physical Matrix timestamps. Cleanup-state counts do not replace harness drain/fence acceptance.",
+          "root_count": 200,
+          "root_release_span_seconds": 0.21,
+          "unacknowledged_outbox_rows_after_cleanup": 0,
+          "visible_full_overlap_seconds": 50.629,
+          "visible_initial_spread_seconds": 13.493
+        },
+        "producer_debt_before_cleanup": 0,
+        "result_sha256": "8eccf3b1a895e58f0524ddd452b3979f9f7e8459991a366682abd5f20a86d52e",
+        "revisions": {
+          "mindroom": "d59028b0bc3d619373bd5f5e5c4e5c0ea223048a",
+          "nio": "3f161fb5c864ff69fa4de08b866d8aa6cd3843be"
+        },
+        "runtime_source_matches": true,
+        "source_unchanged": true
+      }
+    ],
+    "combined_net_production_lines": 84,
+    "decision": "Withdraw both candidates: no demonstrated repeatable startup-tail improvement justifies the extra code.",
+    "fresh_baseline_source_equivalent_revision": "d59028b0bc3d619373bd5f5e5c0ea223048a",
+    "helper_sha256": "676678ae2c7703814e6f52defb7c74dab8c05e51d31b3030a0ec594fef0df70b",
+    "reproduction_archive": {
+      "bytes": 1034820,
+      "files": 120,
+      "path": "reproducibility/20260906-delivery-transactions.tar.gz",
+      "sha256": "93974903f48928b9cafd855af9be18071910c56f6ff79a2a40afa4d533031ae4"
+    },
+    "retained_net_production_lines": 0,
+    "retained_verification": {
+      "consumer_all_hooks_passed": true,
+      "nio_all_hooks_passed": true,
+      "passed": 15544,
+      "portable_timing_reanalysis_matches": true,
+      "production_and_tests_equal_pre_trial": true,
+      "seconds": 121.51,
+      "skipped": 22,
+      "warnings": 16
+    },
+    "scope": "Exploratory sequential 200-root Tuwunel controls; not statistical equivalence or 1,000-reply qualification.",
+    "summary_script_sha256": "dc60611d32672b3ee33fb86a8cd796d5caa9125cec087bce000f1322b2b58d7a"
+  },
+  "invalidation_review": {
+    "changes": [
+      "Changed or unknown recipients retire the old outbound Megolm session; profile-only refresh retains it.",
+      "Sliding tail requests fresh initial state when recovery leaves a joined room without a baseline.",
+      "A timing-sensitive consumer watchdog test now controls time and poll ordering while retaining real progress/grace handling."
+    ],
+    "date": "2026-09-06",
+    "evidence_directory": "durable-sync-kernel/review-invalidation-20260906",
+    "limits": [
+      "No new schema, queue, public API or consumer production behavior.",
+      "Fresh state authorizes future events only; the lost interval remains fenced.",
+      "Ciphertext retained before recipient refresh keeps its original retry semantics.",
+      "No new live capacity benchmark, speed claim or 1000-reply qualification."
+    ],
+    "new_producer_test_cases": 6,
+    "production_lines": {
+      "consumer_source_changes": 0,
+      "full_pr_added": 5226,
+      "full_pr_net": -1245,
+      "full_pr_removed": 6471,
+      "main_revision": "5b6de3bc6f4aa0c317185953f77c9c8fe3d806a3",
+      "review_added": 5,
+      "review_net": 5,
+      "review_removed": 0
+    },
+    "qualified_producer_revision": "76e4fa4bf441430227205671bb48448477d2a38c",
+    "reports_reproduced_and_fixed": 2,
+    "reviewed_producer_revision": "785c8353c24ba453063fc6caaa4c3dd7268d609c",
+    "verification": {
+      "consumer_affected_tests_passed": 337,
+      "consumer_affected_tests_skipped": 1,
+      "consumer_hooks_passed": true,
+      "consumer_python": "3.13.14",
+      "consumer_test_seconds": 7.78,
+      "installed_producer_source_files_matched": 60,
+      "producer_hooks_passed": true,
+      "producer_mypy_errors": 0,
+      "producer_mypy_source_files": 60,
+      "producer_suite_seconds": 71.88,
+      "producer_tests_passed": 885,
+      "producer_tests_skipped": 3,
+      "watchdog_generation_observation_mutation_rejected": true
+    }
+  },
+  "limitations": [
+    "Traced timing includes observer overhead.",
+    "Native waits overlap thread CPU and cover a wider timer bracket.",
+    "GIL acquisition waits include scheduler and mutex reacquisition costs.",
+    "Isolated replay omits application computation and concurrent readers; it is not an achievable application speedup.",
+    "Direct replay validates full run; threaded replay validates the matching startup prefix.",
+    "Inline changes both handoffs and event-loop scheduling; it is not a pure GIL experiment.",
+    "One responder account with 200 conversations does not qualify 200 agents or 1000 concurrent replies."
+  ],
+  "lock_contention": [
+    {
+      "heartbeat_delay_seconds": 0.00011487819254398304,
+      "heartbeat_seconds": 0.020114878192543983,
+      "mode": "worker",
+      "synchronous": "FULL",
+      "write_committed": true,
+      "write_seconds": 2.2321416940540075
+    },
+    {
+      "heartbeat_delay_seconds": 2.211728292070329,
+      "heartbeat_seconds": 2.231728292070329,
+      "mode": "inline",
+      "synchronous": "FULL",
+      "write_committed": true,
+      "write_seconds": 2.2317395131103694
+    }
+  ],
+  "production_lines_changed_in_this_investigation": 0,
+  "reproduction_archive": {
+    "bytes": 32729033,
+    "contents_note": "The archived copy of this measurement summary predates addition of this archive checksum.",
+    "files_checked_by_manifest": 583,
+    "path_relative_to_capacity_workspace": "reproducibility/20260906-writer-investigation.tar.gz",
+    "sha256": "358390b12416dd60d0944e3e6181f6dfcd7abaac07848a9ac310b4c223b15fb7",
+    "storage": "Retained in the persistent capacity workspace; not committed to Git."
+  },
+  "retained_policy": {
+    "health_read_timeout_seconds": 2,
+    "minimum_full_overlap_seconds": 45,
+    "preparation_slots": 8,
+    "reply_timeout_seconds": 180,
+    "roots": 200,
+    "synchronous": "FULL"
+  },
+  "room_lifecycle_review": {
+    "changes": [
+      "Joined-room reset preserves encryption and invalidates stale projection, recipients, outbound group and Sliding checkpoint.",
+      "Plaintext sending waits for established room state; known encrypted rooms use fresh recipients.",
+      "Completed durable recipient cache permits encryption without claiming canonical members are fully synced.",
+      "Invitation snapshots replace former joined members in memory and on disk.",
+      "Classic reconciliation preserves final explicit bans before duplicate filtering.",
+      "Truncated HTTP bodies use the existing bounded retry policy."
+    ],
+    "date": "2026-09-06",
+    "evidence_directory": "durable-sync-kernel/review-room-lifecycle-20260906",
+    "limits": [
+      "No new schema, public API, queue or database.",
+      "Exact local membership echo attribution remains unsupported; the existing net-boundary policy is unchanged.",
+      "No fresh capacity or performance benchmark was run; prior results retain their original source IDs.",
+      "No 1000-reply qualification."
+    ],
+    "new_test_cases": 16,
+    "production_lines": {
+      "consumer_source_changes": 0,
+      "full_pr_added": 5221,
+      "full_pr_net": -1250,
+      "full_pr_removed": 6471,
+      "main_revision": "5b6de3bc6f4aa0c317185953f77c9c8fe3d806a3",
+      "review_added": 79,
+      "review_net": 30,
+      "review_removed": 49
+    },
+    "qualified_producer_revision": "cb7c55da1ffca2f1cdf0733968b208ffe082b397",
+    "reports_reproduced_and_fixed": 6,
+    "reviewed_producer_revision": "6143e8a767b318b0105dd5b43cb280e5ccc6daa2",
+    "unchanged_consumer_source_revision": "3c297613fe478a3526acea9127bbaae884760326",
+    "verification": {
+      "consumer_affected_tests_passed": 287,
+      "consumer_hooks_passed": true,
+      "consumer_python": "3.13.14",
+      "consumer_test_seconds": 35.45,
+      "installed_producer_source_files_matched": 60,
+      "producer_hooks_passed": true,
+      "producer_mypy_errors": 0,
+      "producer_mypy_source_files": 60,
+      "producer_suite_seconds": 71.72,
+      "producer_tests_passed": 879,
+      "producer_tests_skipped": 3
+    }
+  },
+  "sliding_restoration": {
+    "archive": {
+      "bytes": 3916060,
+      "manifest_files": 94,
+      "path": "reproducibility/20260906-sliding-restoration.tar.gz",
+      "sha256": "cb8b04d1404a319346da0cb8b279980bf59c975a7d8fc8e987afafc2933f4618"
+    },
+    "capacity_predicates": {
+      "clean_shutdown": true,
+      "exact_delivery": true,
+      "fence_and_source_progress": true,
+      "health_read_timeout_seconds": 2,
+      "measured_deadline_seconds": 180,
+      "minimum_full_overlap_seconds": 45,
+      "responders": 1,
+      "roots": 200,
+      "syncing_principals": 3,
+      "synthetic_generation_seconds": 60,
+      "zero_producer_application_outbox_debt": true
+    },
+    "date": "2026-09-06",
+    "decision": "Retain Sliding for subscription/window features; no demonstrated reply-speed advantage over Classic in these single-run matched controls.",
+    "limits": [
+      "One matched capacity run per transport/server does not establish statistical equivalence or a general speedup.",
+      "The original pre-fix health timeout was not reproduced or explained.",
+      "The sampled run failed clean shutdown qualification.",
+      "No 1000-reply or 200-independent-agent qualification."
+    ],
+    "production_lines": {
+      "expanded_window_fix_net": 58,
+      "main_base": "5b6de3bc6f4aa0c317185953f77c9c8fe3d806a3",
+      "pr_added": 5056,
+      "pr_net": -1381,
+      "pr_removed": 6437,
+      "restoration_added": 1587,
+      "restoration_net": 1526,
+      "restoration_removed": 61,
+      "scope": "Nio src/**/*.py, including blank lines/comments; excluding scripts/tests/docs"
+    },
+    "runs": [
+      {
+        "acceptance_passed": true,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "completed_replies": 200,
+        "diagnostic": null,
+        "error_type": null,
+        "evidence_directory": "synapse5000-classic-capacity-20260906T183647Z",
+        "metrics": {
+          "completed_reply_median_seconds": 75.343,
+          "completed_reply_p95_seconds": 79.17545,
+          "full_overlap_seconds": 55.759,
+          "initial_reply_median_seconds": 5.8445,
+          "initial_reply_p95_seconds": 11.071999999999997,
+          "initial_reply_spread_seconds": 12.413,
+          "last_completion_from_first_input_seconds": 81.077
+        },
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "capacity",
+        "result_sha256": "6ce25fca9fb4c00c0e1b2111bdcd4a876bbba060caff278c049c8831d3b385bb",
+        "revisions": {
+          "mindroom": "d820bc3a40b6661ff709b3db09c253f29defea1e",
+          "nio": "f7e1dfd78812c8c58d846bc8e62df698903c18bf"
+        },
+        "runtime_source_matches": true,
+        "server": "synapse5000",
+        "source_unchanged": true,
+        "sync_mode": "classic",
+        "workload_roots": 200
+      },
+      {
+        "acceptance_passed": true,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "completed_replies": 200,
+        "diagnostic": null,
+        "error_type": null,
+        "evidence_directory": "synapse5000-sliding-capacity-20260906T175450Z",
+        "gap_probe": {
+          "batch_debt": 0,
+          "input_debt": 0,
+          "live_limited_window": {
+            "actionable": 20,
+            "batches": 6,
+            "completed_syncs": 1,
+            "duplicates": 0,
+            "expected": 20,
+            "losses": 0,
+            "missing": [],
+            "observed": 20,
+            "recovered": 19,
+            "unexpected": []
+          },
+          "ok": true,
+          "requests": {
+            "history_pages": 10,
+            "initial_polls": 1,
+            "sliding_polls": 2
+          },
+          "restart": {
+            "actionable": 20,
+            "batches": 10,
+            "completed_syncs": 1,
+            "duplicates": 0,
+            "expected": 20,
+            "losses": 0,
+            "missing": [],
+            "observed": 20,
+            "recovered": 20,
+            "unexpected": []
+          }
+        },
+        "metrics": {
+          "completed_reply_median_seconds": 74.857,
+          "completed_reply_p95_seconds": 80.20135,
+          "full_overlap_seconds": 54.358,
+          "initial_reply_median_seconds": 5.8245000000000005,
+          "initial_reply_p95_seconds": 11.950149999999999,
+          "initial_reply_spread_seconds": 12.717,
+          "last_completion_from_first_input_seconds": 81.877
+        },
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "capacity",
+        "result_sha256": "e886f8293762e038af91caa96bb36e7a461a1437e9f19cb0488e79e3c47482ca",
+        "revisions": {
+          "mindroom": "e8e668b93a601d7c6f5fb8b01d4a6329cb6633e5",
+          "nio": "2a7a134943cb6b2940f397a8e88943bf6d688259"
+        },
+        "runtime_source_matches": true,
+        "server": "synapse5000",
+        "source_unchanged": true,
+        "sync_mode": "sliding",
+        "workload_roots": 200
+      },
+      {
+        "acceptance_passed": true,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "completed_replies": 200,
+        "diagnostic": null,
+        "error_type": null,
+        "evidence_directory": "synapse5000-sliding-capacity-20260906T183045Z",
+        "gap_probe": {
+          "batch_debt": 0,
+          "input_debt": 0,
+          "live_limited_window": {
+            "actionable": 20,
+            "batches": 6,
+            "completed_syncs": 1,
+            "duplicates": 0,
+            "expected": 20,
+            "losses": 0,
+            "missing": [],
+            "observed": 20,
+            "recovered": 19,
+            "unexpected": []
+          },
+          "ok": true,
+          "requests": {
+            "history_pages": 10,
+            "initial_polls": 1,
+            "sliding_polls": 2
+          },
+          "restart": {
+            "actionable": 20,
+            "batches": 10,
+            "completed_syncs": 1,
+            "duplicates": 0,
+            "expected": 20,
+            "losses": 0,
+            "missing": [],
+            "observed": 20,
+            "recovered": 20,
+            "unexpected": []
+          }
+        },
+        "metrics": {
+          "completed_reply_median_seconds": 74.80799999999999,
+          "completed_reply_p95_seconds": 78.85865,
+          "full_overlap_seconds": 56.155,
+          "initial_reply_median_seconds": 5.5555,
+          "initial_reply_p95_seconds": 10.91505,
+          "initial_reply_spread_seconds": 12.006,
+          "last_completion_from_first_input_seconds": 80.505
+        },
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "capacity",
+        "result_sha256": "d047dbfd74d44ea8b4f91b94ce69fc77c457e6e5f46926a44320dcb77416789e",
+        "revisions": {
+          "mindroom": "d820bc3a40b6661ff709b3db09c253f29defea1e",
+          "nio": "f7e1dfd78812c8c58d846bc8e62df698903c18bf"
+        },
+        "runtime_source_matches": true,
+        "server": "synapse5000",
+        "source_unchanged": true,
+        "sync_mode": "sliding",
+        "workload_roots": 200
+      },
+      {
+        "acceptance_passed": false,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "completed_replies": 0,
+        "diagnostic": null,
+        "error_type": "TimeoutError",
+        "evidence_directory": "tuwunel-classic-capacity-20260906T175135Z",
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "capacity",
+        "result_sha256": "3cf6f2bc18545b57faa33e66f9df4338c92a9512c8a2780297a888d1a3062aba",
+        "revisions": {
+          "mindroom": "e8e668b93a601d7c6f5fb8b01d4a6329cb6633e5",
+          "nio": "2a7a134943cb6b2940f397a8e88943bf6d688259"
+        },
+        "runtime_source_matches": true,
+        "server": "tuwunel",
+        "source_unchanged": true,
+        "sync_mode": "classic",
+        "workload_roots": 0
+      },
+      {
+        "acceptance_passed": true,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "completed_replies": 200,
+        "diagnostic": null,
+        "error_type": null,
+        "evidence_directory": "tuwunel-classic-capacity-20260906T180342Z",
+        "metrics": {
+          "completed_reply_median_seconds": 70.527,
+          "completed_reply_p95_seconds": 76.11475,
+          "full_overlap_seconds": 50.01,
+          "initial_reply_median_seconds": 6.125500000000001,
+          "initial_reply_p95_seconds": 12.198049999999999,
+          "initial_reply_spread_seconds": 12.088,
+          "last_completion_from_first_input_seconds": 76.874
+        },
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "capacity",
+        "result_sha256": "f66c68e5b2e5bba74eb87ae72a62c614388021fb865f537aeee776d5edcf2ddb",
+        "revisions": {
+          "mindroom": "4ef0f67342c5c91013a033b9b0c14295361a65a1",
+          "nio": "2a7a134943cb6b2940f397a8e88943bf6d688259"
+        },
+        "runtime_source_matches": true,
+        "server": "tuwunel",
+        "source_unchanged": true,
+        "sync_mode": "classic",
+        "workload_roots": 200
+      },
+      {
+        "acceptance_passed": true,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "completed_replies": 200,
+        "diagnostic": null,
+        "error_type": null,
+        "evidence_directory": "tuwunel-classic-capacity-20260906T183405Z",
+        "metrics": {
+          "completed_reply_median_seconds": 69.898,
+          "completed_reply_p95_seconds": 76.00829999999999,
+          "full_overlap_seconds": 50.538,
+          "initial_reply_median_seconds": 5.862,
+          "initial_reply_p95_seconds": 11.928400000000002,
+          "initial_reply_spread_seconds": 11.669,
+          "last_completion_from_first_input_seconds": 76.451
+        },
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "capacity",
+        "result_sha256": "fa1ba110aaeeb7c48bcd6e7fad3ca952f6e6fcefd94883518d00b27b15614dd2",
+        "revisions": {
+          "mindroom": "d820bc3a40b6661ff709b3db09c253f29defea1e",
+          "nio": "f7e1dfd78812c8c58d846bc8e62df698903c18bf"
+        },
+        "runtime_source_matches": true,
+        "server": "tuwunel",
+        "source_unchanged": true,
+        "sync_mode": "classic",
+        "workload_roots": 200
+      },
+      {
+        "acceptance_passed": false,
+        "application_pending_after_cleanup": 331,
+        "clean_stops": [
+          true
+        ],
+        "completed_replies": 0,
+        "diagnostic": null,
+        "error_type": "ReadTimeout",
+        "evidence_directory": "tuwunel-sliding-capacity-20260906T174737Z",
+        "gap_probe": {
+          "batch_debt": 0,
+          "input_debt": 0,
+          "live_limited_window": {
+            "actionable": 20,
+            "batches": 8,
+            "completed_syncs": 1,
+            "duplicates": 0,
+            "expected": 20,
+            "losses": 0,
+            "missing": [],
+            "observed": 20,
+            "recovered": 19,
+            "unexpected": []
+          },
+          "ok": true,
+          "requests": {
+            "history_pages": 10,
+            "initial_polls": 1,
+            "sliding_polls": 2
+          },
+          "restart": {
+            "actionable": 20,
+            "batches": 8,
+            "completed_syncs": 1,
+            "duplicates": 0,
+            "expected": 20,
+            "losses": 0,
+            "missing": [],
+            "observed": 20,
+            "recovered": 20,
+            "unexpected": []
+          }
+        },
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "capacity",
+        "result_sha256": "bc62fa240a076ea8885105ce8f5f8b63f7a18be7b39612cbc47efcb01bba16dd",
+        "revisions": {
+          "mindroom": "e8e668b93a601d7c6f5fb8b01d4a6329cb6633e5",
+          "nio": "2a7a134943cb6b2940f397a8e88943bf6d688259"
+        },
+        "runtime_source_matches": true,
+        "server": "tuwunel",
+        "source_unchanged": true,
+        "sync_mode": "sliding",
+        "workload_roots": 200
+      },
+      {
+        "acceptance_passed": false,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          false
+        ],
+        "completed_replies": 200,
+        "diagnostic": {
+          "idle_threads": true,
+          "profiler": "py-spy",
+          "rate_hz": 25,
+          "stall_threshold_seconds": 0.5,
+          "wrapper_sha256": "cdf16dbf0b54e36a9887e0db0e0a48b5916df1427eda617562d8549d53633e19"
+        },
+        "error_type": "AssertionError",
+        "evidence_directory": "tuwunel-sliding-capacity-20260906T175756Z",
+        "gap_probe": {
+          "batch_debt": 0,
+          "input_debt": 0,
+          "live_limited_window": {
+            "actionable": 20,
+            "batches": 8,
+            "completed_syncs": 1,
+            "duplicates": 0,
+            "expected": 20,
+            "losses": 0,
+            "missing": [],
+            "observed": 20,
+            "recovered": 19,
+            "unexpected": []
+          },
+          "ok": true,
+          "requests": {
+            "history_pages": 10,
+            "initial_polls": 1,
+            "sliding_polls": 2
+          },
+          "restart": {
+            "actionable": 20,
+            "batches": 8,
+            "completed_syncs": 1,
+            "duplicates": 0,
+            "expected": 20,
+            "losses": 0,
+            "missing": [],
+            "observed": 20,
+            "recovered": 20,
+            "unexpected": []
+          }
+        },
+        "metrics": {
+          "completed_reply_median_seconds": 71.34049999999999,
+          "completed_reply_p95_seconds": 77.56815,
+          "full_overlap_seconds": 49.781,
+          "initial_reply_median_seconds": 6.2825,
+          "initial_reply_p95_seconds": 12.81545,
+          "initial_reply_spread_seconds": 12.736,
+          "last_completion_from_first_input_seconds": 77.759
+        },
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "capacity",
+        "result_sha256": "2d9f8c23816b24a5618b6f096b183ef662d0bcefcdeba415f11b64ecbf358135",
+        "revisions": {
+          "mindroom": "e8e668b93a601d7c6f5fb8b01d4a6329cb6633e5",
+          "nio": "2a7a134943cb6b2940f397a8e88943bf6d688259"
+        },
+        "runtime_source_matches": true,
+        "server": "tuwunel",
+        "source_unchanged": true,
+        "sync_mode": "sliding",
+        "workload_roots": 200
+      },
+      {
+        "acceptance_passed": false,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "completed_replies": 0,
+        "diagnostic": null,
+        "error_type": "TimeoutError",
+        "evidence_directory": "tuwunel-sliding-capacity-20260906T180630Z",
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "capacity",
+        "result_sha256": "aa001c2dde3cacd1f6de6f3bcf09346dcc96442f23b367978acbc499f4dd93f0",
+        "revisions": {
+          "mindroom": "4ef0f67342c5c91013a033b9b0c14295361a65a1",
+          "nio": "2a7a134943cb6b2940f397a8e88943bf6d688259"
+        },
+        "runtime_source_matches": true,
+        "server": "tuwunel",
+        "source_unchanged": true,
+        "sync_mode": "sliding",
+        "workload_roots": 0
+      },
+      {
+        "acceptance_passed": false,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "completed_replies": 0,
+        "diagnostic": {
+          "child_sha256": "24c31d42e5ea3f25f8d544e27aa0d517281b4b771d1064b6cc1d77595d5efd86",
+          "purpose": "startup classification",
+          "warmup_observation_seconds": 15,
+          "wrapper_sha256": "869efb43262d3346ca7ece0b8b1f1c0001f9609d3679806fb297d1c588c11458"
+        },
+        "error_type": "TimeoutError",
+        "evidence_directory": "tuwunel-sliding-capacity-20260906T181030Z",
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "capacity",
+        "result_sha256": "e4517bcd5e5ae6cbf32d0209b40c326206f9866d8134702025c7dd3a6b056d5b",
+        "revisions": {
+          "mindroom": "4ef0f67342c5c91013a033b9b0c14295361a65a1",
+          "nio": "2a7a134943cb6b2940f397a8e88943bf6d688259"
+        },
+        "runtime_source_matches": true,
+        "server": "tuwunel",
+        "source_unchanged": true,
+        "sync_mode": "sliding",
+        "workload_roots": 0
+      },
+      {
+        "acceptance_passed": true,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "completed_replies": 200,
+        "diagnostic": null,
+        "error_type": null,
+        "evidence_directory": "tuwunel-sliding-capacity-20260906T182731Z",
+        "gap_probe": {
+          "batch_debt": 0,
+          "input_debt": 0,
+          "live_limited_window": {
+            "actionable": 20,
+            "batches": 8,
+            "completed_syncs": 1,
+            "duplicates": 0,
+            "expected": 20,
+            "losses": 0,
+            "missing": [],
+            "observed": 20,
+            "recovered": 19,
+            "unexpected": []
+          },
+          "ok": true,
+          "requests": {
+            "history_pages": 10,
+            "initial_polls": 1,
+            "sliding_polls": 2
+          },
+          "restart": {
+            "actionable": 20,
+            "batches": 8,
+            "completed_syncs": 1,
+            "duplicates": 0,
+            "expected": 20,
+            "losses": 0,
+            "missing": [],
+            "observed": 20,
+            "recovered": 20,
+            "unexpected": []
+          }
+        },
+        "metrics": {
+          "completed_reply_median_seconds": 70.0875,
+          "completed_reply_p95_seconds": 76.0166,
+          "full_overlap_seconds": 50.134,
+          "initial_reply_median_seconds": 6.172499999999999,
+          "initial_reply_p95_seconds": 11.97405,
+          "initial_reply_spread_seconds": 11.817,
+          "last_completion_from_first_input_seconds": 76.581
+        },
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "capacity",
+        "result_sha256": "b0bd3d85931dc56213f6ec95e052198576e7658f6c9695b545f017f7e82f080d",
+        "revisions": {
+          "mindroom": "d820bc3a40b6661ff709b3db09c253f29defea1e",
+          "nio": "f7e1dfd78812c8c58d846bc8e62df698903c18bf"
+        },
+        "runtime_source_matches": true,
+        "server": "tuwunel",
+        "source_unchanged": true,
+        "sync_mode": "sliding",
+        "workload_roots": 200
+      },
+      {
+        "acceptance_passed": false,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "diagnostic": null,
+        "error_type": "AssertionError",
+        "evidence_directory": "synapse5000-sliding-restart-regression-20260906T184117Z",
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "restart-regression",
+        "result_sha256": "973eca9b521b6fb4ce4a2bfc059010d856c547c1a81049dba06fd5881d60ef29",
+        "revisions": {
+          "mindroom": "d820bc3a40b6661ff709b3db09c253f29defea1e",
+          "nio": "f7e1dfd78812c8c58d846bc8e62df698903c18bf"
+        },
+        "runtime_source_matches": true,
+        "server": "synapse5000",
+        "source_unchanged": true,
+        "sync_mode": "sliding"
+      },
+      {
+        "acceptance_passed": true,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "diagnostic": null,
+        "error_type": null,
+        "evidence_directory": "synapse5000-sliding-restart-regression-20260906T184922Z",
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "restart-regression",
+        "result_sha256": "de2e71fdd9bc010b5e18b95c34ead5733078415d15aaf1866172f8c2dc1a1327",
+        "revisions": {
+          "mindroom": "9883dba3a5f89203d662922be83d5cd16c12ed95",
+          "nio": "f7e1dfd78812c8c58d846bc8e62df698903c18bf"
+        },
+        "runtime_source_matches": true,
+        "server": "synapse5000",
+        "source_unchanged": true,
+        "sync_mode": "sliding"
+      },
+      {
+        "acceptance_passed": false,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "diagnostic": null,
+        "error_type": "AssertionError",
+        "evidence_directory": "tuwunel-sliding-restart-regression-20260906T183941Z",
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "restart-regression",
+        "result_sha256": "ca908a2fc08fdd96ebd68ddfd8a59e33ad11b58967e4e9ce49f72eceac5db63e",
+        "revisions": {
+          "mindroom": "d820bc3a40b6661ff709b3db09c253f29defea1e",
+          "nio": "f7e1dfd78812c8c58d846bc8e62df698903c18bf"
+        },
+        "runtime_source_matches": true,
+        "server": "tuwunel",
+        "source_unchanged": true,
+        "sync_mode": "sliding"
+      },
+      {
+        "acceptance_passed": false,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "diagnostic": null,
+        "error_type": "AssertionError",
+        "evidence_directory": "tuwunel-sliding-restart-regression-20260906T184417Z",
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "restart-regression",
+        "result_sha256": "2cf6e640732be48d87fa7456d22941909ee28d9693bf38396155cf21ea1d7635",
+        "revisions": {
+          "mindroom": "04bc7105d68d9aa5dbc11beaea0a68f648a99dc7",
+          "nio": "f7e1dfd78812c8c58d846bc8e62df698903c18bf"
+        },
+        "runtime_source_matches": true,
+        "server": "tuwunel",
+        "source_unchanged": true,
+        "sync_mode": "sliding"
+      },
+      {
+        "acceptance_passed": true,
+        "application_pending_after_cleanup": 0,
+        "clean_stops": [
+          true
+        ],
+        "diagnostic": null,
+        "error_type": null,
+        "evidence_directory": "tuwunel-sliding-restart-regression-20260906T184907Z",
+        "outbox_pending_after_cleanup": 0,
+        "producer_pending_batches": 0,
+        "producer_pending_input": 0,
+        "profile": "restart-regression",
+        "result_sha256": "a87914b8e71c76e9aa317b6ee25fae559b73a363ab674ae04f72f69562ef7739",
+        "revisions": {
+          "mindroom": "9883dba3a5f89203d662922be83d5cd16c12ed95",
+          "nio": "f7e1dfd78812c8c58d846bc8e62df698903c18bf"
+        },
+        "runtime_source_matches": true,
+        "server": "tuwunel",
+        "source_unchanged": true,
+        "sync_mode": "sliding"
+      }
+    ],
+    "verification": {
+      "consumer_wheel_affected_tests_passed": 205,
+      "final_harness_tests_passed": 130,
+      "hooks_passed": true,
+      "mypy_errors": 0,
+      "mypy_files": 60,
+      "nio_passed": 844,
+      "nio_skipped": 3
+    }
+  },
+  "source_revisions": {
+    "mindroom": "e276982fdbd3f58b8d471376c417767654819da4",
+    "nio": "ce18a1fed0a592b93b789de4480ac3e61e8c3145"
+  },
+  "streaming_frequency_diagnostic": {
+    "abba": {
+      "candidate_below_both_controls": true,
+      "candidate_initial_spreads_seconds": [
+        11.492,
+        10.885
+      ],
+      "candidate_matrix_update_totals": [
+        3032,
+        3031
+      ],
+      "control_initial_spreads_seconds": [
+        12.256,
+        12.126
+      ],
+      "control_matrix_update_totals": [
+        5084,
+        5027
+      ]
+    },
+    "archive": {
+      "all_checksums_passed": true,
+      "companion_path": "reproducibility/20260906-sliding-restoration.tar.gz",
+      "companion_sha256": "cb8b04d1404a319346da0cb8b279980bf59c975a7d8fc8e987afafc2933f4618",
+      "compressed_bytes": 266371,
+      "manifested_files": 25,
+      "path": "reproducibility/20260906-review-streaming.tar.gz",
+      "raw_logs_databases_payloads_credentials_excluded": true,
+      "sha256": "535f54ef93f610b865b5a31eeacf4c46d2b7c5d18399961fc1f3c8ad0f79a92b",
+      "standalone_reanalysis_exact_match": true
+    },
+    "constraints": {
+      "all_original_acceptance_predicates_retained": true,
+      "characters_per_second": 80,
+      "concurrent_profilers_or_tests": false,
+      "deadline_seconds": 180,
+      "durability": "FULL",
+      "first_chunk_characters_each_phase": 40,
+      "health_read_timeout_seconds": 2,
+      "minimum_full_overlap_seconds": 45,
+      "preparations": 8,
+      "response_characters": 4800,
+      "roots": 200,
+      "seed": 1,
+      "server": "tuwunel",
+      "subsequent_chunk_characters_abba": [
+        40,
+        400,
+        400,
+        40
+      ],
+      "sync_mode": "sliding",
+      "tool_probability": 0.2
+    },
+    "date": "2026-09-06",
+    "decision": "Keep production streaming behavior; small startup benefit does not warrant a Synapse confirmation or new implementation in this task.",
+    "evidence_directory": "durable-sync-kernel/review-streaming-20260906",
+    "failed_runs": [],
+    "limits": [
+      "Four sequential descriptive runs are not a significance or equivalence test.",
+      "This changes provider wakeups, downstream chunk processing and Matrix edits together; it does not isolate one bottleneck.",
+      "Nominal generation remains 60 seconds but larger synthetic chunks change accumulated scheduling delay and visible update cadence.",
+      "Tool continuations differ despite the same seed and rate because the model hashes assembled history.",
+      "Provider counts include one premeasurement warm-up; reply timing and Matrix update counts cover only the 200 measured replies.",
+      "No new production performance code, changed default, measured production speedup or 1000-reply qualification."
+    ],
+    "production_lines": {
+      "full_nio_pr_added_vs_main": 5193,
+      "full_nio_pr_net_vs_main": -1280,
+      "full_nio_pr_removed_vs_main": 6473,
+      "main_revision": "5b6de3bc6f4aa0c317185953f77c9c8fe3d806a3",
+      "performance_changes": 0,
+      "review_fixes_added": 160,
+      "review_fixes_net": 101,
+      "review_fixes_removed": 59
+    },
+    "runs": [
+      {
+        "acceptance_passed": true,
+        "analysis_status": "complete",
+        "arm_subsequent_chunk_chars": 40,
+        "clean_stops": [
+          true
+        ],
+        "clean_stops_passed": true,
+        "comparison_identity_sha256": "272bc11002e5366898258d294ed5df8fb7a749f7a4fadf028c5bc71d1d76162d",
+        "debt_free": true,
+        "diagnostic_verified": true,
+        "evidence_directory": "tuwunel-sliding-capacity-20260906T195844Z",
+        "matrix_reply_observation_verified": true,
+        "matrix_updates": {
+          "max_per_reply": 28,
+          "median_per_reply": 25.0,
+          "min_per_reply": 25,
+          "p95_per_reply": 27.0,
+          "total": 5084,
+          "total_edits": 4884
+        },
+        "metrics": {
+          "completed_reply_median_seconds": 72.271,
+          "completed_reply_p95_seconds": 78.65729999999999,
+          "full_overlap_seconds": 51.552,
+          "initial_reply_median_seconds": 6.127,
+          "initial_reply_p95_seconds": 12.257,
+          "initial_reply_spread_seconds": 12.256,
+          "last_completion_from_first_input_seconds": 79.289
+        },
+        "missing_files": [],
+        "provider": {
+          "first_chunk_chars_each_phase": 40,
+          "includes_premeasurement_warmup": true,
+          "phase_count": 251,
+          "response_count": 201,
+          "tool_continuation_count": 50,
+          "total_chars": 964800,
+          "total_chunks": 24169,
+          "total_nominal_delay_seconds": 12060.0
+        },
+        "provider_phases_verified": true,
+        "reply_count": 200,
+        "source_unchanged": true
+      },
+      {
+        "acceptance_passed": true,
+        "analysis_status": "complete",
+        "arm_subsequent_chunk_chars": 400,
+        "clean_stops": [
+          true
+        ],
+        "clean_stops_passed": true,
+        "comparison_identity_sha256": "272bc11002e5366898258d294ed5df8fb7a749f7a4fadf028c5bc71d1d76162d",
+        "debt_free": true,
+        "diagnostic_verified": true,
+        "evidence_directory": "tuwunel-sliding-capacity-20260906T200146Z",
+        "matrix_reply_observation_verified": true,
+        "matrix_updates": {
+          "max_per_reply": 17,
+          "median_per_reply": 15.0,
+          "min_per_reply": 15,
+          "p95_per_reply": 16.0,
+          "total": 3032,
+          "total_edits": 2832
+        },
+        "metrics": {
+          "completed_reply_median_seconds": 68.887,
+          "completed_reply_p95_seconds": 74.53829999999999,
+          "full_overlap_seconds": 49.867,
+          "initial_reply_median_seconds": 6.2795000000000005,
+          "initial_reply_p95_seconds": 11.674100000000001,
+          "initial_reply_spread_seconds": 11.492,
+          "last_completion_from_first_input_seconds": 75.236
+        },
+        "missing_files": [],
+        "provider": {
+          "first_chunk_chars_each_phase": 40,
+          "includes_premeasurement_warmup": true,
+          "phase_count": 242,
+          "response_count": 201,
+          "tool_continuation_count": 41,
+          "total_chars": 964800,
+          "total_chunks": 2688,
+          "total_nominal_delay_seconds": 12060.0
+        },
+        "provider_phases_verified": true,
+        "reply_count": 200,
+        "source_unchanged": true
+      },
+      {
+        "acceptance_passed": true,
+        "analysis_status": "complete",
+        "arm_subsequent_chunk_chars": 400,
+        "clean_stops": [
+          true
+        ],
+        "clean_stops_passed": true,
+        "comparison_identity_sha256": "272bc11002e5366898258d294ed5df8fb7a749f7a4fadf028c5bc71d1d76162d",
+        "debt_free": true,
+        "diagnostic_verified": true,
+        "evidence_directory": "tuwunel-sliding-capacity-20260906T200437Z",
+        "matrix_reply_observation_verified": true,
+        "matrix_updates": {
+          "max_per_reply": 17,
+          "median_per_reply": 15.0,
+          "min_per_reply": 15,
+          "p95_per_reply": 16.0,
+          "total": 3031,
+          "total_edits": 2831
+        },
+        "metrics": {
+          "completed_reply_median_seconds": 68.6845,
+          "completed_reply_p95_seconds": 74.02145,
+          "full_overlap_seconds": 50.201,
+          "initial_reply_median_seconds": 5.9544999999999995,
+          "initial_reply_p95_seconds": 11.3528,
+          "initial_reply_spread_seconds": 10.885,
+          "last_completion_from_first_input_seconds": 74.857
+        },
+        "missing_files": [],
+        "provider": {
+          "first_chunk_chars_each_phase": 40,
+          "includes_premeasurement_warmup": true,
+          "phase_count": 239,
+          "response_count": 201,
+          "tool_continuation_count": 38,
+          "total_chars": 964800,
+          "total_chunks": 2682,
+          "total_nominal_delay_seconds": 12060.0
+        },
+        "provider_phases_verified": true,
+        "reply_count": 200,
+        "source_unchanged": true
+      },
+      {
+        "acceptance_passed": true,
+        "analysis_status": "complete",
+        "arm_subsequent_chunk_chars": 40,
+        "clean_stops": [
+          true
+        ],
+        "clean_stops_passed": true,
+        "comparison_identity_sha256": "272bc11002e5366898258d294ed5df8fb7a749f7a4fadf028c5bc71d1d76162d",
+        "debt_free": true,
+        "diagnostic_verified": true,
+        "evidence_directory": "tuwunel-sliding-capacity-20260906T200725Z",
+        "matrix_reply_observation_verified": true,
+        "matrix_updates": {
+          "max_per_reply": 27,
+          "median_per_reply": 25.0,
+          "min_per_reply": 25,
+          "p95_per_reply": 26.0,
+          "total": 5027,
+          "total_edits": 4827
+        },
+        "metrics": {
+          "completed_reply_median_seconds": 70.205,
+          "completed_reply_p95_seconds": 76.00115000000001,
+          "full_overlap_seconds": 49.87,
+          "initial_reply_median_seconds": 6.265499999999999,
+          "initial_reply_p95_seconds": 12.23115,
+          "initial_reply_spread_seconds": 12.126,
+          "last_completion_from_first_input_seconds": 76.274
+        },
+        "missing_files": [],
+        "provider": {
+          "first_chunk_chars_each_phase": 40,
+          "includes_premeasurement_warmup": true,
+          "phase_count": 229,
+          "response_count": 201,
+          "tool_continuation_count": 28,
+          "total_chars": 964800,
+          "total_chunks": 24148,
+          "total_nominal_delay_seconds": 12060.0
+        },
+        "provider_phases_verified": true,
+        "reply_count": 200,
+        "source_unchanged": true
+      }
+    ],
+    "source_revisions": {
+      "mindroom": "2fb726841f7f4c3526b1610ac91eea6afa9fedc1",
+      "nio": "ba75e3a04bb5e333b40617027723e7982d4de09a"
+    },
+    "verification": {
+      "consumer_affected_tests_passed": 200,
+      "consumer_hooks_passed": true,
+      "nio_hooks_passed": true,
+      "nio_mypy_errors": 0,
+      "nio_mypy_source_files": 60,
+      "nio_tests_passed": 863,
+      "nio_tests_skipped": 3
+    }
+  },
+  "writer_analysis": [
+    {
+      "analysis_file": "transaction-path/analysis200-repeat.log",
+      "cohort": "complete writer operations starting inside startup window",
+      "replay": [
+        {
+          "all_transactions": 10604,
+          "final_database_matches": true,
+          "mode": "direct",
+          "scope": "full_run",
+          "seconds_all_transactions": 10.662957564927638,
+          "startup": {
+            "execute_BEGIN": 0.008349466137588024,
+            "execute_COMMIT": 1.2032139650546014,
+            "execute_DELETE": 0.014046316035091877,
+            "execute_INSERT": 0.054263461381196976,
+            "execute_SELECT": 0.047697451896965504,
+            "execute_UPDATE": 0.02395536983385682,
+            "fetch_INSERT": 0.01378212682902813,
+            "fetch_SELECT": 0.012049280572682619,
+            "fetch_UPDATE": 0.0047652944922447205,
+            "transactions": 1722,
+            "worker_cpu": 0.2750133949998599,
+            "worker_wall": 1.4094072305597365
+          },
+          "verified_fetches": 80451
+        },
+        {
+          "all_transactions": 2022,
+          "final_database_matches": true,
+          "mode": "threaded",
+          "scope": "prefix_through_startup",
+          "seconds_all_transactions": 1.9244440221227705,
+          "startup": {
+            "execute_BEGIN": 0.010128352791070938,
+            "execute_COMMIT": 1.1434510769322515,
+            "execute_DELETE": 0.01426410349085927,
+            "execute_INSERT": 0.051819181535393,
+            "execute_SELECT": 0.046302678529173136,
+            "execute_UPDATE": 0.02334447856992483,
+            "fetch_INSERT": 0.013967315666377544,
+            "fetch_SELECT": 0.012527113314718008,
+            "fetch_UPDATE": 0.004863188602030277,
+            "transactions": 1722,
+            "with_handoff": 1.4586657821200788,
+            "worker_cpu": 0.27242263899999974,
+            "worker_wall": 1.3484535105526447
+          },
+          "verified_fetches": 20734
+        }
+      ],
+      "window_seconds": 14.960000038146973,
+      "worker_count": 1722,
+      "worker_cpu": 1.6855720429999999,
+      "worker_wall": 11.439153403043747,
+      "writer_phases": {
+        "copied_result_to_writer_report": 1.4798282980918884,
+        "done_observation_to_transfer_request": 0.007426481228321791,
+        "submission": 0.5680004088208079,
+        "transfer_callback": 0.017873108386993408,
+        "transfer_request_to_callback": 1.4370489194989204,
+        "worker": 11.439153403043747,
+        "worker_to_done_observation": 0.01742737926542759
+      }
+    },
+    {
+      "analysis_file": "transaction-path/analysis200-all-waits.log",
+      "cohort": "complete writer operations starting inside startup window",
+      "native_aggregate_scope": "Outer writer-operation wrapper, including diagnostic bookkeeping; four intercepted APIs, not all possible off-CPU time",
+      "native_all_wait_calls": {
+        "cond_timedwait": 98212,
+        "cond_wait": 0,
+        "fdatasync": 0,
+        "fsync": 1379
+      },
+      "native_all_wait_seconds": {
+        "cond_timedwait": 7.693464986048639,
+        "cond_wait": 0.0,
+        "fdatasync": 0.0,
+        "fsync": 2.2984112869016826
+      },
+      "replay": [
+        {
+          "all_transactions": 10508,
+          "final_database_matches": true,
+          "mode": "direct",
+          "scope": "full_run",
+          "seconds_all_transactions": 10.508924630004913,
+          "startup": {
+            "execute_BEGIN": 0.008077582344412804,
+            "execute_COMMIT": 1.136178744956851,
+            "execute_DELETE": 0.013852603267878294,
+            "execute_INSERT": 0.0535705741494894,
+            "execute_SELECT": 0.046765836887061596,
+            "execute_UPDATE": 0.024176969658583403,
+            "fetch_INSERT": 0.013827387243509293,
+            "fetch_SELECT": 0.011925118509680033,
+            "fetch_UPDATE": 0.004824514035135508,
+            "transactions": 1719,
+            "worker_cpu": 0.2706526270000893,
+            "worker_wall": 1.340203597676009
+          },
+          "verified_fetches": 80407
+        },
+        {
+          "all_transactions": 2023,
+          "final_database_matches": true,
+          "mode": "threaded",
+          "scope": "prefix_through_startup",
+          "seconds_all_transactions": 1.9625064926221967,
+          "startup": {
+            "execute_BEGIN": 0.009704621974378824,
+            "execute_COMMIT": 1.2105027218349278,
+            "execute_DELETE": 0.013929965905845165,
+            "execute_INSERT": 0.05151708284392953,
+            "execute_SELECT": 0.04585740389302373,
+            "execute_UPDATE": 0.023158501833677292,
+            "fetch_INSERT": 0.014129042625427246,
+            "fetch_SELECT": 0.012424760963767767,
+            "fetch_UPDATE": 0.004889890551567078,
+            "transactions": 1719,
+            "with_handoff": 1.519889404065907,
+            "worker_cpu": 0.27351146500000106,
+            "worker_wall": 1.4135946668684483
+          },
+          "verified_fetches": 20859
+        }
+      ],
+      "window_seconds": 14.583999872207642,
+      "worker_count": 1719,
+      "worker_cpu": 1.2722474989999994,
+      "worker_wall": 11.130235767457634,
+      "writer_phases": {
+        "copied_result_to_writer_report": 1.5522136013023555,
+        "done_observation_to_transfer_request": 0.007213416043668985,
+        "submission": 0.5532806236296892,
+        "transfer_callback": 0.017219177447259426,
+        "transfer_request_to_callback": 1.4108457854017615,
+        "worker": 11.130235767457634,
+        "worker_to_done_observation": 0.01843590848147869
+      }
+    }
+  ]
+}

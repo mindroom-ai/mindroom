@@ -28,6 +28,7 @@ import asyncio
 import atexit
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -40,6 +41,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.shell_execution import (
@@ -63,10 +65,37 @@ _SUPERVISOR_TERMINATE_WAIT_SECONDS = 5.0
 _SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
 _RUN_RESPONSE_GRACE_SECONDS = 30.0
 _STDERR_TAIL_BYTES = 4096
+_FINISHED_STATUS_RE = re.compile(r"^Status: FINISHED \(exit code (-?\d+)(?:,|\))")
 
 
 class ShellSupervisorStartupError(RuntimeError):
     """The shell supervisor process failed to start or become ready."""
+
+
+def background_script_supervision_supported() -> bool:
+    """Return whether hard supervisor death also kills its script process group."""
+    return sys.platform.startswith("linux")
+
+
+@dataclass(frozen=True, slots=True)
+class _ShellSupervisorStatus:
+    """Canonical interpretation of one shell-supervisor status reply."""
+
+    state: Literal["running", "exited", "unknown", "error"]
+    output: str
+    exit_code: int | None = None
+
+
+def parse_shell_supervisor_status(message: str) -> _ShellSupervisorStatus:
+    """Parse one supervisor status reply identically in every adapter."""
+    if message.startswith("Status: RUNNING"):
+        return _ShellSupervisorStatus(state="running", output=message)
+    finished = _FINISHED_STATUS_RE.match(message)
+    if finished is not None:
+        return _ShellSupervisorStatus(state="exited", output=message, exit_code=int(finished.group(1)))
+    if message.startswith("Error: Unknown handle"):
+        return _ShellSupervisorStatus(state="unknown", output=message)
+    return _ShellSupervisorStatus(state="error", output=message)
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +105,7 @@ class ShellSupervisorStartupError(RuntimeError):
 
 async def _handle_run(
     registry: dict[str, ProcessRecord],
+    handle_reservations: set[str],
     payload: dict[str, object],
     reader: asyncio.StreamReader,
 ) -> str | None:
@@ -85,15 +115,30 @@ async def _handle_run(
     if not isinstance(argv_payload, list) or not isinstance(env_payload, dict):
         msg = "run request requires an 'argv' list and an 'env' object"
         raise TypeError(msg)
+    handle_payload = payload.get("handle")
+    if handle_payload is not None and not isinstance(handle_payload, str):
+        msg = "run request 'handle' must be a string"
+        raise TypeError(msg)
+    command_argv = [str(item) for item in argv_payload]
+    if handle_payload is not None and background_script_supervision_supported():
+        command_argv = [
+            sys.executable,
+            "-m",
+            "mindroom.parent_death_exec",
+            str(os.getpid()),
+            *command_argv,
+        ]
     run_task = asyncio.create_task(
         run_command(
             registry,
             namespace=str(payload["namespace"]),
-            argv=[str(item) for item in argv_payload],
+            argv=command_argv,
             env={str(key): str(value) for key, value in env_payload.items()},
             cwd=str(payload["cwd"]) if payload.get("cwd") is not None else None,
             tail=int(payload["tail"]),  # ty: ignore[invalid-argument-type]
             timeout=float(payload["timeout"]),  # ty: ignore[invalid-argument-type]
+            handle=handle_payload,
+            handle_reservations=handle_reservations,
         ),
     )
     # EOF before the run response means the client (a per-request tool
@@ -122,6 +167,7 @@ async def _handle_run(
 
 async def _handle_connection(
     registry: dict[str, ProcessRecord],
+    handle_reservations: set[str],
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
@@ -132,7 +178,7 @@ async def _handle_connection(
         payload = json.loads(line)
         op = payload.get("op")
         if op == "run":
-            message = await _handle_run(registry, payload, reader)
+            message = await _handle_run(registry, handle_reservations, payload, reader)
             if message is None:
                 return
         elif op == "check":
@@ -162,12 +208,13 @@ async def _handle_connection(
 
 async def _serve(socket_path: str) -> int:
     registry: dict[str, ProcessRecord] = {}
+    handle_reservations: set[str] = set()
     parent_pid = os.getppid()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, stop_event.set)
     server = await asyncio.start_unix_server(
-        partial(_handle_connection, registry),
+        partial(_handle_connection, registry, handle_reservations),
         path=socket_path,
         limit=_REQUEST_LIMIT_BYTES,
     )
@@ -208,6 +255,7 @@ async def run_command_via_supervisor(
     cwd: str | None,
     tail: int,
     timeout: float,  # noqa: ASYNC109
+    handle: str | None = None,
 ) -> str:
     """Run one shell command through the supervisor and return its message."""
     request = {
@@ -219,6 +267,8 @@ async def run_command_via_supervisor(
         "tail": tail,
         "timeout": timeout,
     }
+    if handle is not None:
+        request["handle"] = handle
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
     except OSError as exc:

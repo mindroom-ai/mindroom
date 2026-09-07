@@ -1,5 +1,8 @@
 """Tests for comprehensive event relation analysis."""
 
+import pytest
+
+from mindroom.event_journal import replacement_target, thread_root
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source, reply_to_event_id_from_content
 
 
@@ -185,6 +188,37 @@ class TestEventRelations:
 
             assert info.is_reply is False
             assert info.reply_to_event_id is None
+
+    @pytest.mark.parametrize("malformed_target", ["", 7, None, ["$root:localhost"]])
+    def test_relation_target_that_names_no_event_matches_the_journal(
+        self,
+        malformed_target: object,
+    ) -> None:
+        """A relation target the journal refuses must not become a relation here.
+
+        ``event_journal.projection`` reads the same raw relation and keeps only a
+        non-empty string, so any looser answer places a turn in a thread -- or against
+        an edit or reaction target -- that the durable row admitting the same event
+        says does not exist.
+        """
+        for rel_type in ("m.thread", "m.replace", "m.annotation", "m.reference"):
+            content = {"m.relates_to": {"rel_type": rel_type, "event_id": malformed_target}}
+            info = EventInfo.from_event({"type": "m.room.message", "content": content})
+
+            assert info.relates_to_event_id is None
+            assert info.thread_id is None
+            assert info.original_event_id is None
+            assert info.reaction_target_event_id is None
+            assert info.next_related_event_id("$self:localhost") is None
+            # The journal projection is the authority this must agree with.
+            assert thread_root(content) is None
+            assert replacement_target(content) is None
+
+        edit_content = {
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original:localhost"},
+            "m.new_content": {"m.relates_to": {"rel_type": "m.thread", "event_id": malformed_target}},
+        }
+        assert EventInfo.from_event({"type": "m.room.message", "content": edit_content}).thread_id_from_edit is None
 
     def test_reply_to_event_id_from_content_extracts_only_string_reply_targets(self) -> None:
         """Reply target extraction should share the Matrix relation traversal."""

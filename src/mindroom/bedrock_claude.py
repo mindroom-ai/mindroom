@@ -42,8 +42,8 @@ class MindRoomBedrockClaude(ClaudeProviderCompat, AwsBedrockClaude):
         return client
 
     def get_async_client(self) -> AsyncAnthropicBedrockMantle:  # ty: ignore[invalid-method-override]  # Agno types only legacy clients
-        """Return an asynchronous Mantle client with current AWS credentials."""
-        if not self.session and self.async_client is not None and not self.async_client.is_closed():
+        """Return this model lifetime's asynchronous Mantle client."""
+        if self.async_client is not None and not self.async_client.is_closed():
             return self.async_client
 
         client_params = self._get_client_params()
@@ -54,6 +54,5 @@ class MindRoomBedrockClaude(ClaudeProviderCompat, AwsBedrockClaude):
                 logger.warning("bedrock_claude_async_http_client_ignored")
 
         client = AsyncAnthropicBedrockMantle(**client_params)
-        if not self.session:
-            self.async_client = client
+        self.async_client = client
         return client

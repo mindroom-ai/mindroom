@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
+from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -15,21 +16,10 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
-from mindroom.dispatch_handoff import (
-    DispatchEvent,
-    DispatchIngressMetadata,
-    DispatchPayloadMetadata,
-    MediaDispatchEvent,
-    TextDispatchEvent,
-    merge_payload_metadata,
-    payload_metadata_from_source,
-)
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.handled_turns import TurnRecord
-from mindroom.inbound_turn_normalizer import TextNormalizationRequest
-from mindroom.matrix.media import is_matrix_media_dispatch_event
+from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
+from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.response_admission import ResponseAdmissionRefusedError
+from mindroom.response_admission import ResponseAdmissionRefusedError, admitted_response_decision
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
@@ -47,13 +37,18 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.command_turn_executor import CommandTurnExecutor
+    from mindroom.coalescing_batch import PreparedTurn
     from mindroom.commands.parsing import Command
+    from mindroom.dispatch_handoff import (
+        DispatchEvent,
+        DispatchIngressMetadata,
+        MediaDispatchEvent,
+        PreparedIngress,
+    )
+    from mindroom.handled_turns import TurnRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_controller import TurnController
     from mindroom.turn_policy import PreparedDispatch, ResponseAction
-    from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 
 
 class _TurnPlan(Protocol):
@@ -74,8 +69,8 @@ class _ReplayGuard(Protocol):
 
 @dataclass(frozen=True)
 class _PreparedTextDispatch:
-    event: TextDispatchEvent
-    payload_metadata: DispatchPayloadMetadata | None
+    turn: PreparedTurn
+    event: PreparedIngress
     handled_turn: TurnRecord
     command: Command | None
     dispatch: PreparedDispatch
@@ -83,40 +78,13 @@ class _PreparedTextDispatch:
     dispatch_started_at: float
 
 
-def _turn_claim_for_dispatch(
-    controller: TurnController,
-    raw_event: TextDispatchEvent,
-    handled_turn: TurnRecord | None,
-) -> TurnRecord:
-    if handled_turn is not None:
-        return handled_turn
-    routed_alias = controller.deps.ingress.router_relay_original_event_id(raw_event)
-    return TurnRecord.create(
-        [raw_event.event_id],
-        discovery_event_ids=(routed_alias,) if routed_alias is not None else (),
-        completed=False,
-    )
-
-
 async def dispatch_text_message(
     controller: TurnController,
-    room: nio.MatrixRoom,
-    raw_event: TextDispatchEvent,
-    requester_user_id: str,
-    *,
-    command_executor: CommandTurnExecutor,
-    visible_responses: VisibleResponseReconciler,
-    media_events: list[MediaDispatchEvent] | None = None,
-    handled_turn: TurnRecord | None = None,
-    queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
-    ingress_metadata: DispatchIngressMetadata | None = None,
-    payload_metadata: DispatchPayloadMetadata | None = None,
-    trust_hydrated_internal_metadata: bool | None = None,
-    current_prompt_is_structured: bool = False,
+    turn: PreparedTurn,
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
-    turn_claim = _turn_claim_for_dispatch(controller, raw_event, handled_turn)
-    if not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
+    turn_claim = turn.handled_turn
+    if not controller.deps.turn_store.try_claim_turn(turn_claim):
         return
     claim_transferred = False
 
@@ -126,134 +94,83 @@ async def dispatch_text_message(
 
     timing_scope_token = None
     try:
-        dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
+        dispatch_timing = get_dispatch_pipeline_timing(turn.event.source)
         prepared = await _prepare_text_dispatch(
             controller,
-            room,
-            raw_event,
-            requester_user_id,
-            media_events=media_events,
-            handled_turn=turn_claim,
-            ingress_metadata=ingress_metadata,
-            payload_metadata=payload_metadata,
-            trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
-            current_prompt_is_structured=current_prompt_is_structured,
+            turn,
             dispatch_timing=dispatch_timing,
         )
         if prepared is None:
             return
         timing_scope_token = timing_scope_context.set(event_timing_scope(prepared.event.event_id))
-        if await _blocked_before_plan(
-            controller,
-            room,
-            prepared,
-            command_executor=command_executor,
-            visible_responses=visible_responses,
-            requester_user_id=requester_user_id,
+        async with admitted_response_decision(
+            controller.deps.runtime.response_admission_gate,
+            controller.deps.response_runner.wait_for_admission_or_shutdown,
         ):
-            return
-
-        message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(
-            prepared,
-            media_events=media_events,
-            requester_user_id=requester_user_id,
-        )
-        if dispatch_timing is not None:
-            dispatch_timing.mark("dispatch_plan_start")
-        plan = await controller.deps.turn_policy.plan_turn(
-            room,
-            prepared.event,
-            prepared.dispatch,
-            is_dm=await is_dm_room(controller._client(), room.room_id),
-            has_active_response_for_target=controller.deps.response_runner.has_active_response_for_target,
-            extra_content=router_extra_content or None,
-            media_events=media_events,
-            router_event=media_events[0]
-            if media_events and len(prepared.handled_turn.source_event_ids) == 1
-            else raw_event,
-        )
-        if dispatch_timing is not None:
-            dispatch_timing.mark("dispatch_plan_ready")
-        await _apply_turn_plan(
-            controller,
-            room,
-            prepared,
-            plan,
-            visible_responses=visible_responses,
-            message_attachment_ids=message_attachment_ids,
-            trusted_attachment_ids=trusted_attachment_ids,
-            media_events=media_events,
-            queued_notice_reservation=queued_notice_reservation,
-            turn_claim=turn_claim,
-            mark_claim_transferred=mark_claim_transferred,
-        )
+            if not controller.deps.turn_policy.can_reply_to_sender_in_room(
+                turn.requester_user_id,
+                turn.room.room_id,
+            ):
+                await controller.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
+                return
+            if await _blocked_before_plan(
+                controller,
+                turn.room,
+                prepared,
+            ):
+                return
+            message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(
+                prepared,
+                media_events=list(turn.media_events) or None,
+                requester_user_id=turn.requester_user_id,
+            )
+            if dispatch_timing is not None:
+                dispatch_timing.mark("dispatch_plan_start")
+            plan = await controller.deps.turn_policy.plan_turn(
+                turn.room,
+                prepared.event,
+                prepared.dispatch,
+                is_dm=await is_dm_room(controller._client(), turn.room.room_id),
+                has_active_response_for_target=controller.deps.response_runner.has_active_response_for_target,
+                extra_content=router_extra_content or None,
+                media_events=list(turn.media_events) or None,
+                router_event=turn.media_events[0]
+                if turn.media_events and len(prepared.handled_turn.source_event_ids) == 1
+                else turn.event,
+            )
+            if dispatch_timing is not None:
+                dispatch_timing.mark("dispatch_plan_ready")
+            await _apply_turn_plan(
+                controller,
+                turn.room,
+                prepared,
+                plan,
+                message_attachment_ids=message_attachment_ids,
+                trusted_attachment_ids=trusted_attachment_ids,
+                media_events=list(turn.media_events) or None,
+                turn_claim=turn_claim,
+                mark_claim_transferred=mark_claim_transferred,
+            )
     finally:
         if not claim_transferred:
             controller.deps.turn_store.release_pending_turn_claim(turn_claim)
-        if queued_notice_reservation is not None:
-            queued_notice_reservation.cancel()
         if timing_scope_token is not None:
             timing_scope_context.reset(timing_scope_token)
 
 
-def _try_claim_turn(
-    controller: TurnController,
-    turn_claim: TurnRecord,
-    queued_notice_reservation: QueuedHumanNoticeReservation | None,
-) -> bool:
-    """Claim dispatch ownership or cancel the reservation that cannot be consumed."""
-    if controller.deps.turn_store.try_claim_turn(turn_claim):
-        return True
-    if queued_notice_reservation is not None:
-        queued_notice_reservation.cancel()
-    return False
-
-
 async def _prepare_text_dispatch(
     controller: TurnController,
-    room: nio.MatrixRoom,
-    raw_event: TextDispatchEvent,
-    requester_user_id: str,
+    turn: PreparedTurn,
     *,
-    media_events: list[MediaDispatchEvent] | None,
-    handled_turn: TurnRecord | None,
-    ingress_metadata: DispatchIngressMetadata | None,
-    payload_metadata: DispatchPayloadMetadata | None,
-    trust_hydrated_internal_metadata: bool | None,
-    current_prompt_is_structured: bool,
     dispatch_timing: DispatchPipelineTiming | None,
 ) -> _PreparedTextDispatch | None:
-    event = await controller.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=raw_event))
-    hydrated_payload_metadata = payload_metadata_from_source(
-        event.source,
-        trust_internal_metadata=(
-            controller.deps.ingress.should_trust_internal_payload_metadata(event)
-            if trust_hydrated_internal_metadata is None
-            else trust_hydrated_internal_metadata
-        ),
-    )
-    payload_metadata = (
-        hydrated_payload_metadata
-        if payload_metadata is None
-        else merge_payload_metadata(
-            payload_metadata,
-            hydrated_payload_metadata,
-            trust_hydrated_internal_metadata=trust_hydrated_internal_metadata
-            if trust_hydrated_internal_metadata is not None
-            else controller.deps.ingress.should_trust_internal_payload_metadata(event),
-        )
-    )
+    event = turn.event
     attach_dispatch_pipeline_timing(event.source, dispatch_timing)
     if dispatch_timing is not None:
         dispatch_timing.mark("dispatch_start")
     dispatch_started_at = time.monotonic()
 
-    if handled_turn is None:
-        handled_turn = TurnRecord.create([event.event_id])
-    elif raw_event is not event and event.event_id in handled_turn.source_event_ids:
-        refreshed_prompts = dict(handled_turn.source_event_prompts or {})
-        refreshed_prompts[event.event_id] = event.body
-        handled_turn = canonicalize_turn_record(handled_turn, source_event_prompts=refreshed_prompts)
+    handled_turn = turn.handled_turn
     routed_original_event_id = controller.deps.ingress.router_relay_original_event_id(event)
     if routed_original_event_id is not None:
         # Keep the routed turn discoverable by the human message the router
@@ -264,32 +181,34 @@ async def _prepare_text_dispatch(
             discovery_event_ids=(*handled_turn.discovery_event_ids, routed_original_event_id),
         )
 
-    command = _command_control_input(
+    command = _parsed_command_for_event(
         controller,
         event,
-        media_events=media_events,
-        ingress_metadata=ingress_metadata,
+        media_events=list(turn.media_events) or None,
+        ingress_metadata=turn.ingress,
     )
     if dispatch_timing is not None:
         dispatch_timing.mark("dispatch_prepare_start")
     prepared = await controller._prepare_dispatch(
-        room,
+        turn.room,
         event,
-        requester_user_id,
+        turn.requester_user_id,
         event_label="message",
         handled_turn=handled_turn,
-        ingress_metadata=ingress_metadata,
-        payload_metadata=payload_metadata,
+        ingress_metadata=turn.ingress,
+        payload_metadata=turn.payload,
         use_command_context=command is not None,
-        current_prompt_is_structured=current_prompt_is_structured,
+        current_prompt_is_structured=turn.current_prompt_is_structured,
     )
     if dispatch_timing is not None:
         dispatch_timing.mark("dispatch_prepare_ready")
     if prepared is None:
         return None
+    if command is not None and prepared.dispatch.envelope.source_kind == VOICE_SOURCE_KIND:
+        command = None
     return _PreparedTextDispatch(
+        turn=turn,
         event=event,
-        payload_metadata=payload_metadata,
         handled_turn=canonicalize_turn_record(
             handled_turn,
             requester_id=prepared.dispatch.requester_user_id,
@@ -302,43 +221,34 @@ async def _prepare_text_dispatch(
     )
 
 
-def _command_control_input(
+def _parsed_command_for_event(
     controller: TurnController,
-    event: TextDispatchEvent,
+    event: PreparedIngress,
     *,
     media_events: list[MediaDispatchEvent] | None,
     ingress_metadata: DispatchIngressMetadata | None,
 ) -> Command | None:
     if media_events:
         return None
-    source_kind = ingress_metadata.source_kind if ingress_metadata is not None else MESSAGE_SOURCE_KIND
-    return controller.deps.ingress.command_control_input(event, source_kind=source_kind)
-
-
-def _turn_sources_all_from_requester(handled_turn: TurnRecord, requester_user_id: str) -> bool:
-    """Return whether every replayable source in one turn was sent by ``requester_user_id``.
-
-    Whole-turn suppression settles every source in a coalesced batch, so it is only safe when the
-    turn provably belongs to that one requester, and a source the record cannot attribute fails
-    closed. Redacted sources are excluded because they own no reply.
-    """
-    return all(
-        handled_turn.requester_id_for_source(source_event_id) == requester_user_id
-        for source_event_id in handled_turn.replay_source_event_ids
-    )
+    if ingress_metadata is not None and ingress_metadata.source_kind == VOICE_SOURCE_KIND:
+        return None
+    if is_audio_message_event(event) or is_voice_event(
+        event,
+        sender_is_trusted=controller.deps.ingress.sender_is_trusted_for_ingress_metadata,
+    ):
+        return None
+    return command_parser.parse(event.body)
 
 
 async def _blocked_before_plan(
     controller: TurnController,
     room: nio.MatrixRoom,
     prepared: _PreparedTextDispatch,
-    *,
-    command_executor: CommandTurnExecutor,
-    visible_responses: VisibleResponseReconciler,
-    requester_user_id: str,
 ) -> bool:
+    requester_user_id = prepared.turn.requester_user_id
+    visible_responses = controller.deps.visible_responses
     if prepared.command is not None:
-        command_owned = await command_executor.execute_if_owned(
+        command_owned = await controller.deps.command_executor.execute_if_owned(
             room=room,
             event=prepared.event,
             requester_user_id=requester_user_id,
@@ -358,17 +268,15 @@ async def _blocked_before_plan(
 
     may_be_superseded = (
         prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
-        and _turn_sources_all_from_requester(prepared.handled_turn, requester_user_id)
+        and prepared.handled_turn.replay_sources_all_from_requester(requester_user_id)
     )
-    current_turn_event_ids = prepared.handled_turn.indexed_event_ids
     if prepared.replay_guard.degraded:
-        skips_turn = await controller._has_newer_unresponded_cached_thread_event(
+        skips_turn = await controller._has_newer_unresponded_journal_thread_event(
             room_id=room.room_id,
             event=prepared.event,
             requester_user_id=requester_user_id,
             thread_id=prepared.replay_guard.thread_id,
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
-            current_turn_event_ids=current_turn_event_ids,
         )
         if may_be_superseded and not skips_turn:
             controller.deps.logger.warning(
@@ -384,10 +292,9 @@ async def _blocked_before_plan(
             requester_user_id,
             prepared.replay_guard.history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
-            current_turn_event_ids=current_turn_event_ids,
         )
     if skips_turn:
-        controller.deps.turn_store.record_turn(prepared.handled_turn)
+        await visible_responses.settle_source_events_ignored(prepared.handled_turn)
     return skips_turn
 
 
@@ -397,25 +304,23 @@ def _attachment_parts(
     media_events: list[MediaDispatchEvent] | None,
     requester_user_id: str,
 ) -> tuple[list[str], list[str], dict[str, Any]]:
-    payload_metadata = prepared.payload_metadata
+    payload_metadata = prepared.turn.payload
     message_attachment_ids = (
         list(payload_metadata.attachment_ids)
-        if payload_metadata is not None and payload_metadata.attachment_ids is not None
+        if payload_metadata.attachment_ids is not None
         else parse_attachment_ids_from_event_source(prepared.event.source)
     )
     trusted_attachment_ids = (
-        list(payload_metadata.attachment_ids)
-        if payload_metadata is not None and payload_metadata.attachment_ids is not None
-        else []
+        list(payload_metadata.attachment_ids) if payload_metadata.attachment_ids is not None else []
     )
     extra_content: dict[str, Any] = {}
     if message_attachment_ids:
         extra_content[ATTACHMENT_IDS_KEY] = message_attachment_ids
-    if payload_metadata is not None and payload_metadata.original_sender is not None:
+    if payload_metadata.original_sender is not None:
         extra_content[ORIGINAL_SENDER_KEY] = payload_metadata.original_sender
-    if payload_metadata is not None and payload_metadata.raw_audio_fallback:
+    if payload_metadata.raw_audio_fallback:
         extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
-    if payload_metadata is not None and payload_metadata.voice_transcript:
+    if payload_metadata.voice_transcript:
         extra_content[VOICE_TRANSCRIPT_KEY] = True
     if media_events and ORIGINAL_SENDER_KEY not in extra_content:
         extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
@@ -424,25 +329,30 @@ def _attachment_parts(
     return message_attachment_ids, trusted_attachment_ids, extra_content
 
 
-async def _apply_turn_plan(
+def _ensure_response_admission_open(controller: TurnController) -> None:
+    """Refuse response planning after orderly shutdown closes task ownership."""
+    if controller.deps.response_runner.process_shutdown_started:
+        raise ResponseAdmissionRefusedError
+
+
+async def _apply_turn_plan(  # noqa: C901
     controller: TurnController,
     room: nio.MatrixRoom,
     prepared: _PreparedTextDispatch,
     plan: _TurnPlan,
     *,
-    visible_responses: VisibleResponseReconciler,
     message_attachment_ids: list[str],
     trusted_attachment_ids: list[str],
     media_events: list[MediaDispatchEvent] | None,
-    queued_notice_reservation: QueuedHumanNoticeReservation | None,
     turn_claim: TurnRecord,
     mark_claim_transferred: Callable[[], None],
 ) -> None:
+    visible_responses = controller.deps.visible_responses
     if plan.kind == "ignore":
         if plan.ignore_reason == "router":
             router_outcome = controller._router_handled_turn_outcome(prepared.handled_turn)
             if router_outcome is not None:
-                controller.deps.turn_store.record_responded_turn(router_outcome)
+                await controller.deps.turn_store.record_responded_turn(router_outcome)
             else:
                 await visible_responses.settle_source_events_ignored(prepared.handled_turn)
         else:
@@ -452,28 +362,34 @@ async def _apply_turn_plan(
         await _execute_route_plan(controller, room, prepared, plan, media_events=media_events)
         return
 
-    assert plan.response_action is not None
-    handled_turn = prepared.handled_turn
+    response_action = plan.response_action
+    assert response_action is not None
+    _ensure_response_admission_open(controller)
     reconcile_visible_response = controller.deps.turn_store.has_pending_response_intent(
         prepared.handled_turn.source_event_ids,
     )
     response_history_scope = (
         controller.deps.turn_store.response_history_scope(
-            plan.response_action,
+            response_action,
             requester_user_id=prepared.dispatch.requester_user_id,
         )
-        if plan.response_action.kind in {"individual", "team"}
+        if response_action.kind in {"individual", "team"}
         else None
     )
+
+    payload_inputs = DispatchPayloadInputs(
+        message_attachment_ids=tuple(message_attachment_ids),
+        trusted_attachment_ids=tuple(trusted_attachment_ids),
+        media_events=tuple(media_events or ()),
+        raw_audio_fallback=prepared.turn.payload.raw_audio_fallback is True,
+        voice_transcript=prepared.turn.payload.voice_transcript is True,
+    )
     handled_turn = controller.deps.turn_store.attach_response_context(
-        handled_turn,
+        prepared.handled_turn,
         history_scope=response_history_scope,
         conversation_target=prepared.dispatch.target,
     )
-    pending_turn = await asyncio.to_thread(
-        controller.deps.turn_store.record_pending_turn,
-        handled_turn,
-    )
+    pending_turn = await controller.deps.turn_store.record_pending_turn(handled_turn)
     if pending_turn is None or pending_turn.completed:
         return
     if pending_turn.redacted_source_event_ids:
@@ -481,48 +397,51 @@ async def _apply_turn_plan(
         return
     handled_turn = pending_turn
 
-    payload_inputs = DispatchPayloadInputs(
-        message_attachment_ids=tuple(message_attachment_ids),
-        trusted_attachment_ids=tuple(trusted_attachment_ids),
-        media_events=tuple(media_events or ()),
-        raw_audio_fallback=(
-            prepared.payload_metadata.raw_audio_fallback is True if prepared.payload_metadata is not None else False
-        ),
-        voice_transcript=(
-            prepared.payload_metadata.voice_transcript is True if prepared.payload_metadata is not None else False
-        ),
-    )
-
     # The inbox handoff is complete once the runner takes the conversation's
     # response lock; the response itself keeps running on a runner-owned task.
     response_started = asyncio.Event()
+    response_claim_released = False
+
+    def release_response_claim() -> None:
+        nonlocal response_claim_released
+        if response_claim_released:
+            return
+        response_claim_released = True
+        controller.deps.turn_store.release_pending_turn_claim(turn_claim)
+
+    async def response_recovery_ready() -> bool:
+        if prepared.dispatch.target.resolved_thread_id is not None and controller.deps.interrupted_turn_rooms.contains(
+            prepared.event.event_id,
+        ):
+            return True
+        return await controller.deps.response_recovery_ready(handled_turn)
+
     response_task = controller.deps.response_runner.track_inbox_response(
-        _run_claimed_response(
+        _run_lazily_claimed_response(
             controller,
             turn_claim,
-            controller._execute_response_action(
+            lambda: controller._execute_response_action(
                 room,
                 prepared.event,
                 prepared.dispatch,
-                plan.response_action,
+                response_action,
                 payload_inputs,
                 processing_log="Processing",
                 dispatch_started_at=prepared.dispatch_started_at,
                 handled_turn=handled_turn,
                 matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
-                queued_notice_reservation=queued_notice_reservation,
                 on_lifecycle_lock_acquired=response_started.set,
                 reconcile_visible_response=reconcile_visible_response,
             ),
+            release_response_claim,
         ),
         name=f"inbox_response:{prepared.event.event_id}",
-        recovery_proof_ready=lambda: (
-            prepared.dispatch.target.resolved_thread_id is not None
-            and controller.deps.interrupted_turn_rooms.contains(prepared.event.event_id)
-        ),
+        recovery_proof_ready=response_recovery_ready,
         on_failure=lambda: (
             controller.deps.retry_dispatch_sources(handled_turn.source_event_ids) if response_started.is_set() else None
         ),
+        on_terminal=release_response_claim,
+        source_event_ids=handled_turn.source_event_ids,
     )
     # Ownership moves synchronously after task creation. If this dispatch task
     # is cancelled while waiting for the lifecycle lock, its finally block must
@@ -538,8 +457,7 @@ async def _apply_turn_plan(
     # belong to the runner-owned task. Pre-lock CANCELLATION is
     # deliberately NOT surfaced: this coroutine was not itself cancelled,
     # and re-raising CancelledError here would corrupt the gate drain's
-    # own cancellation state. The queued-notice reservation still cancels
-    # in dispatch_text_message's finally, which is the cleanup contract.
+    # own cancellation state.
     if response_task.done() and not response_task.cancelled() and not response_started.is_set():
         response_task.result()
 
@@ -548,12 +466,26 @@ async def _run_claimed_response(
     controller: TurnController,
     turn_claim: TurnRecord,
     response: Awaitable[None],
+    release_claim: Callable[[], None] | None = None,
 ) -> None:
     """Release exclusive response ownership after every terminal path."""
     try:
         await response
     finally:
-        controller.deps.turn_store.release_pending_turn_claim(turn_claim)
+        if release_claim is None:
+            controller.deps.turn_store.release_pending_turn_claim(turn_claim)
+        else:
+            release_claim()
+
+
+async def _run_lazily_claimed_response(
+    controller: TurnController,
+    turn_claim: TurnRecord,
+    response_factory: Callable[[], Awaitable[None]],
+    release_claim: Callable[[], None],
+) -> None:
+    """Create a claimed response only after its runner task starts."""
+    await _run_claimed_response(controller, turn_claim, response_factory(), release_claim)
 
 
 async def _run_admitted_router_relay(
@@ -561,14 +493,11 @@ async def _run_admitted_router_relay(
     relay: Callable[[], Awaitable[None]],
 ) -> None:
     """Keep config application outside one router selection and relay delivery."""
-    admission_gate = controller.deps.runtime.response_admission_gate
-    while not admission_gate.admit():
-        if not await controller.deps.response_runner.wait_for_admission_or_shutdown():
-            raise ResponseAdmissionRefusedError
-    try:
+    async with admitted_response_decision(
+        controller.deps.runtime.response_admission_gate,
+        controller.deps.response_runner.wait_for_admission_or_shutdown,
+    ):
         await relay()
-    finally:
-        admission_gate.release()
 
 
 async def _execute_route_plan(
@@ -625,8 +554,6 @@ def _tracked_route_turn(
 ) -> TurnRecord | None:
     if single_direct_media_route:
         return None
-    if prepared.handled_turn.discovery_event_ids:
-        return prepared.handled_turn
     if not prepared.handled_turn.is_coalesced and (
         not prepared.handled_turn.source_event_ids
         or prepared.handled_turn.source_event_ids[0] == prepared.event.event_id

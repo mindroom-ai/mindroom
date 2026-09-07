@@ -71,6 +71,13 @@ if TYPE_CHECKING:
             required=False,
             default="2.0",
         ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+        ),
     ],
     dependencies=["requests"],
     docs_url="https://docs.agno.com/tools/toolkits/others/bitbucket",

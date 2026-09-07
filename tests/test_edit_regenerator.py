@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import EventJournalStore
     from mindroom.hooks import MessageEnvelope
 
 AGENT_NAME = "assistant"
@@ -122,6 +123,7 @@ def _tagged_prompt(source_event_ids: tuple[str, ...], prompts: dict[str, str]) -
         prompts,
         _source_metadata(*source_event_ids),
         timestamp_formatter=lambda _timestamp_ms: None,
+        member_display_names={},
     )
     assert prompt is not None
     return prompt
@@ -190,10 +192,8 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None, receipt_order: i
 
     turn_store.record_turn.side_effect = record_turn
     turn_store.record_responded_turn.side_effect = record_turn
-    turn_store.record_turn_durably.side_effect = record_turn
     turn_store.build_run_metadata.return_value = dict(RUN_METADATA)
     turn_store.prepare_edit_response_source.return_value = False
-    turn_store.event_is_redacted.return_value = False
 
     ingress_hook_runner = MagicMock(spec=IngressHookRunner)
     ingress_hook_runner.emit_message_received_hooks.return_value = False
@@ -248,37 +248,11 @@ def _assert_no_regeneration(harness: _Harness) -> None:
 
 
 @pytest.mark.asyncio
-async def test_edit_redacted_before_processing_is_ignored(tmp_path: Path) -> None:
-    """A durable revision tombstone must prevent a delayed edit from becoming visible."""
-    harness = _harness(tmp_path, turn_record=_turn_record())
-    harness.turn_store.event_is_redacted.return_value = True
-    event, event_info = _edit_event()
-
-    await _handle_edit(harness, event, event_info)
-
-    _assert_no_regeneration(harness)
-    harness.resolver.extract_message_context.assert_not_awaited()
-    assert harness.regenerator.source_for_inflight_revision_event_id(event.event_id) is None
-
-
-@pytest.mark.asyncio
-async def test_edit_redacted_before_mailbox_entry_is_ignored(tmp_path: Path) -> None:
-    """The mailbox boundary must close the race after earlier tombstone checks."""
-    harness = _harness(tmp_path, turn_record=_turn_record())
-    harness.turn_store.event_is_redacted.side_effect = [False, False, True]
-    event, event_info = _edit_event()
-
-    await _handle_edit(harness, event, event_info)
-
-    _assert_no_regeneration(harness)
-    assert harness.regenerator._mailboxes == {}
-
-
-@pytest.mark.asyncio
 async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) -> None:
     """An edited single-message turn regenerates with the edited body and records the new outcome."""
     record = _turn_record()
     harness = _harness(tmp_path, turn_record=record)
+    harness.room.add_member(USER_ID, "Banana Man", None)
     event, event_info = _edit_event(new_body="what is 3+3?")
 
     await _handle_edit(harness, event, event_info)
@@ -286,6 +260,7 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     harness.generate_response.assert_awaited_once()
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "what is 3+3?"
+    assert request.member_display_names == {USER_ID: "Banana Man"}
     assert request.existing_event_id == RESPONSE_EVENT_ID
     assert request.existing_event_is_placeholder is False
     assert request.user_id == USER_ID
@@ -552,7 +527,7 @@ async def test_coalesced_sibling_edits_publish_the_latest_receipt_order(tmp_path
 
     request = harness.generate_response.await_args.args[0]
     assert request.prepare_source_turn is not None
-    assert request.prepare_source_turn() is False
+    assert await request.prepare_source_turn() is False
     harness.turn_store.prepare_edit_response_source.assert_called_once_with(
         target=MessageTarget.resolve(ROOM_ID, THREAD_ID, second_event_id),
         source_event_ids=(first_event_id, second_event_id),
@@ -871,7 +846,10 @@ async def test_edit_waits_for_active_retry_then_uses_retried_response(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_edit_reloads_canonical_alias_owner_after_concurrent_claim(tmp_path: Path) -> None:
+async def test_edit_reloads_canonical_alias_owner_after_concurrent_claim(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
     """A stale alias record must not spin after its replacement claim settles."""
     human_event_id = ORIGINAL_EVENT_ID
     old_relay_event_id = "$old-relay:example.org"
@@ -900,20 +878,22 @@ async def test_edit_reloads_canonical_alias_owner_after_concurrent_claim(tmp_pat
     real_store = TurnStore(
         TurnStoreDeps(
             agent_name=AGENT_NAME,
-            tracking_base_path=tmp_path,
+            turn_records=journal_store.turn_records(AGENT_NAME),
+            legacy_responses_file=None,
             state_writer=state_writer,
             resolver=harness.resolver,
             tool_runtime=MagicMock(),
         ),
     )
-    real_store.record_pending_turn(old_record)
+    await real_store.warm()
+    await real_store.record_pending_turn(old_record)
     claim_ready = asyncio.Event()
     wait_started = asyncio.Event()
     concurrent_claim: TurnRecord | None = None
 
     async def replace_alias_owner_and_claim(**_kwargs: object) -> bool:
         nonlocal concurrent_claim
-        real_store.record_turn(new_record)
+        await real_store.record_turn(new_record)
         concurrent_claim = real_store.get_turn_record(new_relay_event_id)
         assert concurrent_claim is not None
         assert real_store.try_claim_turn(concurrent_claim) is True
@@ -957,7 +937,10 @@ async def test_edit_reloads_canonical_alias_owner_after_concurrent_claim(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_edit_aborts_when_physical_record_loses_discovery_alias(tmp_path: Path) -> None:
+async def test_edit_aborts_when_physical_record_loses_discovery_alias(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
     """A stale physical record with a reassigned alias must terminate without spinning."""
     physical_event_id = ORIGINAL_EVENT_ID
     discovery_event_id = "$human-alias:example.org"
@@ -987,17 +970,19 @@ async def test_edit_aborts_when_physical_record_loses_discovery_alias(tmp_path: 
     real_store = TurnStore(
         TurnStoreDeps(
             agent_name=AGENT_NAME,
-            tracking_base_path=tmp_path,
+            turn_records=journal_store.turn_records(AGENT_NAME),
+            legacy_responses_file=None,
             state_writer=state_writer,
             resolver=harness.resolver,
             tool_runtime=MagicMock(),
         ),
     )
-    real_store.record_pending_turn(stale_record)
+    await real_store.warm()
+    await real_store.record_pending_turn(stale_record)
     wait_calls = 0
 
     async def replace_alias_owner(**_kwargs: object) -> bool:
-        real_store.record_turn(replacement_record)
+        await real_store.record_turn(replacement_record)
         return False
 
     async def wait_for_turn_settled(event_ids: tuple[str, ...]) -> None:
@@ -1132,7 +1117,7 @@ async def test_coalesced_sibling_edit_excludes_redacted_source_prompt(tmp_path: 
     )
     assert "REDACTED_SECRET" not in request.prompt
     assert request.prepare_source_turn is not None
-    assert request.prepare_source_turn() is False
+    assert await request.prepare_source_turn() is False
     harness.turn_store.prepare_edit_response_source.assert_called_once_with(
         target=record.conversation_target,
         source_event_ids=(second_event_id,),
@@ -1157,11 +1142,11 @@ async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_p
     harness = _harness(tmp_path, turn_record=record)
     redaction_checks = 0
 
-    def prepare_edit_response_source(**_kwargs: object) -> bool:
+    async def prepare_edit_response_source(**_kwargs: object) -> bool:
         nonlocal redaction_checks
         redaction_checks += 1
         if redaction_checks == 1:
-            harness.turn_store.record_turn(
+            await harness.turn_store.record_turn(
                 replace(record, redacted_source_event_ids=(first_event_id,)),
             )
             return True
@@ -1169,7 +1154,7 @@ async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_p
 
     async def generate(request: ResponseRequest) -> str | None:
         assert request.prepare_source_turn is not None
-        return None if request.prepare_source_turn() else NEW_RESPONSE_EVENT_ID
+        return None if await request.prepare_source_turn() else NEW_RESPONSE_EVENT_ID
 
     harness.turn_store.prepare_edit_response_source.side_effect = prepare_edit_response_source
     harness.generate_response.side_effect = generate
@@ -1222,7 +1207,7 @@ async def test_edit_request_rechecks_redaction_after_acquiring_response_lock(tmp
 
     request = harness.generate_response.await_args.args[0]
     assert request.prepare_source_turn is not None
-    assert request.prepare_source_turn() is True
+    assert await request.prepare_source_turn() is True
     harness.turn_store.prepare_edit_response_source.assert_called_once_with(
         target=record.conversation_target,
         source_event_ids=(ORIGINAL_EVENT_ID,),
@@ -1608,7 +1593,7 @@ async def test_sync_restart_cancellation_leaves_interrupted_edit_uncommitted(tmp
         assert request.on_interrupted_response_recoverable is not None
         assert request.on_deferred_outcome_handled is not None
         request.on_interrupted_response_recoverable()
-        request.on_deferred_outcome_handled("$interrupted:example.org")
+        await request.on_deferred_outcome_handled("$interrupted:example.org")
         raise asyncio.CancelledError
 
     harness.generate_response.side_effect = interrupt
@@ -1642,7 +1627,7 @@ async def test_user_stop_durably_commits_the_edit_revision_before_generation_ret
 
     async def stop(request: ResponseRequest) -> str:
         assert request.on_user_stop_handled is not None
-        request.on_user_stop_handled(NEW_RESPONSE_EVENT_ID, 2)
+        await request.on_user_stop_handled(NEW_RESPONSE_EVENT_ID, 2)
         return NEW_RESPONSE_EVENT_ID
 
     harness.generate_response.side_effect = stop
@@ -1650,8 +1635,8 @@ async def test_user_stop_durably_commits_the_edit_revision_before_generation_ret
 
     await _handle_edit(harness, event, event_info)
 
-    harness.turn_store.record_turn_durably.assert_called_once()
-    stopped_record = harness.turn_store.record_turn_durably.call_args.args[0]
+    harness.turn_store.record_turn.assert_awaited_once()
+    stopped_record = harness.turn_store.record_turn.call_args.args[0]
     assert stopped_record.response_event_id == NEW_RESPONSE_EVENT_ID
     assert stopped_record.source_event_revisions == {
         ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
@@ -1792,7 +1777,7 @@ async def test_sync_restart_leaves_every_waiting_coalesced_source_uncommitted(tm
         assert request.on_interrupted_response_recoverable is not None
         assert request.on_deferred_outcome_handled is not None
         request.on_interrupted_response_recoverable()
-        request.on_deferred_outcome_handled("$interrupted:example.org")
+        await request.on_deferred_outcome_handled("$interrupted:example.org")
         raise asyncio.CancelledError
 
     harness.ingress_hook_runner.emit_message_received_hooks.side_effect = hook
@@ -1911,7 +1896,6 @@ async def test_edit_context_realigned_to_recorded_thread_root(tmp_path: Path) ->
     harness.resolver.fetch_thread_history.assert_awaited_once_with(
         ROOM_ID,
         THREAD_ID,
-        caller_label="edit_regeneration_context",
     )
     assert harness.generate_response.await_args.args[0].thread_history == refetched_history
 

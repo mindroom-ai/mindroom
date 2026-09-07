@@ -12,6 +12,7 @@ from agno.run.cancel import acancel_run
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
@@ -235,7 +236,6 @@ class StopManager:
         client: AsyncClient,
         remove_button: bool = True,
         delay: float = 5.0,
-        notify_outbound_redaction: Callable[[str, str], None] | None = None,
     ) -> None:
         """Clear tracking for a specific message and optionally remove stop button."""
 
@@ -257,8 +257,6 @@ class StopManager:
                             reason="Response completed",
                         )
                         tracked.reaction_event_id = None
-                        if notify_outbound_redaction is not None:
-                            notify_outbound_redaction(tracked.target.room_id, reaction_event_id)
                     except Exception as e:
                         logger.warning(
                             "stop_button_cleanup_failed",
@@ -290,6 +288,17 @@ class StopManager:
             self._track_cleanup_task(asyncio.create_task(delayed_clear()))
         else:
             logger.debug("Message not tracked, skipping cleanup", message_id=message_id)
+
+    def discard_message(self, message_id: str) -> None:
+        """Drop process-local tracking without scheduling Matrix cleanup."""
+        tracked = self.tracked_messages.pop(message_id, None)
+        if tracked is None:
+            return
+        logger.info(
+            "Discarding tracked message for process shutdown",
+            message_id=message_id,
+            **self._log_target(tracked.target),
+        )
 
     def request_stop_if(self, message_id: str, should_stop: Callable[[], bool]) -> bool:
         """Atomically validate current intent and request cancellation without yielding."""
@@ -350,8 +359,6 @@ class StopManager:
         self,
         client: AsyncClient,
         message_id: str,
-        *,
-        notify_outbound_event: Callable[[str, dict[str, object]], None] | None = None,
     ) -> str | None:
         """Add a stop button reaction to a tracked message."""
         tracked = self.tracked_messages.get(message_id)
@@ -366,11 +373,12 @@ class StopManager:
         )
         try:
             reaction_content = build_reaction_content(message_id, "🛑")
-            response = await client.room_send(
-                room_id=tracked.target.room_id,
-                message_type="m.reaction",
-                content=reaction_content,
-                ignore_unverified_devices=True,
+            response = await send_room_event_result(
+                client,
+                tracked.target.room_id,
+                "m.reaction",
+                reaction_content,
+                operation="add_stop_button",
             )
             if isinstance(response, nio.RoomSendResponse):
                 event_id = str(response.event_id)
@@ -381,17 +389,6 @@ class StopManager:
                     **self._log_target(tracked.target),
                 )
                 tracked.reaction_event_id = event_id
-                if notify_outbound_event is not None:
-                    notify_outbound_event(
-                        tracked.target.room_id,
-                        {
-                            "type": "m.reaction",
-                            "room_id": tracked.target.room_id,
-                            "event_id": event_id,
-                            "sender": client.user_id if isinstance(client.user_id, str) else None,
-                            "content": reaction_content,
-                        },
-                    )
                 return event_id
             logger.warning(
                 "Failed to add stop button - no event_id in response",
@@ -410,8 +407,6 @@ class StopManager:
         self,
         client: AsyncClient,
         message_id: str | None = None,
-        *,
-        notify_outbound_redaction: Callable[[str, str], None] | None = None,
     ) -> None:
         """Remove the stop button reaction immediately when user clicks it."""
         if message_id and message_id in self.tracked_messages:
@@ -431,8 +426,6 @@ class StopManager:
                         reason="User clicked stop",
                     )
                     tracked.reaction_event_id = None
-                    if notify_outbound_redaction is not None:
-                        notify_outbound_redaction(tracked.target.room_id, reaction_event_id)
                     logger.info("Stop button removed successfully", **self._log_target(tracked.target))
                 except Exception as e:
                     logger.exception(

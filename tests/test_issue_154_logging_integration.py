@@ -21,7 +21,6 @@ from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunCon
 from agno.run.base import RunStatus
 
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
@@ -38,6 +37,7 @@ from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     make_turn_context,
@@ -247,7 +247,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
         display_name="GeneralAgent",
         password="test_password",  # noqa: S106
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,

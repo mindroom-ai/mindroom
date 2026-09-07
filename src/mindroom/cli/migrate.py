@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 
 import typer
 
 from mindroom import constants
-from mindroom.cli.config import CONFIG_PATH_OPTION, console, format_validation_errors
+from mindroom.cli.config import CONFIG_PATH_OPTION, console, format_validation_errors, validate_config_source_quiet
 
 _OLD_CONFIG_INIT_MIND_MEMORY_TOOL_BLOCK = """\
     knowledge_bases:
@@ -115,34 +113,10 @@ def _migrate_old_config_init_mind_memory(content: str) -> tuple[str, bool]:
     return migrated, migrated != content
 
 
-def _write_text_atomic(path: Path, content: str) -> None:
-    """Replace an existing text file after fully writing a sibling temp file."""
-    file_mode = path.stat().st_mode & 0o777
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temp_file:
-            temp_path = Path(temp_file.name)
-            temp_file.write(content)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        temp_path.chmod(file_mode)
-        temp_path.replace(path)
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-
-
 def config_migrate(
     path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
-    """Apply safe, text-preserving migrations to config.yaml."""
+    """Apply supported migrations to config.yaml."""
     config_file = _resolve_config_path(path)
 
     if not config_file.exists():
@@ -151,21 +125,46 @@ def config_migrate(
         raise typer.Exit(1)
 
     try:
-        content = config_file.read_text(encoding="utf-8")
+        original = config_file.read_bytes()
+        content = original.decode("utf-8")
     except (OSError, UnicodeError) as exc:
         format_validation_errors(exc, config_path=config_file)
         raise typer.Exit(1) from None
 
     migrated, migrated_mind_memory = _migrate_old_config_init_mind_memory(content)
-    if not migrated_mind_memory:
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_file,
+        process_env=constants.exported_process_env(),
+    )
+    from yaml import YAMLError  # noqa: PLC0415
+
+    try:
+        validate_config_source_quiet(
+            runtime_paths,
+            source=migrated.encode("utf-8"),
+            original=original,
+            tolerate_plugin_load_errors=True,
+        )
+        migrated_access = config_file.read_bytes() != original
+    except (ValueError, YAMLError, OSError) as exc:
+        format_validation_errors(exc, config_path=config_file)
+        raise typer.Exit(1) from None
+
+    if not migrated_access and not migrated_mind_memory:
         console.print("[green]No migrations applied.[/green]")
         return
 
-    try:
-        _write_text_atomic(config_file, migrated)
-    except OSError as exc:
-        console.print(f"[red]Error:[/red] Could not write migrated configuration to {config_file}: {exc}")
-        raise typer.Exit(1) from None
+    if migrated_mind_memory and not migrated_access:
+        from mindroom.yaml_io import write_text_atomic  # noqa: PLC0415
 
-    console.print("[green]Applied migration:[/green] starter Mind file-memory semantic search")
+        try:
+            write_text_atomic(config_file, migrated)
+        except OSError as exc:
+            console.print(f"[red]Error:[/red] Could not write migrated configuration to {config_file}: {exc}")
+            raise typer.Exit(1) from None
+
+    if migrated_access:
+        console.print("[green]Applied migration:[/green] membership access schema")
+    if migrated_mind_memory:
+        console.print("[green]Applied migration:[/green] starter Mind file-memory semantic search")
     console.print(f"[green]Config updated:[/green] {config_file}")

@@ -668,6 +668,31 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
     assert messages[1].content == "Current request"
 
 
+def test_thread_history_and_current_message_carry_member_display_names() -> None:
+    """History and the current turn label senders with their current display name, keyed by Matrix ID."""
+    messages = _build_thread_history_messages(
+        "Current request",
+        [make_visible_message(sender="@alice:localhost", body="Earlier", event_id="$earlier")],
+        response_sender_id="@mindroom_team:localhost",
+        current_sender_id="@alice:localhost",
+        current_event_id="$current",
+        member_display_names={"@alice:localhost": "Banana Man"},
+        config=_config(),
+    )
+
+    assert len(messages) == 2
+    assert messages[0].content == render_msg_tag(
+        sender="@alice:localhost",
+        body="Earlier",
+        event_id="$earlier",
+        display_name="Banana Man",
+    )
+    assert messages[1].content == (
+        'Current message:\n<msg event_id="$current" from="@alice:localhost" display_name="Banana Man">'
+        "<![CDATA[Current request]]></msg>"
+    )
+
+
 def test_current_matrix_message_renders_timestamp_as_msg_attribute() -> None:
     """Current Matrix messages should carry time as metadata, not body text."""
     config = _config()
@@ -761,8 +786,8 @@ def test_user_text_matching_structured_prompt_shape_is_still_wrapped() -> None:
     )
 
 
-def test_fallback_thread_history_pins_attachments_to_their_messages(tmp_path: Path) -> None:
-    """History attachments annotate and attach media on the message that carried them."""
+def test_fallback_thread_history_keeps_attachment_ids_without_inline_media(tmp_path: Path) -> None:
+    """History attachments remain addressable without replaying their payloads."""
     image_path = tmp_path / "car.jpg"
     image_path.write_bytes(b"\xff\xd8\xffjpeg")
     record = register_local_attachment(
@@ -804,7 +829,7 @@ def test_fallback_thread_history_pins_attachments_to_their_messages(tmp_path: Pa
         body='look at this\n[attachments: att_car (image, "car.jpg")]',
         event_id="$img",
     )
-    assert [image.id for image in (history_with_media.images or [])] == ["att_car"]
+    assert not history_with_media.images
     assert messages[1].content == render_msg_tag(
         sender="@alice:localhost",
         body="no attachments here",
@@ -814,8 +839,8 @@ def test_fallback_thread_history_pins_attachments_to_their_messages(tmp_path: Pa
     assert not messages[2].images
 
 
-def test_fallback_thread_history_maps_raw_media_events_to_attachments(tmp_path: Path) -> None:
-    """Raw media events without MindRoom metadata resolve via the deterministic event ID."""
+def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_path: Path) -> None:
+    """Raw media events remain addressable through their deterministic attachment ID."""
     attachment_id = _attachment_id_for_event("$raw-img")
     image_path = tmp_path / "photo.png"
     image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -850,7 +875,7 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachments(tmp_path: 
         body=f'photo.png\n[attachments: {attachment_id} (image, "photo.png")]',
         event_id="$raw-img",
     )
-    assert [image.id for image in (messages[0].images or [])] == [attachment_id]
+    assert not messages[0].images
 
 
 def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) -> None:
@@ -1044,7 +1069,7 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
         body='see files\n[attachments: att_in_thread (file, "in-thread.txt")]',
         event_id="$in-thread",
     )
-    assert [file.id for file in (messages[0].files or [])] == ["att_in_thread"]
+    assert not messages[0].files
 
 
 def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path) -> None:
@@ -1082,7 +1107,7 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
         body='root image\n[attachments: att_root (image, "root.png")]',
         event_id="$root",
     )
-    assert [image.id for image in (messages[0].images or [])] == ["att_root"]
+    assert not messages[0].images
 
 
 def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_context() -> None:

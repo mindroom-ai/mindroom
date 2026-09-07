@@ -5,18 +5,19 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.bot import AgentBot
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
@@ -24,6 +25,14 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
+
+
+async def _complete_frame(bot: AgentBot, index: int = 0) -> None:
+    """Drive runtime side effects through the durable completion owner."""
+    del index
+    await bot._on_ingestion_frame_completion()
 
 
 class TestScheduledTaskRestoration:
@@ -38,7 +47,9 @@ class TestScheduledTaskRestoration:
 
     @staticmethod
     def _install_runtime_support(bot: AgentBot) -> AgentBot:
-        return install_runtime_cache_support(bot)
+        if bot.agent_name == ROUTER_AGENT_NAME:
+            bot._reply_membership_sync = AgentReplyMembershipSync(bot._runtime_view.agent_reply_memberships)
+        return install_runtime_journal_support(bot)
 
     @pytest.mark.asyncio
     async def test_only_router_restores_tasks(self, tmp_path: Path) -> None:
@@ -72,7 +83,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -88,7 +99,7 @@ class TestScheduledTaskRestoration:
         with (
             patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
             patch(
-                "mindroom.bot_room_lifecycle.join_room",
+                "mindroom.matrix.client_room_admin.join_room",
                 new_callable=AsyncMock,
                 return_value=RoomJoinOutcome.JOINED,
             ) as mock_join,
@@ -109,8 +120,7 @@ class TestScheduledTaskRestoration:
                 "lobby",
                 config,
                 runtime_paths_for(config),
-                router_bot.event_cache,
-                router_bot._conversation_cache,
+                router_bot._conversation_reader,
             )
 
     @pytest.mark.asyncio
@@ -138,7 +148,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="GeneralAgent",
         )
-        regular_bot = AgentBot(
+        regular_bot = make_test_agent_bot(
             agent_user=regular_user,
             storage_path=tmp_path,
             config=config,
@@ -154,7 +164,7 @@ class TestScheduledTaskRestoration:
         with (
             patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
             patch(
-                "mindroom.bot_room_lifecycle.join_room",
+                "mindroom.matrix.client_room_admin.join_room",
                 new_callable=AsyncMock,
                 return_value=RoomJoinOutcome.JOINED,
             ) as mock_join,
@@ -177,7 +187,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -190,7 +200,7 @@ class TestScheduledTaskRestoration:
 
         with (
             patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
-            patch("mindroom.bot_room_lifecycle.join_room", new_callable=AsyncMock) as mock_join,
+            patch("mindroom.matrix.client_room_admin.join_room", new_callable=AsyncMock) as mock_join,
             patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
             patch(
                 "mindroom.bot.config_confirmation.restore_pending_changes",
@@ -210,8 +220,7 @@ class TestScheduledTaskRestoration:
             "lobby",
             config,
             runtime_paths_for(config),
-            router_bot.event_cache,
-            router_bot._conversation_cache,
+            router_bot._conversation_reader,
         )
         mock_restore_configs.assert_awaited_once_with(router_bot.client, "lobby")
         mock_welcome.assert_awaited_once_with("lobby")
@@ -227,7 +236,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -245,7 +254,7 @@ class TestScheduledTaskRestoration:
             ) as mock_drain,
             patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         ):
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot)
 
             assert router_bot._deferred_overdue_task_drain_task is not None
             await router_bot._deferred_overdue_task_drain_task
@@ -254,11 +263,10 @@ class TestScheduledTaskRestoration:
                 router_bot.client,
                 config,
                 runtime_paths_for(config),
-                router_bot.event_cache,
-                router_bot._conversation_cache,
+                router_bot._conversation_reader,
             )
 
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot, 1)
             mock_drain.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -275,7 +283,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -294,11 +302,11 @@ class TestScheduledTaskRestoration:
             patch("mindroom.bot.has_deferred_overdue_tasks", return_value=True),
             patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         ):
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot)
             assert router_bot._deferred_overdue_task_drain_task is not None
             await router_bot._deferred_overdue_task_drain_task
 
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot, 1)
             assert router_bot._deferred_overdue_task_drain_task is not None
             await router_bot._deferred_overdue_task_drain_task
 
@@ -318,7 +326,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -338,13 +346,13 @@ class TestScheduledTaskRestoration:
             patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
         ):
             await router_bot.prepare_for_sync_shutdown()
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot)
 
             assert router_bot._deferred_overdue_task_drain_task is None
             mock_drain.assert_not_awaited()
 
             router_bot.mark_sync_loop_started()
-            await router_bot._on_sync_response(MagicMock())
+            await _complete_frame(router_bot, 1)
 
             assert router_bot._deferred_overdue_task_drain_task is not None
             await router_bot._deferred_overdue_task_drain_task
@@ -361,7 +369,7 @@ class TestScheduledTaskRestoration:
             password="test",  # noqa: S106
             display_name="RouterAgent",
         )
-        router_bot = AgentBot(
+        router_bot = make_test_agent_bot(
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
@@ -437,7 +445,7 @@ class TestScheduledTaskRestoration:
                 password="test",  # noqa: S106
                 display_name=display_name,
             )
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=user,
                 storage_path=tmp_path / agent_name,
                 config=config,
@@ -451,7 +459,7 @@ class TestScheduledTaskRestoration:
             with (
                 patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
                 patch(
-                    "mindroom.bot_room_lifecycle.join_room",
+                    "mindroom.matrix.client_room_admin.join_room",
                     new_callable=AsyncMock,
                     return_value=RoomJoinOutcome.JOINED,
                 ),

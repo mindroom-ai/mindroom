@@ -202,7 +202,7 @@ def _team_prompt_tool_surface(team: Team) -> _PromptToolSurface:
     payload and `_tool_instructions` state that feed that prompt are only built by
     the internal `_determine_tools_for_model()` path. Using that single internal
     entrypoint is less brittle than re-implementing several private team helpers in
-    MindRoom. This logic is verified against `agno==2.6.12`; if Agno changes those
+    MindRoom. This logic is verified against `agno==3.0.5`; if Agno changes those
     internals, update this estimator to match the new team prompt builder.
     """
     cached_surface = _cached_tool_surface(team)

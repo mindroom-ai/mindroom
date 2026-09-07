@@ -1,61 +1,112 @@
-"""Tests for cloud Matrix controller identity lookup."""
+"""Tests for live-bot Desktop controller identity resolution."""
 
 from __future__ import annotations
 
+import sqlite3
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
-import nio
 import pytest
-from nio.crypto import Olm
-from nio.store import SqliteStore
 
-from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_entity
-from mindroom.matrix.client_session import olm_store_dir
-from mindroom.matrix.identity import managed_account_key
-from mindroom.matrix.state import MatrixState
+from mindroom.desktop.identity import (
+    DesktopControllerIdentity,
+    DesktopIdentityError,
+    controller_identity_for_live_bot,
+)
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_controller_identity_reads_the_persisted_olm_account(tmp_path: Path) -> None:
-    """The printed pin comes from the controller's local crypto store."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    user_id = "@computer:example.org"
-    device_id = "CLOUDDEVICE"
-    state = MatrixState()
-    state.add_account(
-        managed_account_key("computer"),
-        "computer",
-        "unused-password",
-        domain="example.org",
-        device_id=device_id,
-        access_token="unused-token",  # noqa: S106 - Test-only Matrix state fixture.
+_USER_ID = "@computer:example.org"
+_DEVICE_ID = "CLOUDDEVICE"
+
+
+def _live_bot(
+    *,
+    fingerprint: str = "live-fingerprint",
+    running: bool = True,
+    agent_name: str = "computer",
+    expected_user_id: str = _USER_ID,
+    expected_device_id: str = _DEVICE_ID,
+    client_user_id: str = _USER_ID,
+    client_device_id: str = _DEVICE_ID,
+) -> SimpleNamespace:
+    client = SimpleNamespace(
+        user_id=client_user_id,
+        device_id=client_device_id,
+        olm=SimpleNamespace(
+            account=SimpleNamespace(identity_keys={"ed25519": fingerprint}),
+        ),
     )
-    state.save(runtime_paths)
-    store_path = olm_store_dir(user_id, runtime_paths)
-    store_path.mkdir(parents=True, exist_ok=True)
-    store = SqliteStore(
-        user_id,
-        device_id,
-        str(store_path),
-        pickle_key=nio.AsyncClientConfig().pickle_key,
+    return SimpleNamespace(
+        running=running,
+        agent_name=agent_name,
+        agent_user=SimpleNamespace(
+            user_id=expected_user_id,
+            device_id=expected_device_id,
+        ),
+        client=client,
     )
-    olm = Olm(user_id, device_id, store)
-    expected_fingerprint = olm.account.identity_keys["ed25519"]
-    store.database.close()
-
-    identity = controller_identity_for_entity("computer", runtime_paths=runtime_paths)
-
-    assert identity.user_id == user_id
-    assert identity.device_id == device_id
-    assert identity.ed25519 == expected_fingerprint
 
 
-def test_controller_identity_requires_a_started_entity(tmp_path: Path) -> None:
-    """Missing account state produces a setup instruction instead of a partial pin."""
-    runtime_paths = test_runtime_paths(tmp_path)
+def test_controller_identity_uses_running_live_bot_without_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The exclusive store owner itself supplies the Desktop controller pin."""
+    monkeypatch.setattr(
+        sqlite3,
+        "connect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("SQLite must not open")),
+    )
 
-    with pytest.raises(DesktopIdentityError, match="start MindRoom once"):
-        controller_identity_for_entity("computer", runtime_paths=runtime_paths)
+    identity = controller_identity_for_live_bot("computer", _live_bot())
+
+    assert identity == DesktopControllerIdentity(
+        entity_name="computer",
+        user_id=_USER_ID,
+        device_id=_DEVICE_ID,
+        ed25519="live-fingerprint",
+    )
+
+
+@pytest.mark.parametrize(
+    ("bot", "message"),
+    [
+        (None, "not running"),
+        (_live_bot(running=False), "not running"),
+        (_live_bot(agent_name="other"), "live bot registry"),
+        (_live_bot(client_user_id="@other:example.org"), "mismatched live Matrix device"),
+        (_live_bot(client_device_id="OTHER"), "mismatched live Matrix device"),
+        (_live_bot(fingerprint=""), "no live Ed25519"),
+    ],
+)
+def test_controller_identity_fails_closed_for_missing_or_mismatched_live_bot(
+    bot: object,
+    message: str,
+) -> None:
+    """Only the current exact running entity/device can supply a pin."""
+    with pytest.raises(DesktopIdentityError, match=message):
+        controller_identity_for_live_bot("computer", bot)
+
+
+def test_orchestrator_resolver_tracks_live_bot_replacement(tmp_path: Path) -> None:
+    """The injected resolver reads the current registry entry on every call."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+    first = _live_bot(fingerprint="first")
+    replacement = _live_bot(fingerprint="replacement")
+    orchestrator.agent_bots["computer"] = first
+
+    assert orchestrator.desktop_controller_identity("computer").ed25519 == "first"
+
+    first.running = False
+    orchestrator.agent_bots["computer"] = replacement
+    assert orchestrator.desktop_controller_identity("computer").ed25519 == "replacement"
+
+
+def test_orchestrator_resolver_rejects_missing_target(tmp_path: Path) -> None:
+    """No persisted-store fallback is available when the live target is absent."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+
+    with pytest.raises(DesktopIdentityError, match="not running"):
+        orchestrator.desktop_controller_identity("computer")

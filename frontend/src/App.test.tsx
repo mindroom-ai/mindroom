@@ -147,7 +147,6 @@ describe("App recovery mode", () => {
       isLoading: false,
       selectedAgentId: null,
       selectedTeamId: null,
-      selectedCultureId: null,
       selectedRoomId: null,
     } as never);
   });

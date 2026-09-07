@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
-    from mindroom.matrix.cache import AgentMessageSnapshot
+    from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
@@ -61,10 +61,8 @@ if TYPE_CHECKING:
             room_id: str,
             thread_id: str | None,
             sender: str,
-            *,
-            runtime_started_at: float | None,
         ) -> Awaitable[AgentMessageSnapshot | None]:
-            """Read the latest visible cached sender message for one room or thread scope."""
+            """Read the latest visible sender message for one room or thread scope."""
 
 
 def _resolve_plugin_state_root(
@@ -223,6 +221,7 @@ class HookContextSupport:
             "matrix_admin": self.matrix_admin(),
             "room_state_querier": self.room_state_querier(),
             "room_state_putter": self.room_state_putter(),
+            "_hook_registry_state": self.hook_registry_state,
         }
 
 
@@ -300,8 +299,32 @@ class ResponseResult:
     envelope: MessageEnvelope
 
 
+@dataclass(slots=True, kw_only=True)
+class _HookLifecycleContext:
+    """Track whether a bound hook still belongs to the active registry."""
+
+    _hook_registry_state: HookRegistryState | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _hook_registry_snapshot: HookRegistry | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    def is_active(self) -> bool:
+        """Return whether this hook still belongs to the live registry snapshot."""
+        return (
+            self._hook_registry_state is not None
+            and self._hook_registry_snapshot is not None
+            and self._hook_registry_state.registry is self._hook_registry_snapshot
+        )
+
+
 @dataclass(slots=True)
-class HookContext:
+class HookContext(_HookLifecycleContext):
     """Base fields available to every hook."""
 
     event_name: str
@@ -384,7 +407,7 @@ class HookContext:
         *,
         thread_id: str | None = None,
     ) -> AgentMessageSnapshot | None:
-        """Return the latest visible cached sender message when a reader is available."""
+        """Return the latest visible sender message when a reader is available."""
         if self.agent_message_snapshot_reader is None:
             self.logger.warning("No agent-message snapshot reader available")
             return None
@@ -392,7 +415,6 @@ class HookContext:
             room_id=room_id,
             thread_id=thread_id,
             sender=sender,
-            runtime_started_at=self.runtime_started_at,
         )
 
     async def put_room_state(
@@ -594,6 +616,21 @@ class RoomMemberJoinedContext(HookContext):
 
 
 @dataclass(slots=True)
+class RoomMemberLeftContext(HookContext):
+    """Context for room:member_left hooks."""
+
+    agent_name: str
+    room_id: str
+    event_id: str
+    user_id: str
+    sender_id: str
+    display_name: str | None
+    avatar_url: str | None
+    membership: str
+    prev_membership: str | None
+
+
+@dataclass(slots=True)
 class ConfigReloadedContext(HookContext):
     """Context for config:reloaded hooks."""
 
@@ -627,7 +664,7 @@ class CustomEventContext(HookContext):
 
 
 @dataclass(slots=True)
-class ToolBeforeCallContext:
+class ToolBeforeCallContext(_HookLifecycleContext):
     """Context passed to tool:before_call hook callbacks."""
 
     tool_name: str
@@ -720,7 +757,7 @@ class ToolBeforeCallContext:
 
 
 @dataclass(slots=True)
-class ToolAfterCallContext:
+class ToolAfterCallContext(_HookLifecycleContext):
     """Context passed to tool:after_call hook callbacks."""
 
     tool_name: str

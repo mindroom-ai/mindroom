@@ -130,6 +130,10 @@ Use smaller `chunk_size` values when your embedding server has lower token or ba
 If chunking is too large, semantic indexing retries will fail with embedder 500 errors.
 Semantic refreshes index up to 4 files concurrently by default.
 Set `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY` to an integer from 1 through 128 to tune this process-wide limit for large corpora; invalid values fail when knowledge managers start.
+Local `sentence_transformers` embedding is serialized regardless of this limit, because torch's Metal shader caches are not thread-safe.
+Each background refresh runs in a child process; successful children exit normally, while timed-out or cancelled children are terminated.
+The default timeout is one hour.
+Set `MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS` to a finite positive number of seconds to widen or narrow that timeout for very large corpora.
 
 ### File Type Filtering
 
@@ -255,8 +259,8 @@ When an agent has multiple semantic knowledge bases, results are interleaved fai
 ## Git-Backed Knowledge Bases
 
 Knowledge bases can sync from a Git repository.
-MindRoom starts a background refresh for configured shared Git knowledge bases when runtime support starts.
-After that, it schedules another background refresh every `poll_interval_seconds`.
+MindRoom waits one `poll_interval_seconds` interval before the first background refresh for a configured shared Git knowledge base, avoiding a refresh burst during startup.
+It then schedules another background refresh after each interval.
 Reads keep using the last published index while a refresh is running.
 
 ```yaml
@@ -318,7 +322,8 @@ If a checkout already holds a credential-bearing remote from before this check e
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
 - Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
 - Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
-- When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
+- MindRoom disables implicit LFS smudge during clone, checkout, and reset for every Git-backed knowledge base.
+- When `lfs: true`, MindRoom explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
 - Change detection for Git-backed bases is the tracked revision, not file contents: while the checkout stays on the revision the index was published from, MindRoom republishes the existing index without reading the corpus.
 - Consequently an out-of-band edit to a Git-backed checkout is not indexed while the revision is unchanged.
@@ -401,6 +406,26 @@ Accepted credential fields:
 | `username` + `token` | Standard GitHub/GitLab access token auth |
 | `username` + `password` | Basic HTTP auth |
 | `api_key` | Uses `x-access-token` as username automatically |
+
+For unattended GitHub repositories, a GitHub App installation can replace a personal access token:
+
+```json
+{
+  "auth_type": "github_app",
+  "app_id": 12345,
+  "installation_id": 67890,
+  "private_key_file": "/var/run/secrets/github-app/private-key.pem"
+}
+```
+
+Store this object under the service named by `credentials_service`.
+`private_key_file` must be an absolute path to a read-only secret mount; do not put the PEM contents in the credential object.
+The remote must use the canonical `https://github.com/<owner>/<repository>` form.
+MindRoom reads the key when needed and mints a repository-scoped installation token with read-only Contents permission.
+The control-plane runtime caches that token until shortly before GitHub's reported expiry.
+Scheduled refresh children receive the cached token and expiry only through their stdin request pipe, then pass the token only to Git.
+The handoff includes the non-secret App, installation, repository, and key-path identity, and a child ignores the token if its current credentials no longer match.
+MindRoom never copies the token into the checkout config, credential store, refresh-child launch environment, metadata, or logs.
 
 ## Embedder Configuration
 

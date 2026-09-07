@@ -71,6 +71,56 @@ When no Matrix user ID claim is configured, strict mode only accepts a Matrix id
 That derivation can use the verified JWT email claim even when `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is not configured.
 When no Matrix user ID claim or email-to-Matrix template is configured, strict mode rejects `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` because that header is not backed by a signed identity.
 
+## Personal Connections Portal
+
+Set `MINDROOM_CONNECTIONS_AGENT` to the name of a private agent to enable `/connections`.
+The portal lets each authenticated user connect only the OAuth services they want for their personal agent.
+Services come from that agent's available tools, including deferred tools and registered plugin or MCP OAuth providers.
+Each card loads independently, so a failed or unconnected service does not block the others.
+The portal does not expose model configuration, generic credential editing, or OAuth client administration.
+
+```bash
+MINDROOM_CONNECTIONS_AGENT=personal
+MINDROOM_PUBLIC_URL=https://assistant.example.org
+```
+
+Configure strict JWT authentication as described above, including a signed Matrix user ID claim or a mapping from verified email.
+The portal rejects header-only, standalone API-key, and owner-identity fallback authentication.
+The selected agent must use `private.per: user` or `private.per: user_agent`:
+
+```yaml
+agents:
+  personal:
+    display_name: Personal Mind
+    role: Personal assistant
+    private:
+      per: user_agent
+    access:
+      users: ["@*:example.org"]
+    tools:
+      - google_drive
+      - name: google_calendar
+        defer: true
+```
+
+Portal access requires an explicit matching `access.users` grant or configured administrator authority.
+Room-membership grants alone do not grant portal access because browser requests have no conversation membership context.
+The server resolves canonical Matrix aliases and the configured private scope; the browser cannot choose another user, agent, or credential target.
+Existing requester-only provider rules still apply.
+Account linking and disconnect reuse the same OAuth state, callback, token store, and reset lifecycle used by tools.
+Operators still configure OAuth clients; shared service accounts are not displayed as personal connections.
+
+When the portal is enabled, upstream users without administrator authority cannot access administrator APIs or dashboard pages.
+Existing state-bound OAuth callback, success, and reset pages remain available for account linking.
+To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and the existing `/api/oauth/*` routes to the MindRoom API.
+Keep these routes behind the authenticated upstream and exclude `/connections` from any other application's service-worker navigation fallback.
+Portal assets are served under `/connections/assets/`; root `/assets/` can continue serving the other application.
+Use a runtime build containing the portal before enabling the routes.
+
+Connect and disconnect requests require an HTTPS public origin and a same-origin `Origin` header matching `MINDROOM_PUBLIC_URL`, or the request base URL when unset.
+The portal API returns private, non-cacheable account status and never returns token or OAuth client configuration.
+It provides account onboarding for personal agents; it does not expose an aggregate MCP gateway endpoint.
+
 ## Instance Chart
 
 For the hosted instance chart, configure the equivalent values:

@@ -1,0 +1,513 @@
+"""The narrow slices of a principal's store that collaborators actually use.
+
+`PrincipalStore` is one object with twenty-eight methods covering admission,
+replay, membership, conversation reads, hydration, refetch, and delivery. That
+is the shape of the universal cache dependency this design exists to remove:
+once every collaborator holds the whole surface, any of them can reach for any
+part of it, and the boundaries stop being real.
+
+These protocols are what each collaborator is actually allowed to do. They are
+structural, so `PrincipalStore` satisfies them without declaring anything, and
+they cost nothing at runtime -- the enforcement is the type checker refusing a
+call the annotation does not permit. The point is not to hide the store; it is
+that a hydrator reaching into the outbox should fail review by failing to
+type-check.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from typing import Any, Literal
+
+    from mindroom.history_recovery import (
+        HistoryRecoveryOutcome,
+        RoomHistoryRecovery,
+    )
+
+    from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
+    from .approvals import (
+        StoredApprovalCard,
+        UnreadableApprovalCard,
+    )
+    from .background_approvals import BackgroundApprovalDecision
+    from .interactive_questions import InteractiveSelection
+    from .models import (
+        AdmissionFacts,
+        AdmissionResult,
+        ConversationCursor,
+        ConversationPage,
+        DeliveryAcknowledgement,
+        DeliveryStage,
+        EventKind,
+        HydrationCoverage,
+        InboundEvent,
+        IngestionBatchAdmission,
+        JournalEvent,
+        MatrixDelivery,
+        PendingPage,
+        RefreshRequest,
+        SemanticConsumer,
+        TerminalTurnWrite,
+        UnreadableMatrixDelivery,
+    )
+    from .projection import ProjectedEvent
+
+
+class AdmissionView(Protocol):
+    """Accepting one inbound event durably, and nothing else."""
+
+    async def admit(
+        self,
+        event: InboundEvent,
+        projected: ProjectedEvent | None = None,
+    ) -> AdmissionResult:
+        """Admit one event and update the projection in a single transaction."""
+        ...
+
+
+class IngestionBatchAdmissionView(Protocol):
+    """Admitting one authenticated nio batch, and nothing else."""
+
+    async def admit_ingestion_batch(self, admission: IngestionBatchAdmission) -> AdmissionFacts:  # fmt: skip
+        """Persist one record disposition, receipt, and frontier atomically."""
+        ...
+
+
+class ReplayView(Protocol):
+    """Draining and settling the work the journal still owes."""
+
+    async def pending(
+        self,
+        *,
+        limit: int = ...,
+        after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
+    ) -> PendingPage:
+        """Return actionable events awaiting semantic work, in receipt order."""
+        ...
+
+    async def is_pending(self, event_id: str) -> bool:
+        """Return whether one event still owes semantic work."""
+        ...
+
+    async def settle(self, event_id: str) -> None:
+        """Mark one event's semantic work terminal."""
+        ...
+
+
+class DispatchView(ReplayView, Protocol):
+    """Everything the dispatcher coordinates: replay and semantic claims."""
+
+    async def is_room_member_join_suppressed(self, room_id: str, event_id: str, user_id: str) -> bool:
+        """Check one admitted join against earlier baselines and completed hook delivery."""
+        ...
+
+    async def mark_room_member_join_completed(self, room_id: str, user_id: str) -> None:
+        """Record successful room-member hook delivery."""
+        ...
+
+    async def settle_many(self, event_ids: tuple[str, ...]) -> None:
+        """Settle every event that one terminal turn accounted for."""
+        ...
+
+    async def unsettled_event_ids(self) -> frozenset[str]:
+        """Return every event that still owes semantic work."""
+        ...
+
+    async def load_event(self, event_id: str) -> JournalEvent | None:
+        """Return one admitted event."""
+        ...
+
+    async def pending_of_kind(
+        self,
+        kind: EventKind,
+        *,
+        limit: int = ...,
+        after_receipt_order: int | None = None,
+    ) -> PendingPage:
+        """Return pending events of one kind, in receipt order."""
+        ...
+
+    async def claim_semantic_consumer(
+        self,
+        event_id: str,
+        consumer: SemanticConsumer,
+    ) -> SemanticConsumer | None:
+        """Record the sole consumer, or retire a stale interactive reaction."""
+        ...
+
+    async def claim_interactive_reaction(
+        self,
+        *,
+        source_event_id: str,
+    ) -> InteractiveSelection | None:
+        """Atomically transfer one validated selection to its reaction source."""
+        ...
+
+
+class PendingTurnView(Protocol):
+    """Asking what unfinished work one conversation is already holding.
+
+    Deliberately not part of ``ReplayView``. The caller is a guard deciding
+    whether an older turn is still worth running, and it must be able to see
+    the pending set without being able to settle any of it.
+    """
+
+    async def pending_thread_events_after(
+        self,
+        *,
+        room_id: str,
+        thread_id: str,
+        after_origin_server_ts: int,
+        excluding_event_id: str,
+        limit: int = ...,
+    ) -> tuple[JournalEvent, ...]:
+        """Return unsettled events in one thread newer than a timestamp."""
+        ...
+
+
+class RelationView(Protocol):
+    """Asking what the journal already knows about one event's place in a thread."""
+
+    async def admitted_thread_id(self, *, room_id: str, event_id: str) -> tuple[bool, str | None]:
+        """Return whether one event was admitted, and which thread it belongs to."""
+        ...
+
+
+class ConversationReadView(Protocol):
+    """Reading a conversation, plus the evidence needed to judge completeness.
+
+    Nothing here can change a conversation, which is the point: a reader that
+    could write one is a reader that can be made to.
+    """
+
+    async def read_conversation(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        limit: int,
+        before: ConversationCursor | None = None,
+    ) -> ConversationPage:
+        """Return one bounded page of a conversation."""
+        ...
+
+    async def latest_visible_event_id(self, *, room_id: str, thread_id: str) -> str | None:
+        """Return the newest visible event in one thread, or nothing."""
+        ...
+
+    async def conversation_is_hydrated(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Return whether this conversation was hydrated under current membership."""
+        ...
+
+    async def conversation_hydration_was_truncated(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Return whether a walk ran for this conversation and stopped at a ceiling."""
+        ...
+
+
+class HistoryRecoveryRecordView(Protocol):
+    """Writing down a skipped room-history interval, and nothing else.
+
+    Deliberately one method. The writer is sync certification, which has to make
+    the hole durable before it moves the checkpoint past it; giving that caller
+    anything it could read would let a decision about the transport start
+    depending on the state of the projection.
+    """
+
+    async def record_room_history_recovery(
+        self,
+        room_id: str,
+    ) -> RoomHistoryRecovery | None:
+        """Write down that a room's history could not be proven continuous."""
+        ...
+
+
+class HydrationView(Protocol):
+    """Building a conversation from the server and repairing one message of it."""
+
+    async def membership_epoch(self, room_id: str) -> int:
+        """Return the current membership epoch for one room."""
+        ...
+
+    async def room_history_recovery(self, room_id: str) -> RoomHistoryRecovery | None:
+        """Return one room's current history-recovery obligation, if any."""
+        ...
+
+    async def install_room_history_recovery_chunk(
+        self,
+        recovery: RoomHistoryRecovery,
+        *,
+        events: tuple[ProjectedEvent, ...],
+        expected_membership_epoch: int,
+    ) -> bool:
+        """Project one bounded recovery chunk only while both fences match."""
+        ...
+
+    async def settle_room_history_recovery(
+        self,
+        recovery: RoomHistoryRecovery,
+        *,
+        exhausted_server: bool,
+        attempted_policy_rank: int,
+        expected_membership_epoch: int,
+    ) -> HistoryRecoveryOutcome:
+        """Publish an installed recovery and settle its exact obligation."""
+        ...
+
+    async def conversation_is_hydrated(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Return whether this conversation was hydrated under current membership."""
+        ...
+
+    async def conversation_hydration_coverage(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+    ) -> HydrationCoverage | None:
+        """Return what walks under this membership proved here, or nothing if none did."""
+        ...
+
+    async def install_hydrated_conversation(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        events: tuple[ProjectedEvent, ...],
+        complete: bool,
+        attempted_policy_rank: int = 0,
+        expected_membership_epoch: int,
+    ) -> bool:
+        """Install hydration chunks, then publish their completed marker."""
+        ...
+
+    async def install_refetched_revision(
+        self,
+        request: RefreshRequest,
+        *,
+        revision_event_id: str,
+        revision_ts: int,
+        revision_sender: str,
+        revision_transaction_id: str | None = None,
+        content: Mapping[str, object],
+    ) -> bool:
+        """Install a point-refetched revision if its refresh token still holds."""
+        ...
+
+    async def drop_refetched_message(self, request: RefreshRequest) -> bool:
+        """Remove a logical message the server has no remaining revision of."""
+        ...
+
+
+class MatrixDeliveryView(Protocol):
+    """Delivering what was generated, plus the one journal fact delivery owns.
+
+    That exception is the handoff, and it is narrower than it looks: the only
+    thing this view may say about the journal is "these sources are answered
+    now", and it may only say it in the same breath as recording the answer.
+    Nothing here can read the journal, replay it, or settle a source that no
+    delivery accounts for.
+    """
+
+    @property
+    def principal_id(self) -> str:
+        """Return the principal whose delivery rows this view owns."""
+        ...
+
+    async def membership_epoch(self, room_id: str) -> int:
+        """Return the current membership epoch for one room."""
+        ...
+
+    async def enqueue_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
+        edits_event_id: str | None = None,
+        settle_source_event_ids: tuple[str, ...] = (),
+        permanent_failure_reason: str | None = None,
+    ) -> str | None:
+        """Record delivery intent and settle what it answers, or refuse both."""
+        ...
+
+    async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
+        """Return whether a turn still speaks for the room's current membership."""
+        ...
+
+    async def claim_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        sending_device_id: str | None = None,
+    ) -> MatrixDelivery | None:
+        """Freeze one delivery before network I/O and return the row as it stood."""
+        ...
+
+    async def record_matrix_delivery_device(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        device_id: str | None,
+    ) -> None:
+        """Record the device namespace this delivery is about to send under."""
+        ...
+
+    async def load_matrix_delivery(self, *, delivery_id: str, stage: DeliveryStage) -> MatrixDelivery | None:
+        """Return one delivery without claiming it."""
+        ...
+
+    async def record_permanent_matrix_delivery_failure(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        reason: str,
+    ) -> str | None:
+        """Stop retrying one definitively refused immutable payload, or return its ACK."""
+        ...
+
+    async def retire_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        room_id: str,
+        membership_epoch: int,
+    ) -> str | None:
+        """Retain an obsolete send as an identity tombstone, or return its ACK."""
+        ...
+
+    async def acknowledge_matrix_delivery(
+        self,
+        *,
+        delivery_id: str,
+        stage: DeliveryStage,
+        event_id: str,
+        delivered_projections: tuple[ProjectedEvent, ...],
+        terminal_turn: TerminalTurnWrite | None = None,
+    ) -> DeliveryAcknowledgement:
+        """Atomically record and project the delivery, plus the turn it completes."""
+        ...
+
+    async def unacknowledged_matrix_deliveries(
+        self,
+        *,
+        event_type: str = "m.room.message",
+        limit: int = ...,
+        after: tuple[int, str, str] | None = None,
+    ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
+        """Return deliveries whose Matrix outcome is unknown, oldest first."""
+        ...
+
+
+class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
+    """Approval-domain state plus the generic delivery operations it uses."""
+
+    @property
+    def principal_id(self) -> str: ...  # noqa: D102
+
+    async def enqueue_unavailable_approval_notice(  # noqa: D102
+        self,
+        *,
+        approval_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+    ) -> str | None: ...
+
+    async def reserve_approval_card_deliveries(  # noqa: D102
+        self,
+        *,
+        continuation_principal_id: str,
+        continuation_id: str,
+        expected_generation: int,
+        cards: tuple[ApprovalCardReservation, ...],
+    ) -> bool: ...
+
+    async def reserve_background_approval_card(  # noqa: D102
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        run_id: str,
+        call_id: str,
+        expires_at_ns: int,
+        card: ApprovalCardReservation,
+    ) -> bool: ...
+
+    async def background_approval_decision(  # noqa: D102
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+    ) -> BackgroundApprovalDecision | None: ...
+
+    async def resolve_background_approval_call(  # noqa: D102
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+        requested_status: Literal["denied", "expired"],
+        reason: str,
+    ) -> RecordedApprovalDecision: ...
+
+    async def resolve_pending_background_approval_calls(  # noqa: D102
+        self,
+        *,
+        run_id: str,
+        reason: str,
+    ) -> int: ...
+
+    async def prune_background_approvals(self, *, run_id: str) -> bool: ...  # noqa: D102
+
+    async def resolve_continuation_approval_card(  # noqa: D102
+        self,
+        *,
+        card_event_id: str,
+        requested_status: Literal["approved", "denied", "expired"],
+        reason: str | None,
+        resolution: Mapping[str, Any],
+    ) -> RecordedApprovalDecision: ...
+
+    async def expire_unacknowledged_approval_card(  # noqa: D102
+        self,
+        *,
+        delivery_id: str,
+    ) -> RecordedApprovalDecision: ...
+
+    async def retire_approval_card(self, *, delivery_id: str, card_event_id: str) -> bool: ...  # noqa: D102
+    async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool: ...  # noqa: D102
+    async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> StoredApprovalCard | None: ...  # noqa: D102
+
+    async def pending_approval_room_ids(self) -> tuple[str, ...]: ...  # noqa: D102
+    async def pending_approval_cards(  # noqa: D102
+        self,
+        *,
+        room_id: str,
+        limit: int = ...,
+        after: tuple[int, str] | None = None,
+    ) -> tuple[StoredApprovalCard | UnreadableApprovalCard, ...]: ...
+
+
+__all__ = [
+    "AdmissionView",
+    "ApprovalDeliveryView",
+    "ConversationReadView",
+    "DispatchView",
+    "HistoryRecoveryRecordView",
+    "HydrationView",
+    "IngestionBatchAdmissionView",
+    "MatrixDeliveryView",
+    "PendingTurnView",
+    "RelationView",
+    "ReplayView",
+]

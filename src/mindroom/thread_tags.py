@@ -16,7 +16,7 @@ import nio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_thread_history import enumerate_room_thread_root_ids
+from mindroom.matrix.room_history_reads import enumerate_room_thread_root_ids
 
 logger = get_logger(__name__)
 

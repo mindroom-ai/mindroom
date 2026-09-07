@@ -6,17 +6,18 @@ import asyncio
 import base64
 import json
 import os
+import signal
 import subprocess
 import sys
 import traceback
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, get_ident
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -41,6 +42,10 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
+from mindroom.constants import (
+    DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS,
+    KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV,
+)
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_embedder_api_key
 from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
@@ -55,6 +60,7 @@ from mindroom.knowledge.file_listing import (
     list_knowledge_files,
 )
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
+from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature
 from mindroom.knowledge.redaction import (
@@ -93,7 +99,7 @@ from tests.knowledge_test_support import (
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable
+    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Sequence
     from contextlib import AbstractAsyncContextManager
     from types import ModuleType
 
@@ -450,7 +456,6 @@ def _record_git_sync(
     *relative_paths: str,
 ) -> GitSyncResult:
     """Record a faked sync's outcome the way a real one would, then return it."""
-    source._last_synced_head = result.head
     source._tracked_relative_paths = set(relative_paths)
     return result
 
@@ -2214,6 +2219,32 @@ async def test_source_root_lock_takes_the_in_loop_half_before_the_cross_process_
 
 
 @pytest.mark.asyncio
+async def test_source_root_lock_capability_expires_in_inherited_task_context(tmp_path: Path) -> None:
+    """A task created under the lock cannot retain cleanup authority after release."""
+    source_path = (tmp_path / "docs").resolve()
+    source_root = knowledge_registry.KnowledgeSourceRoot(
+        storage_root=str(tmp_path.resolve()),
+        knowledge_path=str(source_path),
+    )
+    inspect_after_release = asyncio.Event()
+    observed_fds: list[int | None] = []
+
+    async def _inspect_inherited_context() -> None:
+        capability = file_locks.current_inherited_file_lock()
+        assert capability is not None
+        await inspect_after_release.wait()
+        observed_fds.append(capability.fileno_for(source_path))
+
+    async with knowledge_refresh_locks.refresh_source_root_lock(source_root):
+        inherited_task = asyncio.create_task(_inspect_inherited_context())
+
+    inspect_after_release.set()
+    await inherited_task
+
+    assert observed_fds == [None]
+
+
+@pytest.mark.asyncio
 async def test_cancelling_while_the_cross_process_half_is_pending_frees_the_in_loop_half(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3398,6 +3429,7 @@ async def test_publish_metadata_save_finishes_before_repeated_cancellation_escap
             candidate_vector_db=candidate_vector_db,
             indexed_count=0,
             source_signature="source-signature",
+            published_revision=None,
         ),
     )
     await save_started.wait()
@@ -3441,6 +3473,7 @@ async def test_cancelled_publish_metadata_save_surfaces_a_failed_write(
             candidate_vector_db=candidate_vector_db,
             indexed_count=0,
             source_signature="source-signature",
+            published_revision=None,
         ),
     )
     await save_started.wait()
@@ -3495,6 +3528,7 @@ async def test_publishing_states_every_field_of_the_state_file(tmp_path: Path) -
             candidate_vector_db=candidate_vector_db,
             indexed_count=4,
             source_signature="new-signature",
+            published_revision=None,
         )
         is False
     )
@@ -4934,6 +4968,36 @@ def test_published_state_fingerprint_includes_failure_counter(tmp_path: Path) ->
     )
 
 
+def test_failed_subprocess_does_not_claim_pending_state_for_newer_publication(tmp_path: Path) -> None:
+    """A child failure cannot overwrite a stale marker attached to a newer publish."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    initial_state = PublishedIndexState(
+        settings=key.indexing_settings,
+        status="complete",
+        collection="old",
+        indexed_count=1,
+        source_signature="old-source",
+        refresh_job="pending",
+        reason="test_stale",
+    )
+    newer_state = replace(
+        initial_state,
+        collection="new",
+        source_signature="new-source",
+        reason="source_changed",
+    )
+
+    assert not knowledge_refresh_runner._failed_subprocess_state_can_be_reconciled(
+        key,
+        newer_state,
+        initial_state,
+    )
+
+
 @pytest.mark.asyncio
 async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
     tmp_path: Path,
@@ -5301,6 +5365,32 @@ async def test_refresh_scheduler_runs_independent_per_binding_tasks(
 
 
 @pytest.mark.asyncio
+async def test_refresh_scheduler_does_not_deep_copy_config_on_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scheduling a refresh must not deep-copy the full config on the event loop."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    refreshed = asyncio.Event()
+
+    async def _fake_refresh(_base_id: str, **_kwargs: object) -> None:
+        refreshed.set()
+
+    def _unexpected_copy(_self: Config, **_kwargs: object) -> Config:
+        pytest.fail("schedule_refresh deep-copied the config")
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr(Config, "model_copy", _unexpected_copy)
+
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await asyncio.wait_for(refreshed.wait(), timeout=5)
+    await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5625,15 +5715,25 @@ async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_runtime_path", [False, True], ids=["launcher-fallback", "runtime-override"])
 async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    explicit_runtime_path: bool,
 ) -> None:
-    """The subprocess helper sends the scheduled config snapshot via stdin."""
+    """The subprocess gets its config snapshot and the correct executable path."""
+    launcher_bin = tmp_path / "nix-profile" / "bin"
+    runtime_bin = tmp_path / "runtime-bin"
+    monkeypatch.setenv("PATH", str(launcher_bin))
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     config.knowledge_bases["docs"].chunk_size = 1234
     runtime_paths = runtime_paths_for(config)
+    path_overrides = ({}, {"PATH": str(runtime_bin)})[explicit_runtime_path]
+    runtime_paths = replace(
+        runtime_paths,
+        process_env={**runtime_paths.process_env, **path_overrides},
+    )
     captured_request: dict[str, object] = {}
     captured_args: tuple[object, ...] = ()
     captured_env: dict[str, str] = {}
@@ -5674,8 +5774,12 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
         captured_stdin = process.stdin
         return process
 
+    async def _fake_terminate(_process: _Process) -> None:
+        pass
+
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
     monkeypatch.setattr(knowledge_refresh_runner, "_subprocess_session_kwargs", dict)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
 
     await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
         "docs",
@@ -5687,6 +5791,7 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert captured_args[:3] == (sys.executable, "-m", "mindroom.knowledge_refresh_runner")
     assert "--request-path" not in captured_args
     assert captured_env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] == "1"
+    assert captured_env["PATH"] == str((launcher_bin, runtime_bin)[explicit_runtime_path])
     assert captured_stdin is not None
     captured_request.update(json.loads(bytes(captured_stdin.payload).decode()))
     assert captured_request["base_id"] == "docs"
@@ -5696,6 +5801,322 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
     assert captured_request["config_data"]["knowledge_bases"]["docs"]["chunk_size"] == 1234
     assert captured_request["runtime_knowledge_base"] is None
     assert captured_request["execution_identity"]["requester_id"] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
+async def test_subprocess_refresh_serializes_request_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large config serialization must not block the control-plane event loop."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    event_loop_thread = get_ident()
+    serialization_threads: list[int] = []
+    process = MagicMock(returncode=0)
+    process.wait = AsyncMock(return_value=0)
+    process.stdin.drain = AsyncMock()
+    process.stdin.wait_closed = AsyncMock()
+
+    def _fake_serialize(*_args: object, **_kwargs: object) -> bytes:
+        serialization_threads.append(get_ident())
+        return b"{}"
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> MagicMock:
+        return process
+
+    async def _fake_terminate(_process: object) -> None:
+        pass
+
+    monkeypatch.setattr(knowledge_refresh_runner, "_serialize_subprocess_refresh_request", _fake_serialize)
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_subprocess_session_kwargs", dict)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert serialization_threads
+    assert serialization_threads[0] != event_loop_thread
+
+
+@pytest.mark.asyncio
+async def test_scheduled_refreshes_reuse_parent_github_app_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Consecutive refresh workers must receive one runtime-cached App token."""
+    docs_path = tmp_path / "docs"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={
+            "docs": KnowledgeGitConfig(
+                repo_url="https://github.com/example/private.git",
+                credentials_service="github_app",
+            ),
+        },
+    )
+    runtime_paths = runtime_paths_for(config)
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        "github_app",
+        {
+            "auth_type": "github_app",
+            "app_id": 12345,
+            "installation_id": 67890,
+            "private_key_file": str(tmp_path / "github-app.pem"),
+        },
+    )
+    mint_count = 0
+    payloads: list[dict[str, object]] = []
+
+    async def _fake_mint(
+        _self: GitHubAppTokenProvider,
+        _credentials: object,
+        *,
+        repository: str,
+        now: datetime,
+    ) -> object:
+        nonlocal mint_count
+        assert repository == "private"
+        assert now.tzinfo is not None
+        mint_count += 1
+        return SimpleNamespace(
+            token="parent-cached-token",  # noqa: S106
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+
+    process = MagicMock(returncode=0)
+    process.wait = AsyncMock(return_value=0)
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> MagicMock:
+        return process
+
+    async def _fake_send(_process: object, payload: bytes) -> None:
+        payloads.append(json.loads(payload))
+
+    async def _fake_terminate(_process: object) -> None:
+        pass
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_subprocess_session_kwargs", dict)
+    monkeypatch.setattr(knowledge_refresh_runner, "_send_subprocess_refresh_request", _fake_send)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert mint_count == 1
+    assert [payload["github_app_token"]["token"] for payload in payloads] == [
+        "parent-cached-token",
+        "parent-cached-token",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_subprocess_refresh_primes_parent_github_app_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh child must use its parent-provided token without reminting."""
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(
+        repo_url="https://github.com/example/private.git",
+        credentials_service="github_app",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    credentials = {
+        "auth_type": "github_app",
+        "app_id": 12345,
+        "installation_id": 67890,
+        "private_key_file": str(tmp_path / "github-app.pem"),
+    }
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("github_app", credentials)
+    raw_payload = json.loads(
+        knowledge_refresh_runner._serialize_subprocess_refresh_request(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+            force_reindex=False,
+        ),
+    )
+    raw_payload["github_app_token"] = {
+        "token": "parent-cached-token",
+        "expires_at_epoch": 4_070_908_800,
+        "binding": {
+            "app_id": 12345,
+            "installation_id": 67890,
+            "owner": "example",
+            "repository": "private",
+            "private_key_file": str(tmp_path / "github-app.pem"),
+        },
+    }
+    mint_count = 0
+
+    async def _fake_mint(
+        _self: GitHubAppTokenProvider,
+        _credentials: object,
+        *,
+        repository: str,
+        now: datetime,
+    ) -> object:
+        nonlocal mint_count
+        assert repository == "private"
+        assert now.tzinfo is not None
+        mint_count += 1
+        return SimpleNamespace(
+            token="unexpected-remint",  # noqa: S106
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+
+    async def _fake_refresh(
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        **_kwargs: object,
+    ) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+        manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
+        resolved = await manager.git_source._github_app_token_provider.resolve(
+            git_config.repo_url,
+            credentials,
+        )
+        assert resolved == ("x-access-token", "parent-cached-token")
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths),
+            indexed_count=0,
+            index_published=False,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
+    monkeypatch.setattr(knowledge_refresh_runner, "refresh_knowledge_binding", _fake_refresh)
+
+    result = await knowledge_refresh_runner._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
+
+    assert result.availability is KnowledgeAvailability.READY
+    assert mint_count == 0
+
+
+@pytest.mark.asyncio
+async def test_subprocess_refresh_rejects_parent_token_after_credentials_rotate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child must not bind an App token to credentials changed after minting."""
+    docs_path = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(
+        repo_url="https://github.com/example/private.git",
+        credentials_service="github_app",
+    )
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": git_config},
+    )
+    runtime_paths = runtime_paths_for(config)
+    parent_credentials = {
+        "auth_type": "github_app",
+        "app_id": 12345,
+        "installation_id": 67890,
+        "private_key_file": str(tmp_path / "parent.pem"),
+    }
+    current_credentials = {
+        "auth_type": "github_app",
+        "app_id": 54321,
+        "installation_id": 9876,
+        "private_key_file": str(tmp_path / "current.pem"),
+    }
+    credentials_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials("github_app", parent_credentials)
+    raw_payload = json.loads(
+        knowledge_refresh_runner._serialize_subprocess_refresh_request(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+            force_reindex=False,
+        ),
+    )
+    raw_payload["github_app_token"] = {
+        "token": "parent-cached-token",
+        "expires_at_epoch": 4_070_908_800,
+        "binding": {
+            "app_id": 12345,
+            "installation_id": 67890,
+            "owner": "example",
+            "repository": "private",
+            "private_key_file": str(tmp_path / "parent.pem"),
+        },
+    }
+    credentials_manager.save_credentials("github_app", current_credentials)
+    mint_count = 0
+
+    async def _fake_mint(
+        _self: GitHubAppTokenProvider,
+        _credentials: object,
+        *,
+        repository: str,
+        now: datetime,
+    ) -> object:
+        nonlocal mint_count
+        assert repository == "private"
+        assert now.tzinfo is not None
+        mint_count += 1
+        return SimpleNamespace(
+            token="current-token",  # noqa: S106
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+
+    async def _fake_refresh(
+        base_id: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        **_kwargs: object,
+    ) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+        manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
+        resolved = await manager.git_source._github_app_token_provider.resolve(
+            git_config.repo_url,
+            current_credentials,
+        )
+        assert resolved == ("x-access-token", "current-token")
+        return knowledge_refresh_runner.KnowledgeRefreshResult(
+            key=resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths),
+            indexed_count=0,
+            index_published=False,
+            availability=KnowledgeAvailability.READY,
+        )
+
+    monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
+    monkeypatch.setattr(knowledge_refresh_runner, "refresh_knowledge_binding", _fake_refresh)
+
+    result = await knowledge_refresh_runner._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
+
+    assert result.availability is KnowledgeAvailability.READY
+    assert mint_count == 1
 
 
 @pytest.mark.asyncio
@@ -5870,6 +6291,403 @@ async def test_cancelled_subprocess_refresh_reconciles_running_state(
     assert state.reason == "refresh_cancelled"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
+@pytest.mark.asyncio
+async def test_process_group_exit_wait_warns_when_group_survives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded drain must explain any process group it cannot retire."""
+    monkeypatch.setattr(knowledge_refresh_runner, "_process_group_exists", lambda _process_group_id: True)
+
+    with capture_logs() as logs:
+        await knowledge_refresh_runner._wait_for_process_group_exit(12345, wait_seconds=0)
+
+    assert any(log.get("event") == "Knowledge refresh process group survived termination wait" for log in logs)
+
+
+@pytest.mark.asyncio
+async def test_successful_refresh_subprocess_drains_its_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful worker must not leave a lock-holding Git helper behind."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    terminated = asyncio.Event()
+
+    class _Stdin:
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = _Stdin()
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        return _Process()
+
+    async def _fake_terminate(_process: _Process) -> None:
+        terminated.set()
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+
+    await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert terminated.is_set()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
+@pytest.mark.asyncio
+async def test_terminate_refresh_subprocess_kills_surviving_process_group_member(tmp_path: Path) -> None:
+    """A Git-like grandchild that ignores SIGTERM must not outlive its refresh leader."""
+    descendant_lock_path = tmp_path / "descendant.lock"
+    ready_read_fd, ready_write_fd = os.pipe()
+    script = f"""
+import fcntl
+import os
+import signal
+import time
+
+child_pid = os.fork()
+if child_pid == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    lock_file = open({str(descendant_lock_path)!r}, "w")
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    os.write({ready_write_fd}, b"1")
+    os.close({ready_write_fd})
+    time.sleep(60)
+    os._exit(0)
+
+os.close({ready_write_fd})
+signal.signal(signal.SIGTERM, lambda *_args: os._exit(0))
+time.sleep(60)
+"""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        start_new_session=True,
+        pass_fds=(ready_write_fd,),
+    )
+    os.close(ready_write_fd)
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(os.read, ready_read_fd, 1), timeout=30) == b"1"
+        assert file_locks.file_lock_is_held(descendant_lock_path) is True
+
+        await knowledge_refresh_runner._terminate_refresh_subprocess(process)
+
+        assert file_locks.file_lock_is_held(descendant_lock_path) is False
+    finally:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
+        os.close(ready_read_fd)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_reason", [None, "source_changed", "git_source_updated", "manual_reindex"])
+async def test_wedged_subprocess_refresh_is_terminated_after_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pending_reason: str | None,
+) -> None:
+    """A wedged child is killed and its running or intermediate state is failed."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
+    terminated = asyncio.Event()
+
+    class _Stdin:
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = _Stdin()
+
+        async def wait(self) -> int:
+            knowledge_registry.mark_published_index_refresh_running(key)
+            if pending_reason is not None:
+                knowledge_registry.mark_published_index_stale(key, reason=pending_reason)
+            await asyncio.Event().wait()
+            raise AssertionError
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        return _Process()
+
+    async def _fake_terminate(process: _Process) -> None:
+        process.returncode = -9
+        terminated.set()
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_subprocess_timeout_seconds", lambda _runtime_paths: 0.05)
+
+    with pytest.raises(RuntimeError, match=r"timed out after 0\.05s"):
+        await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    assert terminated.is_set()
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.refresh_job == "failed"
+    assert state.reason == "refresh_failed"
+    assert state.last_error is not None
+    assert "timed out after 0.05s" in state.last_error
+
+
+@pytest.mark.asyncio
+async def test_blocked_refresh_request_is_terminated_after_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The watchdog includes request delivery when a child never reads stdin."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
+    terminated = asyncio.Event()
+
+    class _Stdin:
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            await asyncio.Event().wait()
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = _Stdin()
+
+        async def wait(self) -> int:
+            msg = "process.wait() must not start before request delivery finishes"
+            raise AssertionError(msg)
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        return _Process()
+
+    async def _fake_terminate(process: _Process) -> None:
+        process.returncode = -9
+        terminated.set()
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+    monkeypatch.setattr(
+        knowledge_refresh_runner,
+        "_refresh_subprocess_timeout_seconds",
+        lambda _runtime_paths: 0.05,
+    )
+
+    with pytest.raises(RuntimeError, match=r"timed out after 0\.05s"):
+        await asyncio.wait_for(
+            knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+                "docs",
+                config=config,
+                runtime_paths=runtime_paths,
+            ),
+            timeout=0.5,
+        )
+
+    assert terminated.is_set()
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.refresh_job == "failed"
+    assert state.reason == "refresh_failed"
+
+
+@pytest.mark.asyncio
+async def test_timeout_cleanup_finishes_before_cancellation_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during timeout cleanup cannot abandon child termination or reconciliation."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+
+    class _Stdin:
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = _Stdin()
+
+        async def wait(self) -> int:
+            knowledge_registry.mark_published_index_refresh_running(key)
+            await asyncio.Event().wait()
+            raise AssertionError
+
+    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        return _Process()
+
+    async def _fake_terminate(process: _Process) -> None:
+        cleanup_started.set()
+        try:
+            await cleanup_release.wait()
+        except asyncio.CancelledError:
+            cleanup_cancelled.set()
+            raise
+        process.returncode = -9
+        cleanup_finished.set()
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
+    monkeypatch.setattr(
+        knowledge_refresh_runner,
+        "_refresh_subprocess_timeout_seconds",
+        lambda _runtime_paths: 0.05,
+    )
+
+    refresh_task = asyncio.create_task(
+        knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        ),
+    )
+    await cleanup_started.wait()
+    refresh_task.cancel()
+    await asyncio.sleep(0)
+    try:
+        assert not refresh_task.done()
+        refresh_task.cancel()
+        await asyncio.sleep(0)
+        assert not refresh_task.done()
+    finally:
+        cleanup_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await refresh_task
+
+    assert cleanup_finished.is_set()
+    assert not cleanup_cancelled.is_set()
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.refresh_job == "failed"
+    assert state.reason == "refresh_failed"
+
+
+def test_refresh_subprocess_timeout_reads_the_runtime_environment(tmp_path: Path) -> None:
+    """The refresh watchdog resolves config-adjacent environment and rejects unsafe values."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    assert (
+        knowledge_refresh_runner._refresh_subprocess_timeout_seconds(runtime_paths)
+        == DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS
+    )
+
+    runtime_paths.env_path.write_text(f"{KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV}=12.5\n", encoding="utf-8")
+    configured_runtime_paths = test_runtime_paths(tmp_path)
+    assert knowledge_refresh_runner._refresh_subprocess_timeout_seconds(configured_runtime_paths) == 12.5
+
+    for raw_value in ("0", "nan", "inf", "not-a-number"):
+        runtime_paths.env_path.write_text(
+            f"{KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV}={raw_value}\n",
+            encoding="utf-8",
+        )
+        invalid_runtime_paths = test_runtime_paths(tmp_path)
+        with pytest.raises(ValueError, match=KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV):
+            knowledge_refresh_runner._refresh_subprocess_timeout_seconds(invalid_runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_invalid_refresh_timeout_is_recorded_as_failed(
+    tmp_path: Path,
+) -> None:
+    """A malformed watchdog setting leaves a durable failure instead of stale pending state."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    base_runtime_paths = runtime_paths_for(config)
+    runtime_paths = replace(
+        base_runtime_paths,
+        env_file_values={KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV: "invalid"},
+    )
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    knowledge_registry.mark_published_index_stale(key, reason="test_stale")
+
+    with pytest.raises(ValueError, match=KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV):
+        await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.refresh_job == "failed"
+    assert state.reason == "refresh_failed"
+    assert state.last_error is not None
+    assert KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV in state.last_error
+
+
 @pytest.mark.asyncio
 async def test_failed_subprocess_refresh_reconciles_running_state(
     tmp_path: Path,
@@ -5911,7 +6729,13 @@ async def test_failed_subprocess_refresh_reconciles_running_state(
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
         return _Process()
 
+    terminated: list[_Process] = []
+
+    async def _fake_terminate(process: _Process) -> None:
+        terminated.append(process)
+
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
 
     with pytest.raises(RuntimeError, match="exit code 137"):
         await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
@@ -5926,6 +6750,7 @@ async def test_failed_subprocess_refresh_reconciles_running_state(
     assert state.reason == "refresh_failed"
     assert state.last_error is not None
     assert "exit code 137" in state.last_error
+    assert len(terminated) == 1
 
 
 @pytest.mark.asyncio
@@ -5979,7 +6804,11 @@ async def test_failed_subprocess_refresh_does_not_overwrite_newer_success(
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
         return _Process()
 
+    async def _fake_terminate(_process: _Process) -> None:
+        pass
+
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
 
     with pytest.raises(RuntimeError, match="exit code 137"):
         await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
@@ -6048,7 +6877,11 @@ async def test_failed_subprocess_refresh_reconciles_running_state_after_newer_pu
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
         return _Process()
 
+    async def _fake_terminate(_process: _Process) -> None:
+        pass
+
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
 
     with pytest.raises(RuntimeError, match="exit code 137"):
         await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
@@ -6102,7 +6935,11 @@ async def test_refresh_subprocess_receives_conservative_thread_env(
         captured_env.update(kwargs["env"])
         return _Process()
 
+    async def _fake_terminate(_process: _Process) -> None:
+        pass
+
     monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
 
     await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
         "docs",
@@ -7106,6 +7943,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
 
     monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_success)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+    _install_git_revisions(monkeypatch, ["rev-git"])
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -7218,6 +8056,7 @@ async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
         return await original_reindex(self, force_reindex=force_reindex)
 
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
+    _install_git_revisions(monkeypatch, ["rev-a"])
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -7252,6 +8091,7 @@ async def test_git_noop_refresh_skips_corpus_hash_when_revision_is_unchanged(
             GitSyncResult(head="rev-a", updated=False),
         ],
     )
+    _install_git_revisions(monkeypatch, ["rev-a"])
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     def _unexpected_signature(*_args: object, **_kwargs: object) -> str:
@@ -7317,6 +8157,198 @@ async def test_git_noop_refresh_hashes_corpus_when_index_predates_revision_track
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     assert counter.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changed_files", "expected_scanned"),
+    [
+        pytest.param(frozenset({"second.md"}), [("second.md",)], id="reliable-delta"),
+        pytest.param(None, [("first.md", "second.md", "third.md")], id="full-scan-fallback"),
+    ],
+)
+async def test_git_update_uses_reliable_delta_for_file_signature_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_files: frozenset[str] | None,
+    expected_scanned: list[tuple[str, ...]],
+) -> None:
+    """A revision-matched Git delta should avoid hashing every unchanged file."""
+    names = ("first.md", "second.md", "third.md")
+    config, runtime_paths = _git_noop_config(tmp_path, files=names)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+        ],
+        tracked=names,
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-b", "rev-b"])
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (tmp_path / "docs" / "second.md").write_text("changed", encoding="utf-8")
+
+    async def _changed_files_between(
+        _self: GitKnowledgeSource,
+        before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str] | None:
+        assert before_head == "rev-a"
+        assert after_head == "rev-b"
+        return changed_files
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _changed_files_between)
+
+    scanned: list[tuple[str, ...]] = []
+    original_file_signatures_for = KnowledgeManager._file_signatures_for
+
+    async def _record_scanned_files(
+        self: KnowledgeManager,
+        files: Sequence[Path],
+    ) -> dict[str, tuple[tuple[int, int, str], Path]]:
+        scanned.append(tuple(sorted(path.name for path in files)))
+        return await original_file_signatures_for(self, files)
+
+    monkeypatch.setattr(KnowledgeManager, "_file_signatures_for", _record_scanned_files)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 1
+    assert scanned == expected_scanned
+
+
+@pytest.mark.asyncio
+async def test_git_candidate_cancelled_before_reconciliation_rescans_on_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled refresh must not checkpoint an unreconciled Git revision."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+            GitSyncResult(head="rev-b", updated=False),
+        ],
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-b", "rev-b"])
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (tmp_path / "docs" / "doc.md").write_text("changed", encoding="utf-8")
+
+    delta_calls = 0
+
+    async def _cancel_once(
+        _self: GitKnowledgeSource,
+        before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str]:
+        nonlocal delta_calls
+        delta_calls += 1
+        if delta_calls == 1:
+            raise asyncio.CancelledError
+        return frozenset({"doc.md"}) if (before_head, after_head) == ("rev-a", "rev-b") else frozenset()
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _cancel_once)
+
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 1
+
+
+@pytest.mark.asyncio
+async def test_git_delta_targets_the_revision_verified_by_the_refresh_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first reconciliation delta must cover the round's exact Git revision."""
+    names = ("first.md", "second.md")
+    config, runtime_paths = _git_noop_config(tmp_path, files=names)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+        ],
+        tracked=names,
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-c", "rev-c"])
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (tmp_path / "docs" / "first.md").write_text("changed in rev-b", encoding="utf-8")
+
+    async def _changed_files_between(
+        _self: GitKnowledgeSource,
+        _before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str]:
+        (tmp_path / "docs" / "second.md").write_text("changed in rev-c", encoding="utf-8")
+        if after_head == "rev-c":
+            return frozenset(names)
+        return frozenset({"first.md"})
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _changed_files_between)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 2
+
+
+@pytest.mark.asyncio
+async def test_git_publish_records_verified_revision_before_later_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Published metadata must identify the revision whose vectors were verified."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+            GitSyncResult(head="rev-b", updated=True),
+        ],
+    )
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-a", "rev-c", "rev-c", "rev-b", "rev-b"])
+
+    async def _changed_files_between(
+        _self: GitKnowledgeSource,
+        before_head: str | None,
+        after_head: str | None,
+    ) -> frozenset[str] | None:
+        if before_head is None:
+            return None
+        return frozenset({"doc.md"}) if before_head != after_head else frozenset()
+
+    monkeypatch.setattr(GitKnowledgeSource, "changed_files_between", _changed_files_between)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    docs_path = tmp_path / "docs"
+    (docs_path / "doc.md").write_text("content at rev-c", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state_at_rev_c = load_published_index_state(published_index_metadata_path(key))
+
+    (docs_path / "doc.md").write_text("content at rev-b", encoding="utf-8")
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    state_at_rev_b = load_published_index_state(published_index_metadata_path(key))
+
+    assert state_at_rev_c is not None
+    assert state_at_rev_c.published_revision == "rev-c"
+    assert state_at_rev_b is not None
+    assert state_at_rev_b.published_revision == "rev-b"
+    assert state_at_rev_b.source_signature == _knowledge_source_signature(
+        config,
+        "docs",
+        docs_path,
+        tracked_relative_paths={"doc.md"},
+    )
+    assert result.index_published is True
 
 
 @pytest.mark.asyncio
@@ -7423,6 +8455,24 @@ async def test_reindex_hashes_live_corpus_for_non_git_bases(
 
     assert counter.calls >= 1
     assert result.index_published is True
+
+
+@pytest.mark.asyncio
+async def test_non_git_refresh_publishes_when_file_and_directory_share_a_stem(tmp_path: Path) -> None:
+    """Stable corpora publish when a file and directory share a stem."""
+    docs_path = tmp_path / "docs"
+    nested_path = docs_path / "topic"
+    nested_path.mkdir(parents=True)
+    (docs_path / "topic.md").write_text("top-level topic", encoding="utf-8")
+    (nested_path / "details.md").write_text("nested topic details", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert result.indexed_count == 2
 
 
 @pytest.mark.asyncio
@@ -7816,6 +8866,7 @@ async def test_git_failure_redacts_authorization_headers_from_raised_and_metadat
         _ = (args, kwargs)
         return _FailedGitProcess()
 
+    monkeypatch.setenv(knowledge_git_source_module._REFRESH_SUBPROCESS_ENV, "1")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fail_git_command)
 
     with pytest.raises(RuntimeError) as exc_info:

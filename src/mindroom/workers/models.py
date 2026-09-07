@@ -8,6 +8,7 @@ from typing import Literal
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
 WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
+ScriptResourceProfileName = Literal["small", "standard", "large"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +17,9 @@ class WorkerSpec:
 
     worker_key: str
     private_agent_names: frozenset[str] | None = None
+    mirrored_credential_services: frozenset[str] | None = None
+    state_scope_worker_key: str | None = None
+    resource_profile: ScriptResourceProfileName | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +66,16 @@ ProgressSink = Callable[[WorkerReadyProgress], None]
 
 def worker_api_endpoint(
     handle: WorkerHandle,
-    operation: Literal["execute", "leases", "workers", "cleanup", "save-attachment"],
+    operation: Literal[
+        "execute",
+        "leases",
+        "workers",
+        "cleanup",
+        "save-attachment",
+        "script-run",
+        "script-status",
+        "script-cancel",
+    ],
 ) -> str:
     """Return the API endpoint for one worker operation."""
     api_root = handle.debug_metadata.get("api_root")
@@ -73,4 +86,8 @@ def worker_api_endpoint(
         return handle.endpoint
     if operation == "cleanup":
         return f"{api_root}/workers/cleanup"
+    if operation == "script-run":
+        return f"{api_root}/scripts/run"
+    if operation in {"script-status", "script-cancel"}:
+        return f"{api_root}/scripts"
     return f"{api_root}/{operation}"

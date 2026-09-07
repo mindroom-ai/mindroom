@@ -737,7 +737,7 @@ async def _sync_desktop_client(client: nio.AsyncClient) -> None:
         permanent_sync_error = response
         client.stop_sync_forever()
 
-    client.add_response_callback(stop_on_permanent_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
+    client.add_response_callback(stop_on_permanent_sync_error, nio.SyncError)
     await client.sync_forever(timeout=30_000, full_state=False, set_presence="online")
     if permanent_sync_error is not None:
         msg = f"Desktop Matrix sync stopped after permanent authentication failure: {permanent_sync_error}"

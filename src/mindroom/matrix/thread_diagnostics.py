@@ -1,21 +1,12 @@
 """Shared Matrix thread-read diagnostic keys.
 
-This module is a deliberate dependency-cycle breaker between the cache package (which produces
-``ThreadHistoryResult`` diagnostics) and ``thread_membership`` (which consumes them for root proofs).
+A leaf module so the reader that produces ``ThreadHistoryResult`` diagnostics and
+``thread_membership``, which consumes them for root proofs, need not import each other.
 
-Diagnostic semantics:
-
-1. ``thread_read_source`` distinguishes ``cache`` (a stored snapshot with no gap marker), ``homeserver`` (fresh fetch),
-   ``stale_cache`` (advisory fallback after a failed refetch), and ``degraded`` (empty fail-open result
-   from a dispatch timeout).
-
-2. ``is_thread_history_degraded`` is the planning-level check: both ``stale_cache`` and ``degraded``
-   reads count as degraded and must not be treated as authoritative context. Thread reads are not
-   memoized, so there is no cached copy of one to guard against either.
-
-3. ``is_thread_history_source_degraded`` is the stricter proof-level check: only the explicit
-   ``degraded`` source disqualifies a history from serving as thread-root proof, because a stale
-   snapshot still proves children existed while an empty degraded read proves nothing.
+``thread_read_source`` has one value left: ``degraded``, the empty fail-open result of a read
+that could not complete. It is separate from ``thread_read_degraded`` because a caller can flag
+a read degraded while still returning its content, and only the source says the content is
+absent -- which is the distinction the two predicates below turn on.
 """
 
 from __future__ import annotations
@@ -26,12 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 THREAD_HISTORY_SOURCE_DIAGNOSTIC = "thread_read_source"
-THREAD_HISTORY_SOURCE_CACHE = "cache"
-THREAD_HISTORY_SOURCE_HOMESERVER = "homeserver"
-THREAD_HISTORY_SOURCE_STALE_CACHE = "stale_cache"
 THREAD_HISTORY_SOURCE_DEGRADED = "degraded"
-THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC = "cache_reject_reason"
-THREAD_HISTORY_ERROR_DIAGNOSTIC = "thread_read_error"
 THREAD_HISTORY_DEGRADED_DIAGNOSTIC = "thread_read_degraded"
 
 
@@ -39,8 +25,8 @@ THREAD_HISTORY_DEGRADED_DIAGNOSTIC = "thread_read_degraded"
 class _SupportsThreadDiagnostics(Protocol):
     """Minimal boundary-safe shape for thread histories that expose read diagnostics.
 
-    Keep this structural to avoid importing ThreadHistoryResult here and creating a cache
-    package dependency cycle.
+    Keep this structural to avoid importing ThreadHistoryResult here and creating a
+    dependency cycle.
     """
 
     diagnostics: Mapping[str, object]

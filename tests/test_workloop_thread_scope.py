@@ -55,10 +55,15 @@ from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
+from tests.authorization_helpers import (
+    make_test_tool_runtime_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_cache_mock,
-    make_event_cache_mock,
+    ignore_final_delivery_handoff,
+    make_conversation_reader_mock,
+    make_outbox_mock,
+    make_relation_lookup,
     message_origin,
     runtime_paths_for,
     test_runtime_paths,
@@ -217,7 +222,7 @@ def _tool_context(
     thread_id: str | None = None,
     resolved_thread_id: str | None = "$thread_root",
 ) -> ToolRuntimeContext:
-    return ToolRuntimeContext(
+    return make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget(
             room_id=room_id,
@@ -230,8 +235,8 @@ def _tool_context(
         client=AsyncMock(),
         config=loaded.config,
         runtime_paths=loaded.runtime_paths,
-        event_cache=make_event_cache_mock(),
-        conversation_cache=make_conversation_cache_mock(),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
         room=MagicMock(),
         storage_path=None,
     )
@@ -753,13 +758,14 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
             redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=ResponseHookService(hook_context=hook_context),
+            outbox=make_outbox_mock(),
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
 
     parsed = MagicMock()
     parsed.formatted_text = "visible response"
-    parsed.option_map = None
-    parsed.options_list = None
+    parsed.interactive_metadata = None
 
     delivery_result = None
 

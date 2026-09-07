@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shlex
 import socket
 import sys
 from pathlib import Path  # noqa: TC003
@@ -59,12 +60,14 @@ app = typer.Typer(
 )
 avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
 threads_app = typer.Typer(help="Export Matrix threads to local files.")
+journal_app = typer.Typer(help="Inspect and rebind the durable event journal.")
 config_app.command("migrate")(config_migrate)
 app.add_typer(config_app, name="config")
 app.add_typer(plugins_app, name="plugins")
 app.add_typer(desktop_app, name="desktop")
 app.add_typer(avatars_app, name="avatars")
 app.add_typer(threads_app, name="threads")
+app.add_typer(journal_app, name="journal")
 app.add_typer(service_app, name="service")
 app.add_typer(trigger_app, name="trigger")
 
@@ -313,6 +316,11 @@ def avatars_sync(
 
 @threads_app.command("export")
 def _threads_export_command(
+    url: str | None = typer.Option(
+        None,
+        "--url",
+        help="Running MindRoom URL; defaults to MINDROOM_URL or localhost:8765.",
+    ),
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
@@ -352,32 +360,108 @@ def _threads_export_command(
         "--max-thread-roots",
         help="Maximum thread roots to enumerate per room.",
     ),
-    prefer_cache: bool = typer.Option(
-        False,
-        "--prefer-cache",
-        help="Serve thread bodies from the durable event cache and only fetch from the homeserver "
-        "on miss or invalidation. Use alongside a running MindRoom that keeps the cache fresh.",
-    ),
     invited_rooms: bool = typer.Option(
         True,
         "--invited-rooms/--no-invited-rooms",
         help="Include rooms joined through authorized invites (user-created rooms).",
     ),
 ) -> None:
-    """Export Matrix threads to YAML files for grep/ripgrep search."""
+    """Export Matrix threads through a running MindRoom instance to searchable YAML files."""
     asyncio.run(
         _threads_export(
             config_path=config_path,
+            url=url,
             storage_path=storage_path,
             output=output,
             room=room,
             watch=watch,
             interval=interval,
             max_thread_roots=max_thread_roots,
-            prefer_cache=prefer_cache,
             include_invited_rooms=invited_rooms,
         ),
     )
+
+
+async def _journal_adopt(
+    *,
+    config_path: Path | None,
+    storage_path: Path | None,
+    yes: bool,
+    force: bool,
+) -> None:
+    """Bind this install to whatever event-journal database is configured right now."""
+    from mindroom.event_journal_open import (  # noqa: PLC0415 - keeps the journal store out of CLI import time
+        EventJournalBindingError,
+        adopt_event_journal,
+        current_binding_description,
+        describe_event_journal,
+    )
+
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    config = _load_active_config_or_exit(runtime_paths)
+    description = describe_event_journal(config.event_journal, runtime_paths)
+    # Read for the prompt only. What is actually replaced is decided again
+    # under the binding lock, where nothing else can be publishing.
+    previous = current_binding_description(runtime_paths.storage_root)
+    if previous is not None and not yes:
+        console.print(f"This install is bound to [bold]{previous}[/bold].")
+        console.print(
+            f"Adopting [bold]{description}[/bold] gives up the deduplication, delivery, and recovery "
+            "history held in the bound journal.",
+        )
+        console.print("Stop MindRoom first: a runtime that is still up keeps writing to the journal it started on.")
+        if not typer.confirm("Adopt the configured event journal?"):
+            raise typer.Exit(1)
+
+    try:
+        generation = await adopt_event_journal(
+            config.event_journal,
+            runtime_paths=runtime_paths,
+            storage_path=runtime_paths.storage_root,
+            force=force,
+        )
+    except EventJournalBindingError as exc:
+        # The previous binding is still in place, which is the point: a failed
+        # adoption must leave the install exactly as usable as it was.
+        console.print(f"[red]Not adopted:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]Bound[/green] this install to {description} (generation {generation}).")
+
+
+@journal_app.command("adopt")
+def _journal_adopt_command(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Base directory for persistent MindRoom data.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Adopt without confirming, even when another journal is already bound.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Adopt even though another process still has this install's journal open.",
+    ),
+) -> None:
+    """Bind this install to the configured event-journal database.
+
+    MindRoom refuses to start against a journal it is not bound to, because
+    using a different one loses turn deduplication, delivery ownership, and
+    recovery ownership without any error. This is how you say the change was
+    deliberate.
+    """
+    asyncio.run(_journal_adopt(config_path=config_path, storage_path=storage_path, yes=yes, force=force))
 
 
 def _print_thread_export_stats(stats: ThreadExportStats) -> None:
@@ -415,20 +499,19 @@ def _is_connection_os_error(exc: BaseException) -> bool:
 async def _threads_export(
     *,
     config_path: Path | None,
+    url: str | None = None,
     storage_path: Path | None,
     output: Path | None,
     room: str | None,
     watch: bool,
     interval: int,
     max_thread_roots: int,
-    prefer_cache: bool,
     include_invited_rooms: bool,
 ) -> None:
     """Run one thread export command."""
-    from mindroom.thread_export import export_threads_once  # noqa: PLC0415
+    from mindroom.cli.thread_export import request_thread_export  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
-    config = _load_active_config_or_exit(runtime_paths)
     if interval < 1:
         console.print("[red]Error:[/red] --interval must be at least 1 second")
         raise typer.Exit(1)
@@ -438,13 +521,12 @@ async def _threads_export(
 
     while True:
         try:
-            stats = await export_threads_once(
-                config=config,
+            stats = await request_thread_export(
+                url=url,
                 runtime_paths=runtime_paths,
                 output_dir=output,
                 room_filter=room,
                 max_thread_roots=max_thread_roots,
-                prefer_cache=prefer_cache,
                 include_invited_rooms=include_invited_rooms,
             )
         except (OSError, RuntimeError) as exc:
@@ -572,17 +654,30 @@ def _print_pairing_success_with_exports(
     """Print non-persisted exports for local provisioning credentials."""
     console.print("[green]Paired successfully.[/green]")
     console.print("\nExport these variables before running MindRoom:")
-    console.print(f"  export MINDROOM_PROVISIONING_URL={provisioning_url}")
-    console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={client_id}")
-    console.print(f"  export MINDROOM_LOCAL_CLIENT_SECRET={client_secret}")
-    console.print(f"  export MINDROOM_NAMESPACE={namespace}")
+    console.print(
+        f"  export MINDROOM_PROVISIONING_URL={shlex.quote(provisioning_url)}",
+        markup=False,
+        soft_wrap=True,
+    )
+    console.print(f"  export MINDROOM_LOCAL_CLIENT_ID={shlex.quote(client_id)}", markup=False, soft_wrap=True)
+    console.print(
+        f"  export MINDROOM_LOCAL_CLIENT_SECRET={shlex.quote(client_secret)}",
+        markup=False,
+        soft_wrap=True,
+    )
+    console.print(f"  export MINDROOM_NAMESPACE={shlex.quote(namespace)}", markup=False, soft_wrap=True)
     if owner_user_id:
-        console.print(f"  export MINDROOM_OWNER_USER_ID={owner_user_id}")
         console.print(
-            f"\nOwner user ID from pairing: {owner_user_id} (not persisted in --no-persist-env mode).",
+            f"  export MINDROOM_OWNER_USER_ID={shlex.quote(owner_user_id)}",
+            markup=False,
+            soft_wrap=True,
         )
         console.print(
-            "Update your config.yaml owner placeholder(s) manually if you rely on authorization defaults.",
+            f"\nOwner user ID from pairing: {owner_user_id} (not persisted in --no-persist-env mode).",
+            markup=False,
+        )
+        console.print(
+            "Update your config.yaml owner placeholder(s) manually if you rely on membership access settings.",
         )
     console.print("\nThen run:")
     console.print("  uv run mindroom run")

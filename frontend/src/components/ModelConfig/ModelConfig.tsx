@@ -688,6 +688,9 @@ export function ModelConfig() {
       }
     } else {
       delete nextExtraKwargs.base_url;
+      if (nextModelConfig.api != null) {
+        nextModelConfig.api = null;
+      }
     }
     if (Object.keys(nextExtraKwargs).length > 0) {
       nextModelConfig.extra_kwargs = nextExtraKwargs;

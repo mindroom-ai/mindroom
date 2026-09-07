@@ -9,13 +9,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agno.tools.google.sheets import GoogleSheetsTools as AgnoGoogleSheetsTools
+from googleapiclient.discovery import build
 
-from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, google_service_account_configured
+from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 
 if TYPE_CHECKING:
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -41,6 +43,7 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
+        runtime_config: Config | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         """Initialize Google Sheets tools with MindRoom credentials.
@@ -58,6 +61,7 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
         defer_to_original_auth = self._apply_runtime_original_auth_kwargs(kwargs)
         creds = self._initialize_oauth_client(
             worker_target=worker_target,
+            config=runtime_config,
             provided_creds=provided_creds,
             logger=logger,
             defer_to_original_auth=defer_to_original_auth,
@@ -67,11 +71,11 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
         super().__init__(creds=creds, **kwargs)
 
         # Store original auth method for fallback
-        self._set_original_auth(AgnoGoogleSheetsTools._auth)
+        self._set_original_auth(AgnoGoogleSheetsTools._resolve_creds)
         self._wrap_oauth_function_entrypoints()
 
-    def _should_fallback_to_original_auth(self) -> bool:
-        return google_service_account_configured(self.service_account_path, self._runtime_paths)
+    def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
+        return build("sheets", "v4", http=self._google_authorized_http(creds))
 
     def _normalize_dashboard_config_kwargs(self, kwargs: dict[str, Any]) -> None:
         """Map dashboard field names onto Agno's constructor argument names."""

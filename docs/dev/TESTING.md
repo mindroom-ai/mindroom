@@ -23,7 +23,7 @@ The frontend uses Vitest as the test runner with React Testing Library for compo
 - `src/components/Integrations/Integrations.test.tsx` - Tests for the Integrations component
 - `src/types/toolConfig.test.ts` - Tests for tool configuration types
 
-There are 28 frontend test files covering components, hooks, and utilities.
+The frontend test count changes frequently; use `rg --files frontend/src | rg '\.test\.tsx?$'` for the current inventory.
 
 ### Running Frontend Tests
 
@@ -42,9 +42,9 @@ bun run test:ui
 # Run tests with coverage
 bun run test:coverage
 
-# Run e2e tests
-bun run test:e2e
 ```
+
+The package currently has no tracked Gmail OAuth E2E test, so the stale `test:e2e` package script is not part of the supported workflow.
 
 ### Writing Frontend Tests
 
@@ -84,22 +84,20 @@ There are 145+ backend test files covering agents, authorization, commands, conf
 
 ```bash
 # From project root
-source .venv/bin/activate
-
-# Install test dependencies (if not already installed)
+# Install all dependencies in a fresh checkout or worktree
 uv sync --all-extras
 
 # Run all API tests
-python -m pytest tests/api/
+uv run --all-extras pytest tests/api/
 
 # Run with verbose output
-python -m pytest tests/api/ -v
+uv run --all-extras pytest tests/api/ -v
 
 # Run specific test file
-python -m pytest tests/api/test_api.py
+uv run --all-extras pytest tests/api/test_api.py
 
 # Run with coverage
-python -m pytest tests/api/ --cov=mindroom.api
+uv run --all-extras pytest tests/api/ --cov=mindroom.api
 ```
 
 ### Writing Backend Tests
@@ -132,7 +130,7 @@ In strict mode, async test functions require an explicit `@pytest.mark.asyncio` 
 ### Parallel Execution
 
 Tests run in parallel by default via `pytest-xdist` (`-n auto` in `addopts`).
-To run serially for debugging, pass `-n0`: `python -m pytest tests/ -n0`.
+To run serially for debugging, pass `-n0`: `uv run --all-extras pytest tests/ -n0`.
 
 ### Timeouts and Durations
 

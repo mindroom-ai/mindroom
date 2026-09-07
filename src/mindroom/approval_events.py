@@ -33,8 +33,6 @@ class PendingApproval:
     full_arguments_available: bool = False
     thread_id: str | None = None
     agent_name: str | None = None
-    workflow_id: str | None = None
-    participant_id: str | None = None
     requested_at: str | None = None
     expires_at: str | None = None
 
@@ -76,8 +74,6 @@ class PendingApproval:
         requester_id = _content_str(content, "requester_id") or ""
         thread_id = _content_str(content, "thread_id")
         agent_name = _content_str(content, "agent_name")
-        workflow_id = _content_str(content, "workflow_id")
-        participant_id = _content_str(content, "participant_id")
 
         return cls(
             approval_id=approval_id,
@@ -96,8 +92,6 @@ class PendingApproval:
             full_arguments_available=_full_arguments_available(content),
             thread_id=thread_id,
             agent_name=agent_name,
-            workflow_id=workflow_id,
-            participant_id=participant_id,
             requested_at=requested_at,
             expires_at=expires_at,
         )
@@ -133,23 +127,6 @@ def _full_arguments_available(content: dict[str, Any]) -> bool:
     url = content.get("full_arguments_url")
     file_info = content.get("full_arguments_info")
     return sidecar_upload_is_usable(url, file_info, room_encrypted=False)
-
-
-def is_original_approval_card(event: dict[str, Any]) -> bool:
-    """Return whether an event is an original approval card, not a replacement edit."""
-    content = event.get("content")
-    return (
-        event.get("type") == "io.mindroom.tool_approval"
-        and isinstance(content, dict)
-        and not _is_replace_content(content)
-    )
-
-
-def terminal_edit_matches_card_sender(edit: dict[str, Any] | None, card_sender_id: str) -> bool:
-    """Return whether a cached terminal edit is trusted for one approval card."""
-    if edit is None:
-        return True
-    return edit.get("sender") == card_sender_id
 
 
 def _required_str(event: dict[str, Any], key: str) -> str:

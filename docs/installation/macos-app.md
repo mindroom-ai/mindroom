@@ -48,7 +48,8 @@ If you want to use your own Matrix homeserver instead, use **Initialize Self-Hos
 The **Other Setup** submenu holds the non-hosted flows.
 Use **Initialize Self-Hosted Config** when you want to connect to your own Matrix homeserver.
 Use **Run Local Stack Setup** when you want the local Matrix stack flow.
-These actions still write to `~/.mindroom`.
+The initialization actions explicitly write to `~/.mindroom`.
+Local Stack Setup uses normal configuration discovery, so a `config.yaml` in the app's working directory can take precedence.
 
 ## Service Controls
 
@@ -74,6 +75,7 @@ Generate a fresh pair code in `chat.mindroom.chat` (Local MindRoom icon in the l
 ## Updates
 
 Use **Update MindRoom Runtime** to run `uv tool install --managed-python --python 3.13 --force mindroom`.
+Then run **Install/Ensure Service** so the version-pinned launchd service is rewritten and restarted with the updated runtime.
 Use **Check for App Updates...** to update the signed macOS app through Sparkle.
 Homebrew users can also update with Homebrew.
 
@@ -96,3 +98,5 @@ brew uninstall --zap --cask mindroom
 
 The zap command intentionally does not delete `~/.mindroom`.
 Remove that directory manually only when you want to delete MindRoom config, credentials, and persistent agent data.
+Homebrew uninstall and zap also leave the uv-installed MindRoom runtime in place.
+Remove that runtime separately with `uv tool uninstall mindroom` when desired.

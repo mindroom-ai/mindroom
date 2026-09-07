@@ -28,7 +28,6 @@ MATRIX_MESSAGE_LOW_LEVEL_IMPORTS = frozenset(
         "mindroom.custom_tools.attachments",
         "mindroom.interactive",
         "mindroom.matrix.client_delivery",
-        "mindroom.matrix.client_thread_history",
         "mindroom.matrix.client_visible_messages",
         "mindroom.matrix.mentions",
     },
@@ -38,10 +37,9 @@ MATRIX_IDENTIFIER_HELPERS = frozenset(
         "agent_username_localpart",
         "extract_server_name_from_homeserver",
         "managed_room_alias_localpart",
-        "managed_room_key_from_alias_localpart",
         "managed_space_alias_localpart",
         "mindroom_namespace",
-        "room_alias_localpart",
+        "room_alias_identifier_candidates",
     },
 )
 

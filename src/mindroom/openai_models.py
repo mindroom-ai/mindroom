@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from agno.models.deepseek import DeepSeek
 from agno.models.llama_cpp import LlamaCpp
@@ -22,12 +22,13 @@ from mindroom.openai_tool_search import (
 if TYPE_CHECKING:
     from agno.models.message import Message
     from agno.models.response import ModelResponse
+    from agno.run.agent import RunOutput
     from agno.tools.function import Function
     from openai.types.responses import Response, ResponseStreamEvent
     from pydantic import BaseModel
 
 
-# Agno 2.6.12 omits arguments for empty Anthropic tool inputs; agno-agi/agno#8970 proposes the source fix.
+# Agno (still in 3.0.5) omits arguments for empty Anthropic tool inputs; agno-agi/agno#8970 proposes the source fix.
 # Remove this repair only after upgrading to a release with that fix and migrating or dropping older histories.
 def _messages_with_openai_tool_arguments(messages: list[Message]) -> list[Message]:
     """Repair function calls and remove sparse-stream placeholders from replay."""
@@ -123,12 +124,34 @@ class MindRoomLlamaCpp(ChatToolArgumentsCompat, LlamaCpp):
 class MindRoomOpenAIResponses(OpenAIResponses):
     """OpenAI Responses model that preserves native tool-search state."""
 
+    approval_receipt_after_response_id: ClassVar[bool] = True
+
+    def __post_init__(self) -> None:
+        """Use one storage setting for request construction and history replay."""
+        super().__post_init__()
+        if self.request_params is not None and "store" in self.request_params:
+            self.request_params = dict(self.request_params)
+            self.store = self.request_params.pop("store")
+        if self.background and self.store is False:
+            msg = "Background Responses require store=True"
+            raise ValueError(msg)
+
+    def _using_reasoning_model(self) -> bool:
+        """Enable Responses continuation independently of the model's name.
+
+        Agno 3.0.5 gates response chaining and encrypted reasoning retrieval on
+        this predicate, although both belong to the API rather than a model list.
+        This does not enable reasoning or override ``store=False``.
+        """
+        return True
+
     def get_request_params(
         self,
         messages: list[Message] | None = None,
         response_format: dict[Any, Any] | type[BaseModel] | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | None = None,
     ) -> dict[str, Any]:
         """Tag deferred functions and add hosted tool search."""
         request_params = super().get_request_params(
@@ -136,6 +159,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
             response_format=response_format,
             tools=tools,
             tool_choice=tool_choice,
+            run_response=run_response,
         )
         return request_params_with_deferred_tool_search(request_params, model_deferred_tool_names(self))
 

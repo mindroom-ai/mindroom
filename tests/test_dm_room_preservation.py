@@ -9,17 +9,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.worker_routing import agent_state_root_path
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
 )
@@ -40,7 +40,7 @@ class TestDMPreservationDuringCleanup:
     """Test that DM rooms are preserved during various cleanup operations."""
 
     async def test_agent_cleanup_preserves_dm_rooms(self, tmp_path: Path) -> None:
-        """Test that AgentBot.cleanup() preserves DM rooms when DMs are enabled."""
+        """Test that AgentBot.leave_rooms() preserves DM rooms when DMs are enabled."""
         # Create config with DMs enabled
         config = _config_with_runtime_paths(
             tmp_path,
@@ -61,14 +61,14 @@ class TestDMPreservationDuringCleanup:
             access_token="test_token",  # noqa: S106
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!regular:server", "!another:server"],
         )
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
 
@@ -80,11 +80,12 @@ class TestDMPreservationDuringCleanup:
             return room_id in ["!dm:server", "!otherdm:server"]
 
         with (
-            patch("mindroom.bot.get_joined_rooms", return_value=joined_rooms),
+            patch("mindroom.bot_room_lifecycle.get_joined_rooms", return_value=joined_rooms),
             patch("mindroom.matrix.rooms.leave_room", return_value=True) as mock_leave,
             patch("mindroom.matrix.rooms.is_dm_room", side_effect=mock_is_dm_room),
         ):
-            await bot.cleanup()
+            await bot.leave_rooms()
+            await bot.stop()
 
             # Should leave configured rooms but not the DM rooms
             assert mock_leave.call_count == 2
@@ -95,7 +96,7 @@ class TestDMPreservationDuringCleanup:
             assert "!otherdm:server" not in leave_calls
 
     async def test_agent_cleanup_leaves_all_rooms(self, tmp_path: Path) -> None:
-        """Test that AgentBot.cleanup() leaves all non-DM rooms."""
+        """Test that AgentBot.leave_rooms() leaves all non-DM rooms."""
         # Create config
         config = _config_with_runtime_paths(
             tmp_path,
@@ -116,14 +117,14 @@ class TestDMPreservationDuringCleanup:
             access_token="test_token",  # noqa: S106
         )
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!configured:server"],  # Only one configured room
         )
-        install_runtime_cache_support(bot)
+        install_runtime_journal_support(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
 
@@ -135,11 +136,12 @@ class TestDMPreservationDuringCleanup:
             return False
 
         with (
-            patch("mindroom.bot.get_joined_rooms", return_value=joined_rooms),
+            patch("mindroom.bot_room_lifecycle.get_joined_rooms", return_value=joined_rooms),
             patch("mindroom.matrix.rooms.leave_room", return_value=True) as mock_leave,
             patch("mindroom.matrix.rooms.is_dm_room", side_effect=mock_is_dm_room),
         ):
-            await bot.cleanup()
+            await bot.leave_rooms()
+            await bot.stop()
 
             # Should leave all rooms when none are DMs
             assert mock_leave.call_count == 3

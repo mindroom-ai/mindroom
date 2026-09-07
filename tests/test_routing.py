@@ -9,18 +9,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 import mindroom.routing
 import mindroom.thread_utils
 from mindroom.agents import describe_agent
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -32,6 +33,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
+    from mindroom.bot import AgentBot
     from mindroom.matrix.client import ResolvedVisibleMessage
 
 
@@ -63,9 +65,20 @@ def check_agent_mentioned(
     event_source: dict,
     agent_id: MatrixID | None,
     config: Config,
+    *,
+    joined_user_ids: tuple[str, ...] = (),
 ) -> tuple[list[MatrixID], bool, bool]:
     """Check mentions with the test config's bound runtime context."""
-    return mindroom.thread_utils.check_agent_mentioned(event_source, agent_id, config, runtime_paths_for(config))
+    room = nio.MatrixRoom("!test:localhost", "@mindroom_router:localhost")
+    for user_id in joined_user_ids:
+        room.add_member(user_id, None, None)
+    return mindroom.thread_utils.check_agent_mentioned(
+        event_source,
+        agent_id,
+        config,
+        runtime_paths_for(config),
+        room=room,
+    )
 
 
 def _message(
@@ -111,7 +124,7 @@ def _agent_bot(*args: object, **kwargs: object) -> AgentBot:
     config = kwargs["config"]
     assert isinstance(config, Config)
     kwargs["runtime_paths"] = runtime_paths_for(config)
-    return AgentBot(*args, **kwargs)
+    return make_test_agent_bot(*args, **kwargs)
 
 
 def _agent_description_config() -> Config:
@@ -158,7 +171,6 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
             "attach_media_to_run_input",
             "copy_run_input",
             "cached_agent_run",
-            "append_inline_media_fallback_to_run_input",
             "get_model_instance",
             "install_queued_message_notice_hook",
             "queued_message_signal_context",
@@ -406,7 +418,7 @@ class TestAIRouting:
         mock_event = MagicMock()
         mock_event.body = "Test message"
 
-        with patch("mindroom.turn_controller.suggest_responder_for_message") as mock_suggest:
+        with patch("mindroom.router_relay.suggest_responder_for_message") as mock_suggest:
             # Should raise AssertionError since general is not the router agent
             with pytest.raises(AssertionError):
                 await bot._turn_controller._execute_router_relay(
@@ -513,14 +525,19 @@ class TestThreadUtils:
         assert has_multiple_non_agent_users_in_thread(history, self.config) is False
 
     def test_check_agent_mentioned_detects_non_agent_mentions(self) -> None:
-        """Tagging a non-agent user sets has_non_agent_mentions."""
+        """Tagging a joined non-agent user sets has_non_agent_mentions."""
         event_source = {
             "content": {
                 "m.mentions": {"user_ids": ["@bob:localhost"]},
             },
         }
         agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
-        _, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+        _, am_i_mentioned, has_non_agent = check_agent_mentioned(
+            event_source,
+            agent_id,
+            self.config,
+            joined_user_ids=("@bob:localhost",),
+        )
         assert am_i_mentioned is False
         assert has_non_agent is True
 
@@ -579,7 +596,12 @@ class TestThreadUtils:
             },
         }
         agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
-        _, _, has_non_agent = check_agent_mentioned(event_source, agent_id, config)
+        _, _, has_non_agent = check_agent_mentioned(
+            event_source,
+            agent_id,
+            config,
+            joined_user_ids=("@telegram:localhost",),
+        )
         assert has_non_agent is False
 
     def test_check_agent_mentioned_mixed_bot_and_human_mentions(self) -> None:
@@ -599,7 +621,12 @@ class TestThreadUtils:
             },
         }
         agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
-        _, _, has_non_agent = check_agent_mentioned(event_source, agent_id, config)
+        _, _, has_non_agent = check_agent_mentioned(
+            event_source,
+            agent_id,
+            config,
+            joined_user_ids=("@bob:localhost",),
+        )
         assert has_non_agent is True
 
 
@@ -675,7 +702,12 @@ class TestBridgeMentionFallback:
             },
         }
         agent_id = MatrixID.from_username("mindroom_calculator", "localhost")
-        _, am_i_mentioned, has_non_agent = check_agent_mentioned(event_source, agent_id, self.config)
+        _, am_i_mentioned, has_non_agent = check_agent_mentioned(
+            event_source,
+            agent_id,
+            self.config,
+            joined_user_ids=("@alice:localhost",),
+        )
         assert am_i_mentioned is False
         assert has_non_agent is True
 

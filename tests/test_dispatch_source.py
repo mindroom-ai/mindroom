@@ -14,6 +14,7 @@ from mindroom.dispatch_source import (
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
+    INTERACTIVE_SELECTION_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
@@ -51,6 +52,7 @@ def test_scheduled_history_limit_from_content(content: dict[str, object], expect
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
         SCHEDULED_SOURCE_KIND,
+        INTERACTIVE_SELECTION_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     ],
 )

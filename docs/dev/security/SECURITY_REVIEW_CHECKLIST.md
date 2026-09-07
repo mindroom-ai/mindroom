@@ -1,8 +1,9 @@
 # MindRoom Security Review Checklist
 
 > **Audit note (2026-03-18):** Some checked items in this checklist contradict the status reported in individual SECURITY_REVIEW_*.md documents and SECURITY_ACTION_PLAN.md.
-> Known inconsistencies: default password removal is marked done here but action plan still mentions rotation; secrets rotation is marked pending here while other docs say helper scripts exist but execution is unconfirmed; monitoring items are unchecked here but Prometheus metrics are deployed per SECURITY_REVIEW_11.
+> Known inconsistencies: default password removal is marked done here while secrets rotation is still pending, and monitoring items are unchecked here although Prometheus metric and alert-rule manifests exist.
 > Treat the individual review docs as the more detailed source of truth.
+> This is a historical checklist, not a live deployment attestation.
 
 ## Overview
 This document provides a systematic security review checklist for the MindRoom beta release. Each item should be verified and documented before making the codebase open-source.
@@ -13,7 +14,7 @@ This document provides a systematic security review checklist for the MindRoom b
 - Request size limit (1 MiB), core security headers, trusted hosts, and restricted CORS configured
 - Per‑instance NetworkPolicy and namespaced backend RBAC applied
 - Multi‑tenancy isolation fixed for webhook_events and payments (migrations + handler validation); tests added
-- Defaults removed in tracked configs; Helm templates generate strong secrets by default
+- Defaults removed in tracked configs; platform chart secrets must be supplied through values or an existing-Secret workflow.
 - Remaining: verify etcd encryption (K8s Secrets already implemented with file mounts), monitoring/alerts and IR playbook, internal TLS/mTLS (optional for MVP)
 
 ## Critical Issues Found (Immediate Action Required)
@@ -269,7 +270,7 @@ For each security control:
 
 - This is a living document - update as new security considerations arise
 - Consider hiring a security professional for penetration testing before public release
-- Set up a security@mindroom.chat email for responsible disclosure
+- Publish and verify a monitored responsible-disclosure channel.
 - Create a security.txt file for your domain
 - Consider a bug bounty program once public
 

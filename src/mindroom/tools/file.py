@@ -7,7 +7,7 @@ from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constr
 from typing import Any, cast
 
 from agno.tools.file import FileTools as AgnoFileTools
-from agno.tools.file import log_debug, log_error
+from agno.utils.log import log_debug, log_error
 
 from mindroom.tool_system.declarations import (
     ConfigField,
@@ -39,6 +39,7 @@ class _MindRoomFileTools(AgnoFileTools):
         enable_search_files: bool = True,
         enable_read_file_chunk: bool = True,
         enable_replace_file_chunk: bool = True,
+        enable_search_content: bool = True,
         expose_base_directory: bool = False,
         max_file_length: int = 10000000,
         max_file_lines: int = 100000,
@@ -58,6 +59,7 @@ class _MindRoomFileTools(AgnoFileTools):
             enable_search_files=enable_search_files,
             enable_read_file_chunk=enable_read_file_chunk,
             enable_replace_file_chunk=enable_replace_file_chunk,
+            enable_search_content=enable_search_content,
             expose_base_directory=expose_base_directory,
             max_file_length=max_file_length,
             max_file_lines=max_file_lines,
@@ -67,18 +69,22 @@ class _MindRoomFileTools(AgnoFileTools):
             **cast("dict[str, Any]", kwargs),
         )
 
-    def check_escape(self, relative_path: str) -> tuple[bool, Path]:
-        """Check whether a path stays within base_dir when restriction is enabled."""
+    def _check_path(self, file_name: str, base_dir: Path, restrict_to_base_dir: bool = True) -> tuple[bool, Path]:
+        """Resolve a path against base_dir, honoring this toolkit's restriction setting.
+
+        Replaces Agno's Toolkit helper so every method here shares one rule.
+        """
+        del restrict_to_base_dir
         try:
-            return True, resolve_base_dir_path(self.base_dir, relative_path, self.restrict_to_base_dir)
+            return True, resolve_base_dir_path(base_dir, file_name, self.restrict_to_base_dir)
         except ValueError:
-            log_error(f"Path escapes base directory: {relative_path}")
-            return False, self.base_dir
+            log_error(f"Path escapes base directory: {file_name}")
+            return False, base_dir
 
     def save_file(self, contents: str, file_name: str, overwrite: bool = True, encoding: str = "utf-8") -> str:
         """Save content to a file, with clear blocked-path errors."""
         try:
-            safe, file_path = self.check_escape(file_name)
+            safe, file_path = self._check_path(file_name, self.base_dir)
             if not safe:
                 log_error(f"Attempted to save file: {file_name}")
                 return blocked_file_action_message("saving file", file_name, self.base_dir)
@@ -98,7 +104,7 @@ class _MindRoomFileTools(AgnoFileTools):
         """Read a range of lines from a file."""
         try:
             log_debug(f"Reading file: {file_name}")
-            safe, file_path = self.check_escape(file_name)
+            safe, file_path = self._check_path(file_name, self.base_dir)
             if not safe:
                 log_error(f"Attempted to read file: {file_name}")
                 return blocked_file_action_message("reading file", file_name, self.base_dir)
@@ -120,7 +126,7 @@ class _MindRoomFileTools(AgnoFileTools):
         """Replace a range of lines in a file."""
         try:
             log_debug(f"Patching file: {file_name}")
-            safe, file_path = self.check_escape(file_name)
+            safe, file_path = self._check_path(file_name, self.base_dir)
             if not safe:
                 log_error(f"Attempted to replace file chunk: {file_name}")
                 return blocked_file_action_message("replacing file chunk", file_name, self.base_dir)
@@ -141,7 +147,7 @@ class _MindRoomFileTools(AgnoFileTools):
         """Read a file with clear blocked-path errors."""
         try:
             log_debug(f"Reading file: {file_name}")
-            safe, file_path = self.check_escape(file_name)
+            safe, file_path = self._check_path(file_name, self.base_dir)
             if not safe:
                 log_error(f"Attempted to read file: {file_name}")
                 return blocked_file_action_message("reading file", file_name, self.base_dir)
@@ -157,7 +163,7 @@ class _MindRoomFileTools(AgnoFileTools):
 
     def delete_file(self, file_name: str) -> str:
         """Delete a file or empty directory with clear blocked-path errors."""
-        safe, path = self.check_escape(file_name)
+        safe, path = self._check_path(file_name, self.base_dir)
         try:
             if safe:
                 if path.is_dir():
@@ -171,12 +177,11 @@ class _MindRoomFileTools(AgnoFileTools):
             log_error(f"Error removing {file_name}: {e}")
             return f"Error removing file: {e}"
 
-    def list_files(self, **kwargs: object) -> str:
+    def list_files(self, directory: str = ".") -> str:
         """List files in a directory, falling back to absolute paths outside base_dir."""
-        directory = kwargs.get("directory", ".")
         try:
             log_debug(f"Reading files in : {self.base_dir}/{directory}")
-            safe, resolved_directory = self.check_escape(str(directory))
+            safe, resolved_directory = self._check_path(str(directory), self.base_dir)
             if not safe:
                 return blocked_file_action_message("listing files", str(directory), self.base_dir)
             return json.dumps(
@@ -224,6 +229,20 @@ class _MindRoomFileTools(AgnoFileTools):
             error_msg = f"Error searching files with pattern '{pattern}': {e}"
             log_error(error_msg)
             return error_msg
+
+    def search_content(self, query: str, directory: str | None = None, limit: int = 10) -> str:
+        """Search file contents inside ``base_dir`` only.
+
+        Agno's implementation relativizes every hit and every exclusion check
+        against ``base_dir``, so it is only correct there. Directories outside
+        it are refused even when ``restrict_to_base_dir`` is off; the other
+        file operations still honor that flag.
+        """
+        if directory:
+            safe, search_dir = self._check_path(directory, self.base_dir)
+            if not safe or not is_within_base_dir(search_dir, self.base_dir):
+                return f"Error: search_content only searches inside the base directory ({self.base_dir}): {directory}"
+        return super().search_content(query, directory, limit)
 
 
 @register_tool_with_metadata(
@@ -304,6 +323,13 @@ class _MindRoomFileTools(AgnoFileTools):
             default=True,
         ),
         ConfigField(
+            name="enable_search_content",
+            label="Enable Search Content",
+            type="boolean",
+            required=False,
+            default=True,
+        ),
+        ConfigField(
             name="expose_base_directory",
             label="Expose Base Directory",
             type="boolean",
@@ -353,7 +379,6 @@ class _MindRoomFileTools(AgnoFileTools):
     dependencies=["agno"],  # From agno requirements
     docs_url="https://docs.agno.com/tools/toolkits/local/file",
     function_names=(
-        "check_escape",
         "delete_file",
         "list_files",
         "read_file",

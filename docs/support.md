@@ -10,7 +10,9 @@ Use this page for support requests related to MindRoom and MindRoom clients (inc
 
 ## Contact
 
-- Email: `support@mindroom.chat`
+- General support and bug reports: [MindRoom GitHub issues](https://github.com/mindroom-ai/mindroom/issues)
+
+Do not post access tokens, private room IDs, personal data, or safety-report evidence in a public issue.
 
 ## What to Include in a Support Request
 
@@ -44,12 +46,15 @@ Use this page for support requests related to MindRoom and MindRoom clients (inc
 
 Use in-app report/block tools first when available.
 
-If you need help with a moderation or safety issue and cannot use the in-app controls, email support with:
+Do not put moderation evidence or private identifiers in a public GitHub issue.
+If the in-app controls fail, open a general issue without sensitive evidence so maintainers can publish an appropriate private contact path.
 
-- room ID (or link)
-- message link (if available)
-- a short description of the issue
+Useful public context includes:
+
+- the affected feature and client version
+- a short general description with identifiers removed
+- sanitized error text with tokens, Matrix IDs, room IDs, and message links removed
 
 ## Response Times
 
-Support is provided on a best-effort basis. Critical account-access and safety issues are prioritized.
+Support is provided on a best-effort basis.

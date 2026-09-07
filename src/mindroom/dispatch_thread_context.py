@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

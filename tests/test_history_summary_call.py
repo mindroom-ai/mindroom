@@ -43,6 +43,7 @@ from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
@@ -380,7 +381,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     with (
         patch(

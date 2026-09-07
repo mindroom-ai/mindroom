@@ -22,6 +22,7 @@ from mindroom.history.interrupted_replay import (
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.tool_system.events import ToolTraceEntry
+from tests.conftest import seed_session
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -392,7 +393,8 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
         session_table="test_agent_sessions",
     )
     try:
-        storage.upsert_session(
+        seed_session(
+            storage,
             AgentSession(
                 session_id="session-1",
                 agent_id="test_agent",

@@ -8,18 +8,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.handled_turns import TurnRecord
-from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     replace_edit_regenerator_deps,
     runtime_paths_for,
@@ -47,18 +48,20 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     )
 
     config = bind_runtime_paths(
-        Config(
-            agents={"test": AgentConfig(display_name="TestAgent", rooms=["!test:localhost"])},
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
-            authorization={"default_room_access": True},
+        with_current_room_member_access(
+            Config(
+                agents={"test": AgentConfig(display_name="TestAgent", rooms=["!test:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+                authorization={},
+            ),
         ),
         test_runtime_paths(tmp_path),
     )
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         rooms=["!test:localhost"],
@@ -73,12 +76,8 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     bot.orchestrator = mock_orchestrator
 
     bot.client = make_matrix_client_mock(user_id="@mindroom_test:localhost")
-    install_runtime_cache_support(bot)
-    bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
-    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+    install_runtime_journal_support(bot)
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     bot._conversation_resolver.fetch_thread_history = AsyncMock(
@@ -126,7 +125,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
 
     # Verify bot responded
     assert bot.client.room_send.call_count == 2  # thinking + final
-    bot._turn_store.record_turn(
+    await bot._turn_store.record_turn(
         TurnRecord.create(["$original123"], response_event_id="$response123"),
     )
 

@@ -305,10 +305,14 @@ class MatrixVoiceMessageTools(Toolkit):
     ) -> tuple[str | None, str | None]:
         if thread_id is None:
             return None, None
-        latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
-            room_id,
-            thread_id,
-            caller_label="matrix_voice_message_tool",
+        latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
+            room_id=room_id,
+            thread_id=thread_id,
+            # The companion text was just sent into this thread, so it is the
+            # newest event by construction. The projection would answer with
+            # whatever preceded it until that echo arrives, chaining the audio
+            # under the wrong message for a thread-blind client.
+            known_latest_thread_event_id=companion_event_id,
         )
         if latest_thread_event_id is not None:
             return latest_thread_event_id, None
@@ -437,7 +441,6 @@ class MatrixVoiceMessageTools(Toolkit):
             waveform=prepared_audio.waveform,
             thread_id=effective_thread_id,
             latest_thread_event_id=latest_thread_event_id,
-            conversation_cache=context.conversation_cache,
         )
         if event_id is None:
             return self._payload(

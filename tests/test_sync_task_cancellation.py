@@ -6,15 +6,20 @@ import asyncio
 import math
 import time
 from contextlib import suppress
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
-import nio
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom.bot import _SYNC_TIMELINE_LIMIT, AgentBot
+from mindroom import runtime_shutdown
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import (
     SYNC_RESTART_CANCEL_MSG,
@@ -22,26 +27,27 @@ from mindroom.cancellation import (
     cancel_failure_reason,
     cancel_message_for_source,
 )
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
-from mindroom.constants import RuntimePaths
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.hooks import HookRegistry, HookRegistryState
+from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.health import (
-    SyncCacheWriteProgress,
-    get_matrix_sync_cache_write_progress,
     get_matrix_sync_health_snapshot,
+    mark_matrix_ingestion_progress,
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
     reset_matrix_sync_health,
-    track_matrix_sync_cache_write,
 )
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
-from mindroom.matrix.sync_loop import _sliding_sync_lists, _sliding_sync_room_subscriptions, sliding_own_membership_sets
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.matrix_delivery import RecoveryOutcome
 from mindroom.orchestration import runtime as runtime_helpers
-from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
+from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.runtime import (
     EntityStartResults,
     _MatrixSyncStalledError,
@@ -52,33 +58,60 @@ from mindroom.orchestration.runtime import (
     is_sync_restart_cancel,
     log_cancelled_response,
     log_cancelled_response_source,
-    matrix_sync_cache_write_grace_seconds,
+    matrix_ingestion_grace_seconds,
     matrix_sync_startup_timeout_seconds,
     stop_entities,
     sync_forever_with_restart,
 )
-from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.orchestrator import (
+    _gather_bot_shutdown_phase,
+    _gather_deferred_shutdown_phase,
+    _MultiAgentOrchestrator,
+    _run_shutdown_step,
+)
+from mindroom.response_runner import ResponseRunner, ResponseShutdownTimeoutError, _InboxResponseOwnership
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
     ORDERLY_SHUTDOWN,
     SYNC_RESTART_SHUTDOWN,
+    SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
     RuntimeShutdownIntent,
+    ShutdownBudget,
     shutdown_intent_for_entity,
 )
+from tests.bot_helpers import make_test_agent_bot
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_call_manager_mock,
-    install_runtime_cache_support,
-    make_event_cache_mock,
-    make_event_cache_write_coordinator_mock,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
     write_config_yaml,
 )
+
+
+async def _complete_frame(bot: AgentBot, index: int = 0) -> None:
+    """Drive runtime side effects through the durable completion owner."""
+    del index
+    await bot._on_ingestion_frame_completion()
+
+
+def _shutdown_bot_mock() -> AsyncMock:
+    """Model the typed ownership snapshots used by orchestrator shutdown."""
+    return AsyncMock(
+        spec=AgentBot,
+        running=False,
+        pending_response_owner_count=0,
+        pending_response_phase_counts={},
+        deferred_stop_phase=None,
+        deferred_stop_required=False,
+    )
 
 
 def _fake_runtime_paths(**env_overrides: str) -> RuntimePaths:
@@ -93,6 +126,23 @@ def _fake_runtime_paths(**env_overrides: str) -> RuntimePaths:
     )
 
 
+def _configure_mock_access(
+    config: MagicMock,
+    *,
+    members_of_rooms: dict[str, list[str]] | None = None,
+) -> None:
+    """Give a narrow Config mock concrete membership-schema fields."""
+    grants = members_of_rooms or {}
+    config.authorization = AuthorizationConfig()
+    config.administrators = []
+    config.router = SimpleNamespace(
+        access=ResponderAccessConfig(current_room_members=False, members_of_rooms=[]),
+    )
+    for agent_name, agent in config.agents.items():
+        agent.rooms = []
+        agent.access = ResponderAccessConfig(members_of_rooms=grants.get(agent_name, []))
+
+
 class _FakeBot:
     """Minimal bot stub for watchdog tests."""
 
@@ -103,11 +153,14 @@ class _FakeBot:
         self._last_sync_monotonic: float | None = None
         self._first_sync_done = False
         self._sync_shutting_down = False
+        self._matrix_ingestion_quiesce_requested = False
+        self._durable_ingestion_progress_generation: int | None = None
         self.sync_calls = 0
         self.first_call_cancelled = False
         self.first_call_cancel_args: tuple[object, ...] = ()
         self.prepare_for_sync_shutdown_calls = 0
         self.prepare_for_sync_shutdown_cancel_messages: list[str | None] = []
+        self.membership_invalidations: list[str] = []
         self.runtime_paths = _fake_runtime_paths(**env_overrides)
 
     def mark_sync_loop_started(self) -> None:
@@ -116,13 +169,17 @@ class _FakeBot:
     def reset_watchdog_clock(self) -> None:
         self._last_sync_monotonic = None
 
+    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
+        """Record fail-closed router membership invalidations."""
+        self.membership_invalidations.append(reason)
+
     def seconds_since_last_sync_activity(self) -> float | None:
         if self._last_sync_monotonic is None:
             return None
         return time.monotonic() - self._last_sync_monotonic
 
-    def sync_cache_write_progress(self) -> SyncCacheWriteProgress | None:
-        return get_matrix_sync_cache_write_progress(self.agent_name)
+    def durable_ingestion_progress_generation(self) -> int | None:
+        return self._durable_ingestion_progress_generation
 
     @property
     def in_flight_response_count(self) -> int:
@@ -138,6 +195,9 @@ class _FakeBot:
                 self.first_call_cancelled = True
                 self.first_call_cancel_args = exc.args
             raise
+
+    async def _quiesce_matrix_ingestion(self) -> None:
+        """Mirror the real bot's no-session clean-stop boundary."""
 
     async def prepare_for_sync_shutdown(
         self,
@@ -309,6 +369,109 @@ async def test_sync_forever_cancels_iteration_before_checkpoint_shutdown(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_sync_supervisor_does_not_restart_quiesced_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean-stop source return must not start a replacement receive loop."""
+    bot = _FakeBot()
+    starts = 0
+
+    class FakeIteration:
+        async def wait(self) -> None:
+            bot._matrix_ingestion_quiesce_requested = True
+
+        async def cancel(
+            self,
+            *,
+            shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+        ) -> None:
+            assert shutdown_intent == GENERIC_SHUTDOWN
+
+    def start_iteration(_bot: _FakeBot) -> FakeIteration:
+        nonlocal starts
+        starts += 1
+        return FakeIteration()
+
+    monkeypatch.setattr(_SyncIteration, "start", start_iteration)
+    monkeypatch.setattr(
+        runtime_helpers,
+        "retry_delay_seconds",
+        lambda *_args, **_kwargs: 0.0,
+    )
+
+    with capture_logs() as logs:
+        await sync_forever_with_restart(bot, max_retries=2)
+
+    assert starts == 1
+    assert not any(entry["event"] in {"sync_loop_returned_while_bot_running", "restarting_sync_loop"} for entry in logs)
+
+
+@pytest.mark.asyncio
+async def test_sync_watchdog_waits_for_quiesced_source_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A watchdog tick must not cancel the final source commit."""
+    bot = _FakeBot()
+    source_started = asyncio.Event()
+    allow_source_commit = asyncio.Event()
+    source_committed = asyncio.Event()
+    source_cancelled = asyncio.Event()
+    watchdog_polled = asyncio.Event()
+    release_watchdog_poll = asyncio.Event()
+
+    async def request_quiesce_during_poll(_delay: float) -> None:
+        bot._matrix_ingestion_quiesce_requested = True
+        watchdog_polled.set()
+        await release_watchdog_poll.wait()
+
+    async def held_source_commit() -> None:
+        source_started.set()
+        try:
+            await allow_source_commit.wait()
+        except asyncio.CancelledError:
+            source_cancelled.set()
+            raise
+        source_committed.set()
+
+    monkeypatch.setattr(runtime_helpers.asyncio, "sleep", request_quiesce_during_poll)
+    bot.sync_forever = held_source_commit
+    supervisor = asyncio.create_task(sync_forever_with_restart(bot, max_retries=1))
+
+    try:
+        await asyncio.wait_for(source_started.wait(), timeout=1)
+        await asyncio.wait_for(watchdog_polled.wait(), timeout=1)
+        release_watchdog_poll.set()
+        done, _ = await asyncio.wait({supervisor}, timeout=0.05)
+        assert not done
+        assert not source_cancelled.is_set()
+        allow_source_commit.set()
+        release_watchdog_poll.set()
+        await asyncio.wait_for(supervisor, timeout=1)
+    finally:
+        allow_source_commit.set()
+        if not supervisor.done():
+            supervisor.cancel()
+        await asyncio.gather(supervisor, return_exceptions=True)
+
+    assert source_committed.is_set()
+    assert not source_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_ingestion_quiesce_marks_supervisor_stop_intent() -> None:
+    """The terminal source barrier owns the one supervisor-stop write."""
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot._matrix_ingestion_quiesce_requested = False
+    bot._ingestion_session = AsyncMock()
+
+    await AgentBot._quiesce_matrix_ingestion(bot)
+
+    assert bot._matrix_ingestion_quiesce_requested is True
+    bot._ingestion_session.quiesce.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_sync_forever_with_restart_restarts_stalled_sync(monkeypatch: pytest.MonkeyPatch) -> None:
     """Watchdog should cancel and restart a sync loop that stops making progress."""
     bot = _FakeBot()
@@ -467,6 +630,264 @@ async def test_process_shutdown_cancellation_stays_prompt_without_sync_retry() -
     assert bot.response_completions == 0
     assert bot.response_cancel_sources == ["interrupted"]
     assert bot.prepare_for_sync_shutdown_cancel_messages == [None]
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_signals_responses_before_coalescing_drain() -> None:
+    """Busy response cleanup starts while the shared shutdown budget is still available."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+
+    async def response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    response_task = runner.track_inbox_response(
+        response(),
+        name="test_early_process_shutdown_response",
+        recovery_proof_ready=lambda: True,
+    )
+    await asyncio.wait_for(response_started.wait(), timeout=1.0)
+    cancellation_seen_at_coalescing: list[bool] = []
+    drain_result = SimpleNamespace(
+        completed=True,
+        released_reservation_count=0,
+        cancelled_unready_count=0,
+        failed_ready_count=0,
+        dropped_ready_count=0,
+        dispatch_failure_count=0,
+        dispatch_cancelled_count=0,
+        admission_deferred_count=1,
+    )
+
+    async def drain_coalescing(**_kwargs: object) -> SimpleNamespace:
+        cancellation_seen_at_coalescing.append(response_task.cancelling() > 0)
+        return drain_result
+
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot.agent_user = AgentMatrixUser(
+        agent_name="busy",
+        user_id="@mindroom_busy:localhost",
+        display_name="Busy",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=None)
+    bot._sync_shutting_down = False
+    bot._sync_shutdown_budget = None
+    bot._delivery_recovery_wake = MagicMock()
+    bot._response_runner = runner
+    bot._coalescing_gate = MagicMock(drain_all=AsyncMock(side_effect=drain_coalescing))
+    bot.logger = MagicMock()
+
+    with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=True)):
+        await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+
+    assert cancellation_seen_at_coalescing == [True]
+    assert response_task.cancelled()
+    assert (
+        call(
+            "coalescing_admission_deferred_for_durable_recovery",
+            agent_name="busy",
+            admission_deferred_count=1,
+        )
+        in bot.logger.info.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_fences_matrix_transport_before_response_drain() -> None:
+    """Orderly owner drain cannot start another Matrix request."""
+    request_count = 0
+    session_closed = False
+
+    class ProbeSession:
+        async def request(self, *_args: object, **_kwargs: object) -> object:
+            nonlocal request_count
+            request_count += 1
+            return SimpleNamespace(status=200)
+
+        async def close(self) -> None:
+            nonlocal session_closed
+            session_closed = True
+
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_busy:example.org")
+    client.client_session = ProbeSession()  # type: ignore[assignment]
+    drain_result = SimpleNamespace(
+        completed=True,
+        released_reservation_count=0,
+        cancelled_unready_count=0,
+        failed_ready_count=0,
+        dropped_ready_count=0,
+        dispatch_failure_count=0,
+        dispatch_cancelled_count=0,
+        admission_deferred_count=0,
+    )
+
+    async def drain_coalescing(**_kwargs: object) -> SimpleNamespace:
+        with pytest.raises(
+            RuntimeError,
+            match="transport is fenced for process shutdown",
+        ):
+            await client.send("GET", "/_matrix/client/v3/account/whoami")
+        return drain_result
+
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot.agent_user = AgentMatrixUser(
+        agent_name="busy",
+        user_id="@mindroom_busy:localhost",
+        display_name="Busy",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=client)
+    bot._sync_shutting_down = False
+    bot._sync_shutdown_budget = None
+    bot._delivery_recovery_wake = MagicMock()
+    bot._response_runner = ResponseRunner(deps=MagicMock())
+    bot._coalescing_gate = MagicMock(drain_all=AsyncMock(side_effect=drain_coalescing))
+    bot.logger = MagicMock()
+
+    try:
+        with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=True)):
+            await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+    finally:
+        await client.close()
+
+    assert session_closed is True
+    assert request_count == 0
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_preparation_does_not_wait_for_transport_close() -> None:
+    """Transport teardown cannot consume the bounded response-drain window."""
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    coalescing_drained = asyncio.Event()
+
+    class BlockingSession:
+        async def request(self, *_args: object, **_kwargs: object) -> object:
+            message = "fenced shutdown reached the HTTP session"
+            raise AssertionError(message)
+
+        async def close(self) -> None:
+            close_started.set()
+            await release_close.wait()
+
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_busy:example.org")
+    client.client_session = BlockingSession()  # type: ignore[assignment]
+    drain_result = SimpleNamespace(
+        completed=True,
+        released_reservation_count=0,
+        cancelled_unready_count=0,
+        failed_ready_count=0,
+        dropped_ready_count=0,
+        dispatch_failure_count=0,
+        dispatch_cancelled_count=0,
+        admission_deferred_count=0,
+    )
+
+    async def drain_coalescing(**_kwargs: object) -> SimpleNamespace:
+        with pytest.raises(
+            RuntimeError,
+            match="transport is fenced for process shutdown",
+        ):
+            await client.send("GET", "/_matrix/client/v3/account/whoami")
+        coalescing_drained.set()
+        return drain_result
+
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot.agent_user = AgentMatrixUser(
+        agent_name="busy",
+        user_id="@mindroom_busy:localhost",
+        display_name="Busy",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=client)
+    bot._sync_shutting_down = False
+    bot._sync_shutdown_budget = None
+    bot._delivery_recovery_wake = MagicMock()
+    bot._response_runner = ResponseRunner(deps=MagicMock())
+    bot._coalescing_gate = MagicMock(drain_all=AsyncMock(side_effect=drain_coalescing))
+    bot.logger = MagicMock()
+
+    try:
+        with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=True)):
+            await asyncio.wait_for(
+                bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN),
+                timeout=0.2,
+            )
+        assert coalescing_drained.is_set()
+        assert not close_started.is_set()
+    finally:
+        release_close.set()
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_router_process_shutdown_fences_transport_before_first_await() -> None:
+    """Router cleanup cannot yield before new Matrix sends are refused."""
+    router_cleanup_started = asyncio.Event()
+    release_router_cleanup = asyncio.Event()
+
+    class ProbeSession:
+        async def request(self, *_args: object, **_kwargs: object) -> object:
+            message = "router send reached the HTTP session before the shutdown fence"
+            raise AssertionError(message)
+
+        async def close(self) -> None:
+            return
+
+    client = MindRoomAsyncClient("https://example.org", "@mindroom_router:example.org")
+    client.client_session = ProbeSession()  # type: ignore[assignment]
+    drain_result = SimpleNamespace(
+        completed=True,
+        released_reservation_count=0,
+        cancelled_unready_count=0,
+        failed_ready_count=0,
+        dropped_ready_count=0,
+        dispatch_failure_count=0,
+        dispatch_cancelled_count=0,
+        admission_deferred_count=0,
+    )
+
+    async def block_router_cleanup() -> None:
+        router_cleanup_started.set()
+        await release_router_cleanup.wait()
+
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot.agent_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id="@mindroom_router:localhost",
+        display_name="Router",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=client)
+    bot._sync_shutting_down = False
+    bot._sync_shutdown_budget = None
+    bot._delivery_recovery_wake = MagicMock()
+    bot._response_runner = ResponseRunner(deps=MagicMock())
+    bot._coalescing_gate = MagicMock(drain_all=AsyncMock(return_value=drain_result))
+    bot._cancel_deferred_overdue_task_drain = block_router_cleanup
+    bot.logger = MagicMock()
+
+    with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=True)):
+        preparation = asyncio.create_task(
+            bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN),
+        )
+        await asyncio.wait_for(router_cleanup_started.wait(), timeout=0.2)
+        try:
+            with pytest.raises(
+                RuntimeError,
+                match="transport is fenced for process shutdown",
+            ):
+                await client.send("GET", "/_matrix/client/v3/account/whoami")
+        finally:
+            release_router_cleanup.set()
+            await asyncio.wait_for(preparation, timeout=0.2)
+            await client.close()
 
 
 @pytest.mark.asyncio
@@ -886,6 +1307,7 @@ async def test_sync_forever_with_restart_preserves_runtime_before_retry_backoff(
 ) -> None:
     """Receive-loop restart must not tear down response runtime before backoff."""
     bot = _FakeBot()
+    bot.agent_name = ROUTER_AGENT_NAME
     call_order: list[str] = []
     call_count = 0
 
@@ -909,6 +1331,12 @@ async def test_sync_forever_with_restart_preserves_runtime_before_retry_backoff(
         call_order.append("retry_delay")
         return 0.0
 
+    def invalidate_agent_reply_memberships(*, reason: str) -> None:
+        bot.membership_invalidations.append(reason)
+        call_order.append("invalidate")
+
+    bot.invalidate_agent_reply_memberships = invalidate_agent_reply_memberships
+
     monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", fake_retry_delay)
     monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 5.0)
     monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_STARTUP_GRACE_SECONDS", 5.0)
@@ -916,7 +1344,8 @@ async def test_sync_forever_with_restart_preserves_runtime_before_retry_backoff(
 
     await sync_forever_with_restart(bot, max_retries=2)
 
-    assert call_order == ["retry_delay", "prepare"]
+    assert call_order == ["invalidate", "retry_delay", "prepare"]
+    assert bot.membership_invalidations == ["sync_failure"]
 
 
 @pytest.mark.asyncio
@@ -1007,105 +1436,120 @@ async def test_sync_error_updates_watchdog_clock(monkeypatch: pytest.MonkeyPatch
     assert bot.first_call_cancelled is False
 
 
-def test_sync_cache_write_progress_registry_clears_after_failure() -> None:
-    """A failed durable phase must not leave watchdog and health exempt forever."""
-    reset_matrix_sync_health()
-    try:
-        with suppress(RuntimeError), track_matrix_sync_cache_write("failed_agent"):
-            msg = "cache write failed"
-            raise RuntimeError(msg)
-
-        assert get_matrix_sync_cache_write_progress("failed_agent") is None
-    finally:
-        reset_matrix_sync_health()
-
-
 @pytest.mark.parametrize("raw", ["not-a-number", "nan", "inf", "-inf", "0", "-1"])
-def test_sync_cache_write_grace_rejects_non_finite_or_non_positive(raw: str) -> None:
+def test_ingestion_grace_rejects_non_finite_or_non_positive(raw: str) -> None:
     """An invalid grace must not disable the bounded backstop."""
     with pytest.raises(ValueError, match="must be a finite positive number"):
-        matrix_sync_cache_write_grace_seconds(
-            _fake_runtime_paths(MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS=raw),
+        matrix_ingestion_grace_seconds(
+            _fake_runtime_paths(MINDROOM_MATRIX_INGESTION_GRACE_SECONDS=raw),
         )
 
 
 @pytest.mark.parametrize("grace_seconds", [math.nan, math.inf, -math.inf, 0.0, -1.0])
-def test_health_rejects_invalid_cache_write_grace(grace_seconds: float) -> None:
-    """Every health caller must preserve the finite cache-write backstop."""
-    with pytest.raises(ValueError, match="cache_write_grace_seconds must be a finite positive number"):
-        get_matrix_sync_health_snapshot(cache_write_grace_seconds=grace_seconds)
+def test_health_rejects_invalid_ingestion_grace(grace_seconds: float) -> None:
+    """Every health caller must preserve the finite ingestion backstop."""
+    with pytest.raises(ValueError, match="ingestion_grace_seconds must be a finite positive number"):
+        get_matrix_sync_health_snapshot(ingestion_grace_seconds=grace_seconds)
 
 
-def test_health_reports_shared_cache_write_progress_past_grace() -> None:
-    """Health must stop excusing a durable phase after the shared grace expires."""
-    recent_sync_time = datetime.now(UTC) - timedelta(seconds=10)
+def test_health_defers_only_bounded_recent_owned_ingestion_progress() -> None:
+    """Committed Work progress keeps health live without granting immunity."""
+    stale_sync_time = datetime.now(UTC) - timedelta(seconds=300)
     reset_matrix_sync_health()
     try:
-        mark_matrix_sync_loop_started("wedged_agent")
-        mark_matrix_sync_success("wedged_agent", recent_sync_time)
-        with track_matrix_sync_cache_write("wedged_agent"):
-            progress = get_matrix_sync_cache_write_progress("wedged_agent")
-            assert progress is not None
+        mark_matrix_sync_loop_started("draining_agent")
+        mark_matrix_sync_success("draining_agent", stale_sync_time)
+        mark_matrix_ingestion_progress("draining_agent", now_monotonic=100.0)
+        mark_matrix_ingestion_progress("draining_agent", now_monotonic=102.0)
 
-            snapshot = get_matrix_sync_health_snapshot(
-                cache_write_grace_seconds=5.0,
-                now_monotonic=progress.started_monotonic + 6.0,
-            )
+        healthy = get_matrix_sync_health_snapshot(
+            ingestion_grace_seconds=5.0,
+            now_monotonic=103.0,
+        )
+        past_grace = get_matrix_sync_health_snapshot(
+            ingestion_grace_seconds=5.0,
+            now_monotonic=106.0,
+        )
 
-        assert snapshot.stale_entities == ("wedged_agent",)
+        assert healthy.stale_entities == ()
+        assert past_grace.stale_entities == ("draining_agent",)
     finally:
         reset_matrix_sync_health()
 
 
 @pytest.mark.asyncio
-async def test_watchdog_defers_to_shared_cache_write_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A slow durable phase must outlive the ordinary transport timeout."""
-    bot = _FakeBot(MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS="1")
-    cache_write_finished = asyncio.Event()
+async def test_watchdog_defers_while_owned_ingestion_commits_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Committed batches may keep ingestion alive beyond the ordinary sync timeout."""
+    bot = _FakeBot(MINDROOM_MATRIX_INGESTION_GRACE_SECONDS="1")
+    bot._durable_ingestion_progress_generation = 0
+    now = 100.0
+    generations = iter(range(1, 11))
 
-    async def sync_with_slow_cache_write() -> None:
-        bot.sync_calls += 1
-        bot._last_sync_monotonic = time.monotonic()
-        try:
-            with track_matrix_sync_cache_write(bot.agent_name):
-                await asyncio.sleep(0.1)
-        except asyncio.CancelledError:
-            bot.first_call_cancelled = True
-            raise
-        cache_write_finished.set()
-        bot.running = False
+    async def commit_before_watchdog_poll(_delay: float) -> None:
+        nonlocal now
+        generation = next(generations, None)
+        if generation is None:
+            bot.running = False
+            return
+        now = 100.0 + generation / 100
+        bot._durable_ingestion_progress_generation = generation
 
-    bot.sync_forever = sync_with_slow_cache_write
+    monkeypatch.setattr(bot, "seconds_since_last_sync_activity", lambda: now - 100.0)
+    monkeypatch.setattr(runtime_helpers, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(
+        runtime_helpers,
+        "mark_matrix_ingestion_progress",
+        lambda name: mark_matrix_ingestion_progress(name, now_monotonic=now),
+    )
     monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.02)
-    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.005)
 
     reset_matrix_sync_health()
+    sync_task = asyncio.create_task(bot.sync_forever())
+    watchdog_cancelled_sync = asyncio.Event()
     try:
-        await sync_forever_with_restart(bot, max_retries=1)
+        await asyncio.sleep(0)
+        monkeypatch.setattr(runtime_helpers.asyncio, "sleep", commit_before_watchdog_poll)
+        await _SyncIteration._watch(bot, sync_task, watchdog_cancelled_sync)
+        progress = runtime_helpers.get_matrix_ingestion_progress(bot.agent_name)
+        assert progress is not None
+        assert progress.started_monotonic == 100.01
+        assert progress.advanced_monotonic == 100.10
+        assert bot.seconds_since_last_sync_activity() == pytest.approx(0.1)
+        assert not watchdog_cancelled_sync.is_set()
+        assert not sync_task.done()
+        assert not sync_task.cancelling()
+        assert bot.first_call_cancelled is False
+        assert bot.sync_calls == 1
     finally:
+        sync_task.cancel()
+        await asyncio.gather(sync_task, return_exceptions=True)
         reset_matrix_sync_health()
-
-    assert cache_write_finished.is_set()
-    assert bot.first_call_cancelled is False
-    assert bot.sync_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_watchdog_cancels_shared_cache_write_past_grace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A wedged durable phase must still be cancelled after its finite grace."""
-    bot = _FakeBot(MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS="0.04")
+async def test_watchdog_cancels_owned_ingestion_progress_past_finite_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Continuous commits cannot exempt an incomplete Frame forever."""
+    bot = _FakeBot(MINDROOM_MATRIX_INGESTION_GRACE_SECONDS="0.04")
 
-    async def sync_with_wedged_cache_write() -> None:
+    async def sync_with_unbounded_durable_progress() -> None:
         bot.sync_calls += 1
         bot._last_sync_monotonic = time.monotonic()
+        bot._durable_ingestion_progress_generation = 0
+        generation = 0
         try:
-            with track_matrix_sync_cache_write(bot.agent_name):
-                await asyncio.Event().wait()
+            while True:
+                await asyncio.sleep(0.005)
+                generation += 1
+                bot._durable_ingestion_progress_generation = generation
         except asyncio.CancelledError:
             bot.first_call_cancelled = True
             raise
 
-    bot.sync_forever = sync_with_wedged_cache_write
+    bot.sync_forever = sync_with_unbounded_durable_progress
     monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.005)
     monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
@@ -1113,14 +1557,12 @@ async def test_watchdog_cancels_shared_cache_write_past_grace(monkeypatch: pytes
 
     reset_matrix_sync_health()
     try:
-        with capture_logs() as logs:
-            await sync_forever_with_restart(bot, max_retries=1)
+        await sync_forever_with_restart(bot, max_retries=1)
     finally:
         reset_matrix_sync_health()
 
     assert bot.first_call_cancelled is True
-    stall_logs = [entry for entry in logs if entry["event"] == "matrix_sync_watchdog_stalled"]
-    assert [entry["restart_reason_category"] for entry in stall_logs] == ["cache_write_grace_exhausted"]
+    assert bot.sync_calls == 1
 
 
 @pytest.mark.asyncio
@@ -1207,263 +1649,422 @@ async def test_sync_iteration_cancel_preserves_restart_shutdown_source() -> None
 
 
 @pytest.mark.asyncio
-async def test_full_state_stays_enabled_until_first_sync_response() -> None:
-    """A cancelled first sync must keep requesting full state on retry."""
-    full_state_values: list[bool] = []
-
-    class FakeClient:
-        async def sync_forever(self, *, timeout: int, full_state: bool, sync_filter: object = None) -> None:  # noqa: ASYNC109, ARG002
-            full_state_values.append(full_state)
-            await asyncio.Event().wait()
-
-    bot = MagicMock(spec=AgentBot)
+async def test_ingestion_frame_completion_marks_sync_success(tmp_path: Path) -> None:
+    """A completed durable frame must feed the watchdog clock and first-sync lifecycle."""
+    bot = _durable_response_bot(tmp_path)
     bot._first_sync_done = False
-    bot._sync_shutting_down = False
-    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
-    bot.rooms = []
-    bot.client = FakeClient()
-
-    first_task = asyncio.create_task(AgentBot.sync_forever(bot))
-    await asyncio.sleep(0)
-    first_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first_task
-
-    second_task = asyncio.create_task(AgentBot.sync_forever(bot))
-    await asyncio.sleep(0)
-    second_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await second_task
-
-    assert full_state_values == [True, True]
-
-
-@pytest.mark.asyncio
-async def test_full_state_only_after_successful_first_sync() -> None:
-    """sync_forever should stop requesting full state after a successful first sync."""
-    full_state_values: list[bool] = []
-
-    class FakeClient:
-        next_batch = "token123"
-
-        async def sync_forever(self, *, timeout: int, full_state: bool, sync_filter: object = None) -> None:  # noqa: ASYNC109, ARG002
-            full_state_values.append(full_state)
-
-        def add_response_callback(self, *args: object) -> None:
-            pass
-
-        def add_event_callback(self, *args: object) -> None:
-            pass
-
-    bot = MagicMock(spec=AgentBot)
-    bot.agent_name = "test_agent"
-    bot.last_sync_time = None
-    bot._first_sync_done = False
-    bot._sync_shutting_down = False
-    bot._calls_reconcile_pending = False
-    bot._room_member_join_hooks_armed = False
-    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
-    bot.rooms = []
-    bot.client = FakeClient()
-    bot.orchestrator = None
-    bot._runtime_view = BotRuntimeState(
-        client=bot.client,
-        config=MagicMock(spec=Config),
-        runtime_paths=MagicMock(),
-        enable_streaming=True,
-        orchestrator=None,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
-    )
-
-    # Call the real sync_forever method
-    await AgentBot.sync_forever(bot)
-    await AgentBot._on_sync_response(bot, MagicMock())
-    await AgentBot.sync_forever(bot)
-
-    assert full_state_values == [True, False]
-
-
-@pytest.mark.asyncio
-async def test_sliding_sync_mode_uses_sliding_sync_forever() -> None:
-    """Opting into sliding mode should call the MSC4186 nio loop."""
-    sliding_calls: list[dict[str, object]] = []
-
-    class FakeClient:
-        async def sync_forever(self, *, timeout: int, full_state: bool) -> None:  # noqa: ASYNC109, ARG002
-            raise AssertionError
-
-        async def sliding_sync_forever(
-            self,
-            *,
-            timeout: int,  # noqa: ASYNC109 - mirrors matrix-nio long-poll timeout.
-            conn_id: str,
-            lists: dict[str, object],
-            room_subscriptions: dict[str, object],
-            extensions: dict[str, object],
-        ) -> None:
-            sliding_calls.append(
-                {
-                    "timeout": timeout,
-                    "conn_id": conn_id,
-                    "lists": lists,
-                    "room_subscriptions": room_subscriptions,
-                    "extensions": extensions,
-                },
-            )
-
-    bot = MagicMock(spec=AgentBot)
-    bot.agent_name = "code"
-    bot._first_sync_done = False
-    bot.rooms = ["!alpha:localhost", "#lobby:localhost", "!beta:localhost"]
-    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="sliding", sliding_timeline_limit=7))
-    bot.client = FakeClient()
-
-    await AgentBot.sync_forever(bot)
-
-    assert sliding_calls == [
-        {
-            "timeout": 30000,
-            "conn_id": "mindroom-code",
-            "lists": {
-                "mindroom": {
-                    "ranges": [[0, 99]],
-                    "timeline_limit": 7,
-                    "required_state": [
-                        ["m.room.create", ""],
-                        ["m.room.name", ""],
-                        ["m.room.topic", ""],
-                        ["m.room.avatar", ""],
-                        ["m.room.encryption", ""],
-                        ["m.room.member", "$LAZY"],
-                    ],
-                },
-            },
-            "room_subscriptions": {
-                "!alpha:localhost": {
-                    "timeline_limit": 7,
-                    "required_state": [
-                        ["m.room.create", ""],
-                        ["m.room.name", ""],
-                        ["m.room.topic", ""],
-                        ["m.room.avatar", ""],
-                        ["m.room.encryption", ""],
-                        ["m.room.member", "$LAZY"],
-                    ],
-                },
-                "!beta:localhost": {
-                    "timeline_limit": 7,
-                    "required_state": [
-                        ["m.room.create", ""],
-                        ["m.room.name", ""],
-                        ["m.room.topic", ""],
-                        ["m.room.avatar", ""],
-                        ["m.room.encryption", ""],
-                        ["m.room.member", "$LAZY"],
-                    ],
-                },
-            },
-            "extensions": {
-                "to_device": {"enabled": True},
-                "e2ee": {"enabled": True},
-                "account_data": {"enabled": True},
-            },
-        },
-    ]
-
-
-@pytest.mark.asyncio
-async def test_default_sync_mode_is_classic_with_raised_timeline_limit() -> None:
-    """The default sync mode must use classic /v3/sync with the widened per-room timeline limit."""
-    captured: list[object] = []
-
-    class FakeClient:
-        async def sync_forever(self, *, timeout: int, full_state: bool, sync_filter: object = None) -> None:  # noqa: ASYNC109, ARG002
-            captured.append(sync_filter)
-
-    bot = MagicMock(spec=AgentBot)
-    bot._first_sync_done = True
-    bot._sync_shutting_down = False
-    bot.config = Config()
-    bot.rooms = []
-    bot.client = FakeClient()
-
-    await AgentBot.sync_forever(bot)
-
-    assert captured == [{"room": {"timeline": {"limit": _SYNC_TIMELINE_LIMIT}}}]
-
-
-@pytest.mark.asyncio
-async def test_sliding_sync_response_marks_sync_success(tmp_path: Path) -> None:
-    """A sliding sync response must feed the watchdog clock and first-sync lifecycle."""
-    bot = _sliding_response_bot(tmp_path)
-    bot._first_sync_done = False
-    bot._room_member_join_hooks_armed = False
 
     with patch.object(
         bot,
         "_run_sync_response_side_effects",
         new=AsyncMock(),
     ):
-        await bot._on_sync_response(nio.SlidingSyncResponse("pos"))
+        await _complete_frame(bot)
 
     assert bot.last_sync_time is not None
     assert bot._first_sync_done is True
-    assert bot._room_member_join_hooks_armed is True
 
 
-def test_matrix_sync_change_restarts_existing_entities() -> None:
-    """Changing matrix_sync must restart running bots so sync loops pick up the new transport."""
-    plan = build_config_update_plan(
-        current_config=Config(),
-        new_config=Config(matrix_sync=MatrixSyncConfig(mode="sliding")),
-        configured_entities={"router", "code"},
-        existing_entities={"router", "code"},
-        agent_bots={},
+@pytest.mark.asyncio
+async def test_delivery_recovery_asks_the_outbox_on_every_sync_response(
+    tmp_path: Path,
+) -> None:
+    """Owed answers must not wait for a restart, whatever left them owed.
+
+    The first sync response can arrive while a room is still unrecovered, and
+    nio refuses ordinary sends into one. A pass can also raise before it
+    reports anything, and a live send can be refused long after the first
+    sync. Each of those leaves a row unacknowledged, and a flag armed by only
+    some of them loses the answers the others produced.
+    """
+    bot = _durable_response_bot(tmp_path)
+    bot._first_sync_done = False
+    outcomes = [
+        RuntimeError("the first pass never reported"),
+        RecoveryOutcome(recovered=0, failed=1),
+        RecoveryOutcome(recovered=1, failed=0),
+        RecoveryOutcome(recovered=0, failed=0),
+    ]
+    recover = AsyncMock(side_effect=outcomes)
+
+    with (
+        patch.object(bot, "_delivery_gateway", new=SimpleNamespace(recover_deliveries=recover)),
+        patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
+        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+        patch("mindroom.bot._DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS", 0.0),
+        patch("mindroom.bot._DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS", 0.0),
+    ):
+        # A pass that raises or reports an incomplete recovery retries through
+        # the durable outbox before releasing the owner task.
+        await bot._run_sync_response_side_effects(first_sync_response=True)
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        # And a delivery refused after every earlier pass completed is still
+        # found, because the outbox is asked rather than a flag.
+        await bot._run_sync_response_side_effects(first_sync_response=False)
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert recover.await_count == len(outcomes)
+
+
+@pytest.mark.asyncio
+async def test_delivery_recovery_drops_sync_request_context_before_transport(tmp_path: Path) -> None:
+    """A detached recovery worker must not retain its spawning sync context."""
+    bot = _durable_response_bot(tmp_path)
+    receive_generation: ContextVar[str | None] = ContextVar("receive_generation", default=None)
+    observed: list[str | None] = []
+
+    async def recover_deliveries() -> RecoveryOutcome:
+        observed.append(receive_generation.get())
+        return RecoveryOutcome(recovered=0, failed=0)
+
+    token = receive_generation.set("retired-receive-generation")
+    try:
+        with patch.object(bot, "_delivery_gateway", new=SimpleNamespace(recover_deliveries=recover_deliveries)):
+            bot._schedule_delivery_recovery()
+            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    finally:
+        receive_generation.reset(token)
+
+    assert observed == [None]
+
+
+@pytest.mark.asyncio
+async def test_sync_response_returns_while_delivery_recovery_waits_for_the_next_response(
+    tmp_path: Path,
+) -> None:
+    """A parked recovery pass cannot block the next receive-loop callback."""
+    bot = _durable_response_bot(tmp_path)
+    recovery_started = asyncio.Event()
+    next_response_started = asyncio.Event()
+    first_response_returned = asyncio.Event()
+
+    async def recover_deliveries() -> RecoveryOutcome:
+        recovery_started.set()
+        await next_response_started.wait()
+        return RecoveryOutcome(recovered=0, failed=0)
+
+    async def drive_responses() -> None:
+        await _complete_frame(bot)
+        first_response_returned.set()
+        next_response_started.set()
+        await _complete_frame(bot, 1)
+
+    with patch.object(
+        bot,
+        "_delivery_gateway",
+        new=SimpleNamespace(recover_deliveries=recover_deliveries),
+    ):
+        driver = asyncio.create_task(drive_responses())
+        try:
+            await recovery_started.wait()
+            await asyncio.sleep(0)
+            assert first_response_returned.is_set()
+        finally:
+            next_response_started.set()
+            await driver
+            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
+async def test_delivery_recovery_coalesces_sync_wakes_without_overlapping_passes(
+    tmp_path: Path,
+) -> None:
+    """Several responses during one recovery pass request one follow-up pass."""
+    bot = _durable_response_bot(tmp_path)
+    first_pass_started = asyncio.Event()
+    allow_first_pass_finish = asyncio.Event()
+    second_pass_started = asyncio.Event()
+    pass_count = 0
+    active_count = 0
+    max_active_count = 0
+
+    async def recover_deliveries() -> RecoveryOutcome:
+        nonlocal active_count, max_active_count, pass_count
+        pass_count += 1
+        active_count += 1
+        max_active_count = max(max_active_count, active_count)
+        try:
+            if pass_count == 1:
+                first_pass_started.set()
+                await allow_first_pass_finish.wait()
+            else:
+                second_pass_started.set()
+            return RecoveryOutcome(recovered=0, failed=0)
+        finally:
+            active_count -= 1
+
+    with patch.object(
+        bot,
+        "_delivery_gateway",
+        new=SimpleNamespace(recover_deliveries=recover_deliveries),
+    ):
+        await _complete_frame(bot)
+        await first_pass_started.wait()
+        await _complete_frame(bot, 1)
+        await _complete_frame(bot, 2)
+
+        allow_first_pass_finish.set()
+        await second_pass_started.wait()
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert pass_count == 2
+    assert max_active_count == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_shutdown_cancels_the_owned_delivery_recovery(tmp_path: Path) -> None:
+    """The existing owner drain cancels a parked delivery-recovery task."""
+    bot = _durable_response_bot(tmp_path)
+    recovery_started = asyncio.Event()
+    recovery_cancelled = asyncio.Event()
+
+    async def recover_deliveries() -> RecoveryOutcome:
+        recovery_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            recovery_cancelled.set()
+            raise
+
+    async def expire_owner_drain(
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109
+        owner: object | None = None,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+    ) -> bool:
+        assert timeout is not None
+        assert 0.0 < timeout <= SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS
+        return await wait_for_background_tasks(
+            timeout=0,
+            owner=owner,
+            shutdown_intent=shutdown_intent,
+        )
+
+    with (
+        patch.object(
+            bot,
+            "_delivery_gateway",
+            new=SimpleNamespace(recover_deliveries=recover_deliveries),
+        ),
+        patch("mindroom.bot.wait_for_background_tasks", new=expire_owner_drain),
+    ):
+        await _complete_frame(bot)
+        await recovery_started.wait()
+        await bot.prepare_for_sync_shutdown()
+
+    assert recovery_cancelled.is_set()
+
+
+def test_shutdown_budget_shares_one_deadline_across_two_window_drain() -> None:
+    """Sequential shutdown stages consume one policy budget."""
+    with patch(
+        "mindroom.runtime_shutdown.time.monotonic",
+        side_effect=(100.0, 102.0, 104.0, 105.0),
+    ):
+        budget = ShutdownBudget.start(5.0)
+
+        assert budget.remaining_seconds() == 3.0
+        assert budget.per_window_seconds(windows=2) == 0.5
+        assert budget.remaining_seconds() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_prepare_then_stop_reuses_one_total_shutdown_budget() -> None:
+    """Busy cleanup stages and a later stop share one five-second deadline."""
+    now = [100.0]
+    background_timeouts: list[float | None] = []
+    coalescing_timeouts: list[float | None] = []
+    response_timeouts: list[float | None] = []
+
+    async def wait_for_background(
+        timeout: float | None = None,  # noqa: ASYNC109
+        **_kwargs: object,
+    ) -> bool:
+        background_timeouts.append(timeout)
+        if len(background_timeouts) == 1:
+            now[0] += 2.0
+            return True
+        return False
+
+    drain_result = SimpleNamespace(
+        completed=True,
+        released_reservation_count=0,
+        cancelled_unready_count=0,
+        failed_ready_count=0,
+        dropped_ready_count=0,
+        dispatch_failure_count=0,
+        dispatch_cancelled_count=0,
+        admission_deferred_count=0,
     )
 
-    assert plan.entities_to_restart == {"router", "code"}
+    async def drain_coalescing(
+        *,
+        shutdown_budget: ShutdownBudget,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        coalescing_timeouts.append(shutdown_budget.remaining_seconds())
+        if coalescing_timeouts[-1] > 0.0:
+            now[0] += 2.0
+        return drain_result
+
+    async def drain_responses(
+        *,
+        cancel_after_seconds: float | None,
+        **_kwargs: object,
+    ) -> bool:
+        response_timeouts.append(cancel_after_seconds)
+        assert cancel_after_seconds is not None
+        now[0] += cancel_after_seconds * 2
+        return False
+
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot.agent_user = AgentMatrixUser(
+        agent_name="budget",
+        user_id="@mindroom_budget:localhost",
+        display_name="Budget",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=None)
+    bot.running = True
+    bot.last_sync_time = None
+    bot._last_sync_monotonic = None
+    bot._first_sync_done = True
+    bot._orchestrator_ready_handled = True
+    bot._sync_shutting_down = False
+    bot._sync_shutdown_budget = None
+    bot._delivery_recovery_wake = MagicMock()
+    bot._response_runner = MagicMock(
+        refuse_pending_admissions=MagicMock(),
+        drain_inbox_responses=AsyncMock(side_effect=drain_responses),
+        pending_inbox_response_count=0,
+        incomplete_inbox_responses_recoverable=True,
+        in_flight_response_count=0,
+    )
+    bot._coalescing_gate = MagicMock(
+        drain_all=AsyncMock(side_effect=drain_coalescing),
+    )
+    bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._call_manager = None
+    bot._journal_dispatcher = MagicMock(stop=AsyncMock())
+    bot._ingestion_session = None
+    bot._own_journal = None
+    bot.logger = MagicMock()
+
+    with (
+        patch("mindroom.runtime_shutdown.time.monotonic", side_effect=lambda: now[0]),
+        patch("mindroom.bot.wait_for_background_tasks", side_effect=wait_for_background),
+    ):
+        await bot.prepare_for_sync_shutdown()
+        await bot.stop()
+
+    assert background_timeouts == [SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS, 0.0, 0.0, 0.0]
+    assert coalescing_timeouts == [3.0, 0.0]
+    assert response_timeouts == [0.5, 0.0]
 
 
-def test_sliding_sync_required_state_is_not_shared_between_requests() -> None:
-    """Sliding sync request builders should not reuse mutable required_state lists."""
-    lists = _sliding_sync_lists(timeline_limit=7)
-    room_subscriptions = _sliding_sync_room_subscriptions(["!alpha:localhost", "!beta:localhost"], timeline_limit=7)
+@pytest.mark.asyncio
+async def test_stop_does_not_close_runtime_resources_under_live_response_owner() -> None:
+    """A failed response drain cannot be followed by client/store teardown."""
+    shutdown_failure = RuntimeError("response tasks did not stop within bounded cleanup")
+    client = AsyncMock()
+    journal_dispatcher = MagicMock(stop=AsyncMock())
+    ingestion_session = MagicMock(close=AsyncMock())
+    journal = MagicMock(close=AsyncMock())
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot.agent_user = AgentMatrixUser(
+        agent_name="busy",
+        user_id="@mindroom_busy:localhost",
+        display_name="Busy",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=client)
+    bot.running = True
+    bot.last_sync_time = None
+    bot._last_sync_monotonic = None
+    bot._first_sync_done = True
+    bot._orchestrator_ready_handled = True
+    bot._sync_shutting_down = False
+    bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._call_manager = None
+    bot._response_runner = MagicMock(pending_inbox_response_count=1)
+    bot.prepare_for_sync_shutdown = AsyncMock(side_effect=shutdown_failure)
+    bot._journal_dispatcher = journal_dispatcher
+    bot._ingestion_session = ingestion_session
+    bot._own_journal = journal
+    bot.logger = MagicMock()
 
-    list_required_state = lists["mindroom"]["required_state"]
-    alpha_required_state = room_subscriptions["!alpha:localhost"]["required_state"]
-    beta_required_state = room_subscriptions["!beta:localhost"]["required_state"]
+    with pytest.raises(RuntimeError, match="response tasks did not stop") as raised:
+        await bot.stop(shutdown_intent=ORDERLY_SHUTDOWN)
 
-    assert list_required_state == alpha_required_state == beta_required_state
-    assert list_required_state is not alpha_required_state
-    assert alpha_required_state is not beta_required_state
-    alpha_required_state.append(["m.room.power_levels", ""])
-    assert ["m.room.power_levels", ""] not in beta_required_state
-    assert ["m.room.power_levels", ""] not in _sliding_sync_lists(timeline_limit=7)["mindroom"]["required_state"]
+    assert raised.value is shutdown_failure
+    journal_dispatcher.stop.assert_not_awaited()
+    ingestion_session.close.assert_not_awaited()
+    journal.close.assert_not_awaited()
+    client.close.assert_not_awaited()
 
 
-def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> None:
-    """Sliding memberships must classify joins, skip invites, and surface kicks and bans."""
-    response = nio.SlidingSyncResponse(
-        "pos",
-        rooms={
-            "!joined:localhost": nio.SlidingSyncRoom(membership="join"),
-            "!window:localhost": nio.SlidingSyncRoom(),
-            "!invited:localhost": nio.SlidingSyncRoom(membership="invite"),
-            "!stripped:localhost": nio.SlidingSyncRoom(stripped_state=[MagicMock()]),
-            "!kicked:localhost": nio.SlidingSyncRoom(membership="leave"),
-            "!banned:localhost": nio.SlidingSyncRoom(membership="ban"),
-        },
+@pytest.mark.asyncio
+async def test_orderly_stop_defers_saturated_response_timeouts_without_tracebacks() -> None:
+    """Expected response handoffs must not synchronously format one traceback per bot."""
+    bots: list[AgentBot] = []
+    failures: list[ResponseShutdownTimeoutError] = []
+    for index in range(16):
+        failure = ResponseShutdownTimeoutError(
+            "response tasks did not stop within bounded cleanup",
+        )
+        bot = object.__new__(AgentBot)
+        bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+        bot.agent_user = AgentMatrixUser(
+            agent_name=f"saturated_{index:02d}",
+            user_id=f"@mindroom_saturated_{index:02d}:localhost",
+            display_name=f"Saturated {index:02d}",
+            password=TEST_PASSWORD,
+        )
+        bot._runtime_view = MagicMock(client=AsyncMock())
+        bot.running = True
+        bot.last_sync_time = None
+        bot._last_sync_monotonic = None
+        bot._first_sync_done = True
+        bot._orchestrator_ready_handled = True
+        bot._sync_shutting_down = False
+        bot._emit_agent_lifecycle_event = AsyncMock()
+        bot._call_manager = None
+        bot._response_runner = MagicMock(pending_inbox_response_count=index % 3 + 1)
+        bot.prepare_for_sync_shutdown = AsyncMock(side_effect=failure)
+        bot._journal_dispatcher = MagicMock(stop=AsyncMock())
+        bot._ingestion_session = MagicMock(close=AsyncMock())
+        bot._own_journal = MagicMock(close=AsyncMock())
+        bot.logger = MagicMock()
+        bot.logger.exception.side_effect = AssertionError(
+            "expected response timeout formatted a synchronous traceback",
+        )
+        bots.append(bot)
+        failures.append(failure)
+
+    results = await asyncio.gather(
+        *(bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in bots),
+        return_exceptions=True,
     )
 
-    joined_room_ids, departed_room_ids = sliding_own_membership_sets(response)
+    assert results == failures
+    for bot in bots:
+        assert bot.deferred_stop_required
+        bot.logger.exception.assert_not_called()
+        bot.logger.warning.assert_called_once_with(
+            "Deferred resource release after bounded response shutdown",
+            error_type="ResponseShutdownTimeoutError",
+            resource="sync shutdown preparation",
+        )
+        bot._journal_dispatcher.stop.assert_not_awaited()
+        bot._ingestion_session.close.assert_not_awaited()
+        bot._own_journal.close.assert_not_awaited()
+        bot._runtime_view.client.close.assert_not_awaited()
 
-    assert joined_room_ids == {"!joined:localhost", "!window:localhost"}
-    assert departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
 
-
-def _sliding_response_bot(tmp_path: Path) -> AgentBot:
-    """Build one real bot for Sliding response lifecycle tests."""
+def _durable_response_bot(tmp_path: Path) -> AgentBot:
+    """Build one real bot for durable sync lifecycle tests."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -1479,11 +2080,11 @@ def _sliding_response_bot(tmp_path: Path) -> AgentBot:
                     id="test-model",
                 ),
             },
-            matrix_sync=MatrixSyncConfig(mode="sliding"),
+            matrix_sync=MatrixSyncConfig(),
         ),
         runtime_paths,
     )
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="code",
             password=TEST_PASSWORD,
@@ -1495,192 +2096,10 @@ def _sliding_response_bot(tmp_path: Path) -> AgentBot:
         runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot._first_sync_done = True
-    bot._room_member_join_hooks_armed = True
     return bot
-
-
-async def _assert_sliding_cache_progress_stays_fresh(
-    bot: AgentBot,
-    response: nio.SlidingSyncResponse,
-    *,
-    purge_started: asyncio.Event,
-    allow_purge_finish: asyncio.Event,
-    mark_joined_started: asyncio.Event,
-    allow_mark_joined_finish: asyncio.Event,
-) -> None:
-    """Observe one response across both durable membership cache phases."""
-    response_task = asyncio.create_task(bot._on_sync_response(response))
-    try:
-        await asyncio.wait_for(purge_started.wait(), timeout=1.0)
-        purge_progress = bot.sync_cache_write_progress()
-        purge_health = get_matrix_sync_health_snapshot(
-            cache_write_grace_seconds=600.0,
-        )
-        assert purge_progress is not None
-        assert purge_health.stale_entities == ()
-
-        allow_purge_finish.set()
-        await asyncio.wait_for(mark_joined_started.wait(), timeout=1.0)
-        joined_progress = bot.sync_cache_write_progress()
-        joined_health = get_matrix_sync_health_snapshot(
-            cache_write_grace_seconds=600.0,
-        )
-        assert joined_progress is not None
-        assert joined_progress.started_monotonic == purge_progress.started_monotonic
-        assert joined_health.stale_entities == ()
-
-        allow_mark_joined_finish.set()
-        await asyncio.wait_for(response_task, timeout=1.0)
-    finally:
-        allow_purge_finish.set()
-        allow_mark_joined_finish.set()
-        await asyncio.gather(response_task, return_exceptions=True)
-        reset_matrix_sync_health()
-
-
-@pytest.mark.asyncio
-async def test_sliding_sync_remote_departure_fences_and_purges(
-    tmp_path: Path,
-) -> None:
-    """A sliding response reporting a kick must fence, purge, and notify the call manager."""
-    purge_started = asyncio.Event()
-    allow_purge_finish = asyncio.Event()
-    mark_joined_started = asyncio.Event()
-    allow_mark_joined_finish = asyncio.Event()
-    purged_room_ids: list[set[str]] = []
-    marked_joined_room_ids: list[str] = []
-    invalidation_count = 0
-    membership_updates: list[tuple[set[str], set[str]]] = []
-
-    async def delayed_purge(room_ids: set[str]) -> None:
-        purged_room_ids.append(room_ids)
-        purge_started.set()
-        await allow_purge_finish.wait()
-
-    async def delayed_mark_joined(room_id: str) -> None:
-        marked_joined_room_ids.append(room_id)
-        mark_joined_started.set()
-        await allow_mark_joined_finish.wait()
-
-    async def invalidate() -> bool:
-        nonlocal invalidation_count
-        invalidation_count += 1
-        return True
-
-    class CallManagerProbe:
-        async def on_sync_room_membership(
-            self,
-            *,
-            joined_room_ids: set[str],
-            left_room_ids: set[str],
-        ) -> None:
-            membership_updates.append((joined_room_ids, left_room_ids))
-
-    bot = _sliding_response_bot(tmp_path)
-    install_call_manager_mock(bot, CallManagerProbe())
-
-    response = nio.SlidingSyncResponse(
-        "pos",
-        rooms={
-            "!kicked:localhost": nio.SlidingSyncRoom(membership="leave"),
-            "!joined:localhost": nio.SlidingSyncRoom(membership="join"),
-        },
-    )
-
-    reset_matrix_sync_health()
-    mark_matrix_sync_loop_started(bot.agent_name)
-    mark_matrix_sync_success(
-        bot.agent_name,
-        datetime.now(UTC) - timedelta(seconds=400),
-    )
-    with (
-        patch.object(
-            bot._sync_cache_trust,
-            "invalidate_for_cache_scope_cleanup",
-            new=invalidate,
-        ),
-        patch.object(
-            bot._conversation_cache,
-            "purge_rooms",
-            new=delayed_purge,
-        ),
-        patch.object(
-            bot._conversation_cache,
-            "mark_room_joined",
-            new=delayed_mark_joined,
-        ),
-    ):
-        await _assert_sliding_cache_progress_stays_fresh(
-            bot,
-            response,
-            purge_started=purge_started,
-            allow_purge_finish=allow_purge_finish,
-            mark_joined_started=mark_joined_started,
-            allow_mark_joined_finish=allow_mark_joined_finish,
-        )
-
-    assert invalidation_count == 1
-    assert purged_room_ids == [{"!kicked:localhost"}]
-    assert marked_joined_room_ids == ["!joined:localhost"]
-    assert membership_updates == [
-        ({"!joined:localhost"}, {"!kicked:localhost"}),
-    ]
-    assert bot.sync_cache_write_progress() is None
-
-
-@pytest.mark.asyncio
-async def test_sliding_sync_error_skips_classic_token_rejection(
-    tmp_path: Path,
-) -> None:
-    """Routine sliding connection expiry must not run classic sync-token rejection."""
-    bot = _sliding_response_bot(tmp_path)
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_classic")
-    bot._sync_continuity_store.replace_checkpoint(
-        SyncCheckpoint(
-            "s_classic",
-            cache_generation=bot.event_cache.cache_generation,
-        ),
-    )
-    error = nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS")
-
-    with capture_logs() as logs:
-        await bot._on_sync_error(error)
-
-    assert bot._sync_continuity_store.load().checkpoint is not None
-    assert bot._room_member_join_hooks_armed is True
-    assert not any(entry["log_level"] == "warning" for entry in logs)
-
-
-def test_sliding_sync_startup_failure_warns_once_with_classic_hint() -> None:
-    """Sliding errors before the first successful sync warn once and point at classic mode."""
-    bot = MagicMock(spec=AgentBot)
-    bot._first_sync_done = False
-    bot._sliding_sync_startup_warning_emitted = False
-    bot.logger = MagicMock()
-    error = nio.SlidingSyncError("unknown endpoint", "M_UNRECOGNIZED")
-
-    AgentBot._warn_if_sliding_sync_never_succeeded(bot, error)
-    AgentBot._warn_if_sliding_sync_never_succeeded(bot, error)
-
-    bot.logger.warning.assert_called_once()
-    assert "matrix_sync.mode: classic" in bot.logger.warning.call_args.kwargs["hint"]
-    assert bot._sliding_sync_startup_warning_emitted is True
-
-
-def test_sliding_sync_errors_after_first_sync_do_not_warn() -> None:
-    """Sliding errors after a successful sync are routine and stay at debug level."""
-    bot = MagicMock(spec=AgentBot)
-    bot._first_sync_done = True
-    bot._sliding_sync_startup_warning_emitted = False
-    bot.logger = MagicMock()
-
-    AgentBot._warn_if_sliding_sync_never_succeeded(bot, nio.SlidingSyncError("boom", "M_UNKNOWN"))
-
-    bot.logger.warning.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1780,6 +2199,9 @@ async def test_stop_entities_uses_generic_shutdown_for_removed_entities() -> Non
 async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     """AgentBot.stop() must keep restart provenance for final drains."""
     bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    active_hook_registry = HookRegistry.empty()
+    bot._hook_registry_state = HookRegistryState(active_hook_registry)
     bot.agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:localhost",
@@ -1790,20 +2212,35 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
         client=None,
         config=MagicMock(spec=Config),
         runtime_paths=_fake_runtime_paths(),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
         enable_streaming=True,
         orchestrator=None,
-        event_cache=None,
-        event_cache_write_coordinator=None,
     )
+    # This bot is hand-built with object.__new__, so it only has what the test
+    # sets. stop() releases the journal lane, which a real bot always has.
+    bot._journal_dispatcher = MagicMock(stop=AsyncMock())
+    bot._journal_store = MagicMock(close=AsyncMock())
+    bot._response_runner = MagicMock()
+    # Owned rather than borrowed, so stop() closes it -- which is what this
+    # test's shutdown-intent assertions run through.
+    bot._own_journal = MagicMock(close=AsyncMock())
+    bot._ingestion_session = None
+    bot.storage_path = Path("/nonexistent/storage")
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock()
+    bot._response_runner = MagicMock(pending_inbox_response_count=0)
     bot._emit_agent_lifecycle_event = AsyncMock()
     bot._call_manager = None
+    bot._response_runner = MagicMock(pending_inbox_response_count=0)
+    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=True)
+    bot._response_runner.wait_for_source_owned_inbox_responses = AsyncMock()
 
     await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
     bot._emit_agent_lifecycle_event.assert_awaited_once_with("agent:stopped", stop_reason="restart")
+    assert bot.hook_registry is not active_hook_registry
     bot.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    bot._response_runner.wait_for_source_owned_inbox_responses.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -1851,12 +2288,18 @@ async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> 
     shutdown_intents: list[tuple[str, RuntimeShutdownIntent]] = []
 
     mock_bot1 = AsyncMock()
+    mock_bot1._quiesce_matrix_ingestion = AsyncMock(
+        side_effect=lambda: call_order.append(("quiesce", "agent1")),
+    )
     mock_bot1.prepare_for_sync_shutdown = AsyncMock(
         side_effect=lambda **_kwargs: call_order.append(("prepare", "agent1")),
     )
     mock_bot1.stop = AsyncMock(side_effect=lambda **_: call_order.append(("stop", "agent1")))
 
     mock_bot2 = AsyncMock()
+    mock_bot2._quiesce_matrix_ingestion = AsyncMock(
+        side_effect=lambda: call_order.append(("quiesce", "agent2")),
+    )
     mock_bot2.prepare_for_sync_shutdown = AsyncMock(
         side_effect=lambda **_kwargs: call_order.append(("prepare", "agent2")),
     )
@@ -1886,11 +2329,14 @@ async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> 
     with patch("mindroom.orchestration.runtime.cancel_sync_task", side_effect=fake_cancel_sync_task):
         await stop_entities({"agent1", "agent2"}, agent_bots, sync_tasks, restart_entities={"agent1", "agent2"})
 
-    prepare_indexes = [index for index, item in enumerate(call_order) if item[0] == "prepare"]
+    quiesce_indexes = [index for index, item in enumerate(call_order) if item[0] == "quiesce"]
     cancel_indexes = [index for index, item in enumerate(call_order) if item[0] == "cancel"]
+    prepare_indexes = [index for index, item in enumerate(call_order) if item[0] == "prepare"]
 
+    assert quiesce_indexes
     assert prepare_indexes
     assert cancel_indexes
+    assert max(quiesce_indexes) < min(cancel_indexes)
     assert max(cancel_indexes) < min(prepare_indexes)
     assert sorted(shutdown_intents) == [
         ("agent1", SYNC_RESTART_SHUTDOWN),
@@ -1898,6 +2344,171 @@ async def test_stop_entities_cancels_sync_tasks_before_checkpoint_shutdown() -> 
     ]
     mock_bot1.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
     mock_bot2.prepare_for_sync_shutdown.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+
+@pytest.mark.asyncio
+async def test_stop_entities_quiesces_all_sources_concurrently() -> None:
+    """One slow source barrier must not prevent another from starting."""
+    entered: set[str] = set()
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold_quiesce(entity_name: str) -> None:
+        entered.add(entity_name)
+        if entered == {"agent1", "agent2"}:
+            both_entered.set()
+        await release.wait()
+
+    agent_bots: dict[str, AsyncMock] = {}
+    for entity_name in ("agent1", "agent2"):
+        bot = _shutdown_bot_mock()
+
+        async def named_quiesce(name: str = entity_name) -> None:
+            await hold_quiesce(name)
+
+        bot._quiesce_matrix_ingestion = AsyncMock(side_effect=named_quiesce)
+        bot.prepare_for_sync_shutdown = AsyncMock()
+        bot.stop = AsyncMock()
+        agent_bots[entity_name] = bot
+    sync_tasks = {entity_name: asyncio.create_task(asyncio.sleep(60)) for entity_name in agent_bots}
+    stopping = asyncio.create_task(
+        stop_entities(
+            set(agent_bots),
+            agent_bots,
+            sync_tasks,
+            restart_entities={"agent1", "agent2"},
+        ),
+    )
+
+    try:
+        await asyncio.wait_for(both_entered.wait(), timeout=2)
+        release.set()
+        await asyncio.wait_for(stopping, timeout=2)
+    finally:
+        release.set()
+        if not stopping.done():
+            stopping.cancel()
+        await asyncio.gather(stopping, return_exceptions=True)
+        for task in sync_tasks.values():
+            task.cancel()
+        await asyncio.gather(*sync_tasks.values(), return_exceptions=True)
+
+    assert entered == {"agent1", "agent2"}
+
+
+@pytest.mark.asyncio
+async def test_stop_entities_finishes_cleanup_after_cancellation_during_quiesce() -> None:
+    """Caller cancellation is reported only after durable ownership is released."""
+    quiesce_entered = asyncio.Event()
+    release_quiesce = asyncio.Event()
+    bot = _shutdown_bot_mock()
+
+    async def hold_quiesce() -> None:
+        quiesce_entered.set()
+        await release_quiesce.wait()
+
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=hold_quiesce)
+    bot.prepare_for_sync_shutdown = AsyncMock()
+    bot.stop = AsyncMock()
+    sync_task = asyncio.create_task(asyncio.sleep(60))
+    agent_bots = {"agent1": bot}
+    sync_tasks = {"agent1": sync_task}
+    stopping = asyncio.create_task(
+        stop_entities(
+            {"agent1"},
+            agent_bots,
+            sync_tasks,
+            restart_entities={"agent1"},
+        ),
+    )
+
+    await asyncio.wait_for(quiesce_entered.wait(), timeout=2)
+    stopping.cancel()
+    await asyncio.sleep(0)
+    release_quiesce.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+
+    assert sync_task.cancelled()
+    bot.prepare_for_sync_shutdown.assert_awaited_once()
+    bot.stop.assert_awaited_once()
+    assert agent_bots == {"agent1": bot}
+    assert sync_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_entities_cleans_up_before_reporting_source_quiesce_failure() -> None:
+    """A failed source barrier must not strand live sync/store ownership."""
+    failure = RuntimeError("source quiesce failed")
+    bot = _shutdown_bot_mock()
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=failure)
+    bot.prepare_for_sync_shutdown = AsyncMock()
+    bot.stop = AsyncMock()
+    sync_task = asyncio.create_task(asyncio.sleep(60))
+    agent_bots = {"agent1": bot}
+    sync_tasks = {"agent1": sync_task}
+
+    with pytest.raises(RuntimeError, match="source quiesce failed") as raised:
+        await stop_entities(
+            {"agent1"},
+            agent_bots,
+            sync_tasks,
+            restart_entities={"agent1"},
+        )
+
+    assert raised.value is failure
+    assert sync_task.cancelled()
+    bot.prepare_for_sync_shutdown.assert_awaited_once_with(
+        shutdown_intent=SYNC_RESTART_SHUTDOWN,
+    )
+    bot.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    assert agent_bots == {"agent1": bot}
+    assert sync_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_entities_prioritizes_quiesce_failure_after_cleanup_failures() -> None:
+    """Every cleanup stage runs while the source-barrier error stays primary."""
+    quiesce_failure = RuntimeError("source quiesce failed")
+    cleanup_failure = RuntimeError("cleanup failed")
+    bot = _shutdown_bot_mock()
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=quiesce_failure)
+    bot.prepare_for_sync_shutdown = AsyncMock(side_effect=cleanup_failure)
+    bot.stop = AsyncMock(side_effect=cleanup_failure)
+    sync_task = asyncio.create_task(asyncio.sleep(60))
+    agent_bots = {"agent1": bot}
+    sync_tasks = {"agent1": sync_task}
+
+    async def failing_cancel(
+        entity_name: str,
+        tasks: dict[str, asyncio.Task],
+        **_kwargs: object,
+    ) -> None:
+        task = tasks.pop(entity_name)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise cleanup_failure
+
+    with (
+        patch(
+            "mindroom.orchestration.runtime.cancel_sync_task",
+            side_effect=failing_cancel,
+        ),
+        pytest.raises(RuntimeError, match="source quiesce failed") as raised,
+    ):
+        await stop_entities(
+            {"agent1"},
+            agent_bots,
+            sync_tasks,
+            restart_entities={"agent1"},
+        )
+
+    assert raised.value is quiesce_failure
+    assert sync_task.cancelled()
+    bot.prepare_for_sync_shutdown.assert_awaited_once()
+    bot.stop.assert_awaited_once()
+    assert agent_bots == {"agent1": bot}
+    assert sync_tasks == {}
 
 
 @pytest.mark.asyncio
@@ -1925,11 +2536,11 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         # Create config with one agent
         config = MagicMock(spec=Config)
         config.agents = {"test_agent": MagicMock()}
+        _configure_mock_access(config)
         config.teams = {}
         config.mcp_servers = {}
         config.plugins = []
-        config.cache = MagicMock()
-        config.cache.resolve_db_path.return_value = tmp_path / "event_cache.db"
+        config.event_journal = MagicMock()
         config.mindroom_user = None
         config.get_all_configured_rooms.return_value = []
         mock_load_config.return_value = config
@@ -1955,8 +2566,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
 
         assert orchestrator.config_path == (tmp_path / "config.yaml").resolve()
 
-        with patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()):
-            await orchestrator.initialize()
+        await orchestrator.initialize()
 
         # Manually simulate what start() does for sync tasks
         # (We can't actually run start() because it would block on gather())
@@ -1977,23 +2587,27 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
     config = MagicMock(spec=Config)
     config.agents = {"general": MagicMock()}
+    _configure_mock_access(config)
     config.teams = {}
     config.mcp_servers = {}
-    config.cache = MagicMock()
-    config.cache.resolve_db_path.return_value = tmp_path / "event_cache.db"
+    config.event_journal = MagicMock()
     orchestrator.config = config
 
-    router_bot = AsyncMock()
+    router_bot = _shutdown_bot_mock()
     router_bot.agent_name = "router"
     router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
     router_bot.running = True
     router_bot.stop = AsyncMock()
+    router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    router_bot.schedule_reply_authorized_call_revocation = MagicMock()
 
-    general_bot = AsyncMock()
+    general_bot = _shutdown_bot_mock()
     general_bot.agent_name = "general"
     general_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
     general_bot.running = True
     general_bot.stop = AsyncMock()
+    general_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    general_bot.schedule_reply_authorized_call_revocation = MagicMock()
 
     orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
 
@@ -2037,29 +2651,41 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
 
 @pytest.mark.asyncio
-async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tmp_path: Path) -> None:
-    """Initial sync loops must not wait for room reconciliation or restart maintenance."""
+async def test_start_runtime_ingests_before_membership_setup_but_defers_semantic_dispatch(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    """Owned joins need ingestion while semantic work waits for published grants."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     config = MagicMock(spec=Config)
     config.agents = {"general": MagicMock()}
+    _configure_mock_access(config, members_of_rooms={"general": ["grant"]})
     config.teams = {}
     config.mcp_servers = {}
-    config.cache = MagicMock()
-    config.cache.resolve_db_path.return_value = tmp_path / "event_cache.db"
+    config.event_journal = MagicMock()
     orchestrator.config = config
 
-    router_bot = AsyncMock()
+    router_bot = _shutdown_bot_mock()
     router_bot.agent_name = "router"
     router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
     router_bot.running = True
+    router_bot.client = MagicMock()
     router_bot.stop = AsyncMock()
+    router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    router_bot.schedule_reply_authorized_call_revocation = MagicMock()
+    router_bot.release_pending_turn_journal_replay = MagicMock()
+    router_bot.first_sync_complete = True
 
-    general_bot = AsyncMock()
+    general_bot = _shutdown_bot_mock()
     general_bot.agent_name = "general"
     general_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
     general_bot.running = True
+    general_bot.client = MagicMock()
     general_bot.stop = AsyncMock()
+    general_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    general_bot.schedule_reply_authorized_call_revocation = MagicMock()
+    general_bot.release_pending_turn_journal_replay = MagicMock()
+    general_bot.first_sync_complete = True
 
     orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
 
@@ -2069,11 +2695,14 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
         "router": asyncio.Event(),
         "general": asyncio.Event(),
     }
+    runtime_ready = asyncio.Event()
     call_order: list[str] = []
 
     async def blocked_setup(_: list[object]) -> None:
         call_order.append("setup_started")
         setup_started.set()
+        for started in sync_started_by_entity.values():
+            await started.wait()
         await setup_can_finish.wait()
         call_order.append("setup_finished")
 
@@ -2092,21 +2721,152 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=blocked_setup),
         patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
+        patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
     ):
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
         try:
             await asyncio.wait_for(setup_started.wait(), timeout=1.0)
-            await asyncio.wait_for(
-                asyncio.gather(*(event.wait() for event in sync_started_by_entity.values())),
-                timeout=1.0,
-            )
+            for started in sync_started_by_entity.values():
+                await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert not runtime_ready.is_set()
+            assert orchestrator._response_admission_gate.closed
+            assert not orchestrator._response_admission_gate.close_if_idle()
 
-            assert "setup_finished" not in call_order
-            assert {"sync_started:router", "sync_started:general"} <= set(call_order)
+            # An early frame completion cannot release semantic callbacks while
+            # setup still owns the initial membership publication.
+            await orchestrator.handle_bot_ready(router_bot)
+            await orchestrator.handle_bot_ready(general_bot)
+            await asyncio.sleep(0)
+            router_bot.release_pending_turn_journal_replay.assert_not_called()
+            general_bot.release_pending_turn_journal_replay.assert_not_called()
+
+            setup_can_finish.set()
+            await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+
+            setup_finished = call_order.index("setup_finished")
+            assert call_order.index("sync_started:router") < setup_finished
+            assert call_order.index("sync_started:general") < setup_finished
+            router_bot.release_pending_turn_journal_replay.assert_called()
+            general_bot.release_pending_turn_journal_replay.assert_called()
+            assert not orchestrator._response_admission_gate.closed
         finally:
             setup_can_finish.set()
             await orchestrator.stop()
+            if not runtime_task.done():
+                runtime_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(runtime_task, timeout=1.0)
+
+
+def _orchestrator_with_membership_startup_bots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[_MultiAgentOrchestrator, AsyncMock, AsyncMock]:
+    """Build the narrow startup runtime used by publication-ordering tests."""
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.0)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    config = MagicMock(spec=Config)
+    config.agents = {"general": MagicMock()}
+    _configure_mock_access(config, members_of_rooms={"general": ["grant"]})
+    config.teams = {}
+    config.mcp_servers = {}
+    config.event_journal = MagicMock()
+    orchestrator.config = config
+    router_bot = _shutdown_bot_mock()
+    router_bot.agent_name = "router"
+    router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
+    router_bot.running = True
+    router_bot.stop = AsyncMock()
+    router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    router_bot.schedule_reply_authorized_call_revocation = MagicMock()
+    general_bot = _shutdown_bot_mock()
+    general_bot.agent_name = "general"
+    general_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
+    general_bot.running = True
+    general_bot.stop = AsyncMock()
+    general_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+    general_bot.schedule_reply_authorized_call_revocation = MagicMock()
+    orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
+    return orchestrator, router_bot, general_bot
+
+
+@pytest.mark.asyncio
+async def test_startup_membership_publication_serializes_config_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reload must not share or prematurely reopen startup admission ownership."""
+    orchestrator, router_bot, general_bot = _orchestrator_with_membership_startup_bots(tmp_path, monkeypatch)
+
+    setup_started = asyncio.Event()
+    setup_can_finish = asyncio.Event()
+    router_sync_started = asyncio.Event()
+    runtime_ready = asyncio.Event()
+    reload_started = asyncio.Event()
+    reload_can_finish = asyncio.Event()
+
+    async def blocked_setup(_: list[object]) -> None:
+        setup_started.set()
+        await setup_can_finish.wait()
+
+    def start_sync_task(entity_name: str, _bot: object) -> None:
+        if entity_name == ROUTER_AGENT_NAME:
+            router_sync_started.set()
+
+    async def blocked_config_load(*_args: object, **_kwargs: object) -> Config:
+        reload_started.set()
+        await reload_can_finish.wait()
+        return orchestrator.config
+
+    with (
+        patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
+        patch.object(orchestrator, "_start_router_bot", new=AsyncMock(return_value=router_bot)),
+        patch.object(
+            orchestrator,
+            "_start_entities_once",
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[general_bot])),
+        ),
+        patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=blocked_setup),
+        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()),
+        patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
+        patch("mindroom.orchestration.config_lifecycle.asyncio.to_thread", side_effect=blocked_config_load),
+        patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
+    ):
+        runtime_task = asyncio.create_task(orchestrator._start_runtime())
+        reload_task: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(setup_started.wait(), timeout=1.0)
+            assert orchestrator._response_admission_gate.closed
+
+            orchestrator.config_reload.request_reload()
+            reload_task = orchestrator.config_reload._reload_task
+            assert reload_task is not None
+            await asyncio.sleep(0)
+            assert not reload_started.is_set()
+
+            setup_can_finish.set()
+            await asyncio.wait_for(router_sync_started.wait(), timeout=1.0)
+            await orchestrator.handle_bot_ready(router_bot)
+            await asyncio.wait_for(runtime_ready.wait(), timeout=1.0)
+            await asyncio.wait_for(reload_started.wait(), timeout=1.0)
+            assert not orchestrator._response_admission_gate.closed
+
+            reload_can_finish.set()
+            await asyncio.wait_for(reload_task, timeout=1.0)
+            assert not orchestrator._response_admission_gate.closed
+        finally:
+            setup_can_finish.set()
+            reload_can_finish.set()
+            await orchestrator.stop()
+            if reload_task is not None and not reload_task.done():
+                reload_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await reload_task
             if not runtime_task.done():
                 runtime_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -2118,7 +2878,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
     """Hot reload during startup maintenance must not lose one-shot restart cleanup."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     current_config = Config()
-    new_config = Config()
+    new_config = Config(defaults={"enable_streaming": False})
 
     plan = ConfigUpdatePlan(
         new_config=new_config,
@@ -2128,7 +2888,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
         new_entities=set(),
         removed_entities=set(),
         mindroom_user_changed=False,
-        matrix_room_access_changed=False,
+        room_access_changed=False,
         matrix_space_changed=False,
         authorization_changed=False,
     )
@@ -2139,11 +2899,11 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
     orchestrator.agent_bots = {"router": router_bot}
     orchestrator.config = current_config
     orchestrator.running = True
-    orchestrator._startup_maintenance._started = True
+    orchestrator._startup_maintenance.startup_cutoff_ms = 123456
 
     maintenance_started = asyncio.Event()
     maintenance_released = asyncio.Event()
-    replayed: list[tuple[list[object], object]] = []
+    replayed: list[tuple[list[object], object, int]] = []
 
     async def blocked_startup_maintenance() -> None:
         maintenance_started.set()
@@ -2154,15 +2914,14 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
         orchestrator._startup_maintenance.task = old_maintenance_task
         await asyncio.wait_for(maintenance_started.wait(), timeout=1.0)
 
-        def replay_startup_maintenance(bots: list[object], config: object) -> None:
-            replayed.append((bots, config))
+        def replay_startup_maintenance(bots: list[object], config: object, *, startup_cutoff_ms: int) -> None:
+            replayed.append((bots, config, startup_cutoff_ms))
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
             patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
             patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
             patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
@@ -2177,7 +2936,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
 
         assert updated is False
         assert old_maintenance_task.cancelled()
-        assert replayed == [([router_bot], new_config)]
+        assert replayed == [([router_bot], new_config, 123456)]
         mark_startup_runtime_support_ready.assert_awaited_once()
     finally:
         maintenance_released.set()
@@ -2246,12 +3005,10 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         # Setup existing config and bot
         old_config = MagicMock(spec=Config)
         old_config.agents = {"agent1": MagicMock()}
+        _configure_mock_access(old_config)
         old_config.teams = {}
         old_config.mcp_servers = {}
-        old_config.cache = MagicMock()
-        old_config.cache.resolve_db_path.return_value = tmp_path / "event_cache-old.db"
-        old_config.authorization = MagicMock()
-        old_config.authorization.global_users = []
+        old_config.event_journal = MagicMock()
         orchestrator.config = old_config
 
         mock_existing_bot = AsyncMock()
@@ -2265,12 +3022,10 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         # Setup new config (agent1 needs restart)
         new_config = MagicMock(spec=Config)
         new_config.agents = {"agent1": MagicMock()}
+        _configure_mock_access(new_config)
         new_config.teams = {}
         new_config.mcp_servers = {}
-        new_config.cache = MagicMock()
-        new_config.cache.resolve_db_path.return_value = tmp_path / "event_cache-new.db"
-        new_config.authorization = MagicMock()
-        new_config.authorization.global_users = []  # Add this for the logging
+        new_config.event_journal = MagicMock()
         mock_load_config.return_value = new_config
 
         # Agent1 needs to be restarted
@@ -2348,8 +3103,12 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
         mock_existing_bot = AsyncMock()
         mock_existing_bot.config = old_config
         mock_existing_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
+        mock_existing_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+        mock_existing_bot.schedule_reply_authorized_call_revocation = MagicMock()
         mock_router_bot = AsyncMock()
         mock_router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
+        mock_router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+        mock_router_bot.schedule_reply_authorized_call_revocation = MagicMock()
         orchestrator.agent_bots = {"general": mock_existing_bot, "router": mock_router_bot}
 
         async def existing_sync_loop() -> None:
@@ -2391,7 +3150,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
             *_args: object,
             **_kwargs: object,
         ) -> AsyncMock:
-            bot = AsyncMock()
+            bot = _shutdown_bot_mock()
             bot.matrix_id = agent_user.matrix_id
             bot.try_start = AsyncMock(return_value=True)
             bot.sync_forever = AsyncMock()
@@ -2407,7 +3166,6 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
             for task in list(orchestrator._sync_tasks.values()):
                 task.cancel()
             await asyncio.gather(*orchestrator._sync_tasks.values(), return_exceptions=True)
-            await orchestrator._close_runtime_support_services()
 
         # --- assert: create_bot_for_entity called exactly once for "coach" ---
         coach_calls = [c for c in mock_create_bot.call_args_list if c[0][0] == "coach"]
@@ -2440,6 +3198,7 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         cancelled = []
 
         async def track_cancel(name: str, tasks: dict) -> None:
+            shutdown_order.append("sync_cancel")
             cancelled.append(name)
             tasks.pop(name, None)
 
@@ -2455,6 +3214,18 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         mock_bot1.running = True
         mock_bot2 = AsyncMock()
         mock_bot2.running = True
+
+        for mock_bot in (mock_bot1, mock_bot2):
+            mock_bot.pending_response_owner_count = 0
+            mock_bot.pending_response_phase_counts = {}
+            mock_bot.deferred_stop_phase = None
+            mock_bot.deferred_stop_required = False
+
+        async def track_source_quiesce() -> None:
+            shutdown_order.append("source_quiesce")
+
+        mock_bot1._quiesce_matrix_ingestion = AsyncMock(side_effect=track_source_quiesce)
+        mock_bot2._quiesce_matrix_ingestion = AsyncMock(side_effect=track_source_quiesce)
 
         async def track_entity_stop(*_args: object, **_kwargs: object) -> None:
             shutdown_order.append("entity_teardown")
@@ -2497,8 +3268,1014 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
             ],
         )
         assert mock_wait.await_count == 2
+        quiesce_indexes = [index for index, action in enumerate(shutdown_order) if action == "source_quiesce"]
+        cancel_indexes = [index for index, action in enumerate(shutdown_order) if action == "sync_cancel"]
+        assert len(quiesce_indexes) == 2
+        assert len(cancel_indexes) == 2
+        assert max(quiesce_indexes) < min(cancel_indexes)
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("mcp_teardown")
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("entity_teardown")
+
+
+@pytest.mark.asyncio
+async def test_shutdown_step_logs_the_exact_incomplete_phase() -> None:
+    """A stuck shutdown await leaves a non-sensitive exact phase boundary."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_step() -> None:
+        entered.set()
+        await release.wait()
+
+    with patch("mindroom.orchestrator.logger.info") as log_info:
+        task = asyncio.create_task(_run_shutdown_step("config_reload", blocked_step()))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        log_info.assert_any_call(
+            "orchestrator_shutdown_phase_started",
+            shutdown_phase="config_reload",
+        )
+        assert (
+            call(
+                "orchestrator_shutdown_phase_completed",
+                shutdown_phase="config_reload",
+            )
+            not in log_info.call_args_list
+        )
+
+        release.set()
+        await task
+
+        log_info.assert_any_call(
+            "orchestrator_shutdown_phase_completed",
+            shutdown_phase="config_reload",
+        )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stop_prioritizes_quiesce_failure_after_cleanup_failures(
+    tmp_path: Path,
+) -> None:
+    """Orderly stop releases every resource before surfacing its barrier error."""
+    quiesce_failure = RuntimeError("source quiesce failed")
+    cleanup_failure = RuntimeError("cleanup failed")
+    bot = _shutdown_bot_mock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=quiesce_failure)
+    bot.stop = AsyncMock(side_effect=cleanup_failure)
+    journal = AsyncMock()
+    journal.close = AsyncMock(side_effect=asyncio.CancelledError())
+
+    async def failing_cancel(
+        entity_name: str,
+        tasks: dict[str, object],
+    ) -> None:
+        tasks.pop(entity_name)
+        raise cleanup_failure
+
+    with (
+        patch("mindroom.orchestrator.cancel_sync_task", side_effect=failing_cancel),
+        patch(
+            "mindroom.orchestrator.wait_for_background_tasks",
+            new=AsyncMock(),
+        ),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._sync_tasks = {"agent1": MagicMock()}
+        orchestrator._open_journal = journal
+
+        with pytest.raises(RuntimeError, match="source quiesce failed") as raised:
+            await orchestrator.stop()
+
+    assert raised.value is quiesce_failure
+    assert orchestrator._sync_tasks == {}
+    bot.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stop_retains_shared_journal_while_response_owner_is_live(
+    tmp_path: Path,
+) -> None:
+    """A live response owner keeps the shared journal open for its bounded unwind."""
+    response_failure = ResponseShutdownTimeoutError("response still owns runtime resources")
+    bot = _shutdown_bot_mock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 1
+    bot.pending_response_phase_counts = {"recovery_proof": 1}
+    bot.stop = AsyncMock(side_effect=response_failure)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with (
+        patch(
+            "mindroom.orchestrator.wait_for_background_tasks",
+            new=AsyncMock(),
+        ),
+        patch("mindroom.orchestrator.logger.warning") as log_warning,
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+
+        with pytest.raises(ResponseShutdownTimeoutError) as raised:
+            await orchestrator.stop()
+
+    assert raised.value is response_failure
+    journal.close.assert_not_awaited()
+    assert orchestrator._open_journal is journal
+    log_warning.assert_any_call(
+        "orchestrator_shared_journal_close_deferred",
+        live_response_owner_count=1,
+        pending_response_phase_counts={"recovery_proof": 1},
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_logs_response_phases_before_blocking_deferred_cleanup(
+    tmp_path: Path,
+) -> None:
+    """A blocked deferred owner cannot hide its fixed shutdown phase snapshot."""
+    response_failure = ResponseShutdownTimeoutError("response still owns runtime resources")
+    deferred_started = asyncio.Event()
+    release_deferred = asyncio.Event()
+    bot = _shutdown_bot_mock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 1
+    bot.pending_response_phase_counts = {"response_execution": 1}
+    bot.deferred_stop_required = True
+    bot.stop = AsyncMock(side_effect=response_failure)
+
+    async def finish_deferred_stop(
+        *,
+        shutdown_intent: RuntimeShutdownIntent,
+        timeout_seconds: float,
+    ) -> None:
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        assert timeout_seconds == 15.0
+        deferred_started.set()
+        await release_deferred.wait()
+        bot.pending_response_owner_count = 0
+        bot.pending_response_phase_counts = {}
+        bot.deferred_stop_required = False
+
+    bot.finish_deferred_stop = AsyncMock(side_effect=finish_deferred_stop)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with (
+        patch(
+            "mindroom.orchestrator.wait_for_background_tasks",
+            new=AsyncMock(),
+        ),
+        patch("mindroom.orchestrator.logger.warning") as log_warning,
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+
+        stop_task = asyncio.create_task(orchestrator.stop())
+        await deferred_started.wait()
+        try:
+            log_warning.assert_any_call(
+                "orchestrator_response_shutdown_owners_pending",
+                live_response_owner_count=1,
+                pending_response_phase_counts={"response_execution": 1},
+            )
+        finally:
+            release_deferred.set()
+            await stop_task
+
+    journal.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_deferred_agent_stop_exposes_each_real_resource_release_phase() -> None:
+    """A blocked real release keeps one fixed deferred-stop phase observable."""
+    phases = (
+        "recovery_proof",
+        "router_overdue_tasks",
+        "journal_dispatcher",
+        "ingestion_session",
+        "journal_store",
+        "matrix_client",
+    )
+    gates = {phase: (asyncio.Event(), asyncio.Event()) for phase in phases}
+
+    def gated_call(phase: str) -> Callable[[], Awaitable[None]]:
+        async def gated() -> None:
+            started, release = gates[phase]
+            started.set()
+            await release.wait()
+
+        return gated
+
+    async def finish_recovery(*, timeout_seconds: float) -> bool:
+        assert timeout_seconds == 0.1
+        await gated_call("recovery_proof")()
+        return True
+
+    async def cancel_router_tasks() -> int:
+        await gated_call("router_overdue_tasks")()
+        return 0
+
+    runner = MagicMock()
+    runner.finish_process_shutdown_recovery = AsyncMock(side_effect=finish_recovery)
+    dispatcher = MagicMock()
+    dispatcher.stop = AsyncMock(side_effect=gated_call("journal_dispatcher"))
+    session = MagicMock()
+    session.close = AsyncMock(side_effect=gated_call("ingestion_session"))
+    journal = MagicMock()
+    journal.close = AsyncMock(side_effect=gated_call("journal_store"))
+    client = MagicMock()
+    client.close = AsyncMock(side_effect=gated_call("matrix_client"))
+
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot.agent_user = SimpleNamespace(agent_name=ROUTER_AGENT_NAME)
+    bot._deferred_stop_required = True
+    bot._response_runner = runner
+    bot._journal_dispatcher = dispatcher
+    bot._ingestion_session = session
+    bot._own_journal = journal
+    bot._runtime_view = SimpleNamespace(client=client)
+    bot.logger = MagicMock()
+
+    with (
+        patch("mindroom.bot.clear_deferred_overdue_tasks", return_value=0),
+        patch(
+            "mindroom.bot.cancel_all_running_scheduled_tasks",
+            new=AsyncMock(side_effect=cancel_router_tasks),
+        ),
+    ):
+        stopping = asyncio.create_task(
+            AgentBot.finish_deferred_stop(
+                bot,
+                shutdown_intent=ORDERLY_SHUTDOWN,
+                timeout_seconds=0.1,
+            ),
+        )
+        try:
+            for phase in phases:
+                started, release = gates[phase]
+                await started.wait()
+                assert bot.deferred_stop_phase == phase
+                release.set()
+            await stopping
+        finally:
+            for _started, release in gates.values():
+                release.set()
+            await asyncio.gather(stopping, return_exceptions=True)
+
+    assert bot.deferred_stop_phase is None
+    assert not bot.deferred_stop_required
+
+
+@pytest.mark.asyncio
+async def test_ordinary_agent_stop_exposes_real_resource_release_phase() -> None:
+    """A zero-owner stop exposes its fixed release phase before deferred selection."""
+    dispatcher_started = asyncio.Event()
+    release_dispatcher = asyncio.Event()
+
+    async def stop_dispatcher() -> None:
+        dispatcher_started.set()
+        await release_dispatcher.wait()
+
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot.agent_user = SimpleNamespace(agent_name="worker")
+    bot._deferred_stop_required = False
+    bot._deferred_stop_phase = None
+    bot._journal_dispatcher = SimpleNamespace(stop=AsyncMock(side_effect=stop_dispatcher))
+    bot._ingestion_session = None
+    bot._own_journal = None
+    bot._runtime_view = SimpleNamespace(client=None)
+
+    failures: list[BaseException] = []
+    stopping = asyncio.create_task(AgentBot._release_stopped_resources(bot, failures, shutdown_intent=ORDERLY_SHUTDOWN))
+    try:
+        await asyncio.wait_for(dispatcher_started.wait(), timeout=1)
+        assert bot.deferred_stop_phase == "journal_dispatcher"
+    finally:
+        release_dispatcher.set()
+        await stopping
+
+    assert bot.deferred_stop_phase is None
+    assert failures == []
+
+
+@pytest.mark.asyncio
+async def test_deferred_agent_stop_clears_phase_after_failed_recovery_proof() -> None:
+    """A terminal failed bot cannot masquerade as another bot's live phase."""
+    runner = MagicMock()
+    runner.finish_process_shutdown_recovery = AsyncMock(return_value=False)
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot._deferred_stop_required = True
+    bot._response_runner = runner
+
+    with pytest.raises(ResponseShutdownTimeoutError):
+        await AgentBot.finish_deferred_stop(
+            bot,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+            timeout_seconds=0.1,
+        )
+
+    assert bot.deferred_stop_phase is None
+
+
+@pytest.mark.asyncio
+async def test_deferred_diagnostic_gather_preserves_second_cancellation() -> None:
+    """A second outer cancellation retains the original gather semantics."""
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+    child_cancelled = asyncio.Event()
+
+    async def resistant_child() -> None:
+        child_started.set()
+        try:
+            await release_child.wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            raise
+
+    task = asyncio.create_task(_gather_deferred_shutdown_phase((), resistant_child()))
+    await child_started.wait()
+    task.cancel("first")
+    await asyncio.sleep(0)
+    task.cancel("second")
+    try:
+        await asyncio.wait_for(child_cancelled.wait(), timeout=0.1)
+        done, _pending = await asyncio.wait({task}, timeout=0.1)
+        assert task in done
+        assert child_cancelled.is_set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release_child.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_bot_stop_diagnostic_gather_preserves_second_cancellation() -> None:
+    """Initial bot-stop observation retains the original repeated-cancel behavior."""
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+    child_cancelled = asyncio.Event()
+
+    async def resistant_child() -> None:
+        child_started.set()
+        try:
+            await release_child.wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            raise
+
+    task = asyncio.create_task(_gather_bot_shutdown_phase((), resistant_child()))
+    await child_started.wait()
+    task.cancel("first")
+    await asyncio.sleep(0)
+    task.cancel("second")
+    try:
+        await asyncio.wait_for(child_cancelled.wait(), timeout=0.1)
+        done, _pending = await asyncio.wait({task}, timeout=0.1)
+        assert task in done
+        assert child_cancelled.is_set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release_child.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_shared_shutdown_gather_keeps_child_owned_after_first_cancellation() -> None:
+    """The shared gather must finish an owned child before returning cancellation."""
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+
+    async def child() -> None:
+        child_started.set()
+        await release_child.wait()
+
+    gather_phase = runtime_shutdown.gather_shutdown_phase
+    task = asyncio.create_task(gather_phase(child()))
+    await child_started.wait()
+    task.cancel("shutdown")
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    release_child.set()
+    results, cancellation = await task
+
+    assert results == [None]
+    assert isinstance(cancellation, asyncio.CancelledError)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_logs_ordinary_resource_phase_while_bot_stop_blocks(
+    tmp_path: Path,
+) -> None:
+    """A zero-owner resource stall emits its fixed phase before bot-stop returns."""
+    stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
+    bot = _shutdown_bot_mock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 0
+    bot.pending_response_phase_counts = {}
+    bot.deferred_stop_phase = None
+    bot.deferred_stop_required = False
+
+    async def stop(*, shutdown_intent: RuntimeShutdownIntent) -> None:
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        bot.deferred_stop_phase = "journal_dispatcher"
+        stop_started.set()
+        try:
+            await release_stop.wait()
+        finally:
+            bot.deferred_stop_phase = None
+
+    bot.stop = AsyncMock(side_effect=stop)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with (
+        patch(
+            "mindroom.orchestrator.wait_for_background_tasks",
+            new=AsyncMock(),
+        ),
+        patch(
+            "mindroom.orchestrator._DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS",
+            0.01,
+            create=True,
+        ),
+        patch("mindroom.orchestrator.logger.warning") as log_warning,
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+
+        stop_task = asyncio.create_task(orchestrator.stop())
+        await stop_started.wait()
+        try:
+            await asyncio.sleep(0.03)
+            log_warning.assert_any_call(
+                "orchestrator_bot_stop_pending",
+                live_response_owner_count=0,
+                pending_response_phase_counts={},
+                pending_bot_stop_phase_counts={"journal_dispatcher": 1},
+            )
+        finally:
+            release_stop.set()
+            await stop_task
+
+    journal.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_logs_deferred_resource_phase_while_cleanup_blocks(
+    tmp_path: Path,
+) -> None:
+    """A resource-close stall emits aggregate fixed phases before hard kill."""
+    response_failure = ResponseShutdownTimeoutError("response still owns runtime resources")
+    deferred_started = asyncio.Event()
+    release_deferred = asyncio.Event()
+    bot = _shutdown_bot_mock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 0
+    bot.pending_response_phase_counts = {}
+    bot.deferred_stop_phase = "journal_dispatcher"
+    bot.deferred_stop_required = True
+    bot.stop = AsyncMock(side_effect=response_failure)
+
+    async def finish_deferred_stop(
+        *,
+        shutdown_intent: RuntimeShutdownIntent,
+        timeout_seconds: float,
+    ) -> None:
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        assert timeout_seconds == 15.0
+        deferred_started.set()
+        await release_deferred.wait()
+        bot.deferred_stop_phase = None
+        bot.deferred_stop_required = False
+
+    bot.finish_deferred_stop = AsyncMock(side_effect=finish_deferred_stop)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with (
+        patch(
+            "mindroom.orchestrator.wait_for_background_tasks",
+            new=AsyncMock(),
+        ),
+        patch(
+            "mindroom.orchestrator._DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS",
+            0.01,
+            create=True,
+        ),
+        patch("mindroom.orchestrator.logger.warning") as log_warning,
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+
+        stop_task = asyncio.create_task(orchestrator.stop())
+        await deferred_started.wait()
+        try:
+            await asyncio.sleep(0.03)
+            log_warning.assert_any_call(
+                "orchestrator_deferred_response_owners_pending",
+                live_response_owner_count=0,
+                pending_response_phase_counts={},
+                pending_deferred_stop_phase_counts={"journal_dispatcher": 1},
+            )
+        finally:
+            release_deferred.set()
+            await stop_task
+
+    journal.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stop_retries_response_cleanup_after_late_owner_release(
+    tmp_path: Path,
+) -> None:
+    """A late response unwind finishes releases before the timeout is surfaced."""
+    response_failure = ResponseShutdownTimeoutError("response still owns runtime resources")
+    bot = _shutdown_bot_mock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 1
+    bot.deferred_stop_required = True
+    owner_released = asyncio.Event()
+
+    async def fail_bounded_stop(*, shutdown_intent: RuntimeShutdownIntent) -> None:
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        bot.pending_response_owner_count = 0
+        asyncio.get_running_loop().call_soon(owner_released.set)
+        raise response_failure
+
+    async def finish_deferred_stop(
+        *,
+        shutdown_intent: RuntimeShutdownIntent,
+        timeout_seconds: float,
+    ) -> None:
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        assert timeout_seconds == 15.0
+        assert bot.pending_response_owner_count == 0
+        await owner_released.wait()
+        bot.deferred_stop_required = False
+
+    bot.stop = AsyncMock(side_effect=fail_bounded_stop)
+    bot.finish_deferred_stop = AsyncMock(side_effect=finish_deferred_stop)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with patch(
+        "mindroom.orchestrator.wait_for_background_tasks",
+        new=AsyncMock(),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+
+        await orchestrator.stop()
+
+    bot.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
+    bot.finish_deferred_stop.assert_awaited_once_with(
+        shutdown_intent=ORDERLY_SHUTDOWN,
+        timeout_seconds=15.0,
+    )
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
+
+
+@pytest.mark.asyncio
+async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -> None:
+    """The real bot finalizer cannot release resources ahead of its proof owner."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    proof_started = asyncio.Event()
+    proof_cancelled = asyncio.Event()
+    release_proof = asyncio.Event()
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    async def retained_proof() -> bool:
+        proof_started.set()
+        while not release_proof.is_set():
+            try:
+                await release_proof.wait()
+            except asyncio.CancelledError:
+                proof_cancelled.set()
+        return True
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_deferred_agent_stop_response",
+        recovery_proof_ready=retained_proof,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+    with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
+        await runner.drain_inbox_responses(
+            cancel_after_seconds=0.01,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+    await proof_started.wait()
+    await proof_cancelled.wait()
+
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot._deferred_stop_required = True
+    bot._response_runner = runner
+    bot._release_stopped_resources = AsyncMock()
+    bot.logger = MagicMock()
+    finalizing = asyncio.create_task(
+        AgentBot.finish_deferred_stop(
+            bot,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+            timeout_seconds=0.1,
+        ),
+    )
+    await asyncio.sleep(0)
+
+    assert not finalizing.done()
+    bot._release_stopped_resources.assert_not_awaited()
+
+    release_proof.set()
+    await asyncio.wait_for(finalizing, timeout=0.1)
+
+    bot._release_stopped_resources.assert_awaited_once_with([], shutdown_intent=ORDERLY_SHUTDOWN)
+    assert not bot.deferred_stop_required
+    assert runner.pending_inbox_response_count == 0
+    await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None:  # noqa: PLR0915
+    """A proof cancelled by phase one must settle before phase two replaces it."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    first_proof_started = asyncio.Event()
+    first_proof_cancelled = asyncio.Event()
+    release_first_proof = asyncio.Event()
+    proof_calls = 0
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    async def retryable_proof() -> bool:
+        nonlocal proof_calls
+        proof_calls += 1
+        if proof_calls > 1:
+            return True
+        first_proof_started.set()
+        try:
+            await release_first_proof.wait()
+        except asyncio.CancelledError:
+            first_proof_cancelled.set()
+            await release_first_proof.wait()
+            raise
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_deferred_agent_stop_cancelling_proof",
+        recovery_proof_ready=retryable_proof,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+    with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
+        await runner.drain_inbox_responses(
+            cancel_after_seconds=0.01,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+    await first_proof_started.wait()
+    await first_proof_cancelled.wait()
+
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot._deferred_stop_required = True
+    bot._response_runner = runner
+    bot._release_stopped_resources = AsyncMock()
+    bot.logger = MagicMock()
+    deferred_ensure_called = asyncio.Event()
+    original_ensure = ResponseRunner._ensure_recovery_proof_task
+
+    def observe_deferred_ensure(
+        runner_self: ResponseRunner,
+        response_task: asyncio.Task[None],
+        ownership: _InboxResponseOwnership,
+    ) -> asyncio.Task[bool]:
+        deferred_ensure_called.set()
+        return original_ensure(
+            runner_self,
+            response_task,
+            ownership,
+        )
+
+    with patch.object(
+        ResponseRunner,
+        "_ensure_recovery_proof_task",
+        new=observe_deferred_ensure,
+    ):
+        finalizing = asyncio.create_task(
+            AgentBot.finish_deferred_stop(
+                bot,
+                shutdown_intent=ORDERLY_SHUTDOWN,
+                timeout_seconds=0.1,
+            ),
+        )
+        await deferred_ensure_called.wait()
+
+        assert not finalizing.done()
+        assert proof_calls == 1
+        bot._release_stopped_resources.assert_not_awaited()
+
+        release_first_proof.set()
+        await asyncio.wait_for(finalizing, timeout=0.1)
+
+    assert proof_calls == 2
+    bot._release_stopped_resources.assert_awaited_once_with([], shutdown_intent=ORDERLY_SHUTDOWN)
+    assert not bot.deferred_stop_required
+    assert runner.pending_inbox_response_count == 0
+    await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_deferred_stop_keeps_journal_open_for_resistant_owner(
+    tmp_path: Path,
+) -> None:
+    """No shutdown deadline may close the shared journal under a live owner."""
+    response_failure = ResponseShutdownTimeoutError("response still owns runtime resources")
+    release_owner = asyncio.Event()
+    finalizer_entered = asyncio.Event()
+    bot = _shutdown_bot_mock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 1
+    bot.deferred_stop_required = True
+    bot.stop = AsyncMock(side_effect=response_failure)
+
+    async def finish_deferred_stop(
+        *,
+        shutdown_intent: RuntimeShutdownIntent,
+        timeout_seconds: float,
+    ) -> None:
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        assert timeout_seconds == 15.0
+        finalizer_entered.set()
+        await release_owner.wait()
+        bot.pending_response_owner_count = 0
+        bot.deferred_stop_required = False
+
+    bot.finish_deferred_stop = AsyncMock(side_effect=finish_deferred_stop)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with patch(
+        "mindroom.orchestrator.wait_for_background_tasks",
+        new=AsyncMock(),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+        stopping = asyncio.create_task(orchestrator.stop())
+        await finalizer_entered.wait()
+        await asyncio.sleep(0.02)
+
+        assert not stopping.done()
+        journal.close.assert_not_awaited()
+
+        release_owner.set()
+        await stopping
+
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
+
+
+@pytest.mark.asyncio
+async def test_deferred_agent_stop_deadline_keeps_resources_under_live_proof() -> None:
+    """The explicit finalization deadline fails without releasing live owners."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    proof_started = asyncio.Event()
+    release_proof = asyncio.Event()
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    async def resistant_proof() -> bool:
+        proof_started.set()
+        while not release_proof.is_set():
+            with suppress(asyncio.CancelledError):
+                await release_proof.wait()
+        return True
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_deferred_agent_stop_deadline_response",
+        recovery_proof_ready=resistant_proof,
+    )
+    await response_started.wait()
+    runner.begin_process_shutdown()
+    with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
+        await runner.drain_inbox_responses(
+            cancel_after_seconds=0.01,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
+
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot._deferred_stop_required = True
+    bot._response_runner = runner
+    bot._release_stopped_resources = AsyncMock()
+    bot.logger = MagicMock()
+
+    try:
+        with pytest.raises(ResponseShutdownTimeoutError, match="recovery proof"):
+            await asyncio.wait_for(
+                AgentBot.finish_deferred_stop(
+                    bot,
+                    shutdown_intent=ORDERLY_SHUTDOWN,
+                    timeout_seconds=0.02,
+                ),
+                timeout=0.08,
+            )
+        assert proof_started.is_set()
+        bot._release_stopped_resources.assert_not_awaited()
+        assert bot.deferred_stop_required
+    finally:
+        release_proof.set()
+        await asyncio.gather(response_task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_retains_shared_journal_for_generic_failure_until_response_owner_stops(
+    tmp_path: Path,
+) -> None:
+    """Live ownership, not the surfaced error type, controls shared-journal close."""
+    preparation_failure = RuntimeError("preparation failed before response drain")
+    bot = _shutdown_bot_mock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock()
+    bot.pending_response_owner_count = 1
+    stop_calls = 0
+
+    async def fail_then_stop(*, shutdown_intent: RuntimeShutdownIntent) -> None:
+        nonlocal stop_calls
+        assert shutdown_intent is ORDERLY_SHUTDOWN
+        stop_calls += 1
+        if stop_calls == 1:
+            raise preparation_failure
+        bot.pending_response_owner_count = 0
+
+    bot.stop = AsyncMock(side_effect=fail_then_stop)
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+
+    with patch(
+        "mindroom.orchestrator.wait_for_background_tasks",
+        new=AsyncMock(),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+
+        with pytest.raises(RuntimeError, match="preparation failed before response drain") as raised:
+            await orchestrator.stop()
+
+        assert raised.value is preparation_failure
+        journal.close.assert_not_awaited()
+        assert orchestrator._open_journal is journal
+
+        await orchestrator.stop()
+
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stop_finishes_journal_close_after_cancellation(
+    tmp_path: Path,
+) -> None:
+    """Caller cancellation cannot strand the shared journal after quiescence."""
+    quiesce_failure = RuntimeError("source quiesce failed")
+    close_entered = asyncio.Event()
+    release_close = asyncio.Event()
+    close_completed = asyncio.Event()
+    bot = _shutdown_bot_mock()
+    bot.running = True
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=quiesce_failure)
+    bot.stop = AsyncMock()
+    journal = AsyncMock()
+
+    async def hold_close() -> None:
+        close_entered.set()
+        await release_close.wait()
+        close_completed.set()
+
+    journal.close = AsyncMock(side_effect=hold_close)
+    with patch(
+        "mindroom.orchestrator.wait_for_background_tasks",
+        new=AsyncMock(),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._open_journal = journal
+        stopping = asyncio.create_task(orchestrator.stop())
+
+        await asyncio.wait_for(close_entered.wait(), timeout=2)
+        stopping.cancel()
+        await asyncio.sleep(0)
+        release_close.set()
+        with pytest.raises(RuntimeError, match="source quiesce failed") as raised:
+            await stopping
+
+    assert raised.value is quiesce_failure
+    assert close_completed.is_set()
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stop_finishes_cleanup_after_cancellation_during_quiesce(
+    tmp_path: Path,
+) -> None:
+    """A source-barrier failure stays primary while shutdown drains cancellation."""
+    quiesce_failure = RuntimeError("source quiesce failed")
+    quiesce_entered = asyncio.Event()
+    release_quiesce = asyncio.Event()
+    bot = _shutdown_bot_mock()
+    bot.running = True
+
+    async def hold_then_fail_quiesce() -> None:
+        quiesce_entered.set()
+        await release_quiesce.wait()
+        raise quiesce_failure
+
+    bot._quiesce_matrix_ingestion = AsyncMock(side_effect=hold_then_fail_quiesce)
+    bot.stop = AsyncMock()
+    journal = AsyncMock()
+    journal.close = AsyncMock()
+    with patch(
+        "mindroom.orchestrator.wait_for_background_tasks",
+        new=AsyncMock(),
+    ):
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(tmp_path),
+        )
+        orchestrator.agent_bots = {"agent1": bot}
+        orchestrator._sync_tasks = {"agent1": MagicMock()}
+        orchestrator._open_journal = journal
+        stopping = asyncio.create_task(orchestrator.stop())
+
+        await asyncio.wait_for(quiesce_entered.wait(), timeout=2)
+        stopping.cancel()
+        await asyncio.sleep(0)
+        release_quiesce.set()
+        with pytest.raises(RuntimeError, match="source quiesce failed") as raised:
+            await stopping
+
+    assert raised.value is quiesce_failure
+    assert orchestrator._sync_tasks == {}
+    bot.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
+    journal.close.assert_awaited_once()
+    assert orchestrator._open_journal is None
 
 
 # ---------------------------------------------------------------------------

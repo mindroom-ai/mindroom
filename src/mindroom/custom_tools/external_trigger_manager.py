@@ -12,6 +12,7 @@ from mindroom.custom_tools.external_trigger_context import (
     require_external_trigger_owner_context,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.external_triggers.policy import is_external_trigger_administrator
 from mindroom.external_triggers.store import (
     ExternalTriggerRecord,
     ExternalTriggerStore,
@@ -59,7 +60,11 @@ class ExternalTriggerManagerTools(Toolkit):
 
     @staticmethod
     def _is_admin(context: ToolRuntimeContext) -> bool:
-        return context.requester_id in context.config.external_trigger_policy.admin_users
+        return is_external_trigger_administrator(
+            context.current_config,
+            context.runtime_paths,
+            context.requester_id,
+        )
 
     @classmethod
     def _target(

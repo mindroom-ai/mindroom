@@ -10,23 +10,25 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
+from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.commands.parsing import Command, CommandType
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, VOICE_PREFIX
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import DispatchIngressMetadata
-from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SCHEDULED_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
-from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
+from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
@@ -36,7 +38,7 @@ from tests.conftest import (
     dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     install_send_response_mock,
     make_matrix_client_mock,
     replace_turn_controller_deps,
@@ -48,8 +50,10 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.turn_dispatch_helpers import dispatch_test_turn
 
 if TYPE_CHECKING:
+    from mindroom.bot import AgentBot
     from mindroom.matrix.identity import MatrixID
 
 
@@ -107,10 +111,10 @@ def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> None:
 
 def _sync_turn_policy_runtime(bot: AgentBot) -> None:
     """Rebind planner deps after tests replace the bot logger or ledger."""
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = MagicMock()
+    turn_store.record_turn = AsyncMock()
     _replace_turn_policy_deps(bot, logger=bot.logger)
     replace_turn_controller_deps(bot, logger=bot.logger)
 
@@ -160,7 +164,7 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     )
     config = _runtime_bound_config(Config())
     tmpdir = Path(tempfile.mkdtemp())
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmpdir,
         config=config,
@@ -172,16 +176,12 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     bot.client.add_event_admission_callback = MagicMock()
     bot.client.add_event_callback = MagicMock()
     bot.client.user_id = bot.agent_user.user_id
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
     _sync_turn_policy_runtime(bot)
     install_send_response_mock(bot, send_response_mock)
-    bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
-    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     return bot
@@ -485,29 +485,30 @@ class TestBotTaskRestoration:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
-            install_runtime_cache_support(bot)
+            install_runtime_journal_support(bot)
 
             # Mock the necessary methods
             with (
-                patch("mindroom.matrix.users.login") as mock_login,
+                patch("mindroom.bot.login_agent_owned_session") as mock_login,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
                 mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
+                mock_client.clear_persisted_sync_recovery = MagicMock()
                 mock_client.user_id = agent_user.user_id
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
                 mock_client.rooms = {}
-                mock_login.return_value = mock_client
+                mock_login.return_value = owned_matrix_login(mock_client)
 
                 # Mock the client.join method to return JoinResponse
                 mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
@@ -539,17 +540,17 @@ class TestBotTaskRestoration:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
             )
-            install_runtime_cache_support(bot)
+            install_runtime_journal_support(bot)
 
             with (
-                patch("mindroom.matrix.users.login") as mock_login,
+                patch("mindroom.bot.login_agent_owned_session") as mock_login,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
                 patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
             ):
@@ -557,11 +558,12 @@ class TestBotTaskRestoration:
                 mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
+                mock_client.clear_persisted_sync_recovery = MagicMock()
                 mock_client.user_id = agent_user.user_id
                 mock_client.device_id = "TEST_DEVICE"
                 mock_client.access_token = TEST_ACCESS_TOKEN
                 mock_client.rooms = {}
-                mock_login.return_value = mock_client
+                mock_login.return_value = owned_matrix_login(mock_client)
 
                 # Mock the client.join method to return JoinResponse
                 mock_join_response = nio.JoinResponse.from_dict({"room_id": "!test:server"})
@@ -608,7 +610,7 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        bot = AgentBot(
+        bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -667,7 +669,7 @@ class TestCommandHandling:
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -679,13 +681,7 @@ class TestCommandHandling:
             wrap_extracted_collaborators(bot, "_turn_policy")
             _sync_turn_policy_runtime(bot)
             unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
-            bot._conversation_cache.get_thread_history = AsyncMock(
-                return_value=thread_history_result([], is_full_history=True),
-            )
-            bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-                return_value=thread_history_result([], is_full_history=True),
-            )
-            bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
                 return_value=thread_history_result([], is_full_history=False),
             )
 
@@ -732,7 +728,7 @@ class TestCommandHandling:
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -745,13 +741,7 @@ class TestCommandHandling:
             _sync_turn_policy_runtime(bot)
             unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
             bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
-            bot._conversation_cache.get_thread_history = AsyncMock(
-                return_value=thread_history_result([], is_full_history=True),
-            )
-            bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-                return_value=thread_history_result([], is_full_history=True),
-            )
-            bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+            bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
                 return_value=thread_history_result([], is_full_history=False),
             )
 
@@ -783,6 +773,7 @@ class TestCommandHandling:
             )
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_router_command_blocked_by_reply_permissions(self) -> None:
         """Router should ignore commands from senders disallowed by router reply rules."""
         agent_user = AgentMatrixUser(
@@ -795,16 +786,15 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(
             Config(
-                router=RouterConfig(model="default"),
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {"router": ["@alice:server"]},
-                },
+                router=RouterConfig(
+                    model="default",
+                    access=ResponderAccessConfig(users=["@alice:server"]),
+                ),
             ),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -849,26 +839,23 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(
             Config(
-                router=RouterConfig(model="default"),
+                router=RouterConfig(
+                    model="default",
+                    access=ResponderAccessConfig(users=["*"]),
+                ),
                 agents={
                     "code": AgentConfig(
                         display_name="Code Agent",
                         rooms=["!test:server"],
                         skills=["audit"],
+                        access=ResponderAccessConfig(users=["@alice:localhost"]),
                     ),
-                },
-                authorization={
-                    "default_room_access": True,
-                    "agent_reply_permissions": {
-                        "router": ["*"],
-                        "code": ["@alice:localhost"],
-                    },
                 },
             ),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -886,9 +873,9 @@ class TestCommandHandling:
 
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
             room.users = {
-                "@mindroom_router:localhost": None,
-                "@mindroom_code:localhost": None,
-                "@bob:localhost": None,
+                "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+                "@mindroom_code:localhost": nio.MatrixUser("@mindroom_code:localhost"),
+                "@bob:localhost": nio.MatrixUser("@bob:localhost"),
             }
             event = nio.RoomMessageText.from_dict(
                 {
@@ -904,11 +891,6 @@ class TestCommandHandling:
             )
 
             with (
-                patch(
-                    "mindroom.turn_controller.interactive.handle_text_response",
-                    new_callable=AsyncMock,
-                    return_value=None,
-                ),
                 patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
             ):
                 await bot._on_message(room, event)
@@ -941,7 +923,7 @@ class TestCommandHandling:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1009,7 +991,7 @@ class TestCommandHandling:
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1049,9 +1031,8 @@ class TestCommandHandling:
                 },
             )
 
-            with patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None):
-                await bot._on_message(room, event)
-                await drain_coalescing(bot)
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
             # Verify the agent didn't try to process the error message
             generate_response.assert_not_called()
@@ -1136,7 +1117,7 @@ class TestCommandHandling:
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1176,9 +1157,8 @@ class TestCommandHandling:
             },
         )
 
-        with patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None):
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
         # Verify finance agent did NOT process the message
         generate_response.assert_not_called()
@@ -1205,7 +1185,7 @@ class TestCommandHandling:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1279,7 +1259,7 @@ class TestCommandHandling:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1308,7 +1288,7 @@ class TestCommandHandling:
                 },
             )
 
-            result = bot._turn_controller._precheck_dispatch_event(room, event)
+            result = await bot._turn_controller._precheck_dispatch_event(room, event)
 
         assert result is not None
         assert result.requester_user_id == "@mindroom_router:localhost"
@@ -1337,7 +1317,7 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1416,16 +1396,10 @@ class TestCommandHandling:
         )
 
         with (
-            patch(
-                "mindroom.turn_controller.interactive.handle_text_response",
-                new=AsyncMock(return_value=None),
-            ) as mock_interactive,
             patch("mindroom.response_runner.team_response") as mock_team,
         ):
             await bot._on_message(room, event)
             await drain_coalescing(bot)
-
-        mock_interactive.assert_not_awaited()
 
         # Verify news agent did NOT form a team or respond
         generate_response.assert_not_called()
@@ -1451,7 +1425,7 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1546,14 +1520,8 @@ class TestCommandHandling:
             },
         )
 
-        with patch(
-            "mindroom.turn_controller.interactive.handle_text_response",
-            new=AsyncMock(return_value=None),
-        ) as mock_interactive:
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
-
-        mock_interactive.assert_not_awaited()
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
         # Verify finance agent did NOT respond to router's error
         generate_response.assert_not_called()
@@ -1576,7 +1544,7 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1612,9 +1580,8 @@ class TestCommandHandling:
             },
         )
 
-        with patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None):
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
         # Verify the agent didn't try to process the message
         generate_response.assert_not_called()
@@ -1647,7 +1614,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1659,18 +1626,17 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._append_live_event_with_timing = AsyncMock()
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result([], is_full_history=False),
         )
 
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         event = nio.RoomMessageText.from_dict(
@@ -1689,9 +1655,8 @@ class TestRouterSkipsSingleAgent:
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
-        bot._turn_controller._append_live_event_with_timing.assert_not_awaited()
         bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
-        bot._conversation_cache.get_dispatch_thread_snapshot.assert_not_awaited()
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_router_skips_shared_ingress_work_for_agent_owned_thread_follow_up(self) -> None:
@@ -1714,7 +1679,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1726,9 +1691,8 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         _sync_turn_policy_runtime(bot)
-        bot._turn_controller._append_live_event_with_timing = AsyncMock()
         bot._turn_controller._enqueue_for_dispatch = AsyncMock()
-        bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=thread_history_result(
                 [
                     _message(sender="@mindroom_general:localhost", body="I can help with that."),
@@ -1740,10 +1704,10 @@ class TestRouterSkipsSingleAgent:
 
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         event = nio.RoomMessageText.from_dict(
@@ -1762,12 +1726,10 @@ class TestRouterSkipsSingleAgent:
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
-        bot._conversation_cache.get_dispatch_thread_snapshot.assert_awaited_once_with(
+        bot._turn_controller.deps.resolver.dispatch_thread_snapshot.assert_awaited_once_with(
             "!test:server",
             "$thread_root",
-            caller_label="router_pre_ingress_skip",
         )
-        bot._turn_controller._append_live_event_with_timing.assert_not_awaited()
         bot._turn_controller._enqueue_for_dispatch.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1790,7 +1752,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1819,9 +1781,9 @@ class TestRouterSkipsSingleAgent:
         # Create room with only general agent (router is also there but excluded from available agents)
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Create user message
@@ -1835,11 +1797,10 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             # Return only one agent (general)
@@ -1878,7 +1839,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -1906,10 +1867,10 @@ class TestRouterSkipsSingleAgent:
         # Create room with multiple agents
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Create user message
@@ -1923,11 +1884,10 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             # Return multiple agents
@@ -1980,7 +1940,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -2011,11 +1971,11 @@ class TestRouterSkipsSingleAgent:
 
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@alice:localhost": None,
-            "@bob:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@alice:localhost": nio.MatrixUser("@alice:localhost"),
+            "@bob:localhost": nio.MatrixUser("@bob:localhost"),
         }
 
         event = nio.RoomMessageText.from_dict(
@@ -2028,20 +1988,28 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             mock_get_available.return_value = [
                 entity_ids(config, runtime_paths_for(config))["general"],
                 entity_ids(config, runtime_paths_for(config))["calculator"],
             ]
-            await bot._turn_controller._dispatch_text_message(
+            await dispatch_test_turn(
+                bot._turn_controller,
                 room,
                 _PrecheckedEvent(event=event, requester_user_id="@alice:localhost"),
+                ingress_metadata=DispatchIngressMetadata(
+                    source_kind=MESSAGE_SOURCE_KIND,
+                    coalescing_key=CoalescingKey(
+                        room.room_id,
+                        "$thread1",
+                        RequesterCoalescingOwner("@alice:localhost"),
+                    ),
+                ),
             )
 
         bot._turn_controller._execute_router_relay.assert_not_called()
@@ -2068,7 +2036,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -2087,9 +2055,9 @@ class TestRouterSkipsSingleAgent:
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Unknown command from human
@@ -2103,10 +2071,9 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
@@ -2139,7 +2106,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -2156,9 +2123,9 @@ class TestRouterSkipsSingleAgent:
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Schedule command from human
@@ -2172,10 +2139,9 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
@@ -2208,7 +2174,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -2226,9 +2192,9 @@ class TestRouterSkipsSingleAgent:
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Voice transcription relay from router on behalf of a human user
@@ -2257,10 +2223,9 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
             patch("mindroom.turn_policy.get_agents_in_thread") as mock_agents_in_thread,
         ):
@@ -2300,7 +2265,7 @@ class TestRouterSkipsSingleAgent:
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
+            bot = make_test_agent_bot(
                 agent_user=agent_user,
                 storage_path=Path(tmpdir),
                 config=config,
@@ -2317,10 +2282,10 @@ class TestRouterSkipsSingleAgent:
         # Room with router + two agents + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
         room.users = {
-            "@mindroom_router:localhost": None,
-            "@mindroom_general:localhost": None,
-            "@mindroom_calculator:localhost": None,
-            "@user:localhost": None,
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_general:localhost": nio.MatrixUser("@mindroom_general:localhost"),
+            "@mindroom_calculator:localhost": nio.MatrixUser("@mindroom_calculator:localhost"),
+            "@user:localhost": nio.MatrixUser("@user:localhost"),
         }
 
         # Valid command from human (help)
@@ -2334,10 +2299,9 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
-            patch("mindroom.turn_controller.interactive.handle_text_response", return_value=None),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_for_room",
-                new_callable=AsyncMock,
+                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                new_callable=MagicMock,
             ) as mock_get_available,
         ):
             mock_get_available.return_value = [

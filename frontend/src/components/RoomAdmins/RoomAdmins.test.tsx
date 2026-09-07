@@ -36,7 +36,7 @@ describe("isConcreteMatrixUserId", () => {
 
 describe("RoomAdmins", () => {
   const mockSaveConfig = vi.fn();
-  const mockUpdateMatrixRoomAccess = vi.fn();
+  const mockUpdateRoomDefaults = vi.fn();
   type MockStoreState = {
     config: Config;
     diagnostics: ConfigDiagnostic[];
@@ -44,7 +44,7 @@ describe("RoomAdmins", () => {
     isDirty: boolean;
     isLoading: boolean;
     saveConfig: () => Promise<SaveConfigResult>;
-    updateMatrixRoomAccess: typeof mockUpdateMatrixRoomAccess;
+    updateRoomDefaults: typeof mockUpdateRoomDefaults;
   };
   type MockedStoreHook = {
     (): MockStoreState;
@@ -55,9 +55,9 @@ describe("RoomAdmins", () => {
   let mockStoreState: MockStoreState;
 
   const createConfig = (): Partial<Config> => ({
-    matrix_room_access: {
-      mode: "multi_user",
-      room_admins: ["@alice:example.com"],
+    room_defaults: {
+      join_policy: "invite",
+      admins: ["@alice:example.com"],
     },
   });
 
@@ -69,7 +69,7 @@ describe("RoomAdmins", () => {
       isDirty,
       isLoading: false,
       saveConfig: mockSaveConfig,
-      updateMatrixRoomAccess: mockUpdateMatrixRoomAccess,
+      updateRoomDefaults: mockUpdateRoomDefaults,
     };
     mockedUseConfigStore.mockReturnValue(mockStoreState);
     mockedUseConfigStore.getState = vi.fn(() => mockStoreState);
@@ -101,9 +101,9 @@ describe("RoomAdmins", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
 
     await waitFor(() => {
-      expect(mockUpdateMatrixRoomAccess).toHaveBeenCalledWith({
-        mode: "multi_user",
-        room_admins: ["@alice:example.com", "@bob:example.com"],
+      expect(mockUpdateRoomDefaults).toHaveBeenCalledWith({
+        join_policy: "invite",
+        admins: ["@alice:example.com", "@bob:example.com"],
       });
     });
   });
@@ -127,10 +127,10 @@ describe("RoomAdmins", () => {
 
     expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-    expect(mockUpdateMatrixRoomAccess).not.toHaveBeenCalled();
+    expect(mockUpdateRoomDefaults).not.toHaveBeenCalled();
   });
 
-  it("adds an admin when the config has no matrix_room_access section", async () => {
+  it("adds an admin when the config has no room_defaults section", async () => {
     setMockStore({});
 
     render(<RoomAdmins />);
@@ -141,8 +141,8 @@ describe("RoomAdmins", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
 
     await waitFor(() => {
-      expect(mockUpdateMatrixRoomAccess).toHaveBeenCalledWith({
-        room_admins: ["@bob:example.com"],
+      expect(mockUpdateRoomDefaults).toHaveBeenCalledWith({
+        admins: ["@bob:example.com"],
       });
     });
   });
@@ -160,7 +160,7 @@ describe("RoomAdmins", () => {
         expect.objectContaining({ title: "Invalid Matrix user ID" }),
       );
     });
-    expect(mockUpdateMatrixRoomAccess).not.toHaveBeenCalled();
+    expect(mockUpdateRoomDefaults).not.toHaveBeenCalled();
   });
 
   it("rejects duplicate admins", async () => {
@@ -176,7 +176,7 @@ describe("RoomAdmins", () => {
         expect.objectContaining({ title: "Already a room admin" }),
       );
     });
-    expect(mockUpdateMatrixRoomAccess).not.toHaveBeenCalled();
+    expect(mockUpdateRoomDefaults).not.toHaveBeenCalled();
   });
 
   it("removes an admin", async () => {
@@ -187,9 +187,9 @@ describe("RoomAdmins", () => {
     );
 
     await waitFor(() => {
-      expect(mockUpdateMatrixRoomAccess).toHaveBeenCalledWith({
-        mode: "multi_user",
-        room_admins: [],
+      expect(mockUpdateRoomDefaults).toHaveBeenCalledWith({
+        join_policy: "invite",
+        admins: [],
       });
     });
   });

@@ -13,8 +13,8 @@ from mindroom.custom_tools.attachment_helpers import (
     room_access_allowed,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.matrix.client_thread_history import RoomThreadsPageError
-from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
+from mindroom.matrix.room_history_reads import RoomThreadsPageError
+from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
 from mindroom.thread_tag_vocabulary import (
     format_tag_vocabulary_for_description,
     load_tag_vocabulary_snapshot,
@@ -177,7 +177,7 @@ class ThreadTagsTools(Toolkit):
                 context.client,
                 normalize_room_id,
                 normalize_event_id,
-                conversation_cache=context.conversation_cache,
+                relations=context.relations,
             ),
         )
         if thread_target.error is not None:
@@ -286,7 +286,7 @@ class ThreadTagsTools(Toolkit):
                         context.client,
                         normalize_room_id,
                         normalize_event_id,
-                        conversation_cache=context.conversation_cache,
+                        relations=context.relations,
                     )
                 ),
                 allow_context_fallback=False,
@@ -491,7 +491,7 @@ class ThreadTagsTools(Toolkit):
                 context.client,
                 normalize_room_id,
                 normalize_event_id,
-                conversation_cache=context.conversation_cache,
+                relations=context.relations,
             ),
             allow_context_fallback=False,
         )

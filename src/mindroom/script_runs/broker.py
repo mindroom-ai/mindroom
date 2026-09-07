@@ -1,0 +1,1069 @@
+"""Direct execution broker for governed background-script tool calls."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import inspect
+import json
+from dataclasses import dataclass, field, replace
+from threading import Event
+from typing import TYPE_CHECKING, Protocol
+
+from agno.tools.function import Function, FunctionCall, FunctionExecutionResult
+
+from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.script_runs.models import (
+    ScriptCallRecord,
+    ScriptCallState,
+    ScriptRunRecord,
+    ScriptRunState,
+    ScriptToolGrant,
+    script_worker_key_for_run,
+)
+from mindroom.script_runs.policy import resolve_current_script_tool
+from mindroom.script_runs.store import (
+    ScriptCallNotFoundError,
+    ScriptCapabilityError,
+    ScriptReceiptTooLargeError,
+    ScriptRunNotFoundError,
+    ScriptRunStore,
+)
+from mindroom.tool_approval import (
+    BackgroundScriptToolOrigin,
+    ToolApprovalDecision,
+    evaluate_tool_approval,
+)
+from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
+from mindroom.tool_system.runtime_context import (
+    LiveToolDispatchContext,
+    ToolRuntimeContext,
+    build_execution_identity_from_runtime_context,
+    tool_runtime_context,
+)
+from mindroom.tool_system.tool_calls import sanitize_failure_text
+from mindroom.tool_system.tool_hooks import (
+    BackgroundToolApprovalDenied,
+    SyncToolCompletionTracker,
+    build_tool_hook_bridge,
+    prepend_tool_hook_bridge,
+    track_sync_tool_completion,
+)
+from mindroom.tool_system.worker_proxy_client import to_json_compatible
+from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,
+    ToolExecutionIdentity,
+    build_agent_toolkit_worker_target,
+    parse_tool_execution_identity_payload,
+    run_with_tool_execution_identity,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping
+
+    from agno.tools import Toolkit
+
+    from mindroom.config.main import Config
+
+__all__ = [
+    "ScriptBrokerAuthenticationError",
+    "ScriptCallPreparationPendingError",
+    "ScriptRuntimeResolver",
+    "ScriptRuntimeUnavailableError",
+    "ScriptRuntimeWorkerAuthority",
+    "ScriptToolBroker",
+    "ScriptToolCallRequest",
+    "digest_arguments",
+    "drain_script_tool_cleanup",
+]
+
+_INDETERMINATE_ERROR = {
+    "kind": "indeterminate",
+    "message": "The call was accepted, but its terminal result cannot be determined safely.",
+    "retryable": False,
+}
+_REVOKED_GRANT_ERROR = {
+    "kind": "capability_revoked",
+    "message": "The requested tool is no longer available to this script run.",
+    "retryable": False,
+}
+_INVALID_RESULT_ERROR = {
+    "kind": "invalid_tool_result",
+    "message": "The tool returned a result that cannot be represented as strict JSON.",
+    "retryable": False,
+}
+_RESULT_TOO_LARGE_ERROR = {
+    "kind": "result_too_large",
+    "message": "The tool result exceeds the background receipt size limit.",
+    "retryable": False,
+}
+_ACTIVE_RUN_STATES = frozenset({ScriptRunState.STARTING, ScriptRunState.RUNNING})
+
+
+class ScriptBrokerAuthenticationError(ValueError):
+    """Raised when a gateway capability cannot be authenticated safely."""
+
+
+class ScriptCallPreparationPendingError(RuntimeError):
+    """Raised when a call is still authenticating and has no durable claim yet."""
+
+
+class ScriptRuntimeUnavailableError(RuntimeError):
+    """Raised when valid durable authority cannot be checked against a live bot yet."""
+
+
+class ScriptRuntimeResolver(Protocol):
+    """Resolve live runtime and approval services for one durable script owner."""
+
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
+        """Return allowed, denied, or unavailable live room-and-agent authority."""
+        ...
+
+    def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
+        """Rebuild the live context for the durable run owner."""
+        ...
+
+    def resolve_worker_authority(
+        self,
+        run: ScriptRunRecord,
+        *,
+        context: ToolRuntimeContext,
+    ) -> ScriptRuntimeWorkerAuthority:
+        """Resolve the live worker allocation and context-derived routing authority."""
+        ...
+
+    async def request_approval(
+        self,
+        *,
+        origin: BackgroundScriptToolOrigin,
+        context: ToolRuntimeContext,
+        grant: ScriptToolGrant,
+        arguments: dict[str, object],
+        timeout_seconds: float,
+    ) -> ToolApprovalDecision:
+        """Await the bound requester's normal approval decision."""
+        ...
+
+    async def settle_approval(self, origin: BackgroundScriptToolOrigin, *, reason: str) -> None:
+        """Settle an exact approval whose broker ownership ended indeterminately."""
+        ...
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        """Settle only pending approvals after the run's broker ownership ends."""
+        ...
+
+
+class _BackgroundApprovalGate(Protocol):
+    async def __call__(
+        self,
+        origin: BackgroundScriptToolOrigin,
+        tool_name: str,
+        arguments: dict[str, object],
+    ) -> ToolApprovalDecision: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptRuntimeWorkerAuthority:
+    """Live worker authority independently resolved for a durable script run."""
+
+    worker_id: str | None
+    local_unsafe: bool
+    worker_target: ResolvedWorkerTarget
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedScriptCall:
+    run: ScriptRunRecord
+    call: ScriptCallRecord
+    arguments: dict[str, object]
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedExecution:
+    context: ToolRuntimeContext
+    correlation_id: str
+    source_config: Config
+    execution_identity: ToolExecutionIdentity
+    toolkit: Toolkit
+    function: Function
+    approval_config: Config
+
+
+class _CurrentGrantRevokedError(ValueError):
+    """Raised when a launch grant is absent from the current live surface."""
+
+
+class _InvalidToolResultError(ValueError):
+    """Raised when a successful tool result is not strict JSON data."""
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptToolCallRequest:
+    """One token-free request for a stable logical tool call."""
+
+    run_id: str
+    call_id: str
+    grant: ScriptToolGrant
+    arguments: dict[str, object]
+
+    @property
+    def arguments_digest(self) -> str:
+        """Return the canonical immutable digest claimed before execution."""
+        return digest_arguments(self.arguments)
+
+
+def digest_arguments(arguments: Mapping[str, object]) -> str:
+    """Hash one canonical JSON-wire argument object."""
+    normalized = to_json_compatible(arguments)
+    encoded = json.dumps(
+        normalized,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _background_origin(run: ScriptRunRecord, call: ScriptCallRecord) -> BackgroundScriptToolOrigin:
+    return BackgroundScriptToolOrigin(
+        run_id=run.run_id,
+        call_id=call.call_id,
+        requester_id=run.owner_user_id,
+        toolkit_name=call.grant.toolkit_name,
+        function_name=call.grant.function_name,
+    )
+
+
+@dataclass(slots=True)
+class ScriptToolBroker:
+    """Execute stable script calls through the ordinary registered-tool path."""
+
+    store: ScriptRunStore
+    runtime_resolver: ScriptRuntimeResolver
+    _tasks: dict[tuple[str, str], asyncio.Task[ScriptCallRecord]] = field(default_factory=dict, init=False)
+    _preparing: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
+    _preparation_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _run_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
+    _cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
+    _call_admission_open: Event = field(default_factory=Event, init=False)
+
+    def open_call_admission(self) -> None:
+        """Allow new call claims only after lifecycle startup cleanup completes."""
+        self._call_admission_open.set()
+
+    def close_call_admission(self) -> None:
+        """Reject new call claims before lifecycle authority changes begin."""
+        self._call_admission_open.clear()
+
+    def _require_call_admission(self) -> None:
+        if not self._call_admission_open.is_set():
+            msg = "Background script call is unavailable."
+            raise ScriptBrokerAuthenticationError(msg)
+
+    def _prepare_call(self, request: ScriptToolCallRequest, token: str) -> _PreparedScriptCall:
+        run = self.store.require_active_capability(request.run_id, token)
+        claim = self.store.claim_call(
+            run_id=run.run_id,
+            call_id=request.call_id,
+            grant=request.grant,
+            arguments_digest=request.arguments_digest,
+        )
+        return _PreparedScriptCall(
+            run=run,
+            call=claim.call,
+            arguments=request.arguments,
+            created=claim.created,
+        )
+
+    def _prepare_authenticated_call(
+        self,
+        request: ScriptToolCallRequest,
+        authorization: str | None,
+    ) -> _PreparedScriptCall:
+        self._require_call_admission()
+        token = self.authenticate(request.run_id, authorization)
+        return self._prepare_call(request, token)
+
+    async def _accept_prepared_call(
+        self,
+        request: ScriptToolCallRequest,
+        *,
+        authorization: str | None,
+    ) -> ScriptCallRecord:
+        key = (request.run_id, request.call_id)
+        self._preparing[key] = self._preparing.get(key, 0) + 1
+        preparation_finished = False
+        try:
+            prepared = await asyncio.to_thread(self._prepare_authenticated_call, request, authorization)
+
+            if not prepared.created:
+                owned_elsewhere = self._call_is_owned(key, exclude_current_preparation=True)
+                self._finish_preparation(key)
+                preparation_finished = True
+                if prepared.call.state is ScriptCallState.PENDING and not owned_elsewhere:
+                    return await asyncio.to_thread(
+                        self.store.settle_orphaned_call,
+                        run_id=prepared.call.run_id,
+                        call_id=prepared.call.call_id,
+                        error=_INDETERMINATE_ERROR,
+                    )
+                return prepared.call
+
+            task = asyncio.create_task(
+                self._execute_claimed_call(prepared.run, prepared.call, prepared.arguments),
+                name=f"script-tool:{prepared.run.run_id}:{prepared.call.call_id}",
+            )
+            self._tasks[key] = task
+            self._finish_preparation(key)
+            preparation_finished = True
+
+            def forget_completed_task(completed: asyncio.Task[ScriptCallRecord]) -> None:
+                if self._tasks.get(key) is completed:
+                    self._tasks.pop(key, None)
+                if not any(active_key[0] == prepared.run.run_id for active_key in self._tasks):
+                    self._run_locks.pop(prepared.run.run_id, None)
+
+            task.add_done_callback(forget_completed_task)
+            return prepared.call
+        finally:
+            if not preparation_finished:
+                self._finish_preparation(key)
+
+    def _finish_preparation(self, key: tuple[str, str]) -> None:
+        remaining = self._preparing.get(key, 0) - 1
+        if remaining > 0:
+            self._preparing[key] = remaining
+        else:
+            self._preparing.pop(key, None)
+        self._preparation_changed.set()
+
+    def _call_is_owned(
+        self,
+        key: tuple[str, str],
+        *,
+        exclude_current_preparation: bool = False,
+    ) -> bool:
+        task = self._tasks.get(key)
+        if task is not None and not task.done():
+            return True
+        preparation_count = self._preparing.get(key, 0)
+        if exclude_current_preparation:
+            preparation_count -= 1
+        return preparation_count > 0
+
+    def get_call(self, run_id: str, call_id: str) -> ScriptCallRecord:
+        """Return one stable durable call receipt."""
+        key = (run_id, call_id)
+        try:
+            record = self.store.get_call(run_id, call_id)
+        except ScriptCallNotFoundError:
+            if self._call_is_owned(key):
+                msg = "Background script call acceptance is not yet determined."
+                raise ScriptCallPreparationPendingError(msg) from None
+            raise
+        if record.state is ScriptCallState.PENDING and not self._call_is_owned(key):
+            record = self.store.settle_orphaned_call(
+                run_id=run_id,
+                call_id=call_id,
+                error=_INDETERMINATE_ERROR,
+            )
+        return record
+
+    def authenticate(self, run_id: str, authorization: str | None) -> str:
+        """Authenticate a bearer capability with one constant-time comparison path."""
+        token = _bearer_token(authorization)
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        run: ScriptRunRecord | None
+        try:
+            run = self.store.get_run(run_id)
+        except ScriptRunNotFoundError:
+            run = None
+        expected_hash = run.token_hash if run is not None else "0" * len(token_hash)
+        matches = hmac.compare_digest(expected_hash, token_hash)
+        if run is None or not matches or run.cancel_requested_at is not None or run.state not in _ACTIVE_RUN_STATES:
+            msg = "Background script call is unavailable."
+            raise ScriptBrokerAuthenticationError(msg)
+        authorization_state = self.runtime_resolver.is_authorized(run)
+        if authorization_state is None:
+            msg = "Background script owner runtime is temporarily unavailable."
+            raise ScriptRuntimeUnavailableError(msg)
+        if authorization_state is False:
+            msg = "Background script call is unavailable."
+            raise ScriptBrokerAuthenticationError(msg)
+        return token
+
+    async def cancel_run(self, run_id: str) -> None:
+        """Cancel this broker's work for a run whose capability is already revoked."""
+        while any(key[0] == run_id for key in self._preparing):
+            self._preparation_changed.clear()
+            if any(key[0] == run_id for key in self._preparing):
+                await self._preparation_changed.wait()
+        active = [(key, task) for key, task in self._tasks.items() if key[0] == run_id and not task.done()]
+        for _key, task in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*(task for _key, task in active), return_exceptions=True)
+        pending = await asyncio.to_thread(self.store.pending_calls, run_id)
+        for record in pending:
+            await asyncio.to_thread(
+                self.store.publish_call_result,
+                run_id=run_id,
+                call_id=record.call_id,
+                state=ScriptCallState.INDETERMINATE,
+                error=_INDETERMINATE_ERROR,
+            )
+        await self.runtime_resolver.settle_run_approvals(
+            run_id,
+            reason="Background script ownership was cancelled.",
+        )
+
+    async def accept_authenticated(
+        self,
+        request: ScriptToolCallRequest,
+        authorization: str | None,
+    ) -> ScriptCallRecord:
+        """Authenticate and durably claim one gateway call before acknowledging it."""
+        return await run_coroutine_until_complete(
+            self._accept_prepared_call(request, authorization=authorization),
+        )
+
+    async def get_authenticated(
+        self,
+        run_id: str,
+        call_id: str,
+        authorization: str | None,
+    ) -> ScriptCallRecord:
+        """Authenticate a receipt and settle approval debt discovered as orphaned."""
+        await asyncio.to_thread(self.authenticate, run_id, authorization)
+        receipt = await asyncio.to_thread(self.get_call, run_id, call_id)
+        if receipt.state is ScriptCallState.INDETERMINATE:
+            run, call = await asyncio.gather(
+                asyncio.to_thread(self.store.get_run, run_id),
+                asyncio.to_thread(self.store.get_call, run_id, call_id),
+            )
+            await self.runtime_resolver.settle_approval(
+                _background_origin(run, call),
+                reason="Background script call ownership was orphaned after restart.",
+            )
+        return receipt
+
+    async def _execute_claimed_call(
+        self,
+        run: ScriptRunRecord,
+        call: ScriptCallRecord,
+        arguments: dict[str, object],
+    ) -> ScriptCallRecord:
+        run_lock = self._run_locks.setdefault(run.run_id, asyncio.Lock())
+        async with run_lock:
+            try:
+                durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, run.run_id)
+            except ScriptCapabilityError:
+                return await self._publish_async(
+                    call,
+                    state=ScriptCallState.FAILED,
+                    error=_REVOKED_GRANT_ERROR,
+                )
+            return await self._execute_claimed_call_serialized(durable_run, call, arguments)
+
+    async def _execute_claimed_call_serialized(
+        self,
+        run: ScriptRunRecord,
+        call: ScriptCallRecord,
+        arguments: dict[str, object],
+    ) -> ScriptCallRecord:
+        origin = _background_origin(run, call)
+        correlation_id = f"background-script:{run.run_id}:{call.call_id}"
+        execution_started = False
+        try:
+            prepared = await asyncio.to_thread(
+                self._prepare_execution,
+                run,
+                call,
+                correlation_id,
+            )
+            toolkit = prepared.toolkit
+            await self._connect_toolkit_owned(toolkit)
+            execution_started = True
+            execution = await self._run_prepared_execution(
+                prepared,
+                run=run,
+                call=call,
+                origin=origin,
+                arguments=arguments,
+            )
+
+            if execution.status != "success" or isinstance(execution.result, BackgroundToolApprovalDenied):
+                error = (
+                    {
+                        "kind": "approval_denied",
+                        "message": sanitize_failure_text(execution.result.reason),
+                        "retryable": False,
+                    }
+                    if isinstance(execution.result, BackgroundToolApprovalDenied)
+                    else {
+                        "kind": "tool_failure",
+                        "message": sanitize_failure_text(execution.error or "Tool execution failed."),
+                        "retryable": False,
+                    }
+                )
+                return await self._publish_async(
+                    call,
+                    state=ScriptCallState.FAILED,
+                    error=error,
+                )
+            result = _strict_json_result(execution.result)
+            return await self._publish_async(call, state=ScriptCallState.COMPLETED, result=result)
+        except asyncio.CancelledError:
+            raise
+        except _CurrentGrantRevokedError:
+            return await self._publish_async(call, state=ScriptCallState.FAILED, error=_REVOKED_GRANT_ERROR)
+        except _InvalidToolResultError:
+            return await self._publish_async(call, state=ScriptCallState.FAILED, error=_INVALID_RESULT_ERROR)
+        except (ScriptCapabilityError, TypeError, ValueError) as exc:
+            return await self._publish_async(
+                call,
+                state=ScriptCallState.FAILED,
+                error={"kind": "call_rejected", "message": sanitize_failure_text(str(exc)), "retryable": False},
+            )
+        except BaseException as exc:
+            state = ScriptCallState.INDETERMINATE if execution_started else ScriptCallState.FAILED
+            kind = "indeterminate" if execution_started else "runtime_failure"
+            error = (
+                _INDETERMINATE_ERROR
+                if execution_started
+                else {"kind": kind, "message": sanitize_failure_text(str(exc)), "retryable": True}
+            )
+            return await self._publish_async(call, state=state, error=error)
+
+    async def _connect_toolkit(self, toolkit: Toolkit) -> None:
+        if not toolkit.requires_connect:
+            return
+        completion_task = asyncio.create_task(
+            _run_toolkit_lifecycle(toolkit.connect),
+            name="script-toolkit-connect",
+        )
+        try:
+            await asyncio.shield(completion_task)
+        except asyncio.CancelledError:
+            self._retain_toolkit_cleanup(completion_task, toolkit)
+            raise
+
+    async def _connect_toolkit_owned(self, toolkit: Toolkit) -> None:
+        """Connect one toolkit and close it if normal connection fails."""
+        try:
+            await self._connect_toolkit(toolkit)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as connect_error:
+            try:
+                await self._close_toolkit_owned(toolkit)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as close_error:
+                raise connect_error from close_error
+            raise
+
+    async def _run_prepared_execution(
+        self,
+        prepared: _PreparedExecution,
+        *,
+        run: ScriptRunRecord,
+        call: ScriptCallRecord,
+        origin: BackgroundScriptToolOrigin,
+        arguments: dict[str, object],
+    ) -> FunctionExecutionResult:
+        context = prepared.context
+        toolkit = prepared.toolkit
+        function = prepared.function
+        completion_tracker = SyncToolCompletionTracker()
+        cleanup_transferred = False
+
+        async def execute_function() -> FunctionExecutionResult:
+            with tool_runtime_context(context), track_sync_tool_completion(completion_tracker):
+                authored_decision = await _request_authored_confirmation(
+                    runtime_resolver=self.runtime_resolver,
+                    origin=origin,
+                    context=context,
+                    run=run,
+                    call=call,
+                    arguments=arguments,
+                    approval_config=prepared.approval_config,
+                    required=function.requires_confirmation is True,
+                )
+                approval_gate = _build_background_approval_gate(
+                    runtime_resolver=self.runtime_resolver,
+                    context=context,
+                    run=run,
+                    call=call,
+                    approval_config=prepared.approval_config,
+                    authored_decision=authored_decision,
+                    execution_gate=lambda: self._current_execution_decision(prepared, run=run, call=call),
+                )
+                bridge = build_tool_hook_bridge(
+                    context.hook_registry,
+                    agent_name=run.agent_name,
+                    dispatch_context=LiveToolDispatchContext(
+                        execution_identity=prepared.execution_identity,
+                        runtime_context=context,
+                    ),
+                    config=prepared.approval_config,
+                    runtime_paths=context.runtime_paths,
+                    origin=origin,
+                    approval_gate=approval_gate,
+                )
+                prepend_tool_hook_bridge(toolkit, bridge)
+                # Durable receipts are the idempotency boundary for background calls.
+                # Agno's result cache returns before hooks, approval, and live authority checks.
+                function.cache_results = False
+                return await FunctionCall(
+                    function=function,
+                    arguments=arguments,
+                    call_id=call.call_id,
+                ).aexecute()
+
+        try:
+            return await run_with_tool_execution_identity(
+                prepared.execution_identity,
+                operation=execute_function,
+            )
+        except asyncio.CancelledError:
+            completion_task = completion_tracker.started_task()
+            if completion_task is not None and not completion_task.done():
+                self._retain_toolkit_cleanup(completion_task, toolkit)
+            else:
+                self._retain_toolkit_close(toolkit)
+            cleanup_transferred = True
+            raise
+        finally:
+            if not cleanup_transferred:
+                await self._close_toolkit_owned(toolkit)
+
+    async def _current_execution_decision(
+        self,
+        prepared: _PreparedExecution,
+        *,
+        run: ScriptRunRecord,
+        call: ScriptCallRecord,
+    ) -> ToolApprovalDecision:
+        """Return a fail-closed decision from authority immediately before execution."""
+        try:
+            await self._require_current_execution_authority(prepared, run=run, call=call)
+        except ScriptRuntimeUnavailableError as exc:
+            return ToolApprovalDecision(approved=False, reason=str(exc))
+        except (_CurrentGrantRevokedError, ValueError):
+            return ToolApprovalDecision(
+                approved=False,
+                reason="Background script authority changed while approval was pending.",
+            )
+        return ToolApprovalDecision(approved=True)
+
+    async def _require_current_execution_authority(
+        self,
+        prepared: _PreparedExecution,
+        *,
+        run: ScriptRunRecord,
+        call: ScriptCallRecord,
+    ) -> None:
+        """Recheck durable and live authority immediately before a tool body starts."""
+        try:
+            durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, run.run_id)
+        except ScriptCapabilityError as exc:
+            raise _CurrentGrantRevokedError from exc
+        await asyncio.to_thread(
+            self._require_current_live_execution_authority,
+            prepared,
+            durable_run,
+            call,
+        )
+
+    def _require_current_live_execution_authority(
+        self,
+        prepared: _PreparedExecution,
+        durable_run: ScriptRunRecord,
+        call: ScriptCallRecord,
+    ) -> None:
+        """Rebuild and validate live authority without blocking the request loop."""
+        current_context = self.runtime_resolver.resolve(
+            durable_run,
+            correlation_id=prepared.correlation_id,
+        )
+        current_config = current_context.current_config
+        authorization_state = self.runtime_resolver.is_authorized(durable_run, config=current_config)
+        if authorization_state is None:
+            msg = "Background script owner runtime is temporarily unavailable."
+            raise ScriptRuntimeUnavailableError(msg)
+        if (
+            authorization_state is False
+            or call.grant not in durable_run.grants
+            or current_config != prepared.source_config
+        ):
+            raise _CurrentGrantRevokedError
+        worker_authority = self.runtime_resolver.resolve_worker_authority(
+            durable_run,
+            context=current_context,
+        )
+        _validate_resolved_authority(durable_run, current_context, worker_authority)
+
+    async def _close_toolkit_owned(self, toolkit: Toolkit) -> None:
+        """Close one toolkit or transfer its exact close task on cancellation."""
+        close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            if not close_task.done():
+                self._retain_cleanup_task(close_task)
+            raise
+
+    def _retain_toolkit_close(self, toolkit: Toolkit) -> None:
+        close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")
+        self._retain_cleanup_task(close_task)
+
+    def _retain_toolkit_cleanup(
+        self,
+        completion_task: asyncio.Task[object],
+        toolkit: Toolkit,
+    ) -> None:
+        async def finish_lifecycle() -> None:
+            completion_failure: BaseException | None = None
+            try:
+                await completion_task
+            except BaseException as exc:
+                completion_failure = exc
+            await _close_toolkit(toolkit)
+            if completion_failure is not None:
+                raise completion_failure
+
+        lifecycle_task = asyncio.create_task(finish_lifecycle(), name="script-toolkit-lifecycle")
+        self._retain_cleanup_task(lifecycle_task)
+
+    def _retain_cleanup_task(self, retained_task: asyncio.Task[None]) -> None:
+        async def retain() -> None:
+            try:
+                await asyncio.shield(retained_task)
+            except asyncio.CancelledError:
+                if not retained_task.done():
+                    self._retain_cleanup_task(retained_task)
+                raise
+
+        owner_task = asyncio.create_task(retain(), name="script-toolkit-cleanup")
+        self._cleanup_tasks.add(owner_task)
+
+        def forget_cleanup_task(completed: asyncio.Task[None]) -> None:
+            self._cleanup_tasks.discard(completed)
+            if not completed.cancelled():
+                completed.exception()
+
+        owner_task.add_done_callback(forget_cleanup_task)
+
+    def _prepare_execution(
+        self,
+        run: ScriptRunRecord,
+        call: ScriptCallRecord,
+        correlation_id: str,
+    ) -> _PreparedExecution:
+        context = self.runtime_resolver.resolve(run, correlation_id=correlation_id)
+        source_config = context.current_config
+        authorization_state = self.runtime_resolver.is_authorized(run, config=source_config)
+        if authorization_state is None:
+            msg = "Background script owner runtime is temporarily unavailable."
+            raise ScriptRuntimeUnavailableError(msg)
+        if authorization_state is False:
+            raise _CurrentGrantRevokedError
+        if call.grant not in run.grants:
+            raise _CurrentGrantRevokedError
+        toolkit = resolve_current_script_tool(
+            context,
+            call.grant,
+            rejected_toolkit_cleanup=self._close_rejected_toolkit,
+        )
+        if toolkit is None:
+            raise _CurrentGrantRevokedError
+        worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
+        execution_identity = _validate_resolved_authority(run, context, worker_authority)
+        function = _toolkit_function(toolkit, call.grant.function_name)
+        if inspect.isgeneratorfunction(function.entrypoint) or inspect.isasyncgenfunction(function.entrypoint):
+            self._close_rejected_toolkit(toolkit)
+            msg = "Generator tool entrypoints are not supported for background scripts."
+            raise ScriptCapabilityError(msg)
+        return _PreparedExecution(
+            context=context,
+            correlation_id=correlation_id,
+            source_config=source_config,
+            execution_identity=execution_identity,
+            toolkit=toolkit,
+            function=function,
+            approval_config=_background_approval_config(context, run),
+        )
+
+    def _close_rejected_toolkit(self, toolkit: Toolkit) -> None:
+        """Finish a rejected toolkit's lifecycle from the preparation worker thread."""
+        asyncio.run(_close_toolkit(toolkit))
+
+    async def _publish_async(
+        self,
+        call: ScriptCallRecord,
+        *,
+        state: ScriptCallState,
+        result: object | None = None,
+        error: object | None = None,
+    ) -> ScriptCallRecord:
+        return await asyncio.to_thread(self._publish, call, state=state, result=result, error=error)
+
+    def _publish(
+        self,
+        call: ScriptCallRecord,
+        *,
+        state: ScriptCallState,
+        result: object | None = None,
+        error: object | None = None,
+    ) -> ScriptCallRecord:
+        try:
+            stored = self.store.publish_call_result(
+                run_id=call.run_id,
+                call_id=call.call_id,
+                state=state,
+                result=result,
+                error=error,
+            )
+        except ScriptReceiptTooLargeError:
+            try:
+                stored = self.store.publish_call_result(
+                    run_id=call.run_id,
+                    call_id=call.call_id,
+                    state=ScriptCallState.FAILED,
+                    error=_RESULT_TOO_LARGE_ERROR,
+                )
+            except BaseException:
+                return replace(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
+        except BaseException:
+            if state is not ScriptCallState.INDETERMINATE:
+                try:
+                    stored = self.store.publish_call_result(
+                        run_id=call.run_id,
+                        call_id=call.call_id,
+                        state=ScriptCallState.INDETERMINATE,
+                        error=_INDETERMINATE_ERROR,
+                    )
+                except BaseException:
+                    return replace(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
+            else:
+                return replace(call, state=state, result=result, error=error)
+        return stored
+
+
+async def drain_script_tool_cleanup(
+    broker: ScriptToolBroker,
+    *,
+    timeout_seconds: float,
+) -> bool:
+    """Wait boundedly for retained resource owners without cancelling them."""
+    deadline = asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
+    while tasks := tuple(task for task in broker._cleanup_tasks if not task.done()):
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return False
+        _done, pending = await asyncio.wait(tasks, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+        if pending and asyncio.get_running_loop().time() >= deadline:
+            return False
+    return True
+
+
+def _bearer_token(authorization: str | None) -> str:
+    if authorization is None:
+        return ""
+    scheme, separator, token = authorization.partition(" ")
+    if not separator or scheme.lower() != "bearer":
+        return ""
+    return token.strip()
+
+
+def _validate_resolved_authority(
+    run: ScriptRunRecord,
+    context: ToolRuntimeContext,
+    worker_authority: ScriptRuntimeWorkerAuthority,
+) -> ToolExecutionIdentity:
+    durable_identity = parse_tool_execution_identity_payload(
+        run.execution_identity,
+        strict=True,
+        error_prefix="Background script execution_identity",
+    )
+    if durable_identity is None:
+        msg = "Background script execution identity is unavailable."
+        raise ValueError(msg)
+    live_identity = build_execution_identity_from_runtime_context(context)
+    live_config = context.current_config
+    expected_process_worker_target = build_agent_toolkit_worker_target(
+        "user_agent",
+        context.agent_name,
+        is_private=live_config.get_agent(context.agent_name).private is not None,
+        execution_identity=durable_identity,
+        runtime_paths=context.runtime_paths,
+    )
+    expected_tool_worker_target = build_agent_toolkit_worker_target(
+        live_config.resolve_entity(context.agent_name).execution_scope,
+        context.agent_name,
+        is_private=live_config.get_agent(context.agent_name).private is not None,
+        execution_identity=durable_identity,
+        runtime_paths=context.runtime_paths,
+    )
+    expected_durable_worker_key = (
+        None
+        if run.local_unsafe or expected_process_worker_target.worker_key is None
+        else script_worker_key_for_run(expected_process_worker_target.worker_key, run.run_id)
+    )
+    if run.worker_key != expected_durable_worker_key:
+        msg = "Durable script worker key does not match the requester-and-agent process scope."
+        raise ValueError(msg)
+    if (
+        durable_identity != live_identity
+        or durable_identity.agent_name != run.agent_name
+        or durable_identity.requester_id != run.owner_user_id
+        or durable_identity.room_id != run.room_id
+        or durable_identity.resolved_thread_id != run.thread_root_event_id
+        or worker_authority.worker_id != run.worker_id
+        or worker_authority.local_unsafe != run.local_unsafe
+        or worker_authority.worker_target != expected_tool_worker_target
+    ):
+        msg = "Live script runtime context does not match the durable run owner."
+        raise ValueError(msg)
+    return durable_identity
+
+
+def _build_background_approval_gate(
+    *,
+    runtime_resolver: ScriptRuntimeResolver,
+    context: ToolRuntimeContext,
+    run: ScriptRunRecord,
+    call: ScriptCallRecord,
+    approval_config: Config,
+    authored_decision: ToolApprovalDecision | None,
+    execution_gate: Callable[[], Awaitable[ToolApprovalDecision]],
+) -> _BackgroundApprovalGate:
+
+    async def approval_gate(
+        origin: BackgroundScriptToolOrigin,
+        tool_name: str,
+        arguments: dict[str, object],
+    ) -> ToolApprovalDecision:
+        assert tool_name == call.grant.function_name
+        decision = authored_decision
+        if decision is None:
+            policy_requires_approval, timeout_seconds = await evaluate_tool_approval(
+                approval_config,
+                context.runtime_paths,
+                call.grant.function_name,
+                arguments,
+                run.agent_name,
+            )
+            if policy_requires_approval:
+                decision = await runtime_resolver.request_approval(
+                    origin=origin,
+                    context=context,
+                    grant=call.grant,
+                    arguments=arguments,
+                    timeout_seconds=timeout_seconds,
+                )
+        if decision is not None and not decision.approved:
+            return decision
+        return await execution_gate()
+
+    return approval_gate
+
+
+async def _request_authored_confirmation(
+    *,
+    runtime_resolver: ScriptRuntimeResolver,
+    origin: BackgroundScriptToolOrigin,
+    context: ToolRuntimeContext,
+    run: ScriptRunRecord,
+    call: ScriptCallRecord,
+    arguments: dict[str, object],
+    approval_config: Config,
+    required: bool,
+) -> ToolApprovalDecision | None:
+    """Resolve function-authored confirmation before Agno can return a cached value."""
+    if not required:
+        return None
+    _, timeout_seconds = await evaluate_tool_approval(
+        approval_config,
+        context.runtime_paths,
+        call.grant.function_name,
+        arguments,
+        run.agent_name,
+    )
+    return await runtime_resolver.request_approval(
+        origin=origin,
+        context=context,
+        grant=call.grant,
+        arguments=arguments,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _background_approval_config(
+    context: ToolRuntimeContext,
+    run: ScriptRunRecord,
+) -> Config:
+    return build_automation_approval_config(
+        context.current_config,
+        function_owners=_launch_function_owners(run),
+        preapproved_toolkits=(
+            frozenset(grant.toolkit_name for grant in run.grants) if run.preapprove_launch_grants else frozenset()
+        ),
+        never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
+    )
+
+
+def _launch_function_owners(run: ScriptRunRecord) -> dict[str, frozenset[str]]:
+    owners: dict[str, set[str]] = {}
+    for grant in run.grants:
+        owners.setdefault(grant.function_name, set()).add(grant.toolkit_name)
+    return {function_name: frozenset(toolkit_owners) for function_name, toolkit_owners in owners.items()}
+
+
+def _toolkit_function(toolkit: Toolkit, function_name: str) -> Function:
+    function = toolkit.async_functions.get(function_name) or toolkit.functions.get(function_name)
+    if function is None:
+        msg = "The requested tool is no longer available to this script run."
+        raise ScriptCapabilityError(msg)
+    return function
+
+
+async def _maybe_await(value: object) -> object:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _close_toolkit(toolkit: Toolkit) -> None:
+    if toolkit.requires_connect:
+        await _run_toolkit_lifecycle(toolkit.close)
+
+
+async def _run_toolkit_lifecycle(operation: Callable[[], object]) -> None:
+    if inspect.iscoroutinefunction(operation):
+        await operation()
+        return
+    await _run_sync_toolkit_lifecycle(operation)
+
+
+async def _run_sync_toolkit_lifecycle(operation: Callable[[], object]) -> None:
+    result = await asyncio.to_thread(operation)
+    await _maybe_await(result)
+
+
+def _strict_json_result(result: object) -> object:
+    normalized = to_json_compatible(result)
+    try:
+        json.dumps(
+            normalized,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise _InvalidToolResultError from exc
+    return normalized

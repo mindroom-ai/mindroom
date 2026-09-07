@@ -3,17 +3,21 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.agent import Agent as AgnoAgent
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
+from agno.team import Team as AgnoTeam
+from agno.tools.function import Function
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
@@ -36,9 +40,11 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
 )
+from mindroom.synthetic_model import SyntheticModel
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _agent,
@@ -47,6 +53,26 @@ from tests.history_helpers import (  # noqa: F401
     _make_config,
     _session,
 )
+
+
+def _shared_session(*, is_team: bool) -> AgentSession | TeamSession:
+    if is_team:
+        return TeamSession(
+            session_id="session-1",
+            team_id="test_agent",
+            user_id="@history-owner:localhost",
+            runs=[],
+            created_at=1,
+            updated_at=1,
+        )
+    return AgentSession(
+        session_id="session-1",
+        agent_id="test_agent",
+        user_id="@history-owner:localhost",
+        runs=[],
+        created_at=1,
+        updated_at=1,
+    )
 
 
 def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:
@@ -91,8 +117,10 @@ def test_invalidate_compacted_replay_clears_summary_and_rebuild_markers(tmp_path
     assert read_scope_state(session, other_scope) == HistoryScopeState(last_summary_model="other-model")
 
     session.runs = [_completed_run("run-1")]
-    assert prune_reintroduced_runs(session, read_scope_state(session, scope)) is True
+    storage = MagicMock()
+    assert prune_reintroduced_runs(storage, session, read_scope_state(session, scope)) is True
     assert session.runs == []
+    storage.delete_runs.assert_called_once_with(["run-1"])
 
 
 def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> None:
@@ -179,6 +207,115 @@ def test_seen_event_ids_match_model_history_visibility(is_team: bool) -> None:
     assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed", "running"]
 
 
+@pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
+@pytest.mark.asyncio
+async def test_shared_session_paused_run_preserves_prompt_roles_until_continuation_completes(
+    tmp_path: Path,
+    is_team: bool,
+) -> None:
+    """A fresh runtime must resume a paused run in a session shared by multiple requesters."""
+    config, runtime_paths = _make_config(tmp_path)
+    executed: list[list[str]] = []
+
+    def run_shell_command(args: list[str]) -> str:
+        executed.append(args)
+        return "ok"
+
+    def runtime(storage: object) -> tuple[AgnoAgent | AgnoTeam, SyntheticModel]:
+        model = SyntheticModel(
+            id="synthetic",
+            seed=1,
+            min_response_chars=20,
+            max_response_chars=20,
+            chars_per_second=0,
+            tool_call_probability=1,
+        )
+        shared = {
+            "id": "test_agent",
+            "model": model,
+            "tools": [
+                Function(
+                    name="run_shell_command",
+                    entrypoint=run_shell_command,
+                    requires_confirmation=True,
+                ),
+            ],
+            "db": storage,
+            "system_message": "SYSTEM SENTINEL",
+        }
+        entity: AgnoAgent | AgnoTeam = AgnoTeam(members=[], **shared) if is_team else AgnoAgent(**shared)
+        return entity, model
+
+    first_storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    seed_session(first_storage, _shared_session(is_team=is_team))
+
+    first, _first_model = runtime(first_storage)
+    paused = await first.arun(
+        "exercise the tool",
+        session_id="session-1",
+        user_id="@requester:localhost",
+        stream=False,
+    )
+    assert paused.status is RunStatus.paused
+    assert paused.run_id is not None
+    first_storage.close()
+
+    resumed_storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    resumed, resumed_model = runtime(resumed_storage)
+    try:
+        session = await resumed.aget_session(
+            session_id="session-1",
+            user_id="@requester:localhost",
+        )
+        assert session is not None
+        assert session.user_id == "@history-owner:localhost"
+        persisted = session.get_run(paused.run_id)
+        assert persisted is not None
+        assert persisted.status == RunStatus.paused
+        assert persisted.user_id == "@requester:localhost"
+        assert [message.role for message in persisted.messages or ()][:2] == ["system", "user"]
+        requirements = deepcopy(persisted.requirements or [])
+        assert len(requirements) == 1
+        requirements[0].confirm()
+
+        with patch.object(resumed_model, "ainvoke", wraps=resumed_model.ainvoke) as invoke:
+            if isinstance(resumed, AgnoTeam):
+                completed = await resumed.acontinue_run(
+                    run_response=persisted,
+                    requirements=requirements,
+                    session_id="session-1",
+                    user_id="@requester:localhost",
+                    stream=False,
+                )
+            else:
+                completed = await resumed.acontinue_run(
+                    run_id=paused.run_id,
+                    requirements=requirements,
+                    session_id="session-1",
+                    user_id="@requester:localhost",
+                    stream=False,
+                )
+
+        assert isinstance(completed, (RunOutput, TeamRunOutput))
+        assert completed.status is RunStatus.completed
+        continued_messages = invoke.call_args.kwargs["messages"]
+        assert any(message.role == "system" and message.content == "SYSTEM SENTINEL" for message in continued_messages)
+        assert len(executed) == 1
+
+        completed_session = await resumed.aget_session(
+            session_id="session-1",
+            user_id="@requester:localhost",
+        )
+        assert completed_session is not None
+        assert completed_session.user_id == "@history-owner:localhost"
+        completed_run = completed_session.get_run(paused.run_id)
+        assert completed_run is not None
+        assert completed_run.user_id == "@requester:localhost"
+        assert all(message.role not in {"system", "developer"} for message in completed_run.messages or ())
+    finally:
+        resumed_storage.close()
+
+
 def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
     _config, _runtime_paths_value = _make_config(tmp_path)
     agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -259,7 +396,7 @@ def test_compaction_progress_preserves_newer_seen_event_ids(tmp_path: Path) -> N
     latest_session = _session("session-1")
     update_scope_seen_event_ids(working_session, scope, ["compacted-event"])
     update_scope_seen_event_ids(latest_session, scope, ["newer-event"])
-    storage.upsert_session(latest_session)
+    seed_session(storage, latest_session)
 
     record_compaction_chunk(
         storage=storage,
@@ -325,7 +462,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     with (
         patch(

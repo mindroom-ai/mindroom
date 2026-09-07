@@ -176,6 +176,7 @@ async def _emit_compaction_hook(
         token_count_before=token_count_before,
         token_count_after=token_count_after,
         compaction_summary=compaction_summary,
+        _hook_registry_state=runtime_context.hook_registry_state,
     )
     await emit(runtime_context.hook_registry, event_name, context)
 

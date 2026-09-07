@@ -15,6 +15,7 @@ from agno.models.openai.chat import OpenAIChat
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall, ToolResult
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_runtime_paths
@@ -348,15 +349,22 @@ def test_no_workspace_root_leaves_schema_unmodified() -> None:
     assert OUTPUT_PATH_ARGUMENT not in function.parameters["properties"]
 
 
-def test_function_with_existing_mindroom_output_path_is_skipped_with_warning(tmp_path: Path) -> None:
+def test_function_with_existing_mindroom_output_path_is_skipped_with_debug(tmp_path: Path) -> None:
     def existing(mindroom_output_path: str) -> str:
         return mindroom_output_path
 
     function = Function(name="existing", entrypoint=existing)
-    with patch("mindroom.tool_system.output_files.logger.warning") as warning:
+    with capture_logs() as logs:
         wrap_function_for_output_files(function, _policy(tmp_path))
 
-    warning.assert_called_once()
+    assert logs == [
+        {
+            "argument_name": OUTPUT_PATH_ARGUMENT,
+            "event": "tool_output_path_argument_collision",
+            "function_name": "existing",
+            "log_level": "debug",
+        },
+    ]
     result = FunctionCall(
         function=function,
         arguments={OUTPUT_PATH_ARGUMENT: "not-redirected"},

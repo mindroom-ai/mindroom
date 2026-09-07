@@ -1,55 +1,56 @@
-"""Matrix-backed tool approval runtime state."""
+"""Approval-domain decisions backed by the shared Matrix delivery outbox."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import threading
-from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Iterator
-from concurrent.futures import Future, InvalidStateError
+import time
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
-from uuid import uuid4
 
-from mindroom.approval_events import (
-    PendingApproval,
-    PendingApprovalStatus,
-    is_original_approval_card,
-    parse_approval_datetime,
-    terminal_edit_matches_card_sender,
+from mindroom.approval_events import PendingApproval, PendingApprovalStatus, parse_approval_datetime
+from mindroom.event_journal import (
+    ApprovalCardReservation,
+    BackgroundApprovalDecision,
+    DeliveryStage,
+    MatrixDelivery,
+    StoredApprovalCard,
+    UnreadableApprovalCard,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.cache.event_cache import ConversationEventCache
+    from mindroom.event_journal import ApprovalDeliveryView, RecordedApprovalDecision
+    from mindroom.tool_approval import BackgroundScriptToolOrigin
 
 _ApprovalStatus = Literal["approved", "denied", "expired"]
 _ResolutionStatus = Literal["approved", "denied"]
-MatrixEventSender = Callable[[str, str | None, dict[str, Any]], Awaitable["SentApprovalEvent | None"]]
-MatrixEventEditor = Callable[[str, str, dict[str, Any]], Awaitable[bool]]
-ApprovalRoomProvider = Callable[[], set[str]]
-TransportSenderProvider = Callable[[], str | None]
+_MatrixEventPreparer = Callable[[str, str | None, dict[str, Any]], Awaitable[dict[str, Any] | None]]
+_MatrixDeliverySender = Callable[[MatrixDelivery], Awaitable[str]]
+_MatrixDeliveryResolver = Callable[[MatrixDelivery], Awaitable[str | None]]
+_ApprovalActionDeliveryResolver = Callable[[str, str], Awaitable[str | None]]
+_TransportSenderProvider = Callable[[], str | None]
+_SendingDeviceProvider = Callable[[], str | None]
+_ContinuationReadyHandler = Callable[[str, tuple[str, ...]], Awaitable[None] | None]
 
-_STARTUP_DISCARD_SCAN_LIMIT = 10_000
-_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS = 5.0
-_DEFAULT_CANCELLED_REASON = "Tool approval request was cancelled."
-_DEFAULT_MISSING_CONTEXT_REASON = "Tool approval requires a Matrix room."
-_DEFAULT_MISSING_REQUESTER_REASON = "Tool approval requires a human requester."
+_STARTUP_RECOVERY_SCAN_PAGE = 256
+_DEADLINE_SWEEP_SECONDS = 60.0
+_EVENT_TYPE = "io.mindroom.tool_approval"
 DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
-    "Tool approval requires the router to be joined to the Matrix room. "
-    "In ad-hoc invited rooms accepted via accept_invites, approval only works if the router "
-    "is already joined there; otherwise retry from a managed room."
+    "Tool approval needs the router in this room. If `router.accept_invites` allows this Matrix transport account, "
+    "call `invite_router` and wait for the router to join; otherwise enable it or add the router manually, then retry."
 )
-_DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to Matrix."
-DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "
@@ -57,44 +58,33 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "workspace file via `mindroom_output_path` or send it as a file attachment with a short message "
     "body — or auto-approve this tool via a script-based approval rule."
 )
-_STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
-_DETACHED_REQUEST_REASON = "Original tool request is no longer active."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
-_MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: _ApprovalManager | None = None
 logger = get_logger(__name__)
 
 
+def _approval_action_authorized(
+    pending: PendingApproval,
+    stored: StoredApprovalCard,
+    authorize_responder: Callable[[str], bool],
+) -> bool:
+    """Authorize an actionable card against its trusted originating responder."""
+    entity_name = stored.continuation_entity_name if stored.target_kind == "continuation" else pending.agent_name
+    return entity_name is not None and authorize_responder(entity_name)
+
+
 class ToolApprovalTransportError(RuntimeError):
-    """One actionable approval transport limitation."""
+    """One actionable reason an approval card cannot be transported or verified."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
 
 
-class _BoundedCardEventIds:
-    def __init__(self, max_size: int) -> None:
-        self._max_size = max_size
-        self._ids: OrderedDict[str, None] = OrderedDict()
-
-    def add(self, card_event_id: str) -> None:
-        if card_event_id in self._ids:
-            return
-        self._ids[card_event_id] = None
-        while len(self._ids) > self._max_size:
-            self._ids.popitem(last=False)
-
-    def discard(self, card_event_id: str) -> None:
-        self._ids.pop(card_event_id, None)
-
-    def __contains__(self, card_event_id: object) -> bool:
-        return card_event_id in self._ids
-
-    def __len__(self) -> int:
-        return len(self._ids)
+class UnverifiableApprovalCardError(ToolApprovalTransportError):
+    """A legacy approval action target cannot be authenticated by Matrix."""
 
 
 def _utcnow() -> datetime:
@@ -126,23 +116,25 @@ def _contains_sanitizer_truncation(original: object, sanitized: object) -> bool:
             return "__truncated__" in sanitized or any(
                 _contains_sanitizer_truncation(None, item) for item in sanitized.values()
             )
-        has_added_truncation_key = "__truncated__" in sanitized and "__truncated__" not in original
-        if len(sanitized) < len(original) or has_added_truncation_key:
-            return True
         original_by_text_key = {str(key): item for key, item in original.items()}
-        return any(
-            _contains_sanitizer_truncation(original_by_text_key.get(str(key)), item)
-            for key, item in sanitized.items()
-            if key != "__truncated__"
+        return (
+            len(sanitized) < len(original)
+            or ("__truncated__" in sanitized and "__truncated__" not in original)
+            or any(
+                _contains_sanitizer_truncation(original_by_text_key.get(str(key)), item)
+                for key, item in sanitized.items()
+                if key != "__truncated__"
+            )
         )
     if isinstance(sanitized, list):
         original_items = list(original) if isinstance(original, list | tuple | set | frozenset) else []
-        has_added_truncation_marker = sanitized != original_items and sanitized[-1:] == [_SANITIZER_TRUNCATION_MARKER]
-        if len(original_items) > len(sanitized) or has_added_truncation_marker:
-            return True
-        return any(
-            _contains_sanitizer_truncation(original_item, sanitized_item)
-            for original_item, sanitized_item in zip(original_items, sanitized, strict=False)
+        return (
+            len(original_items) > len(sanitized)
+            or (sanitized != original_items and sanitized[-1:] == [_SANITIZER_TRUNCATION_MARKER])
+            or any(
+                _contains_sanitizer_truncation(original_item, sanitized_item)
+                for original_item, sanitized_item in zip(original_items, sanitized, strict=False)
+            )
         )
     return isinstance(sanitized, str) and sanitized.endswith(_SANITIZER_TRUNCATION_MARKER) and sanitized != original
 
@@ -155,57 +147,46 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
         return wrapped, True
     if _json_preview_length(sanitized) <= _MAX_ARGUMENTS_PREVIEW_CHARS:
         return sanitized, sanitizer_truncated
-
     per_value_budget = max(24, _MAX_ARGUMENTS_PREVIEW_CHARS // max(len(sanitized), 1))
     preview = {
         key: _truncate_event_argument_value(value, max_length=per_value_budget) for key, value in sanitized.items()
     }
     while _json_preview_length(preview) > _MAX_ARGUMENTS_PREVIEW_CHARS and preview:
-        drop_key = max(preview, key=lambda k: len(_compact_preview_text(preview[k])))
+        drop_key = max(preview, key=lambda key: len(_compact_preview_text(preview[key])))
         preview.pop(drop_key)
     if not preview:
-        summary = {
+        return {
             "_summary": sanitize_failure_text(
                 f"{len(sanitized)} arguments omitted because the preview exceeded the size limit.",
                 max_length=max(24, _MAX_ARGUMENTS_PREVIEW_CHARS // 2),
             ),
-        }
-        return summary, True
+        }, True
     return preview, True
 
 
 def _full_arguments_json_bytes(value: object) -> int:
-    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode())
 
 
 def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the complete redacted arguments when they can be delivered to a human, else None."""
     if _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
         return None
     sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments))
-    if _full_arguments_json_bytes(sanitized) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
-        return None
-    return sanitized
+    return sanitized if _full_arguments_json_bytes(sanitized) <= _MAX_FULL_ARGUMENTS_JSON_BYTES else None
 
 
 @dataclass(frozen=True, slots=True)
-class ApprovalDecision:
-    """One resolved approval outcome."""
+class _ApprovalStartupSweep:
+    """What one generic recovery pass settled and still owes."""
 
-    status: _ApprovalStatus
-    reason: str | None
-    resolved_by: str | None
-    resolved_at: datetime
+    discarded: int
+    failed: int
+    scanned: int = field(default=0, compare=False)
 
-
-@dataclass(frozen=True, slots=True)
-class SentApprovalEvent:
-    """One delivered approval event."""
-
-    event_id: str
-    # Content the transport actually sent when it diverges from the requested content,
-    # e.g. after offloading full arguments to an uploaded sidecar.
-    sent_content: dict[str, Any] | None = None
+    @property
+    def complete(self) -> bool:
+        """Return whether the pass left no delivery debt."""
+        return self.failed == 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,93 +200,184 @@ class ApprovalActionResult:
     card_event_id: str | None = None
 
 
-@dataclass(slots=True)
-class _LiveApprovalWaiter:
-    approval_id: str
-    card_event_id: str
-    room_id: str
-    card_event: dict[str, Any]
-    future: Future[ApprovalDecision]
-
-
-@dataclass(frozen=True, slots=True)
-class _PostCancelCleanupTask:
-    cleanup_future: Future[None]
-    owner_loop: asyncio.AbstractEventLoop
-    send_task: asyncio.Future[SentApprovalEvent | None]
-
-
-@dataclass(slots=True, eq=False)
-class _ActiveApprovalSend:
-    done_future: Future[None]
-    owner_loop: asyncio.AbstractEventLoop
-    send_task: asyncio.Future[SentApprovalEvent | None]
-
-
+@dataclass
 class _ApprovalManager:
-    """Coordinate live approval waiters against Matrix approval cards.
+    """Own approval semantics while the generic worker owns Matrix delivery."""
 
-    Cached approval cards support terminal cleanup only; they never make an
-    approval actionable after its live waiter is gone.
-    """
+    runtime_paths: RuntimePaths
+    prepare_event: _MatrixEventPreparer | None = None
+    send_delivery: _MatrixDeliverySender | None = None
+    resolve_delivery: _MatrixDeliveryResolver | None = None
+    resolve_action_delivery: _ApprovalActionDeliveryResolver | None = None
+    cards: ApprovalDeliveryView | None = None
+    transport_sender: _TransportSenderProvider | None = None
+    sending_device: _SendingDeviceProvider | None = None
+    continuation_ready: _ContinuationReadyHandler | None = None
+    _resolving_card_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _live_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _deadline_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _deadline_wakeup: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
-    def __init__(
+    def configure_transport(
         self,
-        runtime_paths: RuntimePaths,
         *,
-        sender: MatrixEventSender | None = None,
-        editor: MatrixEventEditor | None = None,
-        event_cache: ConversationEventCache | None = None,
-        approval_room_ids: ApprovalRoomProvider | None = None,
-        transport_sender: TransportSenderProvider | None = None,
+        prepare_event: _MatrixEventPreparer | None = None,
+        send_delivery: _MatrixDeliverySender | None = None,
+        resolve_delivery: _MatrixDeliveryResolver | None = None,
+        resolve_action_delivery: _ApprovalActionDeliveryResolver | None = None,
+        cards: ApprovalDeliveryView | None = None,
+        transport_sender: _TransportSenderProvider | None = None,
+        sending_device: _SendingDeviceProvider | None = None,
+        continuation_ready: _ContinuationReadyHandler | None = None,
     ) -> None:
-        self._runtime_storage_root = runtime_paths.storage_root
-        self._send_event = sender
-        self._edit_event = editor
-        self._event_cache = event_cache
-        self._approval_room_ids = approval_room_ids
-        self._transport_sender = transport_sender
-        self._live_lock = threading.RLock()
-        self._pending_by_card_event: dict[str, _LiveApprovalWaiter] = {}
-        self._resolving_card_event_ids: set[str] = set()
-        self._resolved_card_event_ids = _BoundedCardEventIds(_MAX_REMEMBERED_TERMINAL_CARD_IDS)
-        self._cancelled_card_event_ids = _BoundedCardEventIds(_MAX_REMEMBERED_TERMINAL_CARD_IDS)
-        self._active_approval_sends: set[_ActiveApprovalSend] = set()
-        self._post_cancel_cleanup_tasks: set[_PostCancelCleanupTask] = set()
-        self._shutdown_reason: str | None = None
+        """Rebind transport collaborators after runtime reload."""
+        if prepare_event is not None:
+            self.prepare_event = prepare_event
+        if send_delivery is not None:
+            self.send_delivery = send_delivery
+        if resolve_delivery is not None:
+            self.resolve_delivery = resolve_delivery
+        if resolve_action_delivery is not None:
+            self.resolve_action_delivery = resolve_action_delivery
+        if cards is not None:
+            self.cards = cards
+        if transport_sender is not None:
+            self.transport_sender = transport_sender
+        if sending_device is not None:
+            self.sending_device = sending_device
+        if continuation_ready is not None:
+            self.continuation_ready = continuation_ready
 
-    async def request_approval(  # noqa: C901, PLR0911
+    async def prepare_detached_approval(
         self,
         *,
+        approval_id: str,
+        continuation_id: str,
+        continuation_generation: int,
+        tool_call_id: str,
         tool_name: str,
         arguments: dict[str, Any],
-        room_id: str | None,
-        requester_id: str | None,
-        approver_user_id: str | None,
-        timeout_seconds: float,
+        room_id: str,
+        requester_id: str,
+        approver_user_id: str,
+        expires_at_ns: int,
         agent_name: str | None = None,
         thread_id: str | None = None,
-        workflow_id: str | None = None,
-        participant_id: str | None = None,
-    ) -> ApprovalDecision:
-        """Send one Matrix approval card and wait for the Matrix-backed resolution."""
-        # Keep the send/bind/wait flow linear so cancellation cleanup remains visible.
-        if room_id is None:
-            return self._new_decision(status="denied", reason=_DEFAULT_MISSING_CONTEXT_REASON, resolved_by=None)
-        if approver_user_id is None:
-            return self._new_decision(status="denied", reason=_DEFAULT_MISSING_REQUESTER_REASON, resolved_by=None)
-        if self._send_event is None:
-            return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
-        shutdown_reason = self._current_shutdown_reason()
-        if shutdown_reason is not None:
-            return self._new_decision(status="expired", reason=shutdown_reason, resolved_by=None)
+    ) -> ApprovalCardReservation | None:
+        """Prepare one exact frozen payload without creating delivery debt."""
+        return await self._prepare_approval_card(
+            approval_id=approval_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            raw_arguments=arguments,
+            agent_name=agent_name,
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=requester_id,
+            approver_user_id=approver_user_id,
+            expires_at_ns=expires_at_ns,
+            target_fields={
+                "continuation_id": continuation_id,
+                "continuation_generation": continuation_generation,
+                "tool_call_id": tool_call_id,
+            },
+        )
 
-        approval_id = uuid4().hex
-        requested_at = _utcnow()
-        expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
-        event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
+    async def request_background_approval(
+        self,
+        *,
+        origin: BackgroundScriptToolOrigin,
+        room_id: str,
+        thread_id: str | None,
+        agent_name: str,
+        requester_id: str,
+        approver_user_id: str,
+        tool_name: str,
+        arguments: dict[str, object],
+        timeout_seconds: float,
+    ) -> BackgroundApprovalDecision:
+        """Publish and await one durable exact-call background approval."""
+        cards = self.cards
+        if self.prepare_event is None or cards is None or self.send_delivery is None:
+            return BackgroundApprovalDecision(status="denied", reason="Tool approval runtime is not ready.")
+        delivery_id = f"script-approval:{origin.run_id}:{origin.call_id}"
+        expires_at_ns = time.time_ns() + max(0, round(timeout_seconds * 1_000_000_000))
+        reservation = await self._prepare_approval_card(
+            approval_id=delivery_id,
+            tool_call_id=origin.call_id,
+            tool_name=tool_name,
+            raw_arguments=arguments,
+            agent_name=agent_name,
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=requester_id,
+            approver_user_id=approver_user_id,
+            expires_at_ns=expires_at_ns,
+            target_fields={
+                "approval_target": "background_script",
+                "background_run_id": origin.run_id,
+                "background_call_id": origin.call_id,
+            },
+        )
+        if reservation is None:
+            return BackgroundApprovalDecision(status="denied", reason="Tool approval card could not be prepared.")
+        reserved = await cards.reserve_background_approval_card(
+            room_id=room_id,
+            thread_id=thread_id,
+            run_id=origin.run_id,
+            call_id=origin.call_id,
+            expires_at_ns=expires_at_ns,
+            card=reservation,
+        )
+        if not reserved:
+            return BackgroundApprovalDecision(
+                status="denied",
+                reason="Approval card could not be published in this room.",
+            )
+        try:
+            await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+        except Exception:
+            logger.warning(
+                "approval_card_initial_delivery_deferred",
+                delivery_id=delivery_id,
+                exc_info=True,
+            )
+        self._ensure_deadline_sweep()
+        deadline = asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
+        while True:
+            decision = await cards.background_approval_decision(run_id=origin.run_id, call_id=origin.call_id)
+            if decision is not None:
+                return decision
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                await self.recover_cards_on_startup()
+                decision = await cards.background_approval_decision(run_id=origin.run_id, call_id=origin.call_id)
+                if decision is not None:
+                    return decision
+                return BackgroundApprovalDecision(status="denied", reason=_DEFAULT_TIMEOUT_REASON)
+            await asyncio.sleep(min(1.0, remaining))
+
+    async def _prepare_approval_card(
+        self,
+        *,
+        approval_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        raw_arguments: dict[str, Any],
+        agent_name: str | None,
+        room_id: str,
+        thread_id: str | None,
+        requester_id: str,
+        approver_user_id: str,
+        expires_at_ns: int,
+        target_fields: dict[str, object],
+    ) -> ApprovalCardReservation | None:
+        """Prepare one shared pending-card payload for a typed exact-call target."""
+        if self.prepare_event is None:
+            return None
+        event_arguments, arguments_truncated = _build_event_arguments_preview(raw_arguments)
         full_arguments = (
-            await asyncio.to_thread(_build_full_event_arguments, arguments) if arguments_truncated else None
+            await asyncio.to_thread(_build_full_event_arguments, raw_arguments) if arguments_truncated else None
         )
         content = self._pending_event_content(
             approval_id=approval_id,
@@ -314,78 +386,108 @@ class _ApprovalManager:
             arguments_truncated=arguments_truncated,
             full_arguments=full_arguments,
             agent_name=agent_name,
-            workflow_id=workflow_id,
-            participant_id=participant_id,
             thread_id=thread_id,
             requester_id=requester_id,
             approver_user_id=approver_user_id,
-            requested_at=requested_at,
-            expires_at=expires_at,
+            requested_at=_utcnow(),
+            expires_at=datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC),
             status="pending",
         )
+        content.update(target_fields)
+        prepared = await self.prepare_event(room_id, thread_id, content)
+        if prepared is None:
+            return None
+        return ApprovalCardReservation(
+            delivery_id=approval_id,
+            tool_call_id=tool_call_id,
+            event_type=_EVENT_TYPE,
+            payload=prepared,
+        )
 
-        try:
-            waiter = await self._send_and_bind_waiter(
-                room_id=room_id,
-                thread_id=thread_id,
-                content=content,
-                requested_at=requested_at,
-                approval_id=approval_id,
-            )
-        except ToolApprovalTransportError as exc:
-            logger.info("Approval Matrix transport unavailable", room_id=room_id, reason=exc.reason)
-            return self._new_decision(status="expired", reason=exc.reason, resolved_by=None)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("Failed to send approval Matrix event", room_id=room_id, exc_info=True)
-            return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
+    async def settle_background_approval(
+        self,
+        origin: BackgroundScriptToolOrigin,
+        *,
+        reason: str,
+    ) -> bool:
+        """Deny one cancelled exact call and drive its shared terminal delivery."""
+        if self.cards is None or self.send_delivery is None:
+            return False
+        recorded = await self.cards.resolve_background_approval_call(
+            run_id=origin.run_id,
+            call_id=origin.call_id,
+            requested_status="denied",
+            reason=reason,
+        )
+        if recorded.resolution is None:
+            return False
+        await self.recover_cards_on_startup()
+        return recorded.recorded
 
-        if waiter is None:
-            shutdown_reason = self._current_shutdown_reason()
-            if shutdown_reason is not None:
-                return self._new_decision(status="expired", reason=shutdown_reason, resolved_by=None)
-            return self._new_decision(status="expired", reason=_DEFAULT_SEND_FAILURE_REASON, resolved_by=None)
-
-        try:
-            return await self._await_waiter(waiter, expires_at=expires_at)
-        except asyncio.CancelledError:
-            await self._settle_bound_waiter_as_cancelled(waiter)
-            raise
-        finally:
-            with self._live_lock:
-                self._pending_by_card_event.pop(waiter.card_event_id, None)
-
-    async def discard_pending_on_startup(self) -> int:
-        """Expire cached, router-authored approval cards after startup."""
-        transport_sender = self._transport_sender_id()
-        if transport_sender is None:
+    async def settle_pending_background_approvals(self, run_id: str, *, reason: str) -> int:
+        """Deny only the still-pending approval targets owned by one run."""
+        if self.cards is None or self.send_delivery is None:
             return 0
+        recorded = await self.cards.resolve_pending_background_approval_calls(
+            run_id=run_id,
+            reason=reason,
+        )
+        if recorded:
+            await self.recover_cards_on_startup()
+        return recorded
 
-        discarded = 0
-        for room_id in self._configured_approval_room_ids():
-            for card_event in await self._scan_cached_room_cards(
-                room_id,
-                since_ts_ms=0,
-                limit=_STARTUP_DISCARD_SCAN_LIMIT,
-            ):
-                pending = await self._trusted_pending_from_card_event(
-                    card_event,
-                    room_id=room_id,
-                    transport_sender=transport_sender,
-                )
-                if pending is None:
-                    continue
-                result = await self._discard_matrix_only_card(
-                    pending=pending,
-                    reason=_STARTUP_DISCARD_REASON,
-                    resolved_by=transport_sender,
-                )
-                if result.resolved:
-                    discarded += 1
-        return discarded
+    async def prune_background_approvals(self, run_id: str) -> bool:
+        """Prune settled background targets only after terminal card retirement."""
+        if self.cards is None:
+            return False
+        return await self.cards.prune_background_approvals(run_id=run_id)
 
-    async def handle_card_response(
+    async def reserve_and_publish(
+        self,
+        *,
+        continuation_principal_id: str,
+        continuation_id: str,
+        continuation_generation: int,
+        cards: tuple[ApprovalCardReservation, ...],
+    ) -> bool:
+        """Reserve a complete generation atomically, then best-effort flush its cards."""
+        if self.cards is None or self.send_delivery is None:
+            return False
+        reserved = await self.cards.reserve_approval_card_deliveries(
+            continuation_principal_id=continuation_principal_id,
+            continuation_id=continuation_id,
+            expected_generation=continuation_generation,
+            cards=cards,
+        )
+        if not reserved:
+            return False
+        worker = self._worker()
+        for card in cards:
+            try:
+                await worker.flush(delivery_id=card.delivery_id, stage=DeliveryStage.INITIAL)
+            except Exception:
+                logger.warning(
+                    "approval_card_initial_delivery_deferred",
+                    delivery_id=card.delivery_id,
+                    exc_info=True,
+                )
+        self._ensure_deadline_sweep()
+        return True
+
+    def _worker(self) -> MatrixDeliveryWorker:
+        if self.cards is None or self.send_delivery is None:
+            msg = "Approval Matrix delivery is not configured"
+            raise ToolApprovalTransportError(msg)
+        return MatrixDeliveryWorker(
+            store=self.cards,
+            send=self.send_delivery,
+            event_type=_EVENT_TYPE,
+            resend_after_reconciliation_miss=False,
+            sending_device_id=None if self.sending_device is None else self.sending_device(),
+            resolve_delivered=self.resolve_delivery,
+        )
+
+    async def handle_card_response(  # noqa: C901 - transport recovery and domain terminal states meet here
         self,
         *,
         room_id: str,
@@ -393,774 +495,389 @@ class _ApprovalManager:
         card_event_id: str,
         status: _ResolutionStatus,
         reason: str | None,
+        authorize_responder: Callable[[str], bool],
         before_consume: Callable[[], Awaitable[None]] | None = None,
     ) -> ApprovalActionResult:
-        """Resolve one approval action anchored to a Matrix approval-card event id."""
-        live_waiter = self._live_waiter_for_card(card_event_id)
-        if live_waiter is not None:
-            return await self._handle_live_waiter_response(
-                live_waiter=live_waiter,
-                room_id=room_id,
-                sender_id=sender_id,
-                status=status,
-                reason=reason,
-                before_consume=before_consume,
-            )
-
-        if self.knows_in_memory_approval_card(card_event_id):
+        """Atomically choose the exact-call winner and enqueue its terminal edit."""
+        if self.has_active_in_memory_approval_card(card_event_id):
             if before_consume is not None:
                 await before_consume()
             return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
-
-        pending = await self._cached_trusted_pending_approval_for_card(
-            room_id=room_id,
-            card_event_id=card_event_id,
+        cards = self.cards
+        stored = (
+            None
+            if cards is None
+            else await cards.pending_approval_card(
+                room_id=room_id,
+                card_event_id=card_event_id,
+            )
         )
-        if pending is None or pending.approver_user_id != sender_id:
+        if stored is None:
+            terminal = cards is not None and await cards.is_terminal_approval_card(
+                room_id=room_id,
+                card_event_id=card_event_id,
+            )
+            if not terminal and cards is not None and self.resolve_action_delivery is not None:
+                try:
+                    stored = await self._bind_action_delivery(
+                        cards,
+                        room_id=room_id,
+                        card_event_id=card_event_id,
+                    )
+                except UnverifiableApprovalCardError as exc:
+                    if before_consume is not None:
+                        await before_consume()
+                    logger.warning(
+                        "unverifiable_legacy_approval_action_ignored",
+                        room_id=room_id,
+                        card_event_id=card_event_id,
+                        transport_reason=exc.reason,
+                    )
+                    return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
+                terminal = stored is None and await cards.is_terminal_approval_card(
+                    room_id=room_id,
+                    card_event_id=card_event_id,
+                )
+            if stored is None:
+                if terminal and before_consume is not None:
+                    await before_consume()
+                return ApprovalActionResult(consumed=terminal, resolved=False, card_event_id=card_event_id)
+        if stored.resolution is not None:
+            if before_consume is not None:
+                await before_consume()
+            self._ensure_deadline_sweep()
+            return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
+        transport_sender = None if self.transport_sender is None else self.transport_sender()
+        pending = (
+            None
+            if transport_sender is None
+            else self._trusted_pending_from_card_event(
+                stored.card,
+                room_id=room_id,
+                transport_sender=transport_sender,
+                expected_card_event_id=card_event_id,
+            )
+        )
+        if (
+            pending is None
+            or pending.approver_user_id != sender_id
+            or not _approval_action_authorized(pending, stored, authorize_responder)
+        ):
             return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
         if before_consume is not None:
             await before_consume()
-        return await self._discard_matrix_only_card(
-            pending=pending,
-            reason=_DETACHED_REQUEST_REASON,
-            resolved_by=sender_id,
-        )
-
-    async def handle_live_approval_id_response(
-        self,
-        *,
-        room_id: str,
-        sender_id: str,
-        approval_id: str,
-        status: _ResolutionStatus,
-        reason: str | None,
-        before_consume: Callable[[], Awaitable[None]] | None = None,
-    ) -> ApprovalActionResult:
-        """Resolve one custom client action by in-memory approval id only."""
-        live_card_event_id = self._live_card_event_id_for_approval(approval_id)
-        if live_card_event_id is None:
-            return ApprovalActionResult(consumed=False, resolved=False)
-        live_waiter = self._live_waiter_for_card(live_card_event_id)
-        if live_waiter is None:
-            return ApprovalActionResult(consumed=False, resolved=False, card_event_id=live_card_event_id)
-        return await self._handle_live_waiter_response(
-            live_waiter=live_waiter,
-            room_id=room_id,
-            sender_id=sender_id,
-            status=status,
-            reason=reason,
-            before_consume=before_consume,
-        )
-
-    async def _handle_live_waiter_response(
-        self,
-        *,
-        live_waiter: _LiveApprovalWaiter,
-        room_id: str,
-        sender_id: str,
-        status: _ResolutionStatus,
-        reason: str | None,
-        before_consume: Callable[[], Awaitable[None]] | None,
-    ) -> ApprovalActionResult:
-        if live_waiter.room_id != room_id:
-            return ApprovalActionResult(consumed=False, resolved=False, card_event_id=live_waiter.card_event_id)
-        pending = await self._pending_approval_for_card(
-            room_id=live_waiter.room_id,
-            card_event_id=live_waiter.card_event_id,
-        )
-        if pending is None:
-            return ApprovalActionResult(consumed=False, resolved=False)
-        if pending.approver_user_id != sender_id:
-            return ApprovalActionResult(
-                consumed=False,
-                resolved=False,
-                thread_id=pending.thread_id,
-                card_event_id=pending.card_event_id,
-            )
-        if before_consume is not None:
-            await before_consume()
-        return await self._resolve_live_response(
-            pending=pending,
-            status=status,
-            reason=reason,
-            resolved_by=sender_id,
-        )
-
-    def configure_transport(
-        self,
-        *,
-        sender: MatrixEventSender | None = None,
-        editor: MatrixEventEditor | None = None,
-        event_cache: ConversationEventCache | None = None,
-        approval_room_ids: ApprovalRoomProvider | None = None,
-        transport_sender: TransportSenderProvider | None = None,
-    ) -> None:
-        """Update Matrix transport hooks for an existing runtime manager."""
-        if sender is not None:
-            self._send_event = sender
-        if editor is not None:
-            self._edit_event = editor
-        if event_cache is not None:
-            self._event_cache = event_cache
-        if approval_room_ids is not None:
-            self._approval_room_ids = approval_room_ids
-        if transport_sender is not None:
-            self._transport_sender = transport_sender
-
-    def _current_shutdown_reason(self) -> str | None:
-        with self._live_lock:
-            return self._shutdown_reason
-
-    async def _send_and_bind_waiter(
-        self,
-        *,
-        room_id: str,
-        thread_id: str | None,
-        content: dict[str, Any],
-        requested_at: datetime,
-        approval_id: str,
-    ) -> _LiveApprovalWaiter | None:
-        if self._send_event is None:
-            return None
-
-        send_task = asyncio.ensure_future(self._send_event(room_id, thread_id, content))
-        active_send = _ActiveApprovalSend(
-            done_future=Future(),
-            owner_loop=asyncio.get_running_loop(),
-            send_task=send_task,
-        )
-        with self._live_lock:
-            self._active_approval_sends.add(active_send)
-        try:
-            try:
-                sent_event = await asyncio.shield(send_task)
-            except asyncio.CancelledError:
-                cleanup_future = asyncio.run_coroutine_threadsafe(
-                    self._cleanup_cancelled_send_when_event_arrives(
-                        send_task=send_task,
-                        room_id=room_id,
-                        content=content,
-                        requested_at=requested_at,
-                        approval_id=approval_id,
-                    ),
-                    active_send.owner_loop,
-                )
-                cleanup_task = _PostCancelCleanupTask(
-                    cleanup_future=cleanup_future,
-                    owner_loop=active_send.owner_loop,
-                    send_task=send_task,
-                )
-                with self._live_lock:
-                    self._post_cancel_cleanup_tasks.add(cleanup_task)
-                cleanup_future.add_done_callback(lambda _future: self._discard_post_cancel_cleanup_task(cleanup_task))
-                raise
-
-            if sent_event is None:
-                return None
-            waiter = self._bind_live_waiter(
-                room_id=room_id,
-                content=content,
-                requested_at=requested_at,
-                approval_id=approval_id,
-                sent_event=sent_event,
-            )
-            shutdown_reason = self._current_shutdown_reason()
-            if shutdown_reason is not None:
-                await self._settle_bound_waiter_as_expired(waiter, reason=shutdown_reason)
-            return waiter
-        finally:
-            with self._live_lock:
-                self._active_approval_sends.discard(active_send)
-            with suppress(InvalidStateError):
-                active_send.done_future.set_result(None)
-
-    async def _cleanup_cancelled_send_when_event_arrives(
-        self,
-        *,
-        send_task: asyncio.Future[SentApprovalEvent | None],
-        room_id: str,
-        content: dict[str, Any],
-        requested_at: datetime,
-        approval_id: str,
-    ) -> None:
-        try:
-            sent_event = await asyncio.shield(send_task)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("Cancelled approval send failed before returning an event id", exc_info=True)
-            return
-        if sent_event is None:
-            return
-
-        waiter = self._bind_live_waiter(
-            room_id=room_id,
-            content=content,
-            requested_at=requested_at,
-            approval_id=approval_id,
-            sent_event=sent_event,
-        )
-        try:
-            await self._settle_bound_waiter_as_cancelled(waiter)
-        finally:
-            with self._live_lock:
-                self._pending_by_card_event.pop(waiter.card_event_id, None)
-
-    def _bind_live_waiter(
-        self,
-        *,
-        room_id: str,
-        content: dict[str, Any],
-        requested_at: datetime,
-        approval_id: str,
-        sent_event: SentApprovalEvent,
-    ) -> _LiveApprovalWaiter:
-        card_event = self._card_event_from_content(
-            event_id=sent_event.event_id,
-            content=sent_event.sent_content if sent_event.sent_content is not None else content,
-            requested_at=requested_at,
-        )
-        waiter = _LiveApprovalWaiter(
-            approval_id=approval_id,
-            card_event_id=sent_event.event_id,
-            room_id=room_id,
-            card_event=card_event,
-            future=Future(),
-        )
-        with self._live_lock:
-            self._pending_by_card_event[sent_event.event_id] = waiter
-        return waiter
-
-    async def _settle_bound_waiter_as_cancelled(self, waiter: _LiveApprovalWaiter) -> None:
-        await self._settle_bound_waiter_as_expired(
-            waiter,
-            reason=_DEFAULT_CANCELLED_REASON,
-            mark_cancelled=True,
-        )
-
-    async def _settle_bound_waiter_as_expired(
-        self,
-        waiter: _LiveApprovalWaiter,
-        *,
-        reason: str,
-        mark_cancelled: bool = False,
-    ) -> None:
-        decision = self._new_decision(status="expired", reason=reason, resolved_by=None)
-        if mark_cancelled:
-            self._remember_cancelled_card_event_id(waiter.card_event_id)
-        claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
-        if claimed_waiter is None:
-            with suppress(Exception):
-                await self._wait_for_competing_terminal_decision(waiter)
-            if waiter.future.done():
-                completed = waiter.future.result()
-                if completed.status == "expired" and completed.reason == reason:
-                    self._remember_resolved_card_event_id(waiter.card_event_id)
-                    if mark_cancelled:
-                        self._forget_cancelled_card_event_id(waiter.card_event_id)
-                    return
-            pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
-            await self._emit_resolution(
-                pending,
-                status=decision.status,
-                reason=decision.reason,
-                resolved_by=decision.resolved_by,
-            )
-            with self._live_lock:
-                self._resolved_card_event_ids.add(waiter.card_event_id)
-                if mark_cancelled:
-                    self._cancelled_card_event_ids.discard(waiter.card_event_id)
-            return
-        with self._claimed_resolution(claimed_waiter.card_event_id):
-            await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
-            with self._live_lock:
-                self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
-                if mark_cancelled:
-                    self._cancelled_card_event_ids.discard(claimed_waiter.card_event_id)
-
-    async def _await_waiter(
-        self,
-        waiter: _LiveApprovalWaiter,
-        *,
-        expires_at: datetime,
-    ) -> ApprovalDecision:
-        try:
-            remaining_seconds = max(0.0, (expires_at - _utcnow()).total_seconds())
-            if remaining_seconds <= 0:
-                return await self._expire_waiter(waiter)
-            wrapped_future = asyncio.wrap_future(waiter.future)
-            return await asyncio.wait_for(asyncio.shield(wrapped_future), timeout=remaining_seconds)
-        except TimeoutError:
-            return await self._expire_waiter(waiter)
-
-    async def _expire_waiter(self, waiter: _LiveApprovalWaiter) -> ApprovalDecision:
-        decision = self._new_decision(status="expired", reason=_DEFAULT_TIMEOUT_REASON, resolved_by=None)
-        claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
-        if claimed_waiter is None:
-            return await self._wait_for_competing_terminal_decision(waiter)
-        with self._claimed_resolution(claimed_waiter.card_event_id):
-            await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
-            with self._live_lock:
-                self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
-            return decision
-
-    async def _resolve_live_response(
-        self,
-        *,
-        pending: PendingApproval,
-        status: _ResolutionStatus,
-        reason: str | None,
-        resolved_by: str | None,
-    ) -> ApprovalActionResult:
-        waiter = self._claim_live_resolution(pending.card_event_id)
-        if waiter is None:
-            return ApprovalActionResult(
-                consumed=True,
-                resolved=False,
-                thread_id=pending.thread_id,
-                card_event_id=pending.card_event_id,
-            )
-        with self._claimed_resolution(pending.card_event_id):
-            await self._yield_to_queued_cancellation()
-            cancelled = self._cancelled_card_event_ids_contains(pending.card_event_id)
-            if cancelled:
-                resolved_status: _ApprovalStatus = "expired"
-                resolved_reason = _DEFAULT_CANCELLED_REASON
-                resolution_was_truncated = False
-            else:
-                resolved_status, resolved_reason, resolution_was_truncated = self._normalized_resolution_request(
-                    pending,
-                    status=status,
-                    reason=reason,
-                )
-            decision = self._new_decision(status=resolved_status, reason=resolved_reason, resolved_by=resolved_by)
-            delivered = await self._settle_waiter_with_terminal_edit(waiter, decision)
-            with self._live_lock:
-                self._resolved_card_event_ids.add(pending.card_event_id)
-                self._cancelled_card_event_ids.discard(pending.card_event_id)
-            return ApprovalActionResult(
-                consumed=True,
-                resolved=delivered,
-                error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON if resolution_was_truncated else None,
-                thread_id=pending.thread_id,
-                card_event_id=pending.card_event_id,
-            )
-
-    @staticmethod
-    async def _yield_to_queued_cancellation() -> None:
-        """Let a cancellation already queued behind the resolution claim mark the waiter."""
-        loop = asyncio.get_running_loop()
-        checkpoint = loop.create_future()
-        loop.call_soon(checkpoint.set_result, None)
-        await checkpoint
-
-    async def _discard_matrix_only_card(
-        self,
-        *,
-        pending: PendingApproval,
-        reason: str,
-        resolved_by: str | None,
-    ) -> ApprovalActionResult:
-        if not self._claim_matrix_cleanup(pending.card_event_id):
-            return ApprovalActionResult(
-                consumed=True,
-                resolved=False,
-                thread_id=pending.thread_id,
-                card_event_id=pending.card_event_id,
-            )
-        with self._claimed_resolution(pending.card_event_id):
-            delivered = await self._emit_resolution(
-                pending,
-                status="expired",
-                reason=reason,
-                resolved_by=resolved_by,
-            )
-            with self._live_lock:
-                if delivered:
-                    self._resolved_card_event_ids.add(pending.card_event_id)
-            return ApprovalActionResult(
-                consumed=True,
-                resolved=delivered,
-                thread_id=pending.thread_id,
-                card_event_id=pending.card_event_id,
-            )
-
-    async def _settle_waiter_with_terminal_edit(
-        self,
-        waiter: _LiveApprovalWaiter,
-        decision: ApprovalDecision,
-    ) -> bool:
-        pending = PendingApproval.from_card_event(waiter.card_event, room_id=waiter.room_id)
-        delivered = await self._emit_resolution(
+        resolved_status, resolved_reason, resolution_was_truncated = self._normalized_resolution_request(
             pending,
-            status=decision.status,
-            reason=decision.reason,
-            resolved_by=decision.resolved_by,
+            status=status,
+            reason=reason,
         )
-        if delivered:
-            self._complete_waiter(waiter.card_event_id, decision)
-            return True
-        fail_closed_decision = decision
-        if decision.status == "approved":
-            fail_closed_decision = self._new_decision(
-                status="denied",
-                reason=_DEFAULT_SEND_FAILURE_REASON,
-                resolved_by=decision.resolved_by,
+        with self._claimed_resolution(card_event_id):
+            delivered = await self._record_and_flush_resolution(
+                pending,
+                stored,
+                status=resolved_status,
+                reason=resolved_reason,
+                resolved_by=sender_id if resolved_status == status else None,
             )
-        self._complete_waiter(waiter.card_event_id, fail_closed_decision)
-        return False
+        return ApprovalActionResult(
+            consumed=True,
+            resolved=delivered,
+            error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON if resolution_was_truncated else None,
+            thread_id=pending.thread_id,
+            card_event_id=card_event_id,
+        )
 
-    async def _emit_resolution(
+    async def _bind_action_delivery(
+        self,
+        cards: ApprovalDeliveryView,
+        *,
+        room_id: str,
+        card_event_id: str,
+    ) -> StoredApprovalCard | None:
+        """Bind the exact visible action target to generic delivery debt."""
+        if self.resolve_action_delivery is None:
+            return None
+        delivery_id = await self.resolve_action_delivery(room_id, card_event_id)
+        if delivery_id is None:
+            return None
+        delivery = await cards.load_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.INITIAL,
+        )
+        if (
+            delivery is None
+            or delivery.room_id != room_id
+            or delivery.event_type != _EVENT_TYPE
+            or delivery.payload.get("approval_id") != delivery_id
+            or delivery.acknowledged_event_id not in {None, card_event_id}
+        ):
+            return None
+        acknowledgement = await cards.acknowledge_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.INITIAL,
+            event_id=card_event_id,
+            delivered_projections=(),
+        )
+        if acknowledgement.settled_event_id != card_event_id:
+            return None
+        return await cards.pending_approval_card(
+            room_id=room_id,
+            card_event_id=card_event_id,
+        )
+
+    async def _record_and_flush_resolution(
         self,
         pending: PendingApproval,
+        stored: StoredApprovalCard,
         *,
         status: _ApprovalStatus,
         reason: str | None,
         resolved_by: str | None,
     ) -> bool:
-        if self._edit_event is None:
+        if self.cards is None:
             return False
+        offered = self._resolved_event_content(
+            pending,
+            status=status,
+            reason=reason,
+            resolved_by=resolved_by,
+            resolved_at=_utcnow(),
+        )
+        recorded = await self.cards.resolve_continuation_approval_card(
+            card_event_id=pending.card_event_id,
+            requested_status=status,
+            reason=reason,
+            resolution=offered,
+        )
+        if recorded.resolution is None:
+            return False
+        if recorded.recorded and recorded.continuation_ready:
+            await self._wake_continuation(recorded)
         try:
-            return await self._edit_event(
-                pending.room_id,
-                pending.card_event_id,
-                self._resolved_event_content(
-                    pending,
-                    status=status,
-                    reason=reason,
-                    resolved_by=resolved_by,
-                    resolved_at=_utcnow(),
-                ),
+            edit_event_id = await self._worker().flush(
+                delivery_id=stored.delivery_id,
+                stage=DeliveryStage.FINAL,
             )
         except Exception:
             logger.warning(
-                "Failed to edit approval Matrix event",
-                approval_id=pending.approval_id,
+                "approval_terminal_delivery_deferred",
+                delivery_id=stored.delivery_id,
                 room_id=pending.room_id,
-                event_id=pending.card_event_id,
                 exc_info=True,
             )
             return False
-
-    async def _pending_approval_for_card(self, *, room_id: str, card_event_id: str) -> PendingApproval | None:
-        live_waiter = self._live_waiter_for_card(card_event_id)
-        if live_waiter is None or live_waiter.room_id != room_id:
-            return None
-        try:
-            pending = PendingApproval.from_card_event(live_waiter.card_event, room_id=room_id)
-        except (TypeError, ValueError):
-            return None
-        latest_edit = await self._latest_trusted_edit(pending)
-        if pending.latest_status(latest_edit) != "pending":
-            return None
-        return pending
-
-    async def _cached_trusted_pending_approval_for_card(
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-    ) -> PendingApproval | None:
-        if self._event_cache is None:
-            return None
-        card_event = await self._event_cache.get_event(room_id, card_event_id)
-        if card_event is None or not is_original_approval_card(card_event):
-            return None
-        transport_sender = self._transport_sender_id()
-        if transport_sender is None:
-            return None
-        return await self._trusted_pending_from_card_event(
-            card_event,
-            room_id=room_id,
-            transport_sender=transport_sender,
-            expected_card_event_id=card_event_id,
-        )
-
-    async def _trusted_pending_from_card_event(
-        self,
-        card_event: dict[str, Any],
-        *,
-        room_id: str,
-        transport_sender: str,
-        expected_card_event_id: str | None = None,
-    ) -> PendingApproval | None:
-        event_room_id = card_event.get("room_id")
-        if event_room_id is not None and event_room_id != room_id:
-            return None
-        try:
-            pending = PendingApproval.from_card_event(card_event, room_id=room_id)
-        except (TypeError, ValueError):
-            return None
-        if (
-            expected_card_event_id is not None and pending.card_event_id != expected_card_event_id
-        ) or pending.card_sender_id != transport_sender:
-            return None
-        latest_edit = await self._latest_trusted_edit(pending)
-        if pending.latest_status(latest_edit) != "pending":
-            return None
-        return pending
-
-    async def _latest_edit(
-        self,
-        *,
-        room_id: str,
-        card_event_id: str,
-        sender: str | None = None,
-    ) -> dict[str, Any] | None:
-        if self._event_cache is None:
-            return None
-        return await self._event_cache.get_latest_edit(room_id, card_event_id, sender=sender)
-
-    async def _latest_trusted_edit(self, pending: PendingApproval) -> dict[str, Any] | None:
-        latest_edit = await self._latest_edit(
-            room_id=pending.room_id,
+        if edit_event_id is None:
+            return False
+        return await self.cards.retire_approval_card(
+            delivery_id=stored.delivery_id,
             card_event_id=pending.card_event_id,
-            sender=pending.card_sender_id,
         )
-        if terminal_edit_matches_card_sender(latest_edit, pending.card_sender_id):
-            return latest_edit
+
+    async def expire_continuation_cards(self, continuation_id: str) -> bool:
+        """Enqueue and flush expiry for every card owned by one failed continuation."""
+        if self.cards is None:
+            return False
+        complete = True
+        for room_id in await self.cards.pending_approval_room_ids():
+            cursor: tuple[int, str] | None = None
+            while True:
+                page = await self.cards.pending_approval_cards(
+                    room_id=room_id,
+                    limit=_STARTUP_RECOVERY_SCAN_PAGE,
+                    after=cursor,
+                )
+                if not page:
+                    break
+                cursor = (page[-1].created_at_ns, page[-1].delivery_id)
+                for stored in page:
+                    if isinstance(stored, UnreadableApprovalCard):
+                        if stored.continuation_id == continuation_id:
+                            complete = False
+                        continue
+                    if stored.target_kind == "continuation" and stored.continuation_id == continuation_id:
+                        complete = await self._expire_stored(room_id, stored) and complete
+                if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
+                    break
+        return complete
+
+    async def _expire_stored(self, room_id: str, stored: StoredApprovalCard) -> bool:
+        if self.cards is None or (stored.card_event_id is None and stored.resolution is not None):
+            return False
+        if stored.card_event_id is None:
+            recorded = await self.cards.expire_unacknowledged_approval_card(delivery_id=stored.delivery_id)
+            if recorded.recorded and recorded.continuation_ready:
+                await self._wake_continuation(recorded)
+            return False
+        transport_sender = None if self.transport_sender is None else self.transport_sender()
+        pending = (
+            None
+            if transport_sender is None
+            else self._trusted_pending_from_card_event(
+                stored.card,
+                room_id=room_id,
+                transport_sender=transport_sender,
+                expected_card_event_id=stored.card_event_id,
+            )
+        )
+        if pending is None:
+            return False
+        if stored.resolution is not None:
+            try:
+                edit_event_id = await self._worker().flush(delivery_id=stored.delivery_id, stage=DeliveryStage.FINAL)
+            except Exception:
+                logger.warning(
+                    "approval_terminal_delivery_deferred",
+                    delivery_id=stored.delivery_id,
+                    room_id=room_id,
+                    exc_info=True,
+                )
+                return False
+            return edit_event_id is not None and await self.cards.retire_approval_card(
+                delivery_id=stored.delivery_id,
+                card_event_id=stored.card_event_id,
+            )
+        return await self._record_and_flush_resolution(
+            pending,
+            stored,
+            status="expired",
+            reason=_DEFAULT_TIMEOUT_REASON,
+            resolved_by=None,
+        )
+
+    async def _wake_continuation(self, recorded: RecordedApprovalDecision) -> None:
+        if recorded.continuation_entity_name is None or self.continuation_ready is None:
+            return
+        wake = self.continuation_ready(recorded.continuation_entity_name, recorded.source_event_ids)
+        if wake is not None:
+            await wake
+
+    async def _settle_startup_card(
+        self,
+        room_id: str,
+        stored: StoredApprovalCard | UnreadableApprovalCard,
+    ) -> bool | None:
+        """Settle due recovery work, or return None when none is currently due."""
+        if isinstance(stored, UnreadableApprovalCard):
+            return False
+        if stored.resolution is not None:
+            return await self._expire_stored(room_id, stored)
+        try:
+            expires_at = parse_approval_datetime(
+                cast("str | None", stored.card["content"].get("expires_at")),
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                "approval_card_expiry_unreadable",
+                delivery_id=stored.delivery_id,
+            )
+            return False
+        if expires_at is not None and expires_at <= _utcnow():
+            return await self._expire_stored(room_id, stored)
         return None
 
-    async def _scan_cached_room_cards(
-        self,
-        room_id: str,
-        *,
-        since_ts_ms: int,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        if self._event_cache is None:
-            return []
-        events = await self._event_cache.get_recent_room_events(
-            room_id,
-            event_type="io.mindroom.tool_approval",
-            since_ts_ms=since_ts_ms,
-            limit=limit,
+    async def recover_cards_on_startup(self) -> _ApprovalStartupSweep:
+        """Run generic delivery recovery, deadline decisions, and domain retirement."""
+        if self.cards is None or self.send_delivery is None:
+            return _ApprovalStartupSweep(discarded=0, failed=1)
+        outcome = await self._worker().recover()
+        transport_failures = set(outcome.failed_deliveries)
+        scanned = 0
+        retired = 0
+        failed = outcome.failed - len(transport_failures)
+        for room_id in await self.cards.pending_approval_room_ids():
+            cursor: tuple[int, str] | None = None
+            while True:
+                page = await self.cards.pending_approval_cards(
+                    room_id=room_id,
+                    limit=_STARTUP_RECOVERY_SCAN_PAGE,
+                    after=cursor,
+                )
+                if not page:
+                    break
+                cursor = (page[-1].created_at_ns, page[-1].delivery_id)
+                for stored in page:
+                    scanned += 1
+                    settled = await self._settle_startup_card(room_id, stored)
+                    had_transport_failure = any(
+                        delivery_id == stored.delivery_id for delivery_id, _stage in transport_failures
+                    )
+                    if settled is True:
+                        transport_failures = {
+                            delivery for delivery in transport_failures if delivery[0] != stored.delivery_id
+                        }
+                        retired += 1
+                    elif settled is False and not had_transport_failure:
+                        failed += 1
+                if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
+                    break
+        self._ensure_deadline_sweep()
+        return _ApprovalStartupSweep(
+            discarded=retired,
+            failed=failed + len(transport_failures),
+            scanned=scanned,
         )
-        if len(events) >= limit:
-            logger.warning(
-                "approval_startup_scan_truncated",
-                room_id=room_id,
-                scan_limit=limit,
-            )
-        return [event for event in events if is_original_approval_card(event)]
 
-    async def shutdown(self, *, reason: str) -> None:
-        """Expire pending approvals and drain approval cleanup tasks."""
-        with self._live_lock:
-            self._shutdown_reason = reason
-            waiters = list(self._pending_by_card_event.values())
-        for waiter in waiters:
-            decision = self._new_decision(status="expired", reason=reason, resolved_by=None)
-            claimed_waiter = self._claim_live_resolution(waiter.card_event_id)
-            if claimed_waiter is None:
-                with suppress(Exception):
-                    await self._wait_for_competing_terminal_decision(waiter)
-                continue
-            with self._claimed_resolution(claimed_waiter.card_event_id):
-                await self._settle_waiter_with_terminal_edit(claimed_waiter, decision)
-                with self._live_lock:
-                    self._resolved_card_event_ids.add(claimed_waiter.card_event_id)
-        await self._drain_active_approval_sends()
-        await self._drain_post_cancel_cleanup_tasks()
+    def _ensure_deadline_sweep(self) -> None:
+        if self._deadline_task is None or self._deadline_task.done():
+            self._deadline_task = asyncio.create_task(self._run_deadline_sweep(), name="approval_deadline_sweep")
+        self._deadline_wakeup.set()
 
-    async def _drain_active_approval_sends(self) -> None:
+    async def _run_deadline_sweep(self) -> None:
         while True:
-            with self._live_lock:
-                active_sends = tuple(self._active_approval_sends)
-            if not active_sends:
-                return
+            self._deadline_wakeup.clear()
+            with suppress(TimeoutError):
+                await asyncio.wait_for(self._deadline_wakeup.wait(), timeout=_DEADLINE_SWEEP_SECONDS)
+            try:
+                await self.recover_cards_on_startup()
+            except Exception:
+                logger.warning("approval_deadline_sweep_failed", exc_info=True)
 
-            wrapped_by_done = {asyncio.wrap_future(active.done_future): active for active in active_sends}
-            done, pending = await asyncio.wait(
-                wrapped_by_done,
-                timeout=_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS,
-            )
-            for done_future in done:
-                with suppress(asyncio.CancelledError, Exception):
-                    done_future.result()
-
-            if pending:
-                pending_sends = [wrapped_by_done[wrapped_future] for wrapped_future in pending]
-                for active_send in pending_sends:
-                    active_send.done_future.cancel()
-                    if not active_send.send_task.done() and not active_send.owner_loop.is_closed():
-                        active_send.owner_loop.call_soon_threadsafe(active_send.send_task.cancel)
-                with self._live_lock:
-                    for active_send in pending_sends:
-                        self._active_approval_sends.discard(active_send)
-                logger.warning(
-                    "Timed out waiting for active approval sends during shutdown",
-                    active_approval_sends=len(pending_sends),
-                )
-                return
-
-    async def _drain_post_cancel_cleanup_tasks(self) -> None:
-        while True:
-            with self._live_lock:
-                futures = tuple(self._post_cancel_cleanup_tasks)
-            if not futures:
-                return
-
-            wrapped_by_cleanup = {asyncio.wrap_future(cleanup.cleanup_future): cleanup for cleanup in futures}
-            done, pending = await asyncio.wait(
-                wrapped_by_cleanup,
-                timeout=_POST_CANCEL_CLEANUP_SHUTDOWN_TIMEOUT_SECONDS,
-            )
-            for done_future in done:
-                with suppress(asyncio.CancelledError, Exception):
-                    done_future.result()
-
-            if pending:
-                pending_cleanups = [wrapped_by_cleanup[wrapped_future] for wrapped_future in pending]
-                for cleanup in pending_cleanups:
-                    cleanup.cleanup_future.cancel()
-                    if not cleanup.send_task.done() and not cleanup.owner_loop.is_closed():
-                        cleanup.owner_loop.call_soon_threadsafe(cleanup.send_task.cancel)
-                with self._live_lock:
-                    for cleanup in pending_cleanups:
-                        self._post_cancel_cleanup_tasks.discard(cleanup)
-                logger.warning(
-                    "Timed out waiting for cancelled approval send cleanup during shutdown",
-                    pending_cleanup_tasks=len(pending_cleanups),
-                )
-                return
-
-    def _discard_post_cancel_cleanup_task(self, cleanup_task: _PostCancelCleanupTask) -> None:
-        with self._live_lock:
-            self._post_cancel_cleanup_tasks.discard(cleanup_task)
+    async def shutdown(self) -> None:
+        """Stop the domain deadline scanner; durable delivery debt remains in the outbox."""
+        task = self._deadline_task
+        self._deadline_task = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     def uses_storage_root(self, storage_root: Path) -> bool:
-        """Return whether this manager belongs to one runtime storage root."""
-        return self._runtime_storage_root == storage_root
+        return self.runtime_paths.storage_root == storage_root
 
     def has_live_work(self) -> bool:
-        """Return whether live approvals or cancelled-send cleanup are still active."""
         with self._live_lock:
-            has_waiters = bool(self._pending_by_card_event or self._resolving_card_event_ids)
-            has_active_sends = bool(self._active_approval_sends)
-            has_cleanup_tasks = bool(self._post_cancel_cleanup_tasks)
-        return has_waiters or has_active_sends or has_cleanup_tasks
+            return bool(self._resolving_card_event_ids)
 
-    def _live_waiter_for_card(self, card_event_id: str) -> _LiveApprovalWaiter | None:
+    def has_active_in_memory_approval_card(self, card_event_id: str) -> bool:
         with self._live_lock:
-            return self._pending_by_card_event.get(card_event_id)
-
-    def _live_card_event_id_for_approval(self, approval_id: str) -> str | None:
-        with self._live_lock:
-            for card_event_id, waiter in self._pending_by_card_event.items():
-                if waiter.approval_id == approval_id:
-                    return card_event_id
-        return None
-
-    def _claim_live_resolution(self, card_event_id: str) -> _LiveApprovalWaiter | None:
-        with self._live_lock:
-            waiter = self._pending_by_card_event.get(card_event_id)
-            if (
-                waiter is None
-                or waiter.future.done()
-                or card_event_id in self._resolving_card_event_ids
-                or card_event_id in self._resolved_card_event_ids
-            ):
-                return None
-            self._resolving_card_event_ids.add(card_event_id)
-            return waiter
-
-    def _claim_matrix_cleanup(self, card_event_id: str) -> bool:
-        with self._live_lock:
-            if (
-                card_event_id in self._pending_by_card_event
-                or card_event_id in self._resolving_card_event_ids
-                or card_event_id in self._resolved_card_event_ids
-            ):
-                return False
-            self._resolving_card_event_ids.add(card_event_id)
-            return True
-
-    def _complete_waiter(self, card_event_id: str, decision: ApprovalDecision) -> None:
-        with self._live_lock:
-            waiter = self._pending_by_card_event.get(card_event_id)
-        if waiter is None:
-            return
-        self._complete_waiter_direct(waiter, decision)
-
-    @staticmethod
-    def _complete_waiter_direct(waiter: _LiveApprovalWaiter, decision: ApprovalDecision) -> None:
-        if waiter.future.done():
-            return
-        try:
-            waiter.future.set_result(decision)
-        except InvalidStateError:
-            return
-
-    def _remember_resolved_card_event_id(self, card_event_id: str) -> None:
-        with self._live_lock:
-            self._resolved_card_event_ids.add(card_event_id)
-
-    def _remember_cancelled_card_event_id(self, card_event_id: str) -> None:
-        with self._live_lock:
-            self._cancelled_card_event_ids.add(card_event_id)
-
-    def _forget_cancelled_card_event_id(self, card_event_id: str) -> None:
-        with self._live_lock:
-            self._cancelled_card_event_ids.discard(card_event_id)
-
-    def _cancelled_card_event_ids_contains(self, card_event_id: str) -> bool:
-        with self._live_lock:
-            return card_event_id in self._cancelled_card_event_ids
+            return card_event_id in self._resolving_card_event_ids
 
     @contextmanager
     def _claimed_resolution(self, card_event_id: str) -> Iterator[None]:
+        with self._live_lock:
+            self._resolving_card_event_ids.add(card_event_id)
         try:
             yield
         finally:
             with self._live_lock:
                 self._resolving_card_event_ids.discard(card_event_id)
 
-    def knows_in_memory_approval_card(self, card_event_id: str) -> bool:
-        """Return whether this process has seen one approval card id."""
-        with self._live_lock:
-            return (
-                card_event_id in self._pending_by_card_event
-                or card_event_id in self._resolving_card_event_ids
-                or card_event_id in self._resolved_card_event_ids
-                or card_event_id in self._cancelled_card_event_ids
-            )
-
-    def has_active_in_memory_approval_card(self, card_event_id: str) -> bool:
-        """Return whether an approval card can still consume in-process actions."""
-        with self._live_lock:
-            return card_event_id in self._pending_by_card_event or card_event_id in self._resolving_card_event_ids
-
-    async def _wait_for_competing_terminal_decision(self, waiter: _LiveApprovalWaiter) -> ApprovalDecision:
-        if waiter.future.done():
-            return waiter.future.result()
-        return await asyncio.shield(asyncio.wrap_future(waiter.future))
-
-    def _configured_approval_room_ids(self) -> set[str]:
-        if self._approval_room_ids is None:
-            return set()
-        return self._approval_room_ids()
-
-    def _transport_sender_id(self) -> str | None:
-        if self._transport_sender is None:
-            return None
-        return self._transport_sender()
-
-    def _card_event_from_content(
-        self,
+    @staticmethod
+    def _trusted_pending_from_card_event(
+        card_event: dict[str, Any],
         *,
-        event_id: str,
-        content: dict[str, Any],
-        requested_at: datetime,
-    ) -> dict[str, Any]:
-        sender = self._transport_sender_id() or content.get("approver_user_id")
-        return {
-            "event_id": event_id,
-            "sender": sender,
-            "type": "io.mindroom.tool_approval",
-            "origin_server_ts": int(requested_at.timestamp() * 1000),
-            "content": content,
-        }
+        room_id: str,
+        transport_sender: str,
+        expected_card_event_id: str,
+    ) -> PendingApproval | None:
+        event = dict(card_event)
+        event.setdefault("sender", transport_sender)
+        try:
+            pending = PendingApproval.from_card_event(event, room_id=room_id)
+        except (TypeError, ValueError):
+            return None
+        if pending.card_event_id != expected_card_event_id or pending.card_sender_id != transport_sender:
+            return None
+        return pending if pending.latest_status(None) == "pending" else None
 
     @staticmethod
     def _pending_event_content(
@@ -1171,47 +888,34 @@ class _ApprovalManager:
         arguments_truncated: bool,
         agent_name: str | None,
         thread_id: str | None,
-        requester_id: str | None,
+        requester_id: str,
         approver_user_id: str,
         requested_at: datetime,
         expires_at: datetime,
         status: PendingApprovalStatus,
-        workflow_id: str | None = None,
-        participant_id: str | None = None,
         full_arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         content: dict[str, Any] = {
-            "msgtype": "io.mindroom.tool_approval",
-            "body": _ApprovalManager._event_body(
-                tool_name,
-                status,
-                workflow_id=workflow_id,
-                participant_id=participant_id,
-            ),
+            "msgtype": _EVENT_TYPE,
+            "body": _ApprovalManager._event_body(tool_name, status),
             "tool_name": tool_name,
-            "tool_call_id": approval_id,
             "arguments": arguments,
             "status": status,
             "approval_id": approval_id,
             "approver_user_id": approver_user_id,
+            "requester_id": requester_id,
             "requested_at": requested_at.isoformat(),
             "expires_at": expires_at.isoformat(),
             "thread_id": thread_id,
         }
         if agent_name is not None:
             content["agent_name"] = agent_name
-        if workflow_id is not None:
-            content["workflow_id"] = workflow_id
-        if participant_id is not None:
-            content["participant_id"] = participant_id
         if arguments_truncated:
             content["arguments_truncated"] = True
-            if full_arguments is not None:
-                content["full_arguments"] = full_arguments
-            else:
+            if full_arguments is None:
                 content["approvable"] = False
-        if requester_id is not None:
-            content["requester_id"] = requester_id
+            else:
+                content["full_arguments"] = full_arguments
         return content
 
     @staticmethod
@@ -1223,141 +927,108 @@ class _ApprovalManager:
         resolved_by: str | None,
         resolved_at: datetime,
     ) -> dict[str, Any]:
-        requested_at = parse_approval_datetime(pending.requested_at) or datetime.fromtimestamp(
-            pending.created_at_ms / 1000,
-            tz=UTC,
-        )
-        expires_at = parse_approval_datetime(pending.expires_at) or requested_at + timedelta(
-            seconds=pending.timeout_seconds,
-        )
-        content: dict[str, Any] = {
-            "msgtype": "io.mindroom.tool_approval",
-            "body": _ApprovalManager._event_body(
-                pending.tool_name,
-                status,
-                workflow_id=pending.workflow_id,
-                participant_id=pending.participant_id,
-            ),
+        content = dict(pending.arguments_preview)
+        result: dict[str, Any] = {
+            "msgtype": _EVENT_TYPE,
+            "body": _ApprovalManager._event_body(pending.tool_name, status),
             "tool_name": pending.tool_name,
-            "tool_call_id": pending.approval_id,
-            "arguments": pending.arguments_preview,
+            "arguments": content,
             "status": status,
             "approval_id": pending.approval_id,
             "approver_user_id": pending.approver_user_id,
-            "requested_at": requested_at.isoformat(),
-            "expires_at": expires_at.isoformat(),
+            "requester_id": pending.requester_id,
+            "requested_at": pending.requested_at,
+            "expires_at": pending.expires_at,
             "thread_id": pending.thread_id,
             "resolved_at": resolved_at.isoformat(),
             "resolved_by": resolved_by,
         }
         if pending.agent_name is not None:
-            content["agent_name"] = pending.agent_name
-        if pending.workflow_id is not None:
-            content["workflow_id"] = pending.workflow_id
-        if pending.participant_id is not None:
-            content["participant_id"] = pending.participant_id
+            result["agent_name"] = pending.agent_name
         if pending.arguments_preview_truncated:
-            content["arguments_truncated"] = True
-        if pending.requester_id:
-            content["requester_id"] = pending.requester_id
+            result["arguments_truncated"] = True
         if reason:
-            content["resolution_reason"] = reason
-        return content
+            result["resolution_reason"] = reason
+        return result
 
     @staticmethod
-    def _event_body(
-        tool_name: str,
-        status: PendingApprovalStatus,
-        *,
-        workflow_id: str | None = None,
-        participant_id: str | None = None,
-    ) -> str:
-        subject = tool_name
-        if workflow_id is not None and participant_id is not None:
-            subject = f"{tool_name} — Dynamic Workflow '{workflow_id}' participant '{participant_id}'"
+    def _event_body(tool_name: str, status: PendingApprovalStatus) -> str:
         if status == "approved":
-            return f"Approved: {subject}"
+            return f"Approved: {tool_name}"
         if status == "denied":
-            return f"Denied: {subject}"
+            return f"Denied: {tool_name}"
         if status == "expired":
-            return f"Expired: {subject}"
-        return f"🔒 Approval required: {subject}"
+            return f"Expired: {tool_name}"
+        return f"🔒 Approval required: {tool_name}"
 
-    @classmethod
+    @staticmethod
     def _normalized_resolution_request(
-        cls,
         pending: PendingApproval,
         *,
         status: _ResolutionStatus,
         reason: str | None,
     ) -> tuple[_ApprovalStatus, str | None, bool]:
+        expires_at = parse_approval_datetime(pending.expires_at)
+        if expires_at is not None and expires_at <= _utcnow():
+            return "expired", _DEFAULT_TIMEOUT_REASON, False
         arguments_unreviewable = pending.arguments_preview_truncated and not pending.full_arguments_available
         if status == "approved" and (not pending.approvable or arguments_unreviewable):
             return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True
         return status, reason, False
 
-    @staticmethod
-    def _new_decision(
-        *,
-        status: _ApprovalStatus,
-        reason: str | None,
-        resolved_by: str | None,
-    ) -> ApprovalDecision:
-        return ApprovalDecision(
-            status=status,
-            reason=reason,
-            resolved_by=resolved_by,
-            resolved_at=_utcnow(),
-        )
-
 
 def get_approval_store() -> _ApprovalManager | None:
-    """Return the module-level approval manager when initialized."""
+    """Return the configured approval domain, if the runtime is ready."""
     return _MANAGER
 
 
 def initialize_approval_store(
     runtime_paths: RuntimePaths,
     *,
-    sender: MatrixEventSender | None = None,
-    editor: MatrixEventEditor | None = None,
-    event_cache: ConversationEventCache | None = None,
-    approval_room_ids: ApprovalRoomProvider | None = None,
-    transport_sender: TransportSenderProvider | None = None,
+    prepare_event: _MatrixEventPreparer | None = None,
+    send_delivery: _MatrixDeliverySender | None = None,
+    resolve_delivery: _MatrixDeliveryResolver | None = None,
+    resolve_action_delivery: _ApprovalActionDeliveryResolver | None = None,
+    cards: ApprovalDeliveryView | None = None,
+    transport_sender: _TransportSenderProvider | None = None,
+    sending_device: _SendingDeviceProvider | None = None,
+    continuation_ready: _ContinuationReadyHandler | None = None,
 ) -> _ApprovalManager:
-    """Initialize the module-level approval manager for one runtime context."""
+    """Initialize the module-level approval domain for one runtime context."""
     global _MANAGER
-
     if _MANAGER is not None and _MANAGER.uses_storage_root(runtime_paths.storage_root):
         _MANAGER.configure_transport(
-            sender=sender,
-            editor=editor,
-            event_cache=event_cache,
-            approval_room_ids=approval_room_ids,
+            prepare_event=prepare_event,
+            send_delivery=send_delivery,
+            resolve_delivery=resolve_delivery,
+            resolve_action_delivery=resolve_action_delivery,
+            cards=cards,
             transport_sender=transport_sender,
+            sending_device=sending_device,
+            continuation_ready=continuation_ready,
         )
         return _MANAGER
-
     if _MANAGER is not None and _MANAGER.has_live_work():
-        msg = "Cannot reinitialize approval store with pending live approvals; shut it down first."
+        msg = "Cannot reinitialize approval store while a decision is committing"
         raise RuntimeError(msg)
-
     _MANAGER = _ApprovalManager(
         runtime_paths,
-        sender=sender,
-        editor=editor,
-        event_cache=event_cache,
-        approval_room_ids=approval_room_ids,
+        prepare_event=prepare_event,
+        send_delivery=send_delivery,
+        resolve_delivery=resolve_delivery,
+        resolve_action_delivery=resolve_action_delivery,
+        cards=cards,
         transport_sender=transport_sender,
+        sending_device=sending_device,
+        continuation_ready=continuation_ready,
     )
     return _MANAGER
 
 
-async def shutdown_approval_manager(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
-    """Expire pending approvals and drop the module-level manager."""
+async def shutdown_approval_manager() -> None:
+    """Stop deadline scanning and release the process-local domain facade."""
     global _MANAGER
-
     manager = _MANAGER
     if manager is not None:
-        await manager.shutdown(reason=reason)
+        await manager.shutdown()
         _MANAGER = None

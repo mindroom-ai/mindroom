@@ -6,7 +6,7 @@
 > Only install plugins you trust and have reviewed.
 
 MindRoom plugins extend agents with custom tools, [hooks](https://docs.mindroom.chat/hooks/), and skills.
-A plugin is a directory with a `mindroom.plugin.json` manifest, one or more Python modules, and optionally skill directories.
+A plugin is a directory with a `mindroom.plugin.json` manifest and optional Python modules or skill directories.
 Plugins are loaded from paths listed under `plugins:` in `config.yaml`.
 
 ## Plugin structure
@@ -24,7 +24,8 @@ my-plugin/
         └── SKILL.md
 ```
 
-A plugin must have at least one of `tools_module`, `hooks_module`, `oauth_module`, or `skills`.
+Capability fields are optional, but the `name` field is required.
+A name-only manifest loads but contributes no tools, hooks, OAuth providers, or skills.
 A tools-only plugin exposes callable functions to agents.
 A plugin with `oauth_module` registers OAuth providers whose state, callbacks, and scoped credential storage are handled by MindRoom core.
 A hooks-only plugin observes or transforms events without adding agent-facing tools.
@@ -197,17 +198,46 @@ def register_oauth_providers(settings, runtime_paths):
     ]
 ```
 
-OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
+OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, `/api/oauth/{provider}/disconnect`, and the authenticated `GET`/`POST` `/api/oauth/{provider}/reset` confirmation flow.
 Dashboard flows normally call `connect` and use the returned provider authorization URL.
 Conversation flows should show the browser-openable `authorize` URL, because that URL first authenticates the MindRoom user and then redirects to the external provider.
 Conversation-issued links include an opaque connect token so the callback can verify the requester before storing scoped credentials.
 The connect token is also bound to the runtime requester, and redemption fails unless the authenticated dashboard user resolves to that requester.
 The callback stores tokens under `credential_service` using the resolved requester and agent execution scope, including private `user` and `user_agent` scopes.
+Every OAuth token `credential_service` must end with `_oauth` so core can enforce primary-runtime isolation and reject worker grants without loading plugin code.
 If the tool also has editable dashboard settings, declare `tool_config_service` and store those settings separately through the normal credentials API.
 Set `pkce_code_challenge_method="S256"` when the upstream OAuth provider requires PKCE.
 MindRoom stores the verifier in pending state and passes it as the fifth argument to custom `token_exchanger` callbacks.
 For example, an Acme Drive provider can store OAuth tokens in `acme_drive_oauth` while the `acme_drive` tool settings document contains only options such as file-size limits or capability toggles.
 Tokens and client secrets must never be written to `config.yaml`, prompt files, logs, or tool responses.
+
+Providers that publish protected-resource metadata can resolve endpoints and optionally register a client lazily with the generic discovery bootstrapper:
+
+```python
+from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
+
+provider = OAuthProvider(
+    id="acme_drive",
+    display_name="Acme Drive",
+    authorization_url="",
+    token_url="",
+    scopes=("files.read",),
+    credential_service="acme_drive_oauth",
+    client_config_services=("acme_drive_oauth_client",),
+    token_endpoint_auth_method="none",
+    pkce_code_challenge_method="S256",
+    runtime_bootstrapper=oauth_runtime_bootstrapper(
+        OAuthDiscoveryConfig(
+            resource="https://api.acme.example",
+            token_endpoint_auth_method="none",
+            pkce_code_challenge_method="S256",
+        ),
+    ),
+)
+```
+
+Automatic discovery checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
+Dynamic client registration requires a provider-specific `client_config_services` entry and runs only in the primary runtime.
 
 OAuth-backed tools should set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"` in `@register_tool_with_metadata`.
 When credentials are missing, return a concise instruction containing a browser-openable URL built with `mindroom.oauth.build_oauth_connect_instruction(provider, runtime_paths, worker_target=...)`.
@@ -383,6 +413,9 @@ MindRoom does **not** auto-detect constructor parameter names — undeclared man
 | `RUNTIME_PATHS` | `runtime_paths` | Storage paths, environment values, and data directory access |
 | `CREDENTIALS_MANAGER` | `credentials_manager` | Read and write the per-tool credentials store |
 | `WORKER_TARGET` | `worker_target` | Resolved worker routing context (scope, execution identity, worker key) |
+| `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
+| `WORKER_TOOLS_OVERRIDE` | `worker_tools_override` | Effective worker-routed tool override |
+| `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 
 Example:
 
@@ -420,7 +453,7 @@ context = get_tool_runtime_context()
 worker_target = context.resolve_worker_target()
 ```
 
-This returns the exact worker target that agent toolkit construction uses, so requester-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
+This returns the exact worker target that agent toolkit construction uses, so worker-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
 `resolve_worker_target()` raises `ValueError` for team and router dispatches, because those contexts have no single agent execution scope to mirror; catch it if your tool can run inside a team.
 
 ## MCP via plugins (advanced)
@@ -477,7 +510,9 @@ MCP toolkits are async; Agno's async agent runs (`arun`, `aprint_response`) hand
 
 List skill directories in the manifest `skills` array.
 Each listed directory is added to MindRoom's skill search roots.
-Skill subdirectories must contain a `SKILL.md` file with YAML frontmatter (name, description, requirements).
+Skill subdirectories must contain a `SKILL.md` file.
+YAML frontmatter is optional: discovery falls back to the directory name, and a missing description falls back to the resolved skill name.
+Requirements are declared only when needed.
 
 ## Hooks
 
@@ -580,7 +615,7 @@ If you need to force a reload, for example because the watcher missed something 
 ```
 
 The bot replies with the active plugin set and the count of cancelled background tasks.
-Admin gating uses `authorization.global_users` from `config.yaml`.
+Admin gating uses `administrators` from `config.yaml`.
 
 ### Caveats and tradeoffs
 
@@ -589,7 +624,7 @@ The hot-reload path is intentionally best-effort, not transactional.
 - **In-flight turns keep their old code.** A reload swaps the registry for new events, but any callback already running on the old module finishes there, and only new events use the new module.
 - **No partial-write detection.** If your editor saves the file in two writes, the watcher may briefly load the half-written first state, log an import error, and then reload again on the second write.
 - **CPU-bound infinite loops still wedge the event loop.** The hook dispatcher uses `asyncio.timeout()` for cooperative cancellation, so truly blocking CPU code is not preempted.
-- **Background resources held by the old module can leak until natural cleanup.** Only `asyncio.Task` objects directly attached to module globals are cancelled, so plugins that hold long-lived non-task resources need their own cleanup bookkeeping.
+- **Background resources held by the old module can leak until natural cleanup.** Reload cancels direct module-global `asyncio.Task` objects and tasks in one-level built-in dict, tuple, list, or set containers; deeper or custom containers and non-task resources need their own cleanup bookkeeping.
 - **New plugins added to disk are not auto-enabled.** You still have to add them under `plugins:` in `config.yaml`, because the watcher only reloads plugins that are already configured.
 
 ### Production tip

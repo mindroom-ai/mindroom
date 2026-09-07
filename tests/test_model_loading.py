@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import patch
 
 import pytest
@@ -10,6 +10,7 @@ from agno.models.message import Message as AgnoMessage
 from anthropic.lib.streaming import ParsedMessageStopEvent
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import ParsedMessage, Usage
+from pydantic import ValidationError
 
 from mindroom.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.config.main import Config
@@ -68,6 +69,64 @@ def test_first_party_openai_gpt_5_4_and_newer_use_responses(tmp_path: Path) -> N
     assert isinstance(current, MindRoomOpenAIResponses)
     assert isinstance(older, MindRoomOpenAIChat)
     assert isinstance(compatible, MindRoomOpenAIChat)
+
+
+def test_custom_openai_endpoint_requires_explicit_responses_selection(tmp_path: Path) -> None:
+    """A model name must not opt a compatible endpoint into a different API."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "astra": ModelConfig(
+                    provider="openai",
+                    id="gpt-6-astra",
+                    extra_kwargs={"api_key": "dummy-key", "base_url": "http://localhost:9292/v1"},
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    model = get_model_instance(config, runtime_paths_for(config), "astra")
+
+    assert isinstance(model, MindRoomOpenAIChat)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "api", "base_url", "expected_class"),
+    [
+        ("reasoning-alias", "responses", "http://localhost:9292/v1", MindRoomOpenAIResponses),
+        ("gpt-6-astra", "responses", "http://localhost:9292/v1", MindRoomOpenAIResponses),
+        ("gpt-5.6", "chat_completions", None, MindRoomOpenAIChat),
+        ("gpt-6-astra", "chat_completions", "http://localhost:9292/v1", MindRoomOpenAIChat),
+    ],
+)
+def test_explicit_openai_api_overrides_model_and_endpoint_defaults(
+    tmp_path: Path,
+    model_id: str,
+    api: Literal["responses", "chat_completions"],
+    base_url: str | None,
+    expected_class: type,
+) -> None:
+    """An endpoint's configured API must win over model-name inference."""
+    config = Config(
+        models={
+            "default": ModelConfig(
+                provider="openai",
+                id=model_id,
+                api=api,
+                extra_kwargs={"api_key": "dummy-key", "base_url": base_url},
+            ),
+        },
+    )
+    model = get_model_instance(config, test_runtime_paths(tmp_path))
+    assert isinstance(model, expected_class)
+
+
+@pytest.mark.parametrize(("provider", "api"), [("openai", "invalid"), ("anthropic", "responses")])
+def test_model_api_rejects_invalid_values_and_unsupported_providers(provider: str, api: str) -> None:
+    """A transport selection must not be silently ignored or misspelled."""
+    with pytest.raises(ValidationError):
+        ModelConfig.model_validate({"provider": provider, "id": "test-model", "api": api})
 
 
 def test_openai_wire_providers_use_replay_compatible_models(tmp_path: Path) -> None:

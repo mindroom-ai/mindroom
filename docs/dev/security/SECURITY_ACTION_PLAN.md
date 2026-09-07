@@ -1,6 +1,9 @@
 # MindRoom Security Action Plan
 
-**Updated:** September 17, 2025
+**Updated:** March 18, 2026
+
+> **Historical planning record:** This document mixes the original remediation plan with later repository audits.
+> It is not a current deployment attestation or an operational runbook; revalidate every status claim against the current source and target environment before acting.
 
 ## Executive Summary
 
@@ -9,14 +12,14 @@ MindRoom has addressed the most acute blockers identified in the initial securit
 **Current Risk Assessment: 🟠 MEDIUM-HIGH** – Staging-only. Proceed to production **after** completing outstanding High items.
 
 **Implementation Status (September 17, 2025):**
-- ✅ **P0 Legal/Regulatory:** GDPR flows and log sanitization implemented; helper scripts exist for key rotation.
-- ✅ **P1.1 Auth Security:** Auth monitoring, IP blocking, and admin route protections deployed.
+- ⚠️ **P0 Legal/Regulatory:** GDPR flows and a backend log sanitizer exist in tracked code, but deletion scope and global logging coverage remain incomplete.
+- ⚠️ **P1.1 Auth Security:** Auth monitoring, IP blocking, and admin route protections exist in tracked code; live deployment is unverified.
 - ⚠️ **P1.2 Infrastructure:** K8s Secrets mounted as files, but etcd-at-rest encryption and documented rotation remain unverified.
 - ⚠️ **P2 Monitoring:** Alerting, dashboards, and incident runbooks still pending (logs available for manual review).
 
 ---
 
-## 🚨 IMMEDIATE ACTIONS (✅ COMPLETED)
+## 🚨 IMMEDIATE ACTIONS (⚠️ PARTIAL)
 
 ### P0: Critical Authentication & Data Exposure Fixes
 
@@ -26,57 +29,51 @@ MindRoom has addressed the most acute blockers identified in the initial securit
    - **Verification:** Security review confirmed proper access controls
 
 2. **REVOKE & ROTATE ALL EXPOSED API KEYS** 🔑 ⚠️
-   - **✅ Helpers in repo:** `scripts/rotate-api-keys.sh` and `scripts/apply-rotated-keys.sh`
+   - **⚠️ Obsolete helpers:** Do not run `scripts/rotate-api-keys.sh` or `scripts/apply-rotated-keys.sh`; their Secret names and keys do not match the current charts.
    - **⚠️ Pending:** Confirm actual rotation for DeepSeek, Google, and OpenRouter keys (last known exposure in docs)
    - **⚠️ Pending:** Generate and store a rotation report (no `P0_2_SECRET_ROTATION_REPORT.md` exists)
-   - **Next step:** Schedule rotation run + verification before granting production access
+   - **Next step:** Use the current Helm, provisioner, or external-secret workflow and verify the rotation in a disposable namespace before granting production access.
 
 3. **REMOVE .env FROM GIT HISTORY** 📝 ⚠️
-   - Command stub retained below; confirm it has been executed on any shared repositories before launch.
-   ```bash
-   git filter-branch --force --index-filter \
-     "git rm --cached --ignore-unmatch .env" \
-     --prune-empty --tag-name-filter cat -- --all
-   git push --force --all
-   git push --force --tags
-   ```
+   - Rewriting shared Git history is destructive and requires repository-owner coordination, a tested backup, and a repository-specific migration plan.
+   - Do not copy a generic force-push command from this historical plan.
 
 4. **DEFAULT PASSWORDS REPLACEMENT** ✅ **COMPLETED**
    - **Status:** All default passwords removed from configurations
-   - **Implementation:** Helm templates generate strong secrets by default
+   - **Implementation:** Secrets must be supplied through the chart values or existing-Secret workflow; the platform chart does not generate strong missing secrets.
    - **Docker Compose:** Requires explicit password configuration (no defaults)
    - **Security:** No "changeme" passwords remain in tracked configs
 
 ---
 
-## ✅ COMPLETED SECURITY IMPLEMENTATIONS
+## SECURITY IMPLEMENTATIONS AND OPEN GAPS
 
-### P0: Legal/Regulatory Compliance (COMPLETED)
+### P0: Legal/Regulatory Compliance (PARTIAL)
 
 **Logging Sanitization:**
 - **Frontend:** Production logger prevents all console output (`lib/logger.ts`)
-- **Backend:** Automatic PII redaction in production logs (`utils/log_sanitizer.py`)
-- **Result:** Zero sensitive data exposure in production logs
+- **Backend:** A PII-redacting logger exists in `utils/log_sanitizer.py`, but modules using standard-library loggers bypass it.
+- **Result:** Global log-surface enforcement and verification remain outstanding.
 
 **GDPR Compliance:**
 - **Data Export:** Complete personal data export in JSON format (`/my/gdpr/export-data`)
 - **Data Deletion:** Soft delete with 7-day grace period (`/my/gdpr/request-deletion`)
 - **Consent Management:** User consent preferences (`/my/gdpr/consent`)
-- **Result:** Full GDPR Article compliance
+- **Result:** These application flows exist, but this document does not establish full GDPR compliance or deletion across authentication, payment, and instance-storage processors.
 
 **Soft Delete Implementation:**
-- **Database:** Migration 004 adds soft delete capabilities
+- **Database:** The consolidated schema contains soft-delete capabilities.
 - **Functions:** `soft_delete_account()`, `restore_account()`, `hard_delete_account()`
 - **Grace Period:** 7-day recovery window
 - **Result:** Data lifecycle management with audit trail
 
-### P1.1: Authentication Security (COMPLETED)
+### P1.1: Authentication Security (PARTIAL)
 
 **Auth Failure Tracking:**
 - **Implementation:** `auth_monitor.py` with module-level functions (KISS)
 - **IP Blocking:** Automatic blocking after 5 failures in 15 minutes
 - **Block Duration:** 30 minutes with automatic expiry
-- **Audit Logging:** All authentication events tracked with graceful failure handling
+- **Audit Logging:** Uncached regular-user verification successes and failures are recorded; cache hits, admin verification, and SSO paths are not comprehensively covered.
 - **Integration:** Embedded in `verify_user()` dependency
 - **Result:** Protection against brute force, credential stuffing, and account enumeration
 
@@ -87,7 +84,7 @@ MindRoom has addressed the most acute blockers identified in the initial securit
 **Secrets lifecycle:**
 - ✅ K8s secrets are mounted as read-only files at `/etc/secrets` and consumed via `_get_secret()`.
 - ⚠️ Need to verify etcd-at-rest encryption for the target cluster before launch.
-- ⚠️ Document a tested rotation run (helper scripts exist but have not been executed/end-to-end).
+- ⚠️ Document a tested rotation run through the current Helm, provisioner, or external-secret workflow.
 
 **Runtime hardening:**
 - ⚠️ Platform deployments still run as root; update manifests with `securityContext` (see example below).
@@ -104,10 +101,10 @@ securityContext:
 
 ### P2: Monitoring & IR (IN PROGRESS)
 
-**Prometheus Deployment (✅ COMPLETE)**
-- ✅ ServiceMonitor + PrometheusRule deployed for auth/admin events
+**Prometheus Configuration (PARTIAL)**
+- ✅ ServiceMonitor + PrometheusRule manifests exist for auth/admin events
 - ✅ Metrics exposed (`mindroom_auth_events_total`, `mindroom_admin_verifications_total`, `mindroom_blocked_ips`)
-- ✅ Scrape verified (Prometheus target UP)
+- ⚠️ Live scrape and target health require verification in the target cluster.
 - ➡️ Documented in SECURITY_REVIEW_11
 
 **Alert Routing (⚠️ TODO)**
@@ -120,7 +117,7 @@ securityContext:
 - Automate weekly/monthly security reports once routing is in place
 
 **Incident Response (⚠️ TODO)**
-- Draft playbook covering triage, escalation, postmortems
+- Turn the draft playbook into an owned, tested procedure covering triage, escalation, and postmortems.
 - Align with compliance requirements (SOC 2, GDPR breach notification)
 
 9. **Move Secrets from Environment Variables to Volumes** ✅ **COMPLETED**
@@ -161,26 +158,24 @@ securityContext:
     - **Enable Supabase transparent data encryption**
     - **Encrypt PII fields at application level**
 
-13. **Remove All Production Logging of Sensitive Data**
-    - **Remove all `console.log` from production builds**
-    - **Implement log sanitization middleware**
+13. **Enforce Production Logging Sanitization Across All Loggers**
+    - **Route standard-library and application loggers through one enforced sanitizer**
+    - **Verify representative UUID, email, and token fixtures across the production log surface**
 
-14. **Add GDPR Compliance Mechanisms**
-    - **Implement consent management**
-    - **Add data export endpoint**
-    - **Create data deletion workflows**
+14. **Complete GDPR Processor and Deletion Coverage**
+    - **Verify deletion across application, authentication, payment, and instance-storage processors**
+    - **Document retention and archival behavior**
 
 ### P5: Monitoring & Incident Response
 
-15. **Deploy Security Monitoring**
-    - **Implement failed login attempt tracking**
-    - **Add alerts for suspicious patterns**
-    - **Create audit logging for all admin actions**
+15. **Complete Security Monitoring**
+    - **Route existing alert evaluations to an owned receiver**
+    - **Cover cache-hit, admin, and SSO authentication surfaces**
+    - **Verify audit logging for all admin actions**
 
 16. **Create Incident Response Playbook**
     - **Document response procedures**
-    - **Set up security@mindroom.chat**
-    - **Create security.txt file**
+    - **Publish a verified disclosure channel and `security.txt` file**
 
 ---
 
@@ -203,11 +198,8 @@ securityContext:
 
 ### P7: Supply Chain Security
 
-20. **Fix npm Vulnerabilities**
-    ```bash
-    pnpm audit fix
-    pnpm update mermaid esbuild vite
-    ```
+20. **Triage Current JavaScript Dependency Findings**
+    - Re-run the repository's package-manager audit, validate each current finding, and apply targeted upgrades with tests.
 
 21. **Set Up Automated Dependency Scanning**
     - **Add GitHub Actions security workflow**
@@ -247,15 +239,15 @@ securityContext:
 ## 📋 Compliance Requirements
 
 ### Immediate Compliance Gaps
-- **GDPR:** No consent management, data portability, or right to erasure
+- **GDPR:** Application flows exist, but processor-wide deletion, retention, and encryption coverage is incomplete.
 - **SOC 2:** Missing audit logs, security monitoring, incident response
 - **PCI DSS:** Insufficient network segmentation (if processing payments)
 - **ISO 27001:** No formal security policies or procedures
 
 ### Current Security Posture
-- ✅ GDPR compliance for EU operations
-- ✅ Core security controls for SOC 2 foundation
-- ✅ Security documentation comprehensive and current
+- ⚠️ GDPR application flows exist, but this plan is not a compliance attestation.
+- ⚠️ Some controls relevant to SOC 2 exist, but operational evidence remains incomplete.
+- ⚠️ This historical document requires source and live-environment revalidation.
 - 🔄 Operational monitoring enhancements (post-launch)
 
 ---
@@ -267,7 +259,7 @@ securityContext:
 2. ✅ GDPR data deletion with 7-day grace period implemented
 3. ✅ GDPR consent management implemented
 4. ✅ Frontend logging sanitization (zero production output)
-5. ✅ Backend logging sanitization (automatic PII redaction)
+5. ⚠️ Backend logging sanitizer available to participating callers; global enforcement remains outstanding
 6. ✅ Git history scanned and documented (3 keys in docs)
 7. ✅ Soft delete mechanism with audit trail implemented
 
@@ -275,8 +267,8 @@ securityContext:
 8. ✅ Auth failure tracking implemented (IP-based)
 9. ✅ Automatic IP blocking after 5 failures in 15 minutes
 10. ✅ 30-minute block duration with automatic expiry
-11. ✅ Audit logging for all authentication events
-12. ✅ Integration with all authentication flows
+11. ⚠️ Audit logging for uncached regular-user authentication events
+12. ⚠️ Cache-hit, admin, and SSO authentication coverage remains incomplete
 
 **Infrastructure:**
 13. ✅ All admin endpoints require authentication
@@ -317,7 +309,7 @@ Re-run this action plan after the above are delivered.
 
 ## 📞 Support & Resources
 
-- **Security Questions:** security@mindroom.chat (TBD – create mailbox before launch)
+- **Security Questions:** Publish and verify a monitored disclosure channel before launch.
 - **Incident Response:** Playbook outstanding; assign an owner
 - **Bug Bounty:** Defer until monitoring & IR are mature
 - **External Audit:** Schedule post-remediation
@@ -332,13 +324,12 @@ Re-run this action plan after the above are delivered.
 
 ## Final Status Update (September 17, 2025)
 
-- **Risk Trend:** 6.8/10 → 5.8/10 (MEDIUM-HIGH). Further reduction blocked by open items above.
+- **Risk Trend:** The historical numeric estimate was unsupported; current evidence still indicates medium-high risk, with further reduction blocked by the open items above.
 - **Completed:** Admin authentication fixes, rate limiting, GDPR endpoints, log sanitization.
 - **Outstanding:** Secrets rotation confirmation, monitoring alerts, internal TLS, checklist backlog.
 
 **Platform Status:** Safe for restricted staging with trusted testers only. Do **not** expose publicly until remaining blockers are resolved and documentation is refreshed.
 
-> **Audit note (2026-03-18):** The 6.8→5.8 risk reduction is unsubstantiated — no scoring methodology or evidence ties specific fixes to numeric changes.
+> **Audit note (2026-03-18):** Earlier versions published a numeric risk reduction without a scoring methodology or evidence tying specific fixes to numeric changes.
 > Several items marked pending here have no target dates or responsible parties assigned.
-> The compliance section (P4/GDPR) contradicts itself: items 12-14 list GDPR as TODO while the completed section above confirms GDPR flows are live.
-> The P3-P8 sections have not been refreshed since the original write-up and may not reflect current state.
+> The P3-P8 sections originated in the original write-up and require current source and deployment validation.

@@ -21,11 +21,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_STALE_RECOVERY_RETRY_DELAYS_SECONDS = (0.25, 0.5, 1.0)
-
 type _StartupBot = AgentBot | TeamBot
 type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
-type _RecoverStaleStreams = Callable[[list[_StartupBot], Config, set[str]], Awaitable[None]]
+type _RecoverStaleStreams = Callable[[list[_StartupBot], Config, int, set[str]], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
 type _RunningBots = Callable[[], list[_StartupBot]]
@@ -40,119 +38,105 @@ class StartupMaintenanceController:
     sync_runtime_support: _SyncRuntimeSupport
     mark_runtime_support_ready: _MarkRuntimeSupportReady
     task: asyncio.Task[None] | None = field(default=None, init=False)
-    _started: bool = field(default=False, init=False)
-    # A reload can cancel maintenance before any phase completes and then
-    # finish with zero running bots; this records that the full sequence is
-    # still owed so a later reload or bot-recovery replay reruns it.
-    replay_pending: bool = field(default=False, init=False)
-    _config_reload_suspended: bool = field(default=False, init=False)
+    startup_cutoff_ms: int | None = field(default=None, init=False)
+    _room_setup_completion: asyncio.Future[None] | None = field(default=None, init=False, repr=False)
 
-    def start(self, bots: list[_StartupBot], config: Config) -> None:
+    def start(self, bots: list[_StartupBot], config: Config, *, startup_cutoff_ms: int) -> None:
         """Schedule detached startup maintenance for one startup generation."""
-        self._started = True
-        self.replay_pending = False
+        self.startup_cutoff_ms = startup_cutoff_ms
+        room_setup_completion = asyncio.get_running_loop().create_future()
+        self._room_setup_completion = room_setup_completion
         self.task = create_logged_task(
-            self._run(bots, config),
+            self._run(
+                bots,
+                config,
+                startup_cutoff_ms,
+                room_setup_completion=room_setup_completion,
+            ),
             name="startup_maintenance",
             failure_message="Startup maintenance task failed",
         )
 
-    async def cancel(self) -> bool:
-        """Cancel detached startup maintenance and report whether unfinished work was interrupted.
+    async def wait_for_rooms_and_memberships(self) -> None:
+        """Wait until initial room setup has published or failed closed."""
+        room_setup_completion = self._room_setup_completion
+        if room_setup_completion is None:
+            msg = "Startup maintenance has not started"
+            raise RuntimeError(msg)
+        await room_setup_completion
 
-        Parked debt counts as unfinished even when no task is alive: a prior
-        replay may have found zero running bots, and the pending flag is the
-        only record of that debt.
-        """
+    async def cancel(self) -> bool:
+        """Cancel detached startup maintenance and report whether unfinished work was interrupted."""
         task = self.task
         self.task = None
-        should_replay = (task is not None and not task.done()) or self.replay_pending
+        should_replay = task is not None and not task.done()
         await cancel_logged_task(task)
+        room_setup_completion = self._room_setup_completion
+        if room_setup_completion is not None and not room_setup_completion.done():
+            room_setup_completion.set_result(None)
         return should_replay
-
-    async def suspend_for_config_reload(self) -> bool:
-        """Cancel maintenance and fence background recovery until reload finalization."""
-        self._config_reload_suspended = True
-        return await self.cancel()
-
-    def _task_running(self) -> bool:
-        """Return whether a live maintenance task is currently scheduled."""
-        return self.task is not None and not self.task.done()
 
     def restart_after_config_reload(
         self,
         *,
         config: Config,
         running_bots: _RunningBots,
-        replay: bool = True,
     ) -> None:
         """Replay canceled startup maintenance after config reload completes."""
-        self._config_reload_suspended = False
-        if not replay or not self._started or self._task_running():
-            return
-        # The cancel interrupted the full sequence, so it is owed. Record the
-        # debt before attempting resume: a reload that finishes with zero
-        # running bots must stay replayable by a later reload or by background
-        # bot recovery.
-        self.replay_pending = True
-        self.resume_pending_maintenance(config=config, running_bots=running_bots)
-
-    def resume_pending_maintenance(self, *, config: Config, running_bots: _RunningBots) -> None:
-        """Resume parked full-maintenance debt once running bots exist.
-
-        Called from reload replay and from background bot-start recovery. Only
-        a live task blocks resume; parked debt must stay resumable without an
-        intervening cancel().
-        """
-        if self._config_reload_suspended or self._task_running() or not self.replay_pending:
+        if self.startup_cutoff_ms is None or self.task is not None:
             return
         bots = running_bots()
         if not bots:
             return
-        self.start(bots, config)
+        self.start(bots, config, startup_cutoff_ms=self.startup_cutoff_ms)
 
-    async def recover_after_bot_start(self, bots: list[_StartupBot], config: Config) -> None:
-        """Attempt one recovered bot's cleanup without truncating runtime finalization."""
-        recovery_complete = await self._run_phase(
-            "startup_maintenance.stale_stream_recovery.background_bot",
-            lambda: self.recover_stale_streams(bots, config, set()),
-            failure_message="Recovered bot stale stream recovery failed",
-        )
-        if not recovery_complete:
-            self.replay_pending = True
-
-    async def _run(self, bots: list[_StartupBot], config: Config) -> None:
+    async def _run(
+        self,
+        bots: list[_StartupBot],
+        config: Config,
+        startup_cutoff_ms: int,
+        *,
+        room_setup_completion: asyncio.Future[None],
+    ) -> None:
         scanned_room_ids: set[str] = set()
+
+        async def setup_rooms_and_publish_result() -> None:
+            try:
+                await self._run_phase(
+                    "startup_maintenance.rooms_and_memberships",
+                    lambda: self.setup_rooms_and_memberships(bots),
+                    failure_message="Startup room and membership maintenance failed",
+                )
+            finally:
+                if not room_setup_completion.done():
+                    room_setup_completion.set_result(None)
+
         room_setup_task = asyncio.create_task(
-            self._run_phase(
-                "startup_maintenance.rooms_and_memberships",
-                lambda: self.setup_rooms_and_memberships(bots),
-                failure_message="Startup room and membership maintenance failed",
-            ),
+            setup_rooms_and_publish_result(),
             name="startup_rooms_and_memberships",
         )
         try:
             await self._run_phase(
                 "startup_maintenance.stale_stream_recovery.initial",
-                lambda: self.recover_stale_streams(bots, config, scanned_room_ids),
+                lambda: self.recover_stale_streams(
+                    bots,
+                    config,
+                    startup_cutoff_ms,
+                    scanned_room_ids,
+                ),
                 failure_message="Initial startup stale stream recovery failed",
             )
             await room_setup_task
-            recovery_complete = await self._run_phase(
+            await self._run_phase(
                 "startup_maintenance.stale_stream_recovery.joined_room_delta",
-                lambda: self.recover_stale_streams(bots, config, scanned_room_ids),
+                lambda: self.recover_stale_streams(
+                    bots,
+                    config,
+                    startup_cutoff_ms,
+                    scanned_room_ids,
+                ),
                 failure_message="Joined-room delta stale stream recovery failed",
             )
-            for delay_seconds in _STALE_RECOVERY_RETRY_DELAYS_SECONDS:
-                if recovery_complete:
-                    break
-                await asyncio.sleep(delay_seconds)
-                recovery_complete = await self._run_phase(
-                    "startup_maintenance.stale_stream_recovery.retry",
-                    lambda: self.recover_stale_streams(bots, config, scanned_room_ids),
-                    failure_message="Startup stale stream recovery retry failed",
-                )
-            self.replay_pending = not recovery_complete
         finally:
             if not room_setup_task.done():
                 room_setup_task.cancel()

@@ -13,6 +13,7 @@ Models define the AI providers and model IDs used by agents.
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
+- `llama_cpp` - Local models through an OpenAI-compatible llama.cpp server
 - `groq` - Groq-hosted models (fast inference)
 - `openrouter` - OpenRouter-hosted models (access to many providers)
 - `cerebras` - Cerebras-hosted models
@@ -28,10 +29,13 @@ Each model configuration supports the following fields:
 |-------|----------|---------|-------------|
 | `provider` | Yes | - | The AI provider (see supported providers above) |
 | `id` | Yes | - | Model ID specific to the provider |
+| `api` | No | `null` | For `openai`, force `responses` or `chat_completions`; unset keeps automatic selection |
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
-| `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
 | `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` or `compaction.fallback_model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
+
+For Azure OpenAI, `id` is the Azure deployment name, not the underlying base-model name.
+Provider credentials come from supported environment variables, stored credentials, CLI authentication, or deliberately supplied `extra_kwargs`; the top-level `ModelConfig.api_key` field is not used during model construction.
 
 ## Configuration Examples
 
@@ -176,9 +180,30 @@ Changing `seed` changes the repeatable response length, split point, and tool-ca
 
 ## OpenAI API Models
 
-GPT 5.4 and newer models on the first-party `openai` provider use the Responses API.
-This enables OpenAI's native deferred-tool search without disabling reasoning.
-Older GPT models and models configured with a custom `extra_kwargs.base_url` keep using Chat Completions for OpenAI-compatible endpoint support.
+Set `api: responses` or `api: chat_completions` on an `openai` model to select the API independently of its model ID or endpoint.
+Use explicit selection for proxies and custom model aliases; the endpoint must support the selected API.
+
+```yaml
+models:
+  astra:
+    provider: openai
+    id: gpt-6-astra
+    api: responses
+    extra_kwargs:
+      base_url: http://localhost:4000/v1
+      reasoning_effort: high
+```
+
+[GPT-6 Astra requires Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model).
+Responses continuation works independently of the model ID, including custom aliases.
+Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
+`extra_kwargs.store: false` remains respected; selecting Responses does not override it.
+
+When `api` is unset, GPT 5.4 and newer models on the first-party OpenAI endpoint use Responses.
+Other routes, including all custom OpenAI-compatible endpoints, default to Chat Completions.
+If you previously relied on automatic Astra routing through a proxy, add `api: responses` before upgrading.
+Explicit Chat Completions disables native deferred-tool search and keeps MindRoom's dynamic-tool discovery.
+Selecting Responses on a custom endpoint does not enable OpenAI's hosted tool search; only supported first-party OpenAI and Codex routes use it.
 
 ## Codex Models with ChatGPT Login
 
@@ -439,7 +464,7 @@ Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICA
 
 ### File-based Secrets
 
-For container environments (Kubernetes, Docker Swarm), you can also use file-based secrets by appending `_FILE` to any environment variable name:
+For container environments (Kubernetes, Docker Swarm), supported API-key and secret variables can also use a `_FILE` suffix:
 
 ```bash
 # Instead of setting the key directly:

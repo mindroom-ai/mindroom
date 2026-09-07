@@ -29,6 +29,14 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
+            name="user_token",
+            label="User Token",
+            type="password",
+            required=False,
+            default=None,
+            description="User token (xoxp-) used for search_messages, which bot tokens cannot call",
+        ),
+        ConfigField(
             name="markdown",
             label="Markdown",
             type="boolean",
@@ -159,7 +167,6 @@ if TYPE_CHECKING:
     docs_url="https://docs.agno.com/tools/toolkits/social/slack",
     function_names=(
         "download_file",
-        "download_file_bytes",
         "get_channel_history",
         "get_channel_info",
         "get_thread",

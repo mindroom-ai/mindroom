@@ -16,7 +16,6 @@ from agno.models.message import Message
 from agno.run.agent import RunCancelledEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
 
-from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -30,10 +29,12 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.streaming import _CANCELLED_RESPONSE_NOTE, _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
+    make_matrix_client_mock,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
     request_envelope,
@@ -43,6 +44,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from mindroom.bot import AgentBot
 
 
 def _runtime_bound_config() -> Config:
@@ -58,7 +61,7 @@ def _runtime_bound_config() -> Config:
 def _mock_bot(tmp_path: Path) -> AgentBot:
     """Create a bot test instance with explicit mocked collaborators."""
     config = _runtime_bound_config()
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         AgentMatrixUser(
             agent_name="test_agent",
             password=TEST_PASSWORD,
@@ -72,18 +75,18 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     )
     bot.logger = MagicMock()
     bot.stop_manager.remove_stop_button = AsyncMock()
-    bot.client = AsyncMock()
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.user_id = "@mindroom_test_agent:localhost"
     bot.hook_registry = HookRegistry.empty()
     bot.enable_streaming = True
     bot.orchestrator = None
-    install_runtime_cache_support(bot)
+    install_runtime_journal_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
     )
     bot._conversation_state_writer = MagicMock()
     bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
-    bot._conversation_state_writer.persist_response_event_id_in_session_run = MagicMock()
+    bot._conversation_state_writer.apersist_response_event_id_in_session_run = AsyncMock()
     bot._conversation_state_writer.history_scope = MagicMock(
         return_value=HistoryScope(kind="agent", scope_id=bot.agent_name),
     )
@@ -99,6 +102,7 @@ def _knowledge_access_support() -> SimpleNamespace:
     return SimpleNamespace(
         for_agent=MagicMock(return_value=None),
         resolve_for_agent=MagicMock(return_value=_KnowledgeResolution(knowledge=None)),
+        resolve_for_agent_async=AsyncMock(return_value=_KnowledgeResolution(knowledge=None)),
     )
 
 
@@ -171,18 +175,20 @@ class TestAIErrorDisplay:
         async def mock_gateway_edit_message(
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
-            event_id: str,
-            content: dict[str, object],
-            text: str,
+            envelope: dict[str, object],
             **_kwargs: object,
         ) -> DeliveredMatrixEvent:
-            edited_messages.append((event_id, text))
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
+            # The outbox sends the finished replace event, so the edit target
+            # and its text come out of the envelope, not off the call.
+            target = envelope["m.relates_to"]["event_id"]
+            body = envelope["m.new_content"]["body"]
+            edited_messages.append((target, body))
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=envelope)
 
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(side_effect=mock_gateway_edit_message),
             ),
         ):
@@ -269,7 +275,7 @@ class TestAIErrorDisplay:
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=mock_gateway_edit_message),
             ),
         ):
@@ -307,7 +313,7 @@ class TestAIErrorDisplay:
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=mock_gateway_edit_message),
             ),
         ):
@@ -376,7 +382,7 @@ class TestAIErrorDisplay:
             patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(mock_agent))),
             patch("mindroom.ai.ai_runtime.cached_agent_run", new=AsyncMock(side_effect=fake_cached_run)),
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=mock_gateway_edit_message),
             ),
         ):
@@ -442,7 +448,7 @@ class TestAIErrorDisplay:
             ),
             patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(mock_agent))),
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=mock_gateway_edit_message),
             ),
         ):
@@ -533,13 +539,14 @@ class TestAIErrorDisplay:
         async def mock_gateway_edit_message(
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
-            event_id: str,  # noqa: ARG001
-            content: dict[str, object],
-            text: str,
+            envelope: dict[str, object],
             **_kwargs: object,
         ) -> DeliveredMatrixEvent:
-            edited_messages.append(text)
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
+            # The outbox sends the finished replace event, so the edit target
+            # and its text come out of the envelope, not off the call.
+            body = envelope["m.new_content"]["body"]
+            edited_messages.append(body)
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=envelope)
 
         error_messages = [
             "[test_agent] 🔴 Authentication failed. Please check your API key configuration.",
@@ -555,17 +562,22 @@ class TestAIErrorDisplay:
             with (
                 patch("mindroom.response_runner.ai_response") as mock_ai,
                 patch(
-                    "mindroom.delivery_gateway.edit_message_result",
+                    "mindroom.delivery_gateway.send_message_outcome",
                     new=AsyncMock(side_effect=mock_gateway_edit_message),
                 ),
             ):
                 _build_response_runner(bot)
                 mock_ai.return_value = error_msg
 
+                # Each iteration is a separate turn, so it needs a separate
+                # causing event. Sharing one would make the outbox treat the
+                # later answers as resends of the first and replay it.
+                index = error_messages.index(error_msg)
                 await bot._response_runner._process_and_respond(
                     _response_request(
                         prompt="Help me",
-                        existing_event_id=f"$thinking_{error_messages.index(error_msg)}",
+                        reply_to_event_id=f"$user_msg_{index}",
+                        existing_event_id=f"$thinking_{index}",
                     ),
                 )
 
@@ -607,7 +619,7 @@ class TestAIErrorDisplay:
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=mock_gateway_edit_message),
             ),
         ):
@@ -633,7 +645,7 @@ class TestAIErrorDisplay:
         with (
             patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
-                "mindroom.delivery_gateway.send_message_result",
+                "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(
                     return_value=DeliveredMatrixEvent(
                         event_id="$response_id",

@@ -8,14 +8,13 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from mindroom import constants
-from mindroom.api.config_lifecycle import read_committed_config_and_runtime, read_committed_runtime_config
+from mindroom.api.config_lifecycle import app_state, read_committed_config_and_runtime, read_committed_runtime_config
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_name, leave_room
+from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_name
 from mindroom.matrix.rooms import filter_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
-from mindroom.matrix.users import create_agent_user, login_agent_user
+from mindroom.matrix.users import create_agent_http_client
 
 logger = get_logger(__name__)
 
@@ -23,6 +22,7 @@ router = APIRouter(prefix="/api/matrix", tags=["matrix"])
 
 
 if TYPE_CHECKING:
+    from mindroom import constants
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
 
@@ -111,34 +111,18 @@ async def _get_agent_matrix_rooms(
         AgentRoomsResponse with room information
 
     """
-    # Create or get the agent user
-    homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
-    agent_user = await create_agent_user(
-        homeserver,
-        agent_id,
-        display_name,
-        runtime_paths=runtime_paths,
-    )
-
-    # Login and get the client
-    client = await login_agent_user(homeserver, agent_user, runtime_paths)
-
-    # Get all joined rooms from Matrix
-    joined_rooms = await get_joined_rooms(client) or []
-
-    # Resolve room aliases to room IDs for comparison
-    configured_room_ids = resolve_room_aliases(configured_room_aliases, runtime_paths=runtime_paths)
-
-    rooms_not_configured = [room for room in joined_rooms if room not in configured_room_ids]
-    unconfigured_rooms = await filter_non_dm_rooms(client, rooms_not_configured)
-
-    # Get room names for unconfigured rooms
-    unconfigured_room_details = []
-    for room_id in unconfigured_rooms:
-        room_name = await get_room_name(client, room_id)
-        unconfigured_room_details.append(_RoomInfo(room_id=room_id, name=room_name))
-
-    await client.close()
+    client = create_agent_http_client(agent_id, runtime_paths)
+    try:
+        joined_rooms = await get_joined_rooms(client) or []
+        configured_room_ids = resolve_room_aliases(configured_room_aliases, runtime_paths=runtime_paths)
+        rooms_not_configured = [room for room in joined_rooms if room not in configured_room_ids]
+        unconfigured_rooms = await filter_non_dm_rooms(client, rooms_not_configured)
+        unconfigured_room_details = []
+        for room_id in unconfigured_rooms:
+            room_name = await get_room_name(client, room_id)
+            unconfigured_room_details.append(_RoomInfo(room_id=room_id, name=room_name))
+    finally:
+        await client.close()
 
     return AgentRoomsResponse(
         agent_id=agent_id,
@@ -215,28 +199,17 @@ async def leave_room_endpoint(request: RoomLeaveRequest, api_request: Request) -
         HTTPException: If the entity is not found or the leave operation fails
 
     """
-    agent_data, runtime_paths = read_committed_config_and_runtime(
+    read_committed_config_and_runtime(
         api_request,
-        lambda config_data: dict(_get_configured_matrix_entity(config_data, request.agent_id)),
+        lambda config_data: _get_configured_matrix_entity(config_data, request.agent_id),
     )
-    homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
-
-    # Create or get the Matrix user for this configured entity.
-    agent_user = await create_agent_user(
-        homeserver,
-        request.agent_id,
-        agent_data.get("display_name", request.agent_id),
-        runtime_paths=runtime_paths,
-    )
-
-    # Login and get the client
-    client = await login_agent_user(homeserver, agent_user, runtime_paths)
-
-    # Leave the room
-    success = await leave_room(client, request.room_id)
-
-    # Close the client connection
-    await client.close()
+    leave = app_state(api_request.app).leave_matrix_room
+    if leave is None:
+        raise HTTPException(status_code=503, detail="Leaving a room requires a running MindRoom instance")
+    try:
+        success = await leave(request.agent_id, request.room_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     if not success:
         raise HTTPException(status_code=500, detail=f"Failed to leave room {request.room_id}")

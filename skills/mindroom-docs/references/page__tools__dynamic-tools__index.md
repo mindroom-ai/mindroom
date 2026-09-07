@@ -32,7 +32,8 @@ No flags means the tool is eager and appears in every request.
 
 ## Native Server-Side Tool Search
 
-Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the `anthropic` and `vertexai_claude` providers, and GPT models 5.4 or newer on the first-party `openai`, `codex`, and `openai_codex` providers, use the provider's server-side tool search automatically.
+Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the `anthropic` and `vertexai_claude` providers, and GPT models 5.4 or newer on first-party `openai`, `codex`, and `openai_codex` endpoints, use the provider's server-side tool search automatically.
+An `openai` model configured with `extra_kwargs.base_url` or a non-official `OPENAI_BASE_URL` uses MindRoom's runtime gating instead.
 On this path every deferred tool ships in every request tagged `defer_loading: true` together with the provider's tool-search entry, so deferred schemas stay out of the model's rendered context until the model searches for them.
 Tool discovery never invalidates the prompt cache: Anthropic expands discovered tool references inline in the message stream, and OpenAI loads discovered tools at the end of the context window.
 The `dynamic_tools` manager, its prompt blocks, and session loaded-tool state are not used on this path; all deferred toolkits are attached at agent build, so discovered calls execute directly.
@@ -48,7 +49,8 @@ The manager exposes `list_tools()`, `tool_search(query)`, `load_tool(tool_name)`
 Search is plain keyword and exact-name lookup only.
 A newly loaded tool becomes callable once it appears in the agent's available tools, never in the same parallel tool-call batch as `load_tool()`.
 A standalone agent continues the same task in a later tool-call step within the same response, because its run loop rebuilds the agent with the updated schema and resumes the turn without waiting for another user message.
-Team members and other embedded agents run without that continuation loop, so their loads and unloads take effect on the next request in the same session.
+Standalone agents and normal team turns continue the same task after loading or unloading a tool.
+Embedded callers without a continuation-capable response-turn driver apply changes on the next request in the same session.
 Rebuilding the agent after a tool load also makes that toolkit's instructions available in the new system prompt.
 
 ## State Scope

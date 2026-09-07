@@ -8,18 +8,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.handled_turns import TurnRecord
-from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    install_runtime_cache_support,
+    install_runtime_journal_support,
     make_matrix_client_mock,
     replace_edit_regenerator_deps,
     runtime_paths_for,
@@ -30,6 +31,8 @@ from tests.identity_helpers import persist_entity_accounts
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 async def _empty_event_iterator() -> AsyncGenerator[object, None]:
@@ -65,7 +68,7 @@ def setup_test_bot(
             config = bind_runtime_paths(config, runtime_paths)
     persist_entity_accounts(config, runtime_paths_for(config))
 
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent,
         storage_path,
         config,
@@ -74,12 +77,8 @@ def setup_test_bot(
         enable_streaming=enable_streaming,
     )
     bot.client = _make_matrix_client_mock()
-    install_runtime_cache_support(bot)
-    bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
-    bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
-    bot._conversation_cache.get_dispatch_thread_snapshot = AsyncMock(
+    install_runtime_journal_support(bot)
+    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     bot._conversation_resolver.fetch_thread_history = AsyncMock(
@@ -110,15 +109,17 @@ class TestStreamingEdits:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                "helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        self.config = with_current_room_member_access(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                    "helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         )
 
     @pytest.mark.asyncio
@@ -164,7 +165,7 @@ class TestStreamingEdits:
         await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
-        bot._turn_store.record_turn(
+        await bot._turn_store.record_turn(
             TurnRecord.create(["$initial123"], response_event_id="$response123"),
         )
 
@@ -255,7 +256,7 @@ class TestStreamingEdits:
         mock_room.room_id = "!test:localhost"
 
         # Mark that we already responded to some original message
-        bot._turn_store.record_turn(TurnRecord.create(["$original123"]))
+        await bot._turn_store.record_turn(TurnRecord.create(["$original123"]))
 
         # New message (NOT an edit) mentioning the agent
         new_event = MagicMock()

@@ -20,7 +20,7 @@ Use these tools when you need lightweight text extraction, structured scraping A
 - [`jina`] - Jina Reader URL reading and optional web search with an optional API key.
 - [`firecrawl`] - Firecrawl API for scrape, crawl, map, and search jobs.
 - [`spider`] - Spider Cloud API for search, scrape, and crawl.
-- [`scrapegraph`] - ScrapeGraph AI extraction, markdown conversion, search scraping, and agentic crawling.
+- [`scrapegraph`] - ScrapeGraph AI extraction, markdown conversion, search scraping, structured crawling, and raw scraping.
 - [`apify`] - Apify Actor runner that turns configured actors into tool functions.
 - [`brightdata`] - Bright Data scraping, screenshots, SERP queries, and feed endpoints.
 - [`oxylabs`] - Oxylabs Google search, Amazon data, and general web scraping.
@@ -391,11 +391,10 @@ scrape("https://matrix.org/blog/")
 
 #### What It Does
 
-`scrapegraph` exposes `smartscraper()`, `markdownify()`, `crawl()`, `agentic_crawler()`, `searchscraper()`, and `scrape()`.
+`scrapegraph` exposes `smartscraper()`, `markdownify()`, `crawl()`, `searchscraper()`, and `scrape()`.
 `smartscraper()` extracts structured data from one page based on a natural-language prompt.
 `markdownify()` returns a Markdown version of a page.
 `crawl()` applies a prompt plus JSON schema across a crawl.
-`agentic_crawler()` performs automated steps in the browser and can optionally run AI extraction over the resulting content.
 `searchscraper()` searches the web before extracting information.
 `render_heavy_js` only affects the low-level `scrape()` path.
 
@@ -408,10 +407,13 @@ scrape("https://matrix.org/blog/")
 | `enable_markdownify` | `boolean` | `no` | `false` | Enable `markdownify()`. |
 | `enable_crawl` | `boolean` | `no` | `false` | Enable `crawl()`. |
 | `enable_searchscraper` | `boolean` | `no` | `false` | Enable `searchscraper()`. |
-| `enable_agentic_crawler` | `boolean` | `no` | `false` | Enable `agentic_crawler()`. |
 | `enable_scrape` | `boolean` | `no` | `false` | Enable raw `scrape()`. |
 | `render_heavy_js` | `boolean` | `no` | `false` | Ask ScrapeGraph to render heavy JavaScript for `scrape()`. |
+| `crawl_poll_interval` | `number` | `no` | `3` | Seconds between crawl-status polls. |
+| `crawl_max_wait` | `number` | `no` | `180` | Maximum seconds to wait for a crawl to complete. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+
+The upstream toolkit also accepts a `headers` mapping, but MindRoom's authored tool-config schema does not currently expose mapping-valued fields, so do not put `headers` in `config.yaml`.
 
 #### Example
 
@@ -421,7 +423,6 @@ agents:
     tools:
       - scrapegraph:
           enable_searchscraper: true
-          enable_agentic_crawler: true
 ```
 
 ```python
@@ -431,7 +432,7 @@ markdownify("https://matrix.org/blog/")
 
 #### Notes
 
-- If you disable `enable_smartscraper` without enabling `all`, the installed upstream toolkit auto-enables `markdownify()` so the tool still has a useful default surface.
+- Keep at least one function enabled, or set `all: true`; disabling every function flag registers an empty toolkit surface.
 - Use `scrapegraph` when you want prompt-shaped extraction rather than generic page text.
 - For purely local extraction with no hosted API dependency, use `crawl4ai` or `trafilatura`.
 

@@ -50,11 +50,6 @@ def _debug_enabled(bound_logger: object) -> bool:
         return True
 
 
-def timing_enabled() -> bool:
-    """Return whether structured timing diagnostics should be emitted."""
-    return _is_enabled()
-
-
 def elapsed_ms_between(start: float, end: float, *, ndigits: int = 1) -> float:
     """Return elapsed milliseconds rounded to the shared precision policy."""
     return round((end - start) * 1000, ndigits)
@@ -88,7 +83,6 @@ _PRIMARY_TOTALS: tuple[tuple[str, str, str], ...] = (
 )
 
 _DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
-    ("diag_ingress_cache_append_ms", "ingress_cache_append_start", "ingress_cache_append_ready"),
     ("diag_ingress_normalize_ms", "ingress_normalize_start", "ingress_normalize_ready"),
     ("diag_dispatch_prepare_ms", "dispatch_prepare_start", "dispatch_prepare_ready"),
     ("diag_dispatch_plan_ms", "dispatch_plan_start", "dispatch_plan_ready"),

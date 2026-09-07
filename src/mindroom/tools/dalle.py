@@ -55,7 +55,8 @@ if TYPE_CHECKING:
             label="Style",
             type="text",
             required=False,
-            default="vivid",
+            default=None,
+            description="Optional vivid or natural; only sent when set because OpenAI dropped the parameter",
         ),
         ConfigField(
             name="api_key",

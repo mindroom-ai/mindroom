@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path  # noqa: TC003 - dataclass is also the API response schema
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    import nio
 
-    from mindroom.matrix.users import AgentMatrixUser
+    from mindroom.thread_export.projected_history import ProjectedThreadReader
 
 
 @dataclass(frozen=True)
@@ -80,8 +81,9 @@ class ThreadExportTarget:
     """One export destination and its optional room-membership scope."""
 
     output_dir: Path
-    required_member_user_id: str | None = None
+    required_member_user_ids: tuple[str, ...] = ()
     include_invited_rooms: bool = True
+    trusted_root: Path | None = None
 
 
 @dataclass
@@ -112,18 +114,21 @@ class ThreadExportAccumulator:
 
 @dataclass(frozen=True)
 class ThreadExportGroup:
-    """Rooms ready to be read with one persisted Matrix account."""
+    """Rooms to read through one running entity."""
 
     rooms: tuple[ThreadExportRoom, ...]
-    user: AgentMatrixUser
+    entity_name: str
 
 
 @dataclass(frozen=True)
-class ThreadExportGroupFailure:
-    """Rooms that could not be assigned a usable Matrix account."""
+class ThreadExportSource:
+    """Rooms readable through one live Matrix client and projection view.
 
+    ``target_output_dirs=None`` preserves the all-target fan-out used by
+    administrative exports; workspace sources name only their own targets.
+    """
+
+    client: nio.AsyncClient
+    reader: ProjectedThreadReader
     rooms: tuple[ThreadExportRoom, ...]
-    error: str
-
-
-type ThreadExportGroupResult = ThreadExportGroup | ThreadExportGroupFailure
+    target_output_dirs: tuple[Path, ...] | None = None

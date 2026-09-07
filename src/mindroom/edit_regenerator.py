@@ -3,25 +3,26 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-
-import nio
 
 from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.handled_turns import with_user_stop
 from mindroom.hooks import hook_ingress_policy
-from mindroom.matrix.client_visible_messages import extract_visible_edit_body, resolve_visible_event_source
+from mindroom.matrix.client_visible_messages import extract_visible_edit_body
+from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_store import record_deferred_outcome_response, record_user_stop_terminal
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    import nio
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -91,7 +92,6 @@ class EditRegenerator:
 
     deps: EditRegeneratorDeps
     _mailboxes: dict[tuple[str, str, str], _Mailbox] = field(default_factory=dict, init=False, repr=False)
-    _inflight_revision_sources: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
@@ -116,7 +116,6 @@ class EditRegenerator:
         thread_history = await self.deps.resolver.fetch_thread_history(
             room.room_id,
             conversation_target.resolved_thread_id,
-            caller_label="edit_regeneration_context",
         )
         return MessageContext(
             am_i_mentioned=context.am_i_mentioned,
@@ -129,10 +128,10 @@ class EditRegenerator:
             requires_model_history_refresh=context.requires_model_history_refresh,
         )
 
-    async def handle_message_edit(
+    async def handle_message_edit(  # noqa: C901, PLR0911, PLR0912
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
+        event: nio.RoomMessageFormatted,
         event_info: EventInfo,
         requester_user_id: str,
     ) -> None:
@@ -144,55 +143,28 @@ class EditRegenerator:
         if registry.current_entity_name_for_user_id(event.sender):
             return
 
-        registered_source = self._inflight_revision_sources.setdefault(event.event_id, original_event_id)
-        if registered_source != original_event_id:
-            msg = f"Edit revision {event.event_id!r} targets multiple source events"
-            raise RuntimeError(msg)
-        try:
-            await self._handle_registered_message_edit(
-                room,
-                event,
-                event_info,
-                requester_user_id,
-                original_event_id=original_event_id,
-            )
-        finally:
-            if self._inflight_revision_sources.get(event.event_id) == original_event_id:
-                self._inflight_revision_sources.pop(event.event_id)
-
-    def source_for_inflight_revision_event_id(self, revision_event_id: str) -> str | None:
-        """Return the source currently owned by one in-flight edit revision."""
-        return self._inflight_revision_sources.get(revision_event_id)
-
-    async def _handle_registered_message_edit(  # noqa: C901, PLR0911
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
-        event_info: EventInfo,
-        requester_user_id: str,
-        *,
-        original_event_id: str,
-    ) -> None:
-        """Regenerate one edit while its revision-to-source ownership is registered."""
-        if self.deps.turn_store.event_is_redacted(event.event_id):
-            return
-
         context = await self.deps.resolver.extract_message_context(
             room,
             event,
-            caller_label="edit_regeneration_context",
         )
-        turn_record = self.deps.turn_store.load_turn(
+        # A search hint, and only that. The thread an edit names inside its ``m.new_content`` is
+        # ignored on application, so it places nothing - here it merely points the recovery read at
+        # one more conversation session to probe, on top of the room session it always probes. The
+        # record that comes back still has to name this event as a source authored by this
+        # requester, and every durable or visible decision below is taken from that record's own
+        # conversation target rather than from the claim that found it.
+        turn_lookup_thread_id = context.thread_id or event_info.thread_id_from_edit
+        turn_record = await self.deps.turn_store.load_turn(
             room=room,
-            thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
+            thread_id=turn_lookup_thread_id,
             original_event_id=original_event_id,
             requester_user_id=requester_user_id,
         )
         if turn_record is None:
             await self.deps.wait_for_turn_settled((original_event_id,))
-            turn_record = self.deps.turn_store.load_turn(
+            turn_record = await self.deps.turn_store.load_turn(
                 room=room,
-                thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
+                thread_id=turn_lookup_thread_id,
                 original_event_id=original_event_id,
                 requester_user_id=requester_user_id,
             )
@@ -220,8 +192,6 @@ class EditRegenerator:
         committed = (turn_record.source_event_revisions or {}).get(original_event_id)
         if committed is not None and revision < committed:
             return
-        if self.deps.turn_store.event_is_redacted(event.event_id):
-            return
 
         edited_content, _ = await extract_visible_edit_body(
             event.source,
@@ -239,130 +209,36 @@ class EditRegenerator:
             body=edited_content,
             source_kind=EDIT_SOURCE_KIND,
         )
-        await self._enqueue_edit(
-            room,
-            turn_record,
-            _Edit(
+        assert turn_record.anchor_event_id is not None
+        key = (turn_record.conversation_target.room_id, turn_record.anchor_event_id, envelope.requester_id)
+        mailbox = self._mailboxes.setdefault(key, _Mailbox())
+        reserved_revision = mailbox.reserved_revisions.get(original_event_id)
+        if reserved_revision is not None and revision <= reserved_revision:
+            return
+        mailbox.reserved_revisions[original_event_id] = revision
+        mailbox.participants += 1
+        try:
+            suppressed = revision == (turn_record.suppressed_source_event_revisions or {}).get(
+                original_event_id,
+            ) or (
+                revision != committed
+                and await self.deps.ingress_hook_runner.emit_message_received_hooks(
+                    envelope=envelope,
+                    correlation_id=event.event_id,
+                    policy=hook_ingress_policy(envelope),
+                )
+            )
+            if mailbox.reserved_revisions.get(original_event_id) != revision:
+                return
+            mailbox.pending[original_event_id] = _Edit(
                 original_event_id=original_event_id,
                 body=edited_content,
                 context=context,
                 envelope=envelope,
                 revision=revision,
                 receipt_order=receipt_order,
-                suppressed=False,
-            ),
-            committed_revision=committed,
-            emit_ingress_hook=True,
-        )
-
-    async def handle_redacted_revision(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.RedactionEvent,
-        source_event_id: str,
-    ) -> None:
-        """Regenerate a turn from the source body exposed after its current edit is redacted."""
-        turn_record = self.deps.turn_store.get_turn_record(source_event_id)
-        if turn_record is None:
-            return
-        committed = (turn_record.source_event_revisions or {}).get(source_event_id)
-        revision_is_inflight = self._inflight_revision_sources.get(event.redacts) == source_event_id
-        if not revision_is_inflight and (committed is None or committed[1] != event.redacts):
-            return
-        if (
-            turn_record.conversation_target is None
-            or turn_record.history_scope is None
-            or turn_record.response_owner != self.deps.agent_name
-            or turn_record.response_event_id is None
-        ):
-            return
-        requester_user_id = turn_record.requester_id_for_source(source_event_id)
-        if requester_user_id is None or source_event_id in turn_record.redacted_source_event_ids:
-            return
-
-        response = await self.deps.resolver.deps.conversation_cache.get_event(room.room_id, source_event_id)
-        if not isinstance(response, nio.RoomGetEventResponse) or not isinstance(response.event, nio.RoomMessageText):
-            msg = f"Failed to resolve source {source_event_id!r} after redacting revision {event.redacts!r}"
-            raise TypeError(msg)
-        source_event = response.event
-        _resolved_source, visible_body = await resolve_visible_event_source(
-            source_event.source,
-            self._client(),
-            fallback_body=source_event.body,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-            room_id=room.room_id,
-        )
-        context = await self.deps.resolver.extract_message_context(
-            room,
-            source_event,
-            caller_label="edit_redaction_regeneration_context",
-        )
-        context = await self._edit_regeneration_context(
-            context,
-            room,
-            conversation_target=turn_record.conversation_target,
-        )
-        envelope = self.deps.resolver.build_message_envelope(
-            event=source_event,
-            requester_user_id=requester_user_id,
-            context=context,
-            target=turn_record.conversation_target,
-            body=visible_body,
-            source_kind=EDIT_SOURCE_KIND,
-        )
-        await self._enqueue_edit(
-            room,
-            turn_record,
-            _Edit(
-                original_event_id=source_event_id,
-                body=visible_body,
-                context=context,
-                envelope=envelope,
-                revision=(event.server_timestamp, event.event_id),
-                receipt_order=await self.deps.receipt_order(),
-                suppressed=False,
-            ),
-            committed_revision=committed,
-            emit_ingress_hook=False,
-        )
-
-    async def _enqueue_edit(
-        self,
-        room: nio.MatrixRoom,
-        turn_record: TurnRecord,
-        edit: _Edit,
-        *,
-        committed_revision: SourceEventRevision | None,
-        emit_ingress_hook: bool,
-    ) -> None:
-        """Reserve and drain one monotonic source revision through its response mailbox."""
-        assert turn_record.anchor_event_id is not None
-        assert turn_record.conversation_target is not None
-        key = (turn_record.conversation_target.room_id, turn_record.anchor_event_id, edit.envelope.requester_id)
-        mailbox = self._mailboxes.setdefault(key, _Mailbox())
-        mailbox.participants += 1
-        try:
-            if emit_ingress_hook and self.deps.turn_store.event_is_redacted(edit.revision[1]):
-                return
-            reserved_revision = mailbox.reserved_revisions.get(edit.original_event_id)
-            if reserved_revision is not None and edit.revision <= reserved_revision:
-                return
-            mailbox.reserved_revisions[edit.original_event_id] = edit.revision
-            suppressed = edit.revision == (turn_record.suppressed_source_event_revisions or {}).get(
-                edit.original_event_id,
-            ) or (
-                emit_ingress_hook
-                and edit.revision != committed_revision
-                and await self.deps.ingress_hook_runner.emit_message_received_hooks(
-                    envelope=edit.envelope,
-                    correlation_id=edit.revision[1],
-                    policy=hook_ingress_policy(edit.envelope),
-                )
+                suppressed=suppressed,
             )
-            if mailbox.reserved_revisions.get(edit.original_event_id) != edit.revision:
-                return
-            mailbox.pending[edit.original_event_id] = replace(edit, suppressed=suppressed)
             async with mailbox.lock:
                 await self._drain(room, turn_record, mailbox)
         finally:
@@ -370,13 +246,13 @@ class EditRegenerator:
             if mailbox.participants == 0 and self._mailboxes.get(key) is mailbox:
                 self._mailboxes.pop(key)
 
-    def _build_request(  # noqa: C901
+    async def _build_request(  # noqa: C901
         self,
         room: nio.MatrixRoom,
         mailbox: _Mailbox,
     ) -> tuple[ResponseRequest | None, TurnRecord | None, dict[str, SourceEventRevision]]:
         latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
-        record = self.deps.turn_store.load_turn(
+        record = await self.deps.turn_store.load_turn(
             room=room,
             thread_id=latest.context.thread_id,
             original_event_id=latest.original_event_id,
@@ -419,7 +295,7 @@ class EditRegenerator:
                     source_event_revisions=revisions,
                     suppressed_source_event_revisions=suppressed_revisions,
                 )
-                self.deps.turn_store.record_turn(record)
+                await self.deps.turn_store.record_turn(record)
             return None, None, applied
 
         driving_edit = max(active.values(), key=lambda edit: edit.revision)
@@ -437,6 +313,7 @@ class EditRegenerator:
                     prompt_map,
                     dict(record.source_event_metadata),
                     timestamp_formatter=self.deps.timestamp_formatter,
+                    member_display_names=room_member_display_names(room),
                 )
                 if tagged_prompt is not None:
                     prompt, structured = tagged_prompt, True
@@ -460,15 +337,17 @@ class EditRegenerator:
             ),
         )
 
-        def record_interrupted_turn() -> None:
-            # The interrupted revision must stay uncommitted so the replacement
-            # runtime's recovery re-drives it instead of treating it as applied.
-            if self.deps.interrupted_turn_rooms.register(driving_edit.revision[1], room_id=room.room_id):
-                applied.clear()
+        record_interrupted_turn, record_deferred_outcome, record_user_stop = self._settlement_callbacks(
+            room,
+            record=record,
+            driving_edit=driving_edit,
+            applied=applied,
+        )
 
         return (
             ResponseRequest(
                 thread_history=driving_edit.context.thread_history,
+                member_display_names=room_member_display_names(room),
                 prompt=prompt,
                 response_envelope=driving_edit.envelope,
                 existing_event_id=record.response_event_id,
@@ -491,29 +370,55 @@ class EditRegenerator:
                 ),
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
-                on_deferred_outcome_handled=lambda response_event_id: (
-                    self.deps.turn_store.record_responded_turn(
-                        canonicalize_turn_record(record, response_event_id=response_event_id),
-                    )
-                    if applied
-                    else None
-                ),
-                on_user_stop_handled=lambda response_event_id, stop_receipt_order: (
-                    self.deps.turn_store.record_turn_durably(
-                        with_user_stop(
-                            record,
-                            response_event_id,
-                            stop_receipt_order,
-                            delivery_settled=True,
-                        ),
-                    )
-                    if applied
-                    else None
-                ),
+                on_deferred_outcome_handled=record_deferred_outcome,
+                on_user_stop_handled=record_user_stop,
             ),
             record,
             applied,
         )
+
+    def _settlement_callbacks(
+        self,
+        room: nio.MatrixRoom,
+        *,
+        record: TurnRecord,
+        driving_edit: _Edit,
+        applied: dict[str, SourceEventRevision],
+    ) -> tuple[
+        Callable[[], None],
+        Callable[[str], Awaitable[None]],
+        Callable[[str, int], Awaitable[None]],
+    ]:
+        """Build the interrupted-turn and terminal-outcome callbacks for one regeneration.
+
+        Both outcome callbacks read ``applied`` when they fire rather than when
+        the request is built, because ``record_interrupted_turn`` can empty it
+        in between: an interrupted revision must stay uncommitted so the
+        replacement runtime re-drives it instead of treating it as applied.
+        """
+
+        def record_interrupted_turn() -> None:
+            if self.deps.interrupted_turn_rooms.register(driving_edit.revision[1], room_id=room.room_id):
+                applied.clear()
+
+        async def record_deferred_outcome(response_event_id: str) -> None:
+            if applied:
+                await record_deferred_outcome_response(
+                    self.deps.turn_store,
+                    record,
+                    response_event_id,
+                )
+
+        async def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
+            if applied:
+                await record_user_stop_terminal(
+                    self.deps.turn_store,
+                    record,
+                    response_event_id,
+                    stop_receipt_order,
+                )
+
+        return record_interrupted_turn, record_deferred_outcome, record_user_stop
 
     @staticmethod
     def _discard(mailbox: _Mailbox, revisions: dict[str, SourceEventRevision]) -> None:
@@ -549,7 +454,7 @@ class EditRegenerator:
     async def _drain_claimed(self, room: nio.MatrixRoom, mailbox: _Mailbox) -> None:
         while mailbox.pending:
             latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
-            request, record, applied = self._build_request(room, mailbox)
+            request, record, applied = await self._build_request(room, mailbox)
             if request is None or record is None:
                 self._discard(mailbox, applied)
                 if not applied:
@@ -559,7 +464,7 @@ class EditRegenerator:
             if regenerated_event_id is not None:
                 if not applied:
                     return
-                self.deps.turn_store.record_responded_turn(
+                await self.deps.turn_store.record_responded_turn(
                     canonicalize_turn_record(record, response_event_id=regenerated_event_id),
                 )
                 self._discard(mailbox, applied)

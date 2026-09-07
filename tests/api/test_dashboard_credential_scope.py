@@ -7,6 +7,7 @@ from fastapi import HTTPException, Request
 
 from mindroom.api.dashboard_credential_scope import (
     require_agent_credential_management_authorized,
+    require_agent_oauth_connection_authorized,
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
@@ -27,7 +28,12 @@ def _request(auth_user: dict[str, Any] | None = None, query_string: bytes = b"")
     return Request(scope)
 
 
-def _config(worker_scope: str | None = None, authorization: dict[str, object] | None = None) -> Config:
+def _config(
+    worker_scope: str | None = None,
+    *,
+    credential_managers: list[str] | None = None,
+    private_per: str | None = None,
+) -> Config:
     payload: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
         "agents": {
@@ -37,11 +43,11 @@ def _config(worker_scope: str | None = None, authorization: dict[str, object] | 
                 "tools": ["calculator"],
                 "instructions": ["hi"],
                 "rooms": ["lobby"],
+                "credential_managers": credential_managers or [],
+                **({"private": {"per": private_per}} if private_per is not None else {}),
             },
         },
     }
-    if authorization is not None:
-        payload["authorization"] = authorization
     config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
     return config
@@ -203,7 +209,7 @@ class TestResolveDashboardAgentExecutionScopeRequest:
 class TestRequireAgentCredentialManagementAuthorized:
     """Accept/reject matrix for credential management per caller role."""
 
-    _allowlist: ClassVar[dict[str, object]] = {"agent_reply_permissions": {"*": ["@alice:example.org"]}}
+    _credential_managers: ClassVar[list[str]] = ["@alice:example.org"]
 
     def _runtime_paths(self) -> RuntimePaths:
         return resolve_runtime_paths(process_env={})
@@ -212,12 +218,58 @@ class TestRequireAgentCredentialManagementAuthorized:
         """Return isolated runtime paths with an empty process env."""
         identity = require_agent_credential_management_authorized(
             _request({"user_id": "alice", "auth_source": "trusted_upstream", "matrix_user_id": "@alice:example.org"}),
-            config=_config(authorization=self._allowlist),
+            config=_config(credential_managers=self._credential_managers),
             runtime_paths=self._runtime_paths(),
             agent_name="general",
         )
         assert identity.requester_id == "@alice:example.org"
         assert identity.agent_name == "general"
+
+    def test_human_alias_returns_canonical_dashboard_execution_identity(self) -> None:
+        """Private dashboard targets must share the canonical human requester's storage scope."""
+        owner_id = "@alice:example.org"
+        bridge_id = "@bridge:example.org"
+        config = _config(credential_managers=[owner_id])
+        config.authorization.aliases = {owner_id: [bridge_id]}
+
+        identity = require_agent_credential_management_authorized(
+            _request(
+                {
+                    "user_id": "bridge",
+                    "auth_source": "trusted_upstream",
+                    "matrix_user_id": bridge_id,
+                },
+            ),
+            config=config,
+            runtime_paths=self._runtime_paths(),
+            agent_name="general",
+        )
+
+        assert identity.requester_id == owner_id
+
+    def test_configured_bot_alias_cannot_inherit_dashboard_credential_authority(self) -> None:
+        """A configured bot must keep its own identity instead of inheriting a human grant."""
+        owner_id = "@alice:example.org"
+        bot_id = "@bridgebot:example.org"
+        config = _config(credential_managers=[owner_id])
+        config.authorization.aliases = {owner_id: [bot_id]}
+        config.bot_accounts = [bot_id]
+
+        with pytest.raises(HTTPException) as exc_info:
+            require_agent_credential_management_authorized(
+                _request(
+                    {
+                        "user_id": "bridgebot",
+                        "auth_source": "trusted_upstream",
+                        "matrix_user_id": bot_id,
+                    },
+                ),
+                config=config,
+                runtime_paths=self._runtime_paths(),
+                agent_name="general",
+            )
+
+        assert exc_info.value.status_code == 403
 
     def test_non_allowlisted_trusted_upstream_matrix_user_is_rejected(self) -> None:
         """A non-allowlisted trusted-upstream Matrix user is rejected with 403."""
@@ -230,7 +282,7 @@ class TestRequireAgentCredentialManagementAuthorized:
                         "matrix_user_id": "@mallory:example.org",
                     },
                 ),
-                config=_config(authorization=self._allowlist),
+                config=_config(credential_managers=self._credential_managers),
                 runtime_paths=self._runtime_paths(),
                 agent_name="general",
             )
@@ -241,21 +293,54 @@ class TestRequireAgentCredentialManagementAuthorized:
         with pytest.raises(HTTPException) as exc_info:
             require_agent_credential_management_authorized(
                 _request({"user_id": "alice"}),
-                config=_config(authorization=self._allowlist),
+                config=_config(credential_managers=self._credential_managers),
                 runtime_paths=self._runtime_paths(),
                 agent_name="general",
             )
         assert exc_info.value.status_code == 403
 
-    def test_dashboard_user_is_authorized_when_no_allowlist_is_configured(self) -> None:
-        """Without an allowlist any authenticated dashboard user is authorized."""
-        identity = require_agent_credential_management_authorized(
-            _request({"user_id": "alice"}),
-            config=_config(),
-            runtime_paths=self._runtime_paths(),
+    def test_dashboard_user_is_rejected_when_no_credential_manager_is_configured(self) -> None:
+        """An authenticated dashboard user still needs explicit credential authority."""
+        with pytest.raises(HTTPException) as exc_info:
+            require_agent_credential_management_authorized(
+                _request({"user_id": "alice"}),
+                config=_config(),
+                runtime_paths=self._runtime_paths(),
+                agent_name="general",
+            )
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.parametrize("private_per", ["user", "user_agent"])
+    def test_requester_can_manage_own_private_agent_oauth_without_allowlist(self, private_per: str) -> None:
+        """Private-agent OAuth authority is separate from generic credential management."""
+        request = _request(
+            {
+                "user_id": "alice",
+                "auth_source": "trusted_upstream",
+                "matrix_user_id": "@alice:example.org",
+            },
+        )
+        config = _config(private_per=private_per)
+        runtime_paths = self._runtime_paths()
+
+        with pytest.raises(HTTPException) as exc_info:
+            require_agent_credential_management_authorized(
+                request,
+                config=config,
+                runtime_paths=runtime_paths,
+                agent_name="general",
+            )
+        assert exc_info.value.status_code == 403
+
+        identity = require_agent_oauth_connection_authorized(
+            request,
+            config=config,
+            runtime_paths=runtime_paths,
             agent_name="general",
         )
-        assert identity.requester_id == "alice"
+
+        assert identity.requester_id == "@alice:example.org"
+        assert identity.agent_name == "general"
 
     def test_unresolvable_requester_is_rejected(self) -> None:
         """Requests without a resolvable requester identity are rejected with 403."""

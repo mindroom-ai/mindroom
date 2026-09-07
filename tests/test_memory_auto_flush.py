@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -237,6 +240,57 @@ async def test_worker_respects_batch_limits(
     await worker._run_cycle(config)
 
     assert len(writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_session_load_does_not_block_the_event_loop(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked session read must run outside the worker's event loop."""
+    mark_auto_flush_dirty_session(
+        tmp_path,
+        config,
+        agent_name="general",
+        session_id="s1",
+    )
+    started = threading.Event()
+    loop_advanced = threading.Event()
+    release = threading.Event()
+    observed_progress = threading.Event()
+
+    def _blocking_load(*_args: object, **_kwargs: object) -> _FakeSession:
+        started.set()
+        assert release.wait(timeout=5)
+        return _FakeSession(updated_at=100, messages=[])
+
+    def _release_after_observing_loop() -> None:
+        assert started.wait(timeout=5)
+        if loop_advanced.wait(timeout=0.5):
+            observed_progress.set()
+        release.set()
+
+    monkeypatch.setattr("mindroom.memory.auto_flush._load_agent_session", _blocking_load)
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+    monkeypatch.setattr(worker, "_process_session_key", AsyncMock())
+    observer = threading.Thread(target=_release_after_observing_loop, name="auto-flush-loop-observer")
+    observer.start()
+    try:
+        task = asyncio.create_task(worker._run_cycle(config))
+        assert await asyncio.to_thread(started.wait, 5)
+        loop_advanced.set()
+        await task
+    finally:
+        release.set()
+        observer.join(timeout=5)
+
+    assert observed_progress.is_set(), "session read blocked the event loop"
+    assert not observer.is_alive()
 
 
 @pytest.mark.asyncio
@@ -782,8 +836,13 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
     captured: dict[str, object] = {}
 
     class _DummyStorage:
+        closed = False
+
         def get_session(self, session_id: str, _session_type: object) -> None:
             captured["session_id"] = session_id
+
+        def close(self) -> None:
+            self.closed = True
 
     def _fake_create_session_storage(
         agent_name: str,
@@ -796,7 +855,9 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
         captured["config"] = config
         captured["runtime_paths"] = runtime_paths
         captured["execution_identity"] = execution_identity
-        return _DummyStorage()
+        storage = _DummyStorage()
+        captured["storage"] = storage
+        return storage
 
     monkeypatch.setattr("mindroom.memory.auto_flush.create_session_storage", _fake_create_session_storage)
 
@@ -813,6 +874,8 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
     assert captured["execution_identity"] == alice_identity
     assert captured["agent_name"] == "mind"
     assert captured["session_id"] == "session-alice"
+    assert isinstance(captured["storage"], _DummyStorage)
+    assert captured["storage"].closed is True
 
 
 def test_load_agent_session_uses_canonical_session_helper(
@@ -820,7 +883,7 @@ def test_load_agent_session_uses_canonical_session_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Auto-flush should not locally coerce raw Agno session payloads."""
-    storage = object()
+    storage = MagicMock()
     sentinel = object()
 
     def _fake_create_session_storage(*_args: object, **_kwargs: object) -> object:
@@ -836,6 +899,7 @@ def test_load_agent_session_uses_canonical_session_helper(
     )
 
     assert _load_agent_session(config, runtime_paths_for(config), "general", "session-1") is sentinel
+    storage.close.assert_called_once_with()
 
 
 def test_reprioritize_private_sessions_stays_within_private_scope(tmp_path: Path) -> None:

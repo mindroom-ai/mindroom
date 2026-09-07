@@ -186,7 +186,9 @@ class KnowledgeRefreshScheduler:
 
         request = _ScheduledRefresh(
             base_id=base_id,
-            config=config.model_copy(deep=True),
+            # Config reloads replace the object, so retaining this generation
+            # avoids a CPU-heavy deep copy on the event loop.
+            config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
             health_recorder=capture_embedder_health_recorder(),

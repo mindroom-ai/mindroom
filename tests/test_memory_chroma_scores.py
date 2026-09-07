@@ -18,8 +18,8 @@ def _chroma_store() -> ChromaDB:
     store.insert(
         vectors=[[1.0, 0.0, 0.0], [0.8, 0.6, 0.0], [0.0, 0.0, 1.0]],
         payloads=[
-            {"data": "IonQ MindRoom COI lawyer review", "user_id": "agent_general"},
-            {"data": "IonQ hardware notes", "user_id": "agent_general"},
+            {"data": "PR review", "user_id": "agent_general"},
+            {"data": "Hardware notes", "user_id": "agent_general"},
             {"data": "unrelated grocery list", "user_id": "agent_general"},
         ],
         ids=["verbatim", "related", "unrelated"],
@@ -30,7 +30,7 @@ def _chroma_store() -> ChromaDB:
 def _rank_with_mem0(store: ChromaDB) -> list[dict[str, object]]:
     """Run mem0's real semantic scoring gate over one verbatim-overlap query."""
     hits = store.search(
-        query="IonQ COI lawyer review",
+        query="PR review",
         vectors=[1.0, 0.0, 0.0],
         top_k=3,
         filters=_SCOPE_FILTER,
@@ -72,7 +72,7 @@ def test_wrapped_chroma_scores_return_the_verbatim_match_first() -> None:
     _install_chroma_similarity_scores(store)
 
     hits = store.search(
-        query="IonQ COI lawyer review",
+        query="PR review",
         vectors=[1.0, 0.0, 0.0],
         top_k=3,
         filters=_SCOPE_FILTER,
@@ -83,7 +83,7 @@ def test_wrapped_chroma_scores_return_the_verbatim_match_first() -> None:
 
     ranked = _rank_with_mem0(store)
     assert [entry["id"] for entry in ranked] == ["verbatim", "related"]
-    assert ranked[0]["payload"]["data"] == "IonQ MindRoom COI lawyer review"
+    assert ranked[0]["payload"]["data"] == "PR review"
 
 
 def test_install_ignores_non_chroma_stores() -> None:

@@ -45,6 +45,7 @@ from tests.conftest import (
     bind_runtime_paths,
     make_turn_context,
     make_visible_message,
+    seed_session,
 )
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
@@ -96,7 +97,7 @@ def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path:
         ],
     )
 
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     assert session.runs is not None
     assert [(message.role, message.content) for message in session.runs[0].messages or []] == [
@@ -595,7 +596,7 @@ async def test_prepare_agent_and_prompt_skips_thread_fallback_for_summary_only_r
         runs=[],
         summary=SessionSummary(summary="Compacted summary", updated_at=datetime.now(UTC)),
     )
-    storage.upsert_session(session)
+    seed_session(storage, session)
     live_agent = _agent()
     thread_history = [
         make_visible_message(sender="@alice:localhost", body="Original context", event_id="$root"),
@@ -700,7 +701,8 @@ async def test_native_agno_replays_recent_raw_history_without_persisting_replay(
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    storage.upsert_session(
+    seed_session(
+        storage,
         _session(
             "session-1",
             runs=[
@@ -752,7 +754,7 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
         summary=SessionSummary(summary="stored summary", updated_at=datetime.now(UTC)),
     )
     update_scope_seen_event_ids(session, HistoryScope(kind="agent", scope_id="test_agent"), ["event-1"])
-    storage.upsert_session(session)
+    seed_session(storage, session)
 
     recording_model = RecordingModel(id="recording-model", provider="fake")
     live_agent = _agent(model=recording_model, db=storage, num_history_runs=1)

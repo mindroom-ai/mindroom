@@ -6,11 +6,11 @@ import ast
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from agno.db.base import SessionType
@@ -24,7 +24,7 @@ from mindroom import constants
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.event_journal.store import TurnRecordStore
 from mindroom.handled_turns import (
     SourceEventMetadata,
     TurnRecord,
@@ -40,453 +40,36 @@ from mindroom.history.storage import (
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.text_ingress_dispatch import (
-    _blocked_before_plan,
-    _PreparedTextDispatch,
-    _run_claimed_response,
-    dispatch_text_message,
-)
+from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_store import TurnStore, TurnStoreDeps
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from mindroom.text_ingress_dispatch import _ReplayGuard
-    from mindroom.turn_controller import TurnController
-    from mindroom.turn_policy import PreparedDispatch
+    from mindroom.event_journal import EventJournalStore
 
 
-def _store(
-    tmp_path: Path,
-    *,
-    on_terminal_turn_persisted: Callable[[tuple[str, ...]], None] | None = None,
-) -> TurnStore:
-    return TurnStore(
+async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent") -> TurnStore:
+    """Return a warmed store over this journal's turn records.
+
+    Warming is not optional any more: the ledger's synchronous reads answer
+    from a map that ``warm`` fills, and refuse until it has.
+    """
+    store = TurnStore(
         TurnStoreDeps(
-            agent_name="agent",
-            tracking_base_path=tmp_path,
+            agent_name=agent_name,
+            turn_records=journal_store.turn_records(agent_name),
+            legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
-            on_terminal_turn_persisted=on_terminal_turn_persisted,
         ),
     )
+    await store.warm()
+    return store
 
 
-def _is_claimed(store: TurnStore, event_id: str) -> bool:
-    """Inspect the reservation-owned records at the TurnStore unit seam."""
-    with store._pending_claim_lock:
-        return any(event_id in claim.indexed_event_ids for claim in store._pending_turn_claims)
-
-
-def test_complete_turn_claim_owns_source_and_discovery_alias(tmp_path: Path) -> None:
-    """One reservation-owned record carries every live identity."""
-    store = _store(tmp_path)
-    claimed_turn = TurnRecord.create(
-        ["$relay"],
-        discovery_event_ids=("$routed",),
-        completed=False,
-    )
-
-    assert store.try_claim_turn(claimed_turn)
-    assert _is_claimed(store, "$relay") is True
-    assert _is_claimed(store, "$routed") is True
-    store.release_pending_turn_claim(claimed_turn)
-    assert _is_claimed(store, "$routed") is False
-    assert _is_claimed(store, "$relay") is False
-
-
-def test_source_replay_collides_with_live_discovery_alias(tmp_path: Path) -> None:
-    """A routed source stays owned until both original and relay settle."""
-    store = _store(tmp_path)
-    original = TurnRecord.create(["$routed"], completed=False)
-    relay = TurnRecord.create(["$relay"], discovery_event_ids=("$routed",), completed=False)
-    replay = TurnRecord.create(["$routed"], completed=False)
-
-    assert store.try_claim_turn(original)
-    assert store.try_claim_turn(relay)
-    store.release_pending_turn_claim(original)
-    assert store.try_claim_turn(replay) is False
-
-    store.release_pending_turn_claim(relay)
-    assert store.try_claim_turn(replay) is True
-    store.release_pending_turn_claim(replay)
-
-
-@pytest.mark.asyncio
-async def test_dispatch_releases_claim_when_router_alias_discovery_fails(tmp_path: Path) -> None:
-    """Every failure after the primary claim must leave the source replayable."""
-    store = _store(tmp_path)
-
-    def fail_alias_discovery(_event: object) -> str:
-        msg = "alias discovery failed"
-        raise RuntimeError(msg)
-
-    controller = cast(
-        "TurnController",
-        SimpleNamespace(
-            deps=SimpleNamespace(
-                turn_store=store,
-                ingress=SimpleNamespace(router_relay_original_event_id=fail_alias_discovery),
-            ),
-        ),
-    )
-    raw_event = PreparedTextEvent(
-        sender="@router:example.org",
-        event_id="$relay",
-        body="relayed",
-        source={},
-        server_timestamp=1_000,
-    )
-
-    with pytest.raises(RuntimeError, match="alias discovery failed"):
-        await dispatch_text_message(
-            controller,
-            MagicMock(room_id="!room:example.org"),
-            raw_event,
-            "@user:example.org",
-            command_executor=MagicMock(),
-            visible_responses=MagicMock(),
-        )
-
-    assert _is_claimed(store, "$relay") is False
-
-
-@pytest.mark.asyncio
-async def test_dispatch_claims_complete_router_relay_turn_before_first_await(tmp_path: Path) -> None:
-    """Dispatch claims source and routed alias together before preparation."""
-    store = _store(tmp_path)
-    ingress = SimpleNamespace(router_relay_original_event_id=lambda _event: "$routed")
-    controller = cast(
-        "TurnController",
-        SimpleNamespace(deps=SimpleNamespace(turn_store=store, ingress=ingress)),
-    )
-    raw_event = PreparedTextEvent(
-        sender="@router:example.org",
-        event_id="$relay",
-        body="relayed",
-        source={},
-        server_timestamp=1_000,
-    )
-    prepared = SimpleNamespace(
-        handled_turn=TurnRecord.create(
-            ["$relay"],
-            discovery_event_ids=("$routed",),
-            completed=False,
-        ),
-        event=raw_event,
-    )
-    observed: dict[str, bool] = {}
-    prepared_turns: list[TurnRecord | None] = []
-
-    async def capture_prepared(*_args: object, handled_turn: TurnRecord | None, **_kwargs: object) -> object:
-        prepared_turns.append(handled_turn)
-        return prepared
-
-    async def blocked(*_args: object, **_kwargs: object) -> bool:
-        observed["routed_in_flight"] = _is_claimed(store, "$routed")
-        return True
-
-    with (
-        patch(
-            "mindroom.text_ingress_dispatch._prepare_text_dispatch",
-            new=capture_prepared,
-        ),
-        patch(
-            "mindroom.text_ingress_dispatch._blocked_before_plan",
-            new=AsyncMock(side_effect=blocked),
-        ),
-    ):
-        await dispatch_text_message(
-            controller,
-            MagicMock(room_id="!room:example.org"),
-            raw_event,
-            "@user:example.org",
-            command_executor=MagicMock(),
-            visible_responses=MagicMock(),
-        )
-
-    assert observed["routed_in_flight"] is True
-    assert prepared_turns == [
-        TurnRecord.create(
-            ["$relay"],
-            discovery_event_ids=("$routed",),
-            completed=False,
-        ),
-    ]
-    assert _is_claimed(store, "$routed") is False
-    assert _is_claimed(store, "$relay") is False
-
-
-@pytest.mark.asyncio
-async def test_dispatch_leaves_alias_owned_by_another_live_turn(tmp_path: Path) -> None:
-    """A relay whose routed alias is already owned leaves that owner untouched.
-
-    The routed original may still be live when the relay overlaps it. The relay's
-    up-front claim must fail for that alias and never release it, so the original
-    turn's claim survives the relay's finally block.
-    """
-    store = _store(tmp_path)
-    assert store.try_claim_turn(TurnRecord.create(["$routed"], completed=False))
-    ingress = SimpleNamespace(router_relay_original_event_id=lambda _event: "$routed")
-    controller = cast(
-        "TurnController",
-        SimpleNamespace(deps=SimpleNamespace(turn_store=store, ingress=ingress)),
-    )
-    raw_event = PreparedTextEvent(
-        sender="@router:example.org",
-        event_id="$relay",
-        body="relayed",
-        source={},
-        server_timestamp=1_000,
-    )
-    prepared = SimpleNamespace(handled_turn=TurnRecord.create(["$relay"], completed=False), event=raw_event)
-    prepared_claims: list[TurnRecord | None] = []
-
-    async def capture_prepared(*_args: object, handled_turn: TurnRecord | None, **_kwargs: object) -> object:
-        prepared_claims.append(handled_turn)
-        return prepared
-
-    with (
-        patch(
-            "mindroom.text_ingress_dispatch._prepare_text_dispatch",
-            new=capture_prepared,
-        ),
-        patch(
-            "mindroom.text_ingress_dispatch._blocked_before_plan",
-            new=AsyncMock(return_value=True),
-        ),
-    ):
-        await dispatch_text_message(
-            controller,
-            MagicMock(room_id="!room:example.org"),
-            raw_event,
-            "@user:example.org",
-            command_executor=MagicMock(),
-            visible_responses=MagicMock(),
-        )
-
-    # The relay released its complete record; the routed original still owns its source.
-    assert prepared_claims == [
-        TurnRecord.create(
-            ["$relay"],
-            discovery_event_ids=("$routed",),
-            completed=False,
-        ),
-    ]
-    assert _is_claimed(store, "$routed") is True
-    assert _is_claimed(store, "$relay") is False
-
-
-def _prepared_replay_guard_dispatch(*, degraded: bool) -> tuple[_PreparedTextDispatch, TurnRecord]:
-    event = PreparedTextEvent(
-        sender="@user:example.org",
-        event_id="$current",
-        body="current",
-        source={},
-        server_timestamp=1_000,
-    )
-    handled_turn = TurnRecord.create(["$current", "$coalesced-sibling"], completed=False)
-    prepared = _PreparedTextDispatch(
-        command=None,
-        event=event,
-        handled_turn=handled_turn,
-        payload_metadata=None,
-        dispatch=cast(
-            "PreparedDispatch",
-            SimpleNamespace(
-                envelope=SimpleNamespace(
-                    origin=SimpleNamespace(may_be_superseded_by_newer_requester_turn=True),
-                ),
-            ),
-        ),
-        replay_guard=cast(
-            "_ReplayGuard",
-            SimpleNamespace(
-                degraded=degraded,
-                history=[],
-                thread_id="$thread",
-            ),
-        ),
-        dispatch_started_at=0.0,
-    )
-    return prepared, handled_turn
-
-
-@pytest.mark.asyncio
-async def test_full_replay_guard_receives_every_current_turn_event_id() -> None:
-    """The full-history seam must not treat a coalesced sibling as newer work."""
-    prepared, handled_turn = _prepared_replay_guard_dispatch(degraded=False)
-    full_guard = MagicMock(return_value=False)
-    controller = cast(
-        "TurnController",
-        SimpleNamespace(
-            deps=SimpleNamespace(logger=MagicMock()),
-            _should_skip_deep_synthetic_full_dispatch=MagicMock(return_value=False),
-            _has_newer_unresponded_in_thread=full_guard,
-        ),
-    )
-
-    assert (
-        await _blocked_before_plan(
-            controller,
-            MagicMock(room_id="!room:example.org"),
-            prepared,
-            command_executor=MagicMock(),
-            visible_responses=MagicMock(),
-            requester_user_id="@user:example.org",
-        )
-        is False
-    )
-    assert full_guard.call_args.kwargs["current_turn_event_ids"] == handled_turn.indexed_event_ids
-
-
-@pytest.mark.asyncio
-async def test_degraded_replay_guard_receives_every_current_turn_event_id() -> None:
-    """The cache fallback seam must not treat a coalesced sibling as newer work."""
-    prepared, handled_turn = _prepared_replay_guard_dispatch(degraded=True)
-    cached_guard = AsyncMock(return_value=False)
-    controller = cast(
-        "TurnController",
-        SimpleNamespace(
-            deps=SimpleNamespace(logger=MagicMock()),
-            _should_skip_deep_synthetic_full_dispatch=MagicMock(return_value=False),
-            _has_newer_unresponded_cached_thread_event=cached_guard,
-        ),
-    )
-
-    assert (
-        await _blocked_before_plan(
-            controller,
-            MagicMock(room_id="!room:example.org"),
-            prepared,
-            command_executor=MagicMock(),
-            visible_responses=MagicMock(),
-            requester_user_id="@user:example.org",
-        )
-        is False
-    )
-    assert cached_guard.await_args.kwargs["current_turn_event_ids"] == handled_turn.indexed_event_ids
-
-
-@pytest.mark.asyncio
-async def test_replay_guard_persists_no_response_supersession(tmp_path: Path) -> None:
-    """A skipped older turn needs durable no-response proof for restart and live-fuzz attribution."""
-    store = _store(tmp_path)
-    prepared, _handled_turn = _prepared_replay_guard_dispatch(degraded=False)
-    visible_responses = SimpleNamespace(settle_source_events_ignored=AsyncMock())
-    controller = cast(
-        "TurnController",
-        SimpleNamespace(
-            deps=SimpleNamespace(logger=MagicMock(), turn_store=store),
-            _should_skip_deep_synthetic_full_dispatch=MagicMock(return_value=False),
-            _has_newer_unresponded_in_thread=MagicMock(return_value=True),
-        ),
-    )
-
-    assert await _blocked_before_plan(
-        controller,
-        MagicMock(room_id="!room:example.org"),
-        prepared,
-        command_executor=MagicMock(),
-        visible_responses=visible_responses,
-        requester_user_id="@user:example.org",
-    )
-
-    persisted = store.get_turn_record("$current")
-    assert persisted is not None
-    assert persisted.completed is True
-    assert persisted.response_event_id is None
-    assert store.get_turn_record("$coalesced-sibling") == persisted
-    visible_responses.settle_source_events_ignored.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_router_relay_response_persists_collided_alias_and_redaction(tmp_path: Path) -> None:
-    """A responding relay keeps its routed alias durable without stealing its live claim."""
-    store = _store(tmp_path)
-    assert store.try_claim_turn(TurnRecord.create(["$routed"], completed=False))
-    marked = store.mark_source_redacted("$routed")
-    assert marked is not None
-
-    target = MessageTarget.resolve("!room:example.org", "$thread", "$relay")
-    raw_event = PreparedTextEvent(
-        sender="@router:example.org",
-        event_id="$relay",
-        body="relayed",
-        source={},
-        server_timestamp=1_000,
-    )
-    prepared = SimpleNamespace(
-        event=raw_event,
-        payload_metadata=None,
-        handled_turn=TurnRecord.create(
-            ["$relay"],
-            discovery_event_ids=("$routed",),
-        ),
-        dispatch=SimpleNamespace(
-            requester_user_id="@user:example.org",
-            target=target,
-            scheduled_history_budget=None,
-        ),
-        dispatch_started_at=1.0,
-    )
-    plan = SimpleNamespace(
-        kind="respond",
-        response_action=SimpleNamespace(kind="reject"),
-    )
-    controller = cast(
-        "TurnController",
-        SimpleNamespace(
-            deps=SimpleNamespace(
-                turn_store=store,
-                ingress=SimpleNamespace(router_relay_original_event_id=lambda _event: "$routed"),
-                turn_policy=SimpleNamespace(plan_turn=AsyncMock(return_value=plan)),
-                response_runner=SimpleNamespace(has_active_response_for_target=MagicMock()),
-            ),
-            _client=lambda: MagicMock(),
-        ),
-    )
-
-    with (
-        patch(
-            "mindroom.text_ingress_dispatch._prepare_text_dispatch",
-            new=AsyncMock(return_value=prepared),
-        ),
-        patch(
-            "mindroom.text_ingress_dispatch._blocked_before_plan",
-            new=AsyncMock(return_value=False),
-        ),
-        patch(
-            "mindroom.text_ingress_dispatch.is_dm_room",
-            new=AsyncMock(return_value=False),
-        ),
-    ):
-        await dispatch_text_message(
-            controller,
-            MagicMock(room_id="!room:example.org"),
-            raw_event,
-            "@user:example.org",
-            command_executor=MagicMock(),
-            visible_responses=SimpleNamespace(settle_source_events_ignored=AsyncMock()),
-        )
-
-    persisted = store.get_turn_record("$relay")
-    assert persisted is not None
-    assert persisted.discovery_event_ids == ("$routed",)
-    assert persisted.redacted_source_event_ids == ("$routed",)
-    # The relay released only its own claim; the overlapping original still owns its alias.
-    assert _is_claimed(store, "$routed") is True
-    assert _is_claimed(store, "$relay") is False
-
-    store._ledger.flush()
-    _reset_handled_turn_ledger_runtime()
-    restarted = _store(tmp_path)
-    assert restarted.get_turn_record("$routed") == persisted
-
-
-def _load_with_recovery(
+async def _load_with_recovery(
     store: TurnStore,
     *,
     original_event_id: str,
@@ -494,7 +77,7 @@ def _load_with_recovery(
 ) -> TurnRecord | None:
     room = MagicMock(room_id="!room:example.org")
     with patch.object(store, "_load_persisted_turn_record", return_value=recovery_record):
-        return store.load_turn(
+        return await store.load_turn(
             room=room,
             thread_id=None,
             original_event_id=original_event_id,
@@ -506,6 +89,8 @@ def _load_with_recovery(
 class _FakeAgentStorage:
     session: AgentSession | TeamSession | None
     upserted_session: AgentSession | TeamSession | None = None
+    upserted_runs: list[object] = field(default_factory=list)
+    deleted_run_ids: list[str] = field(default_factory=list)
 
     def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
         if self.session is None or self.session.session_id != session_id:
@@ -515,12 +100,25 @@ class _FakeAgentStorage:
     def upsert_session(self, session: AgentSession | TeamSession) -> None:
         self.upserted_session = session
 
+    def upsert_run(
+        self,
+        run: object,
+        session_id: str,
+        user_id: str | None = None,
+        run_index: int | None = None,
+    ) -> None:
+        del session_id, user_id, run_index
+        self.upserted_runs.append(run)
+
+    def delete_runs(self, run_ids: list[str]) -> None:
+        self.deleted_run_ids.extend(run_ids)
+
     def close(self) -> None:
         return None
 
 
-def _store_with_storage(
-    tmp_path: Path,
+async def _store_with_storage(
+    journal_store: EventJournalStore,
     storage: _FakeAgentStorage,
     *,
     agent_name: str = "agent",
@@ -529,15 +127,18 @@ def _store_with_storage(
     state_writer.create_storage.return_value = storage
     state_writer.session_type_for_scope.return_value = SessionType.AGENT
     state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
-    return TurnStore(
+    store = TurnStore(
         TurnStoreDeps(
             agent_name=agent_name,
-            tracking_base_path=tmp_path,
+            turn_records=journal_store.turn_records(agent_name),
+            legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
         ),
     )
+    await store.warm()
+    return store
 
 
 def _owned_turn_record(target: MessageTarget) -> TurnRecord:
@@ -551,43 +152,24 @@ def _owned_turn_record(target: MessageTarget) -> TurnRecord:
     )
 
 
-def _prepare_redaction(
+async def _prepare_redaction(
     store: TurnStore,
     target: MessageTarget,
     *,
     redacted_event_id: str = "$user_msg",
 ) -> bool:
     """Tombstone one source and run the next response's locked cleanup gate."""
-    store.mark_source_redacted(redacted_event_id)
-    return store._prepare_response_for_redactions(
+    await store.mark_source_redacted(redacted_event_id)
+    return await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
 
 
-def test_only_terminal_turn_notifies_exact_indexed_event_ids(tmp_path: Path) -> None:
-    """Pending TurnStore state must not retire callback work that startup cannot resume."""
-    notifications: list[tuple[str, ...]] = []
-    store = _store(tmp_path, on_terminal_turn_persisted=notifications.append)
-    pending = TurnRecord.create(
-        ["$source"],
-        discovery_event_ids=["$alias"],
-        completed=False,
-    )
-
-    store.record_pending_turn(pending)
-    assert notifications == []
-
-    store.record_turn(pending)
-    store._ledger.flush()
-
-    assert notifications == [("$source", "$alias")]
-
-
-def test_user_stop_durably_terminates_the_turn_that_owns_the_response(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_user_stop_durably_terminates_the_turn_that_owns_the_response(journal_store: EventJournalStore) -> None:
     """A user stop must become durable turn truth before dispatch settles it."""
-    notifications: list[tuple[str, ...]] = []
-    store = _store(tmp_path, on_terminal_turn_persisted=notifications.append)
+    store = await _store(journal_store)
     target = MessageTarget.resolve("!room:example.org", None, "$source")
     pending = TurnRecord.create(
         ["$source"],
@@ -597,89 +179,48 @@ def test_user_stop_durably_terminates_the_turn_that_owns_the_response(tmp_path: 
         requester_id="@user:example.org",
         conversation_target=target,
     )
-    store.record_pending_turn(pending)
+    await store.record_pending_turn(pending)
 
     stop_receipt_order = 2
-    stopped = store.record_user_stopped_response("$reply", stop_receipt_order)
+    stopped = await store.record_user_stopped_response("$reply", stop_receipt_order)
 
     assert stopped is not None
     assert stopped.completed is True
     assert stopped.user_stop_receipt_order == stop_receipt_order
     assert stopped.user_stop_settled_receipt_order is None
-    assert store.is_durably_handled("$source") is True
-    assert notifications == [("$source",)]
-    retried = store.record_user_stopped_response("$reply", stop_receipt_order)
+    assert store.is_handled("$source") is True
+    retried = await store.record_user_stopped_response("$reply", stop_receipt_order)
     assert retried is not None
     assert retried.completed is True
     assert retried.user_stop_receipt_order == stop_receipt_order
     assert retried.user_stop_settled_receipt_order is None
-    assert notifications == [("$source",)]
 
-    finalized = store.record_user_stopped_response(
+    finalized = await store.record_user_stopped_response(
         "$reply",
         stop_receipt_order,
         delivery_settled=True,
     )
     assert finalized is not None
     assert finalized.user_stop_settled_receipt_order == stop_receipt_order
-    assert notifications == [("$source",)]
 
 
-def test_settled_user_stop_retry_reenters_durable_persistence(tmp_path: Path) -> None:
-    """A failed settled-STOP write must not make an in-memory retry look durable."""
-    store = _store(tmp_path)
-    target = MessageTarget.resolve("!room:example.org", None, "$source")
-    store.record_pending_turn(
-        TurnRecord.create(
-            ["$source"],
-            response_event_id="$reply",
-            completed=False,
-            response_owner="agent",
-            requester_id="@user:example.org",
-            conversation_target=target,
-        ),
-    )
-    stop_receipt_order = 2
-    store.record_user_stopped_response("$reply", stop_receipt_order)
-    persist_attempts = 0
-
-    def fail_persist(_records: tuple[TurnRecord, ...]) -> None:
-        nonlocal persist_attempts
-        persist_attempts += 1
-        msg = "disk unavailable"
-        raise OSError(msg)
-
-    with (
-        patch.object(store._ledger, "_persist_records", side_effect=fail_persist),
-        patch.object(store._ledger, "_schedule_persist_retry_locked"),
-    ):
-        with pytest.raises(OSError, match="disk unavailable"):
-            store.record_user_stopped_response(
-                "$reply",
-                stop_receipt_order,
-                delivery_settled=True,
-            )
-        assert persist_attempts == 2
-
-        with pytest.raises(OSError, match="disk unavailable"):
-            store.record_user_stopped_response(
-                "$reply",
-                stop_receipt_order,
-                delivery_settled=True,
-            )
-        assert persist_attempts == 4
-
-
+@pytest.mark.asyncio
 @pytest.mark.parametrize("invalid_receipt_order", [0, -1, True])
-def test_user_stop_rejects_invalid_receipt_order(tmp_path: Path, invalid_receipt_order: int) -> None:
+async def test_user_stop_rejects_invalid_receipt_order(
+    journal_store: EventJournalStore,
+    invalid_receipt_order: int,
+) -> None:
     """STOP ordering requires a real positive durable admission sequence."""
     with pytest.raises(ValueError, match="receipt order must be positive"):
-        _store(tmp_path).record_user_stopped_response("$reply", invalid_receipt_order)
+        await (await _store(journal_store)).record_user_stopped_response("$reply", invalid_receipt_order)
 
 
-def test_locked_pending_response_preparation_suppresses_a_concurrent_user_stop(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_locked_pending_response_preparation_suppresses_a_concurrent_user_stop(
+    journal_store: EventJournalStore,
+) -> None:
     """A response queued before STOP must recheck terminal truth after taking its lock."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     target = MessageTarget.resolve("!room:example.org", None, "$source")
     pending = TurnRecord.create(
         ["$source"],
@@ -689,9 +230,9 @@ def test_locked_pending_response_preparation_suppresses_a_concurrent_user_stop(t
         requester_id="@user:example.org",
         conversation_target=target,
     )
-    store.record_pending_turn(pending)
+    await store.record_pending_turn(pending)
     assert (
-        store.prepare_pending_response_source(
+        await store.prepare_pending_response_source(
             target=target,
             source_event_ids=("$source",),
             terminal_source_event_ids=("$source",),
@@ -699,10 +240,10 @@ def test_locked_pending_response_preparation_suppresses_a_concurrent_user_stop(t
         is False
     )
 
-    store.record_user_stopped_response("$reply", 2)
+    await store.record_user_stopped_response("$reply", 2)
 
     assert (
-        store.prepare_pending_response_source(
+        await store.prepare_pending_response_source(
             target=target,
             source_event_ids=("$source",),
             terminal_source_event_ids=("$source",),
@@ -711,11 +252,14 @@ def test_locked_pending_response_preparation_suppresses_a_concurrent_user_stop(t
     )
 
 
-def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_delivery(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_delivery(
+    journal_store: EventJournalStore,
+) -> None:
     """Only later edits run, and they durably supersede an older STOP delivery."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     target = MessageTarget.resolve("!room:example.org", None, "$source")
-    store.record_turn(
+    await store.record_turn(
         TurnRecord.create(
             ["$source"],
             response_event_id="$reply",
@@ -726,7 +270,7 @@ def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_delivery
         ),
     )
 
-    assert store.prepare_edit_response_source(
+    assert await store.prepare_edit_response_source(
         target=target,
         source_event_ids=("$source",),
         response_event_id="$reply",
@@ -737,7 +281,7 @@ def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_delivery
     assert stopped.latest_edit_receipt_order is None
     assert stopped.user_stop_settled_receipt_order is None
 
-    assert not store.prepare_edit_response_source(
+    assert not await store.prepare_edit_response_source(
         target=target,
         source_event_ids=("$source",),
         response_event_id="$reply",
@@ -749,16 +293,17 @@ def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_delivery
     assert reopened.user_stop_settled_receipt_order == 2
 
 
-def test_pending_delivery_intent_does_not_require_model_history_scope(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_pending_delivery_intent_does_not_require_model_history_scope(journal_store: EventJournalStore) -> None:
     """Response ownership and target distinguish delivery intent from a raw visible echo."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     source_event_ids = ("$source",)
     visible_echo = TurnRecord.create(
         source_event_ids,
         response_event_id="$echo",
         completed=False,
     )
-    store.record_pending_turn(visible_echo)
+    await store.record_pending_turn(visible_echo)
     assert store.has_pending_response_intent(source_event_ids) is False
 
     target = MessageTarget.resolve("!room:example.org", None, "$source")
@@ -767,7 +312,7 @@ def test_pending_delivery_intent_does_not_require_model_history_scope(tmp_path: 
         history_scope=None,
         conversation_target=target,
     )
-    store.record_pending_turn(delivery_intent)
+    await store.record_pending_turn(delivery_intent)
 
     assert store.has_pending_response_intent(source_event_ids) is True
     record = store.get_turn_record("$source")
@@ -777,41 +322,35 @@ def test_pending_delivery_intent_does_not_require_model_history_scope(tmp_path: 
     assert record.history_scope is None
 
 
-def test_terminal_turn_notifies_only_after_durable_write(tmp_path: Path) -> None:
-    """Dispatch truth must remain until its replacing TurnStore write reaches disk."""
-    notified = threading.Event()
-    persist_started = threading.Event()
-    release_persist = threading.Event()
-    store = _store(tmp_path, on_terminal_turn_persisted=lambda _event_ids: notified.set())
-    original_persist = store._ledger._persist_records
+@pytest.mark.asyncio
+async def test_a_live_claim_is_observable_without_waiting_for_it(journal_store: EventJournalStore) -> None:
+    """Whether a turn still owns a source, asked without blocking on the answer.
 
-    def blocking_persist(records: tuple[TurnRecord, ...]) -> None:
-        persist_started.set()
-        assert release_persist.wait(timeout=2)
-        original_persist(records)
+    The claim is taken before the turn is handed off and dropped however the
+    turn ends, so its presence is what separates "a turn owns this" from "a
+    turn owned this and is gone". A caller holding durable work owed to that
+    turn has to be able to ask without joining the wait.
+    """
+    store = await _store(journal_store)
+    claim = TurnRecord.create(("$source",), discovery_event_ids=("$alias",), completed=False)
 
-    with patch.object(store._ledger, "_persist_records", side_effect=blocking_persist):
-        record_thread = threading.Thread(
-            target=store.record_turn,
-            args=(TurnRecord.create(["$source"], response_event_id="$response"),),
-        )
-        record_thread.start()
-        try:
-            assert persist_started.wait(timeout=2)
-            assert not notified.wait(timeout=0.1)
-            record_thread.join(timeout=0.1)
-            assert not record_thread.is_alive()
-        finally:
-            release_persist.set()
-            record_thread.join(timeout=2)
+    assert store.has_live_turn_claim("$source") is False
 
-    assert not record_thread.is_alive()
-    assert notified.wait(timeout=2)
+    assert store.try_claim_turn(claim) is True
+    assert store.has_live_turn_claim("$source") is True
+    assert store.has_live_turn_claim("$alias") is True, "an alias is indexed by the same claim"
+    assert store.has_live_turn_claim("$unrelated") is False
+
+    store.release_pending_turn_claim(claim)
+
+    assert store.has_live_turn_claim("$source") is False
+    assert store.has_live_turn_claim("$alias") is False
 
 
-def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_pending_turn_claim_allows_only_one_concurrent_owner(journal_store: EventJournalStore) -> None:
     """Overlapping delivery of one source event must start one response."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     turn = TurnRecord.create(["$source"], completed=False)
     barrier = threading.Barrier(8)
     claims = [False] * barrier.parties
@@ -831,44 +370,10 @@ def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> 
     assert store.try_claim_turn(turn) is True
 
 
-def test_is_claimed_in_flight_tracks_live_claims(tmp_path: Path) -> None:
-    """A replayed delivery must be detectable while its first delivery is answered."""
-    store = _store(tmp_path)
-    turn = TurnRecord.create(["$source"], completed=False)
-
-    assert _is_claimed(store, "$source") is False
-    assert store.try_claim_turn(turn) is True
-    assert _is_claimed(store, "$source") is True
-    store.release_pending_turn_claim(turn)
-    assert _is_claimed(store, "$source") is False
-
-
-def test_same_turn_can_reclaim_terminal_owner_for_recovery(tmp_path: Path) -> None:
-    """Current edit and restart recovery may reclaim its own durable source identity."""
-    store = _store(tmp_path)
-    turn = TurnRecord.create(["$source"], completed=False)
-    store.record_turn(turn)
-
-    assert store.try_claim_turn(turn) is True
-    assert _is_claimed(store, "$source") is True
-    store.release_pending_turn_claim(turn)
-
-
-def test_is_claimed_in_flight_sees_absorbed_discovery_alias(tmp_path: Path) -> None:
-    """Discovery aliases folded into a claim also count as in flight."""
-    store = _store(tmp_path)
-    turn = replace(
-        TurnRecord.create(["$source"], completed=False),
-        discovery_event_ids=("$alias",),
-    )
-
-    assert store.try_claim_turn(turn) is True
-    assert _is_claimed(store, "$alias") is True
-
-
-def test_discovery_alias_allows_original_but_excludes_second_relay(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_discovery_alias_allows_original_but_excludes_second_relay(journal_store: EventJournalStore) -> None:
     """One human original may overlap its relay, but two relays for it may not."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     original = TurnRecord.create(["$human"], completed=False)
     first_relay = TurnRecord.create(["$relay-one"], discovery_event_ids=["$human"], completed=False)
     duplicate_relay = TurnRecord.create(["$relay-two"], discovery_event_ids=["$human"], completed=False)
@@ -883,12 +388,17 @@ def test_discovery_alias_allows_original_but_excludes_second_relay(tmp_path: Pat
     store.release_pending_turn_claim(original)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("completed_claim", [False, True])
-def test_same_turn_can_reclaim_its_handled_alias(tmp_path: Path, *, completed_claim: bool) -> None:
+async def test_same_turn_can_reclaim_its_handled_alias(
+    journal_store: EventJournalStore,
+    *,
+    completed_claim: bool,
+) -> None:
     """A relay turn must remain claimable for its own edit or restart drain."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     completed = TurnRecord.create(["$relay"], discovery_event_ids=["$human"])
-    store.record_turn(completed)
+    await store.record_turn(completed)
     claim = replace(completed, completed=completed_claim)
 
     assert store.try_claim_turn(claim) is True
@@ -896,16 +406,17 @@ def test_same_turn_can_reclaim_its_handled_alias(tmp_path: Path, *, completed_cl
     store.release_pending_turn_claim(claim)
 
 
-def test_pending_coalesced_turn_can_reclaim_tombstoned_alias(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_pending_coalesced_turn_can_reclaim_tombstoned_alias(journal_store: EventJournalStore) -> None:
     """A sibling edit remains claimable after another alias is tombstoned."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     pending = TurnRecord.create(
         ["$relay-one", "$relay-two"],
         discovery_event_ids=["$human-one", "$human-two"],
         redacted_source_event_ids=["$human-two"],
         completed=False,
     )
-    store.record_pending_turn(pending)
+    await store.record_pending_turn(pending)
 
     assert store.is_handled("$human-two") is True
     assert store.try_claim_turn(pending) is True
@@ -914,9 +425,9 @@ def test_pending_coalesced_turn_can_reclaim_tombstoned_alias(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_turn_settlement_waits_for_pending_claim_release(tmp_path: Path) -> None:
+async def test_turn_settlement_waits_for_pending_claim_release(journal_store: EventJournalStore) -> None:
     """A waiter should remain blocked until response ownership reaches its existing release seam."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     turn = TurnRecord.create(["$source"], completed=False)
     assert store.try_claim_turn(turn) is True
     wait_started = asyncio.Event()
@@ -934,9 +445,9 @@ async def test_turn_settlement_waits_for_pending_claim_release(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_distinct_physical_claims_can_share_alias_until_both_settle(tmp_path: Path) -> None:
+async def test_distinct_physical_claims_can_share_alias_until_both_settle(journal_store: EventJournalStore) -> None:
     """A discovery alias coordinates settlement without rejecting its physical relay."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     original = TurnRecord.create(["$human"], completed=False)
     relay = TurnRecord.create(["$relay"], discovery_event_ids=["$human"], completed=False)
     assert store.try_claim_turn(original) is True
@@ -960,48 +471,47 @@ async def test_distinct_physical_claims_can_share_alias_until_both_settle(tmp_pa
     await asyncio.gather(waiter, second_waiter)
 
 
-def test_turn_settlement_wait_does_not_consume_default_executor(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_turn_settlement_wait_does_not_consume_default_executor(journal_store: EventJournalStore) -> None:
     """Claim settlement must progress while every default-executor worker is occupied."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     turn = TurnRecord.create(["$source"], completed=False)
+    loop = asyncio.get_running_loop()
+    # One worker, entirely occupied below: anything that reaches for the default
+    # executor from here on cannot make progress, which is the point.
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+    worker_started = asyncio.Event()
+    release_worker = threading.Event()
 
-    async def probe() -> None:
-        loop = asyncio.get_running_loop()
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
-        worker_started = asyncio.Event()
-        release_worker = threading.Event()
+    def occupy_worker() -> None:
+        loop.call_soon_threadsafe(worker_started.set)
+        release_worker.wait()
 
-        def occupy_worker() -> None:
-            loop.call_soon_threadsafe(worker_started.set)
-            release_worker.wait()
+    blocker = asyncio.create_task(asyncio.to_thread(occupy_worker))
+    await worker_started.wait()
+    try:
+        assert store.try_claim_turn(turn) is True
+        wait_started = asyncio.Event()
 
-        blocker = asyncio.create_task(asyncio.to_thread(occupy_worker))
-        await worker_started.wait()
-        try:
-            assert store.try_claim_turn(turn) is True
-            wait_started = asyncio.Event()
+        async def wait_for_settlement() -> None:
+            wait_started.set()
+            await store.wait_for_turn_settled(turn.indexed_event_ids)
 
-            async def wait_for_settlement() -> None:
-                wait_started.set()
-                await store.wait_for_turn_settled(turn.indexed_event_ids)
-
-            waiter = asyncio.create_task(wait_for_settlement())
-            await wait_started.wait()
-            assert not waiter.done()
-            store.release_pending_turn_claim(turn)
-            async with asyncio.timeout(1):
-                await waiter
-        finally:
-            release_worker.set()
-            await blocker
-
-    asyncio.run(probe())
+        waiter = asyncio.create_task(wait_for_settlement())
+        await wait_started.wait()
+        assert not waiter.done()
+        store.release_pending_turn_claim(turn)
+        async with asyncio.timeout(1):
+            await waiter
+    finally:
+        release_worker.set()
+        await blocker
 
 
 @pytest.mark.asyncio
-async def test_failed_claimed_response_releases_turn_for_replay(tmp_path: Path) -> None:
+async def test_failed_claimed_response_releases_turn_for_replay(journal_store: EventJournalStore) -> None:
     """A failed owner must not permanently suppress a later delivery."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     turn = TurnRecord.create(["$source"], completed=False)
     assert store.try_claim_turn(turn) is True
 
@@ -1017,9 +527,9 @@ async def test_failed_claimed_response_releases_turn_for_replay(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_terminal_turn_keeps_claim_until_response_task_finishes(tmp_path: Path) -> None:
+async def test_terminal_turn_keeps_claim_until_response_task_finishes(journal_store: EventJournalStore) -> None:
     """Terminal persistence must not reopen a source before task cleanup completes."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     turn = TurnRecord.create(["$source"], completed=False)
     other_turn = TurnRecord.create(["$discovery"], completed=False)
     expanded_turn = replace(turn, discovery_event_ids=other_turn.source_event_ids)
@@ -1029,7 +539,7 @@ async def test_terminal_turn_keeps_claim_until_response_task_finishes(tmp_path: 
     assert store.try_claim_turn(other_turn) is True
 
     async def finish_response() -> None:
-        store.record_turn(expanded_turn)
+        await store.record_turn(expanded_turn)
         terminal_recorded.set()
         await release_response.wait()
 
@@ -1044,29 +554,31 @@ async def test_terminal_turn_keeps_claim_until_response_task_finishes(tmp_path: 
     assert store.try_claim_turn(other_turn) is False
 
 
-def test_prepare_redaction_removes_causal_run_suffix(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_prepare_redaction_removes_causal_run_suffix(journal_store: EventJournalStore) -> None:
     """Redacting a source must delete later output that may depend on that run."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
         session_id=target.session_id,
         agent_id="agent",
         runs=[
-            RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"}),
-            RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$other"}),
+            RunOutput(run_id="run-1", session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"}),
+            RunOutput(run_id="run-2", session_id=target.session_id, metadata={"matrix_event_id": "$other"}),
         ],
     )
     storage = _FakeAgentStorage(session)
-    store = _store_with_storage(tmp_path, storage)
-    store.record_turn(_owned_turn_record(target))
+    store = await _store_with_storage(journal_store, storage)
+    await store.record_turn(_owned_turn_record(target))
 
-    should_suppress = _prepare_redaction(store, target)
+    should_suppress = await _prepare_redaction(store, target)
 
     assert should_suppress is False
-    assert storage.upserted_session is session
+    assert storage.deleted_run_ids == ["run-1", "run-2"]
     assert session.runs == []
 
 
-def test_edit_then_redaction_never_replays_the_old_causal_suffix(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_edit_then_redaction_never_replays_the_old_causal_suffix(journal_store: EventJournalStore) -> None:
     """Editing a source must remove later output before its replacement is persisted."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$source")
     scope = HistoryScope(kind="agent", scope_id="agent")
@@ -1093,7 +605,7 @@ def test_edit_then_redaction_never_replays_the_old_causal_suffix(tmp_path: Path)
         ],
     )
     storage = _FakeAgentStorage(session)
-    store = _store_with_storage(tmp_path, storage)
+    store = await _store_with_storage(journal_store, storage)
     source_record = TurnRecord.create(
         ["$source"],
         response_event_id="$reply",
@@ -1102,7 +614,7 @@ def test_edit_then_redaction_never_replays_the_old_causal_suffix(tmp_path: Path)
         history_scope=scope,
         conversation_target=target,
     )
-    store.record_turn(source_record)
+    await store.record_turn(source_record)
 
     store.remove_stale_runs_for_edit(
         turn_record=source_record,
@@ -1120,13 +632,14 @@ def test_edit_then_redaction_never_replays_the_old_causal_suffix(tmp_path: Path)
             },
         ),
     ]
-    should_suppress = _prepare_redaction(store, target, redacted_event_id="$source")
+    should_suppress = await _prepare_redaction(store, target, redacted_event_id="$source")
 
     assert should_suppress is False
     assert session.runs == []
 
 
-def test_prepare_redaction_removes_runs_that_consumed_the_source(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_prepare_redaction_removes_runs_that_consumed_the_source(journal_store: EventJournalStore) -> None:
     """A later run that consumed redacted context must not remain eligible for replay."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
@@ -1144,16 +657,19 @@ def test_prepare_redaction_removes_runs_that_consumed_the_source(tmp_path: Path)
         ],
     )
     storage = _FakeAgentStorage(session)
-    store = _store_with_storage(tmp_path, storage)
-    store.record_turn(_owned_turn_record(target))
+    store = await _store_with_storage(journal_store, storage)
+    await store.record_turn(_owned_turn_record(target))
 
-    should_suppress = _prepare_redaction(store, target)
+    should_suppress = await _prepare_redaction(store, target)
 
     assert should_suppress is False
     assert session.runs == []
 
 
-def test_prepare_redaction_removes_source_from_every_recorded_history_scope(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_prepare_redaction_removes_source_from_every_recorded_history_scope(
+    journal_store: EventJournalStore,
+) -> None:
     """Later ad-hoc responses must not retain a source consumed outside its original scope."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     agent_scope = HistoryScope(kind="agent", scope_id="agent")
@@ -1190,14 +706,16 @@ def test_prepare_redaction_removes_source_from_every_recorded_history_scope(tmp_
     store = TurnStore(
         TurnStoreDeps(
             agent_name="agent",
-            tracking_base_path=tmp_path,
+            turn_records=journal_store.turn_records("agent"),
+            legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
         ),
     )
-    store.record_turn(_owned_turn_record(target))
-    store.record_turn(
+    await store.warm()
+    await store.record_turn(_owned_turn_record(target))
+    await store.record_turn(
         TurnRecord.create(
             ["$later"],
             response_event_id="$later-reply",
@@ -1208,16 +726,17 @@ def test_prepare_redaction_removes_source_from_every_recorded_history_scope(tmp_
         ),
     )
 
-    should_suppress = _prepare_redaction(store, target)
+    should_suppress = await _prepare_redaction(store, target)
 
     assert should_suppress is False
     assert agent_session.runs == []
     assert team_session.runs == []
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("source_owner", [None, "other"])
-def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
-    tmp_path: Path,
+async def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
+    journal_store: EventJournalStore,
     *,
     source_owner: str | None,
 ) -> None:
@@ -1254,20 +773,22 @@ def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
     store = TurnStore(
         TurnStoreDeps(
             agent_name="agent",
-            tracking_base_path=tmp_path,
+            turn_records=journal_store.turn_records("agent"),
+            legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
             tool_runtime=tool_runtime,
         ),
     )
-    store.record_turn(
+    await store.warm()
+    await store.record_turn(
         replace(
             _owned_turn_record(target),
             response_owner=source_owner,
             requester_id="@source:example.org",
         ),
     )
-    store.record_turn(
+    await store.record_turn(
         TurnRecord.create(
             ["$later"],
             response_event_id="$later-reply",
@@ -1278,7 +799,7 @@ def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
         ),
     )
 
-    should_suppress = _prepare_redaction(store, target)
+    should_suppress = await _prepare_redaction(store, target)
 
     assert should_suppress is False
     assert team_session.runs == []
@@ -1288,7 +809,8 @@ def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
     }
 
 
-def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(journal_store: EventJournalStore) -> None:
     """A redaction race should become cleanup work only when its source turn registers."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
@@ -1297,12 +819,12 @@ def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(tmp_path
         runs=[RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"})],
     )
     storage = _FakeAgentStorage(session)
-    store = _store_with_storage(tmp_path, storage)
-    marked = store.mark_source_redacted("$user_msg")
+    store = await _store_with_storage(journal_store, storage)
+    marked = await store.mark_source_redacted("$user_msg")
     assert marked is not None
     assert marked.conversation_target is None
     assert marked.pending_redaction_cleanup_event_ids == ()
-    pending = store.record_pending_turn(
+    pending = await store.record_pending_turn(
         TurnRecord.create(
             ["$user_msg"],
             completed=False,
@@ -1315,7 +837,7 @@ def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(tmp_path
     assert pending is not None
     assert pending.pending_redaction_cleanup_event_ids == ("$user_msg",)
 
-    should_suppress = store._prepare_response_for_redactions(
+    should_suppress = await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$user_msg",),
     )
@@ -1327,7 +849,8 @@ def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(tmp_path
     assert cleaned.pending_redaction_cleanup_event_ids == ()
 
 
-def test_prepare_redaction_invalidates_compacted_replay(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_prepare_redaction_invalidates_compacted_replay(journal_store: EventJournalStore) -> None:
     """Redaction must remove content already folded into the durable summary."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="agent", scope_id="agent")
@@ -1349,10 +872,10 @@ def test_prepare_redaction_invalidates_compacted_replay(tmp_path: Path) -> None:
         HistoryScopeState(last_summary_model="summary-model", compacted_run_ids=("$compacted-run",)),
     )
     storage = _FakeAgentStorage(session)
-    store = _store_with_storage(tmp_path, storage)
-    store.record_turn(_owned_turn_record(target))
+    store = await _store_with_storage(journal_store, storage)
+    await store.record_turn(_owned_turn_record(target))
 
-    should_suppress = _prepare_redaction(store, target)
+    should_suppress = await _prepare_redaction(store, target)
 
     assert should_suppress is False
     assert storage.upserted_session is session
@@ -1362,14 +885,17 @@ def test_prepare_redaction_invalidates_compacted_replay(tmp_path: Path) -> None:
     assert read_scope_state(session, scope) == HistoryScopeState(compacted_run_ids=("$compacted-run",))
 
 
-def test_redaction_before_response_registration_tombstones_pending_coalesced_turn(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_redaction_before_response_registration_tombstones_pending_coalesced_turn(
+    journal_store: EventJournalStore,
+) -> None:
     """A source redacted before response startup must suppress its later pending batch."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
     team_scope = HistoryScope(kind="team", scope_id="team_private")
 
-    store.mark_source_redacted("$first")
-    pending = store.record_pending_turn(
+    await store.mark_source_redacted("$first")
+    pending = await store.record_pending_turn(
         TurnRecord.create(
             ["$first", "$second"],
             source_event_prompts={"$first": "REDACTED_SECRET", "$second": "keep"},
@@ -1389,9 +915,12 @@ def test_redaction_before_response_registration_tombstones_pending_coalesced_tur
     assert store.is_handled("$second") is False
 
 
-def test_redaction_detaches_from_a_pending_coalesced_turn_after_sibling_completion(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_redaction_detaches_from_a_pending_coalesced_turn_after_sibling_completion(
+    journal_store: EventJournalStore,
+) -> None:
     """A split sibling identity must not veto the remaining source tombstone."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
     scope = HistoryScope(kind="agent", scope_id="agent")
     pending = TurnRecord.create(
@@ -1402,8 +931,8 @@ def test_redaction_detaches_from_a_pending_coalesced_turn_after_sibling_completi
         history_scope=scope,
         conversation_target=target,
     )
-    store.record_pending_turn(pending)
-    store.record_turn(
+    await store.record_pending_turn(pending)
+    await store.record_turn(
         TurnRecord.create(
             ["$second"],
             response_event_id="$second-reply",
@@ -1414,7 +943,7 @@ def test_redaction_detaches_from_a_pending_coalesced_turn_after_sibling_completi
         ),
     )
 
-    marked = store.mark_source_redacted("$first")
+    marked = await store.mark_source_redacted("$first")
 
     assert marked is not None
     assert marked.source_event_ids == ("$first",)
@@ -1427,12 +956,13 @@ def test_redaction_detaches_from_a_pending_coalesced_turn_after_sibling_completi
     assert completed_sibling.response_event_id == "$second-reply"
 
 
-def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(journal_store: EventJournalStore) -> None:
     """A completed sibling must not leave an old alias cleanup pending forever."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
     scope = HistoryScope(kind="agent", scope_id="agent")
     storage = _FakeAgentStorage(None)
-    store = _store_with_storage(tmp_path, storage)
+    store = await _store_with_storage(journal_store, storage)
     pending = TurnRecord.create(
         ["$first", "$second"],
         completed=False,
@@ -1441,9 +971,9 @@ def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(tmp_path: 
         history_scope=scope,
         conversation_target=target,
     )
-    store.record_pending_turn(pending)
-    store.mark_source_redacted("$first")
-    store.record_turn(
+    await store.record_pending_turn(pending)
+    await store.mark_source_redacted("$first")
+    await store.record_turn(
         TurnRecord.create(
             ["$second"],
             response_event_id="$second-reply",
@@ -1454,7 +984,7 @@ def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(tmp_path: 
         ),
     )
 
-    should_suppress = store._prepare_response_for_redactions(
+    should_suppress = await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$second",),
     )
@@ -1471,7 +1001,10 @@ def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(tmp_path: 
     assert completed_sibling.response_event_id == "$second-reply"
 
 
-def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(
+    journal_store: EventJournalStore,
+) -> None:
     """Projecting a redacted physical source must retain the context needed to sanitize it."""
     relay_event_id = "$relay"
     human_event_id = "$human"
@@ -1491,8 +1024,8 @@ def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(tmp_pa
     )
     update_scope_seen_event_ids(session, scope, [human_event_id])
     storage = _FakeAgentStorage(session)
-    store = _store_with_storage(tmp_path, storage)
-    store.record_pending_turn(
+    store = await _store_with_storage(journal_store, storage)
+    await store.record_pending_turn(
         TurnRecord.create(
             [relay_event_id, human_event_id],
             completed=False,
@@ -1509,7 +1042,7 @@ def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(tmp_pa
             conversation_target=target,
         ),
     )
-    store.record_turn(
+    await store.record_turn(
         TurnRecord.create(
             [relay_event_id],
             response_event_id="$relay-reply",
@@ -1517,7 +1050,7 @@ def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(tmp_pa
         ),
     )
 
-    projected = store.mark_source_redacted(human_event_id)
+    projected = await store.mark_source_redacted(human_event_id)
 
     assert projected is not None
     assert projected.source_event_ids == (human_event_id,)
@@ -1526,7 +1059,7 @@ def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(tmp_pa
     assert projected.requester_id_for_source(human_event_id) is None
     assert projected.pending_redaction_cleanup_event_ids == (human_event_id,)
 
-    should_suppress = store._prepare_response_for_redactions(
+    should_suppress = await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -1540,7 +1073,8 @@ def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(tmp_pa
     assert cleaned.pending_redaction_cleanup_event_ids == ()
 
 
-def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(journal_store: EventJournalStore) -> None:
     """Post-lock cleanup must retain the exact team scope recorded before generation."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="team", scope_id="team_private")
@@ -1564,12 +1098,14 @@ def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path
     store = TurnStore(
         TurnStoreDeps(
             agent_name="agent",
-            tracking_base_path=tmp_path,
+            turn_records=journal_store.turn_records("agent"),
+            legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
         ),
     )
+    await store.warm()
     response_record = TurnRecord.create(
         ["$user_msg"],
         requester_id="@user:example.org",
@@ -1577,11 +1113,11 @@ def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path
         history_scope=scope,
         conversation_target=target,
     )
-    store.record_pending_turn(response_record)
-    store.mark_source_redacted("$user_msg")
-    store.record_turn(replace(response_record, response_event_id="$reply"))
+    await store.record_pending_turn(response_record)
+    await store.mark_source_redacted("$user_msg")
+    await store.record_turn(replace(response_record, response_event_id="$reply"))
 
-    should_suppress = store._prepare_response_for_redactions(
+    should_suppress = await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -1591,11 +1127,12 @@ def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path
     state_writer.create_storage.assert_called_with(ANY, scope=scope)
 
 
-def test_redaction_sanitizes_coalesced_ledger_prompt_and_metadata(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_redaction_sanitizes_coalesced_ledger_prompt_and_metadata(journal_store: EventJournalStore) -> None:
     """Sibling edit regeneration must not recover a redacted coalesced prompt."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
-    store.record_turn(
+    await store.record_turn(
         TurnRecord.create(
             ["$first", "$second"],
             source_event_prompts={"$first": "REDACTED_SECRET", "$second": "keep"},
@@ -1610,7 +1147,7 @@ def test_redaction_sanitizes_coalesced_ledger_prompt_and_metadata(tmp_path: Path
         ),
     )
 
-    sanitized = store.mark_source_redacted("$first")
+    sanitized = await store.mark_source_redacted("$first")
 
     assert sanitized is not None
     assert sanitized.redacted_source_event_ids == ("$first",)
@@ -1621,10 +1158,15 @@ def test_redaction_sanitizes_coalesced_ledger_prompt_and_metadata(tmp_path: Path
     assert store.get_turn_record("$second") == sanitized
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("terminal", [False, True])
-def test_turn_merge_preserves_redacted_discovery_alias(tmp_path: Path, *, terminal: bool) -> None:
+async def test_turn_merge_preserves_redacted_discovery_alias(
+    journal_store: EventJournalStore,
+    *,
+    terminal: bool,
+) -> None:
     """Backfilled aliases must retain their tombstone and cleanup intent across turn merges."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     existing = TurnRecord.create(
         ["$question"],
         discovery_event_ids=["$selection"],
@@ -1632,7 +1174,7 @@ def test_turn_merge_preserves_redacted_discovery_alias(tmp_path: Path, *, termin
         pending_redaction_cleanup_event_ids=["$selection"],
         completed=False,
     )
-    store.record_pending_turn(existing)
+    await store.record_pending_turn(existing)
     incoming = TurnRecord.create(
         ["$question"],
         response_event_id="$response" if terminal else None,
@@ -1640,9 +1182,9 @@ def test_turn_merge_preserves_redacted_discovery_alias(tmp_path: Path, *, termin
     )
 
     if terminal:
-        store.record_turn(incoming)
+        await store.record_turn(incoming)
     else:
-        store.record_pending_turn(incoming)
+        await store.record_pending_turn(incoming)
 
     merged = store.get_turn_record("$selection")
     assert merged is not None
@@ -1651,7 +1193,10 @@ def test_turn_merge_preserves_redacted_discovery_alias(tmp_path: Path, *, termin
     assert merged.pending_redaction_cleanup_event_ids == ("$selection",)
 
 
-def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(
+    journal_store: EventJournalStore,
+) -> None:
     """Bots that never handled a source must not accumulate or probe cleanup work."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="agent", scope_id="agent")
@@ -1662,12 +1207,12 @@ def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(tmp_pa
         summary=SessionSummary(summary="contains REDACTED_SECRET"),
     )
     update_scope_seen_event_ids(owner_session, scope, ["$user_msg"])
-    owner_store = _store_with_storage(
-        tmp_path,
+    owner_store = await _store_with_storage(
+        journal_store,
         _FakeAgentStorage(owner_session),
         agent_name="owner",
     )
-    owner_store.record_turn(
+    await owner_store.record_turn(
         replace(
             _owned_turn_record(target),
             response_owner="owner",
@@ -1679,14 +1224,14 @@ def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(tmp_pa
         runs=[],
         summary=SessionSummary(summary="unrelated"),
     )
-    unrelated_store = _store_with_storage(
-        tmp_path,
+    unrelated_store = await _store_with_storage(
+        journal_store,
         _FakeAgentStorage(unrelated_session),
         agent_name="unrelated",
     )
 
-    owner_marked = owner_store.mark_source_redacted("$user_msg")
-    unrelated_marked = unrelated_store.mark_source_redacted("$user_msg")
+    owner_marked = await owner_store.mark_source_redacted("$user_msg")
+    unrelated_marked = await unrelated_store.mark_source_redacted("$user_msg")
 
     assert owner_marked is not None
     assert owner_marked.pending_redaction_cleanup_event_ids == ("$user_msg",)
@@ -1694,11 +1239,11 @@ def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(tmp_pa
     assert unrelated_marked.redacted_source_event_ids == ("$user_msg",)
     assert unrelated_marked.pending_redaction_cleanup_event_ids == ()
 
-    owner_store._prepare_response_for_redactions(
+    await owner_store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
-    should_suppress = unrelated_store._prepare_response_for_redactions(
+    should_suppress = await unrelated_store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -1710,13 +1255,17 @@ def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(tmp_pa
     unrelated_store.deps.state_writer.create_storage.assert_not_called()
 
 
-def test_turn_store_constructs_private_ledger_from_tracking_base_path(tmp_path: Path) -> None:
-    """TurnStore should own its private ledger and persist through the tracking base path."""
-    store = _store(tmp_path)
+@pytest.mark.asyncio
+async def test_turn_store_constructs_private_ledger_over_its_turn_records(
+    journal_store: EventJournalStore,
+) -> None:
+    """TurnStore should own its private ledger and persist through the injected record store."""
+    store = await _store(journal_store)
 
-    store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
+    await store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
 
-    reloaded_store = _store(tmp_path)
+    _reset_handled_turn_ledger_runtime()
+    reloaded_store = await _store(journal_store)
 
     assert reloaded_store.is_handled("$event")
     turn_record = reloaded_store.get_turn_record("$event")
@@ -1724,11 +1273,12 @@ def test_turn_store_constructs_private_ledger_from_tracking_base_path(tmp_path: 
     assert turn_record.response_event_id == "$response"
 
 
-def test_redaction_tombstone_persists_across_ledger_reload(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_redaction_tombstone_persists_across_ledger_reload(journal_store: EventJournalStore) -> None:
     """A crash after cache mutation must not lose the source-redaction barrier."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     target = MessageTarget.resolve("!room:example.org", "$thread", "$event")
-    store.record_turn(
+    await store.record_turn(
         TurnRecord.create(
             ["$event", "$sibling"],
             source_event_prompts={"$event": "REDACTED_SECRET", "$sibling": "keep"},
@@ -1739,9 +1289,9 @@ def test_redaction_tombstone_persists_across_ledger_reload(tmp_path: Path) -> No
         ),
     )
 
-    store.mark_source_redacted("$event")
+    await store.mark_source_redacted("$event")
     _reset_handled_turn_ledger_runtime()
-    reloaded_store = _store(tmp_path)
+    reloaded_store = await _store(journal_store)
 
     reloaded_record = reloaded_store.get_turn_record("$event")
     assert reloaded_record is not None
@@ -1751,38 +1301,8 @@ def test_redaction_tombstone_persists_across_ledger_reload(tmp_path: Path) -> No
     assert reloaded_store.is_handled("$sibling") is True
 
 
-def test_redaction_barrier_ignores_unrelated_prior_persist_failure(tmp_path: Path) -> None:
-    """An older failed write must not prevent the redaction tombstone from becoming durable."""
-    store = _store(tmp_path)
-    real_persist = store._ledger._persist_records
-    unrelated_failed = threading.Event()
-    failed_once = False
-
-    def persist_with_unrelated_failure(turn_records: tuple[TurnRecord, ...]) -> None:
-        nonlocal failed_once
-        if not failed_once and any("$unrelated" in record.indexed_event_ids for record in turn_records):
-            failed_once = True
-            unrelated_failed.set()
-            message = "unrelated persist failed"
-            raise OSError(message)
-        real_persist(turn_records)
-
-    with patch.object(store._ledger, "_persist_records", side_effect=persist_with_unrelated_failure):
-        store.record_visible_echo("$unrelated", "$echo")
-        assert unrelated_failed.wait(timeout=5)
-        marked = store.mark_source_redacted("$redacted")
-
-        assert marked is not None
-        store._ledger.flush()
-
-    _reset_handled_turn_ledger_runtime()
-    durable_record = _store(tmp_path).get_turn_record("$redacted")
-    assert durable_record is not None
-    assert durable_record.redacted_source_event_ids == ("$redacted",)
-    assert durable_record.pending_redaction_cleanup_event_ids == ()
-
-
-def test_warm_preserves_lazy_cleanup_until_next_response(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_warm_preserves_lazy_cleanup_until_next_response(journal_store: EventJournalStore) -> None:
     """A restart must retain replay cleanup for the conversation's next response."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
@@ -1791,16 +1311,16 @@ def test_warm_preserves_lazy_cleanup_until_next_response(tmp_path: Path) -> None
         runs=[RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"})],
     )
     storage = _FakeAgentStorage(session)
-    store = _store_with_storage(tmp_path, storage)
-    store.record_turn(_owned_turn_record(target))
-    marked = store.mark_source_redacted("$user_msg")
+    store = await _store_with_storage(journal_store, storage)
+    await store.record_turn(_owned_turn_record(target))
+    marked = await store.mark_source_redacted("$user_msg")
 
     assert marked is not None
     assert marked.pending_redaction_cleanup_event_ids == ("$user_msg",)
     _reset_handled_turn_ledger_runtime()
-    restarted_store = _store_with_storage(tmp_path, storage)
+    restarted_store = await _store_with_storage(journal_store, storage)
 
-    restarted_store.warm()
+    await restarted_store.warm()
 
     assert len(session.runs or []) == 1
     restarted_record = restarted_store.get_turn_record("$user_msg")
@@ -1808,7 +1328,7 @@ def test_warm_preserves_lazy_cleanup_until_next_response(tmp_path: Path) -> None
     assert restarted_record.redacted_source_event_ids == ("$user_msg",)
     assert restarted_record.pending_redaction_cleanup_event_ids == ("$user_msg",)
     assert (
-        restarted_store._prepare_response_for_redactions(
+        await restarted_store._prepare_response_for_redactions(
             target=target,
             source_event_ids=("$later",),
         )
@@ -1820,7 +1340,10 @@ def test_warm_preserves_lazy_cleanup_until_next_response(tmp_path: Path) -> None
     assert cleaned_record.pending_redaction_cleanup_event_ids == ()
 
 
-def test_locked_response_preparation_sanitizes_and_acknowledges_history_cleanup(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_locked_response_preparation_sanitizes_and_acknowledges_history_cleanup(
+    journal_store: EventJournalStore,
+) -> None:
     """The under-lock gate removes replay and acknowledges the completed work."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     session = AgentSession(
@@ -1829,11 +1352,11 @@ def test_locked_response_preparation_sanitizes_and_acknowledges_history_cleanup(
         runs=[RunOutput(session_id=target.session_id, metadata={"matrix_event_id": "$user_msg"})],
     )
     storage = _FakeAgentStorage(session)
-    store = _store_with_storage(tmp_path, storage)
-    store.record_turn(_owned_turn_record(target))
-    store.mark_source_redacted("$user_msg")
+    store = await _store_with_storage(journal_store, storage)
+    await store.record_turn(_owned_turn_record(target))
+    await store.mark_source_redacted("$user_msg")
 
-    should_suppress = store._prepare_response_for_redactions(
+    should_suppress = await store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -1982,9 +1505,10 @@ def test_turn_record_codecs_preserve_explicit_unknown_source_ownership() -> None
     assert run_recovered.requester_id_for_source(event_id) is None
 
 
-def test_build_run_metadata_normalizes_discovery_aliases(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_build_run_metadata_normalizes_discovery_aliases(journal_store: EventJournalStore) -> None:
     """Additional discovery IDs should share canonical source-ID normalization."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     turn_record = TurnRecord.create(["$first", "$anchor"])
 
     metadata = store.build_run_metadata(
@@ -1999,7 +1523,8 @@ def test_build_run_metadata_normalizes_discovery_aliases(tmp_path: Path) -> None
     }
 
 
-def test_discovery_alias_recovery_repairs_anchor_and_alias_rows(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_discovery_alias_recovery_repairs_anchor_and_alias_rows(journal_store: EventJournalStore) -> None:
     """Missing-ledger recovery should index one non-coalesced turn by its anchor and discovery alias."""
     metadata = TurnRecordCodec.to_run_metadata(
         TurnRecord.create(
@@ -2018,8 +1543,8 @@ def test_discovery_alias_recovery_repairs_anchor_and_alias_rows(tmp_path: Path) 
     assert not recovery_record.is_coalesced
 
     for lookup_event_id in ("$question", "$selection"):
-        store = _store(tmp_path / lookup_event_id.removeprefix("$"))
-        loaded = _load_with_recovery(
+        store = await _store(journal_store, agent_name=f"agent_{lookup_event_id.removeprefix('$')}")
+        loaded = await _load_with_recovery(
             store,
             original_event_id=lookup_event_id,
             recovery_record=recovery_record,
@@ -2036,17 +1561,18 @@ def test_discovery_alias_recovery_repairs_anchor_and_alias_rows(tmp_path: Path) 
             assert store.is_handled(indexed_event_id)
 
 
-def test_recovery_does_not_replace_a_conflicting_completed_identity(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_recovery_does_not_replace_a_conflicting_completed_identity(journal_store: EventJournalStore) -> None:
     """Repair missing aliases without overwriting another completed source turn."""
-    store = _store(tmp_path)
-    store.record_turn(TurnRecord.create(["$selection"], response_event_id="$selection-response"))
+    store = await _store(journal_store)
+    await store.record_turn(TurnRecord.create(["$selection"], response_event_id="$selection-response"))
     recovery_record = TurnRecord.create(
         ["$question"],
         discovery_event_ids=["$selection"],
         response_event_id="$question-response",
     )
 
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$question",
         recovery_record=recovery_record,
@@ -2062,16 +1588,16 @@ def test_recovery_does_not_replace_a_conflicting_completed_identity(tmp_path: Pa
     assert selection_record.source_event_ids == ("$selection",)
     assert selection_record.response_event_id == "$selection-response"
 
-    store._ledger.flush()
     _reset_handled_turn_ledger_runtime()
-    reloaded_store = _store(tmp_path)
+    reloaded_store = await _store(journal_store)
     assert reloaded_store.get_turn_record("$question") == loaded
     assert reloaded_store.get_turn_record("$selection") == selection_record
 
 
-def test_newer_delivered_run_recovers_mutable_facts_after_crash(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_newer_delivered_run_recovers_mutable_facts_after_crash(journal_store: EventJournalStore) -> None:
     """A delivered run newer than the ledger should repair the edit crash window."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     ledger_record = TurnRecord.create(
         ["$first", "$anchor"],
         response_event_id="$old-response",
@@ -2082,7 +1608,7 @@ def test_newer_delivered_run_recovers_mutable_facts_after_crash(tmp_path: Path) 
         visible_echo_event_id="$echo",
         timestamp=10,
     )
-    store._ledger.record_handled_turn(ledger_record)
+    await store._ledger.record_handled_turn(ledger_record)
     recovery_record = TurnRecord.create(
         ["$first", "$anchor"],
         response_event_id="$new-response",
@@ -2094,7 +1620,7 @@ def test_newer_delivered_run_recovers_mutable_facts_after_crash(tmp_path: Path) 
         timestamp=20,
     )
 
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$first",
         recovery_record=recovery_record,
@@ -2113,9 +1639,10 @@ def test_newer_delivered_run_recovers_mutable_facts_after_crash(tmp_path: Path) 
     assert loaded.timestamp == 20
 
 
-def test_recovery_preserves_newer_ledger_only_sibling_edit(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_recovery_preserves_newer_ledger_only_sibling_edit(journal_store: EventJournalStore) -> None:
     """Recovery must merge edit facts per source instead of replacing the whole map."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     ledger_record = TurnRecord.create(
         ["$first", "$anchor"],
         response_event_id="$old-response",
@@ -2123,7 +1650,7 @@ def test_recovery_preserves_newer_ledger_only_sibling_edit(tmp_path: Path) -> No
         source_event_revisions={"$anchor": (30, "$anchor-edit")},
         timestamp=10,
     )
-    store._ledger.record_handled_turn(ledger_record)
+    await store._ledger.record_handled_turn(ledger_record)
     recovery_record = TurnRecord.create(
         ["$first", "$anchor"],
         response_event_id="$new-response",
@@ -2132,7 +1659,7 @@ def test_recovery_preserves_newer_ledger_only_sibling_edit(tmp_path: Path) -> No
         timestamp=20,
     )
 
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$first",
         recovery_record=recovery_record,
@@ -2150,14 +1677,15 @@ def test_recovery_preserves_newer_ledger_only_sibling_edit(tmp_path: Path) -> No
     assert loaded.response_event_id == "$new-response"
 
 
-def test_recovery_preserves_newer_routed_alias_prompt(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_recovery_preserves_newer_routed_alias_prompt(journal_store: EventJournalStore) -> None:
     """A newer human-alias revision must carry its owned relay prompt through recovery."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     source_metadata = {
         "$relay": SourceEventMetadata(sender="@user:example.org", discovery_event_id="$human"),
         "$anchor": SourceEventMetadata(sender="@user:example.org"),
     }
-    store._ledger.record_handled_turn(
+    await store._ledger.record_handled_turn(
         TurnRecord.create(
             ["$relay", "$anchor"],
             discovery_event_ids=["$human"],
@@ -2178,17 +1706,18 @@ def test_recovery_preserves_newer_routed_alias_prompt(tmp_path: Path) -> None:
         timestamp=20,
     )
 
-    loaded = _load_with_recovery(store, original_event_id="$human", recovery_record=recovery_record)
+    loaded = await _load_with_recovery(store, original_event_id="$human", recovery_record=recovery_record)
 
     assert loaded is not None
     assert loaded.source_event_prompts == {"$relay": "new relay", "$anchor": "anchor"}
     assert loaded.source_event_revisions == {"$human": (30, "$new-edit")}
 
 
-def test_recovery_without_prompts_preserves_durable_prompt_map(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_recovery_without_prompts_preserves_durable_prompt_map(journal_store: EventJournalStore) -> None:
     """A delivered recovery lacking prompt metadata cannot erase durable coalesced bodies."""
-    store = _store(tmp_path)
-    store._ledger.record_handled_turn(
+    store = await _store(journal_store)
+    await store._ledger.record_handled_turn(
         TurnRecord.create(
             ["$first", "$anchor"],
             response_event_id="$old-response",
@@ -2197,7 +1726,7 @@ def test_recovery_without_prompts_preserves_durable_prompt_map(tmp_path: Path) -
         ),
     )
 
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$first",
         recovery_record=TurnRecord.create(
@@ -2211,10 +1740,11 @@ def test_recovery_without_prompts_preserves_durable_prompt_map(tmp_path: Path) -
     assert loaded.source_event_prompts == {"$first": "first", "$anchor": "anchor"}
 
 
-def test_recovery_preserves_explicit_unknown_source_ownership(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_recovery_preserves_explicit_unknown_source_ownership(journal_store: EventJournalStore) -> None:
     """A newer explicit unknown-ownership marker must not inherit stale ledger attribution."""
-    store = _store(tmp_path)
-    store._ledger.record_handled_turn(
+    store = await _store(journal_store)
+    await store._ledger.record_handled_turn(
         TurnRecord.create(
             ["$event"],
             response_event_id="$old-response",
@@ -2232,7 +1762,7 @@ def test_recovery_preserves_explicit_unknown_source_ownership(tmp_path: Path) ->
         timestamp=20,
     )
 
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$event",
         recovery_record=recovery_record,
@@ -2244,10 +1774,11 @@ def test_recovery_preserves_explicit_unknown_source_ownership(tmp_path: Path) ->
     assert loaded.requester_id_for_source("$event") is None
 
 
-def test_routed_alias_redaction_marks_owning_relay_under_lock(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_routed_alias_redaction_marks_owning_relay_under_lock(journal_store: EventJournalStore) -> None:
     """Under-lock redaction checks must recognize a physical relay tombstoned by its alias."""
-    store = _store(tmp_path)
-    store._ledger.record_handled_turn(
+    store = await _store(journal_store)
+    await store._ledger.record_handled_turn(
         TurnRecord.create(
             ["$relay", "$anchor"],
             discovery_event_ids=["$human"],
@@ -2260,22 +1791,23 @@ def test_routed_alias_redaction_marks_owning_relay_under_lock(tmp_path: Path) ->
         ),
     )
 
-    marked = store.mark_source_redacted("$human")
+    marked = await store.mark_source_redacted("$human")
 
     assert marked is not None
     assert marked.source_event_prompts == {"$anchor": "keep"}
     assert store._any_source_redacted(("$relay",)) is True
 
 
-def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(journal_store: EventJournalStore) -> None:
     """Second-resolution run times should still repair a later run from the same second."""
-    store = _store(tmp_path)
-    store._ledger.record_handled_turn(
+    store = await _store(journal_store)
+    await store._ledger.record_handled_turn(
         TurnRecord.create(["$event"], response_event_id="$old-response", timestamp=10.9),
     )
     recovery_record = TurnRecord.create(["$event"], response_event_id="$new-response", timestamp=10)
 
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$event",
         recovery_record=recovery_record,
@@ -2286,16 +1818,17 @@ def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path:
     assert loaded.timestamp > 10.9
 
 
-def test_repeated_delivered_run_recovery_keeps_ledger_version_stable(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_repeated_delivered_run_recovery_keeps_ledger_version_stable(journal_store: EventJournalStore) -> None:
     """Idempotent recovery should not rewrite the ledger with synthetic timestamp drift."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     ledger_record = TurnRecord.create(
         ["$event"],
         response_event_id="$response",
         response_owner="agent",
         timestamp=10,
     )
-    store._ledger.record_handled_turn(ledger_record)
+    await store._ledger.record_handled_turn(ledger_record)
     recovery_record = TurnRecord.create(
         ["$event"],
         response_event_id="$response",
@@ -2303,7 +1836,7 @@ def test_repeated_delivered_run_recovery_keeps_ledger_version_stable(tmp_path: P
         timestamp=20,
     )
 
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$event",
         recovery_record=recovery_record,
@@ -2313,15 +1846,16 @@ def test_repeated_delivered_run_recovery_keeps_ledger_version_stable(tmp_path: P
     assert store.get_turn_record("$event") == ledger_record
 
 
-def test_newer_interrupted_run_keeps_delivered_ledger_outcome(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_newer_interrupted_run_keeps_delivered_ledger_outcome(journal_store: EventJournalStore) -> None:
     """A newer run without Matrix delivery must not replace a visible response."""
-    store = _store(tmp_path)
-    store._ledger.record_handled_turn(
+    store = await _store(journal_store)
+    await store._ledger.record_handled_turn(
         TurnRecord.create(["$event"], response_event_id="$response", timestamp=10),
     )
     recovery_record = TurnRecord.create(["$event"], completed=False, timestamp=20)
 
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$event",
         recovery_record=recovery_record,
@@ -2333,10 +1867,11 @@ def test_newer_interrupted_run_keeps_delivered_ledger_outcome(tmp_path: Path) ->
     assert loaded.timestamp == 10
 
 
-def test_interrupted_recovery_does_not_mix_prompt_and_revision(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_interrupted_recovery_does_not_mix_prompt_and_revision(journal_store: EventJournalStore) -> None:
     """An unfinished run cannot pair its edit revision with the delivered ledger prompt."""
-    store = _store(tmp_path)
-    store._ledger.record_handled_turn(
+    store = await _store(journal_store)
+    await store._ledger.record_handled_turn(
         TurnRecord.create(
             ["$event"],
             response_event_id="$response",
@@ -2352,7 +1887,7 @@ def test_interrupted_recovery_does_not_mix_prompt_and_revision(tmp_path: Path) -
         timestamp=20,
     )
 
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$event",
         recovery_record=recovery_record,
@@ -2364,10 +1899,11 @@ def test_interrupted_recovery_does_not_mix_prompt_and_revision(tmp_path: Path) -
     assert loaded.response_event_id == "$response"
 
 
-def test_recovery_does_not_adopt_revision_without_its_prompt(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_recovery_does_not_adopt_revision_without_its_prompt(journal_store: EventJournalStore) -> None:
     """A ledger edit revision is unusable unless its matching durable prompt survived."""
-    store = _store(tmp_path)
-    store._ledger.record_handled_turn(
+    store = await _store(journal_store)
+    await store._ledger.record_handled_turn(
         TurnRecord.create(
             ["$event"],
             response_event_id="$old-response",
@@ -2383,21 +1919,22 @@ def test_recovery_does_not_adopt_revision_without_its_prompt(tmp_path: Path) -> 
         timestamp=20,
     )
 
-    loaded = _load_with_recovery(store, original_event_id="$event", recovery_record=recovery_record)
+    loaded = await _load_with_recovery(store, original_event_id="$event", recovery_record=recovery_record)
 
     assert loaded is not None
     assert loaded.source_event_prompts == {"$event": "old prompt"}
     assert loaded.source_event_revisions == {"$event": (10, "$old-edit")}
 
 
-def test_terminal_write_refreshes_ledger_precedence_timestamp(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_terminal_write_refreshes_ledger_precedence_timestamp(journal_store: EventJournalStore) -> None:
     """A successful terminal write should become newer than its recovered input."""
-    store = _store(tmp_path)
-    store._ledger.record_handled_turn(
+    store = await _store(journal_store)
+    await store._ledger.record_handled_turn(
         TurnRecord.create(["$event"], response_event_id="$old-response", timestamp=1),
     )
 
-    store.record_turn(TurnRecord.create(["$event"], response_event_id="$new-response", timestamp=1))
+    await store.record_turn(TurnRecord.create(["$event"], response_event_id="$new-response", timestamp=1))
 
     updated = store.get_turn_record("$event")
     assert updated is not None
@@ -2405,12 +1942,13 @@ def test_terminal_write_refreshes_ledger_precedence_timestamp(tmp_path: Path) ->
     assert updated.timestamp > 1
 
 
-def test_terminal_turn_can_replace_a_provisional_source_identity(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_terminal_turn_can_replace_a_provisional_source_identity(journal_store: EventJournalStore) -> None:
     """A partial visible echo may join the canonical coalesced turn that completes it."""
-    store = _store(tmp_path)
-    store.record_visible_echo("$second", "$echo")
+    store = await _store(journal_store)
+    await store.record_visible_echo("$second", "$echo")
 
-    store.record_turn(TurnRecord.create(["$first", "$second"], response_event_id="$response"))
+    await store.record_turn(TurnRecord.create(["$first", "$second"], response_event_id="$response"))
 
     first_record = store.get_turn_record("$first")
     second_record = store.get_turn_record("$second")
@@ -2420,14 +1958,17 @@ def test_terminal_turn_can_replace_a_provisional_source_identity(tmp_path: Path)
     assert first_record.visible_echo_event_id == "$echo"
 
 
-def test_visible_echo_is_finalized_only_after_replacement_acknowledgement(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_visible_echo_is_finalized_only_after_replacement_acknowledgement(
+    journal_store: EventJournalStore,
+) -> None:
     """A posted placeholder should not become a terminal router outcome before its edit succeeds."""
-    store = _store(tmp_path)
-    store.record_visible_echo("$event", "$echo")
+    store = await _store(journal_store)
+    await store.record_visible_echo("$event", "$echo")
 
     assert store.finalized_visible_echo_for_sources(("$event",)) is None
 
-    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
 
     record = store.get_turn_record("$event")
     assert record is not None
@@ -2440,22 +1981,24 @@ def test_visible_echo_is_finalized_only_after_replacement_acknowledgement(tmp_pa
     assert finalized.is_fallback is False
 
 
-def test_visible_echo_finalization_requires_tracked_placeholder(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_visible_echo_finalization_requires_tracked_placeholder(journal_store: EventJournalStore) -> None:
     """An acknowledgement alone must not create a finalized visible echo."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
 
-    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
 
     assert store.get_turn_record("$event") is None
 
 
-def test_visible_echo_finalization_cannot_overwrite_terminal_outcome(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_visible_echo_finalization_cannot_overwrite_terminal_outcome(journal_store: EventJournalStore) -> None:
     """A late edit acknowledgement should preserve a concurrently completed turn."""
-    store = _store(tmp_path)
-    store.record_visible_echo("$event", "$echo")
-    store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
+    store = await _store(journal_store)
+    await store.record_visible_echo("$event", "$echo")
+    await store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
 
-    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
 
     record = store.get_turn_record("$event")
     assert record is not None
@@ -2467,35 +2010,36 @@ def test_visible_echo_finalization_cannot_overwrite_terminal_outcome(tmp_path: P
     assert finalized.is_fallback is False
 
 
-def test_finalized_visible_echo_keeps_transcript_over_fallback(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_finalized_visible_echo_keeps_transcript_over_fallback(journal_store: EventJournalStore) -> None:
     """Transcript replacement should upgrade fallback and reject later downgrade."""
-    store = _store(tmp_path)
-    store.record_visible_echo("$event", "$echo")
+    store = await _store(journal_store)
+    await store.record_visible_echo("$event", "$echo")
 
-    store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
+    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
     fallback = store.finalized_visible_echo("$event")
     assert fallback is not None
     assert fallback.is_fallback is True
 
-    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
     transcript = store.finalized_visible_echo("$event")
     assert transcript is not None
     assert transcript.is_fallback is False
 
-    store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
+    await store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
     assert store.finalized_visible_echo("$event") == transcript
 
-    store._ledger.flush()
     _reset_handled_turn_ledger_runtime()
-    assert _store(tmp_path).finalized_visible_echo("$event") == transcript
+    assert (await _store(journal_store)).finalized_visible_echo("$event") == transcript
 
 
-def test_terminal_turn_rejects_conflicting_completed_canonical_source(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_terminal_turn_rejects_conflicting_completed_canonical_source(journal_store: EventJournalStore) -> None:
     """A completed source cannot be reassigned into a different canonical turn."""
-    store = _store(tmp_path)
-    store.record_turn(TurnRecord.create(["$first"], response_event_id="$first-response"))
+    store = await _store(journal_store)
+    await store.record_turn(TurnRecord.create(["$first"], response_event_id="$first-response"))
 
-    store.record_turn(TurnRecord.create(["$first", "$second"], response_event_id="$other-response"))
+    await store.record_turn(TurnRecord.create(["$first", "$second"], response_event_id="$other-response"))
 
     first_record = store.get_turn_record("$first")
     assert first_record is not None
@@ -2532,9 +2076,10 @@ def test_run_metadata_with_empty_normalized_sources_falls_back_to_anchor() -> No
     assert parsed.source_event_ids == ("$anchor",)
 
 
-def test_undelivered_run_repairs_as_incomplete_and_remains_retryable(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_undelivered_run_repairs_as_incomplete_and_remains_retryable(journal_store: EventJournalStore) -> None:
     """A persisted run without Matrix response linkage must not become a handled turn."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     metadata = TurnRecordCodec.to_run_metadata(
         TurnRecord.create(["$event"], response_owner="agent"),
     )
@@ -2542,7 +2087,7 @@ def test_undelivered_run_repairs_as_incomplete_and_remains_retryable(tmp_path: P
     recovery_record = TurnRecordCodec.from_run_metadata(metadata)
 
     assert recovery_record is not None
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$event",
         recovery_record=recovery_record,
@@ -2557,16 +2102,19 @@ def test_undelivered_run_repairs_as_incomplete_and_remains_retryable(tmp_path: P
     assert not store.is_handled("$event")
 
 
-def test_load_turn_uses_ledger_identity_and_outcome_then_backfills_missing_context(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_load_turn_uses_ledger_identity_and_outcome_then_backfills_missing_context(
+    journal_store: EventJournalStore,
+) -> None:
     """Ledger facts should win field-by-field while absent optional context comes from run metadata."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     ledger_record = TurnRecord.create(
         ["$first", "$anchor"],
         response_event_id="$ledger-response",
         source_event_prompts={"$first": "ledger first", "$anchor": "ledger anchor"},
         requester_id="@ledger-user:example.org",
     )
-    store.record_turn(ledger_record)
+    await store.record_turn(ledger_record)
     persisted_ledger_record = store.get_turn_record("$first")
     assert persisted_ledger_record is not None
     recovery_target = MessageTarget.resolve("!room:example.org", None, "$anchor")
@@ -2580,7 +2128,7 @@ def test_load_turn_uses_ledger_identity_and_outcome_then_backfills_missing_conte
         conversation_target=recovery_target,
     )
 
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$first",
         recovery_record=recovery_record,
@@ -2600,16 +2148,17 @@ def test_load_turn_uses_ledger_identity_and_outcome_then_backfills_missing_conte
     assert repaired == loaded
 
 
-def test_load_turn_repairs_missing_ledger_row_from_run_metadata(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_load_turn_repairs_missing_ledger_row_from_run_metadata(journal_store: EventJournalStore) -> None:
     """Run metadata should recover and immediately backfill an absent ledger row."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     recovery_record = TurnRecord.create(
         ["$event"],
         response_event_id="$response",
         response_owner="agent",
     )
 
-    loaded = _load_with_recovery(
+    loaded = await _load_with_recovery(
         store,
         original_event_id="$event",
         recovery_record=recovery_record,
@@ -2624,10 +2173,13 @@ def test_load_turn_repairs_missing_ledger_row_from_run_metadata(tmp_path: Path) 
     assert repaired.response_owner == "agent"
 
 
-def test_record_turn_preserves_existing_optional_facts_at_the_owner_boundary(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_record_turn_preserves_existing_optional_facts_at_the_owner_boundary(
+    journal_store: EventJournalStore,
+) -> None:
     """TurnStore, rather than the physical ledger, should merge repeated writes."""
-    store = _store(tmp_path)
-    store.record_turn(
+    store = await _store(journal_store)
+    await store.record_turn(
         TurnRecord.create(
             ["$event"],
             response_event_id="$first-response",
@@ -2636,7 +2188,7 @@ def test_record_turn_preserves_existing_optional_facts_at_the_owner_boundary(tmp
         ),
     )
 
-    store.record_turn(TurnRecord(source_event_ids=("$event",), response_event_id="$second-response"))
+    await store.record_turn(TurnRecord(source_event_ids=("$event",), response_event_id="$second-response"))
 
     record = store.get_turn_record("$event")
     assert record is not None
@@ -2645,82 +2197,175 @@ def test_record_turn_preserves_existing_optional_facts_at_the_owner_boundary(tmp
     assert record.correlation_id == "corr-1"
 
 
-def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(tmp_path: Path) -> None:
-    """A delayed visible-echo update must preserve a terminal write racing behind it."""
-    store = _store(tmp_path)
+@pytest.mark.asyncio
+async def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(journal_store: EventJournalStore) -> None:
+    """A visible-echo write suspended mid-flight must not undo a terminal write behind it.
+
+    The database round trip is the one suspension point inside a ledger update,
+    so without serialization a terminal write could overtake a stalled echo
+    write in memory and then be durably overwritten by it -- memory saying the
+    turn is finished while storage says it is not, which a restart resolves the
+    wrong way. The terminal update therefore waits for the echo to finish
+    owing its row, and storage ends up ordered the way memory is.
+    """
+    store = await _store(journal_store)
     terminal_record = TurnRecord.create(["$event"], response_event_id="$response")
-    echo_record_built = threading.Event()
-    release_echo_record = threading.Event()
-    terminal_started = threading.Event()
-    terminal_finished = threading.Event()
-    create_turn_record = TurnRecord.create
+    echo_write_reached_storage = asyncio.Event()
+    release_echo_write = asyncio.Event()
+    real_upsert = TurnRecordStore.upsert
 
-    def blocking_create(
-        source_event_ids: list[str],
-        *,
-        completed: bool = True,
-        **kwargs: object,
-    ) -> TurnRecord:
-        turn_record = create_turn_record(source_event_ids, completed=completed, **kwargs)
-        if not completed:
-            echo_record_built.set()
-            assert release_echo_record.wait(timeout=2)
-        return turn_record
+    async def gate_first_write(records: TurnRecordStore, **kwargs: object) -> None:
+        if not echo_write_reached_storage.is_set():
+            echo_write_reached_storage.set()
+            await release_echo_write.wait()
+        await real_upsert(records, **kwargs)
 
-    def record_visible_echo() -> None:
-        store.record_visible_echo("$event", "$echo")
+    with patch.object(TurnRecordStore, "upsert", gate_first_write):
+        echo_task = asyncio.create_task(store.record_visible_echo("$event", "$echo"))
+        await echo_write_reached_storage.wait()
 
-    def record_terminal_outcome() -> None:
-        terminal_started.set()
-        store.record_turn(terminal_record)
-        terminal_finished.set()
+        terminal_task = asyncio.create_task(store.record_turn(terminal_record))
+        await asyncio.sleep(0)
+        assert not terminal_task.done(), "the terminal update must wait for the echo's row"
 
-    with patch.object(TurnRecord, "create", side_effect=blocking_create):
-        echo_thread = threading.Thread(target=record_visible_echo)
-        echo_thread.start()
-        assert echo_record_built.wait(timeout=2)
+        release_echo_write.set()
+        await asyncio.gather(echo_task, terminal_task)
 
-        terminal_thread = threading.Thread(target=record_terminal_outcome)
-        terminal_thread.start()
-        assert terminal_started.wait(timeout=2)
-        assert not terminal_finished.wait(timeout=0.1)
-
-        release_echo_record.set()
-        echo_thread.join(timeout=2)
-        terminal_thread.join(timeout=2)
-
-    assert not echo_thread.is_alive()
-    assert not terminal_thread.is_alive()
     record = store.get_turn_record("$event")
     assert record is not None
     assert record.completed
     assert record.response_event_id == "$response"
     assert record.visible_echo_event_id == "$echo"
 
+    _reset_handled_turn_ledger_runtime()
+    restarted = await _store(journal_store)
+    durable = restarted.get_turn_record("$event")
+    assert durable is not None
+    assert durable.completed, "the terminal outcome must survive the echo's late write"
+    assert durable.response_event_id == "$response"
+    assert durable.visible_echo_event_id == "$echo"
 
-def test_record_responded_turn_rejects_empty_response_event_id(tmp_path: Path) -> None:
+
+@pytest.mark.asyncio
+async def test_the_record_a_final_acknowledgement_commits_binds_its_response(
+    journal_store: EventJournalStore,
+) -> None:
+    """A delivered answer's event ID reaches the record in the acknowledgement's own commit.
+
+    Until the record names the response event, an edit of that message has
+    nothing to edit and is dropped. A startup pass used to rejoin the two
+    afterwards; this closes the window instead of repairing it, so what the
+    acknowledgement carries has to be the bound, completed record.
+    """
+    store = await _store(journal_store)
+    await store.record_pending_turn(
+        TurnRecord.create(["$source"], completed=False, response_owner="agent"),
+    )
+
+    bound = store.terminal_turn_record("$source", "$answer")
+
+    assert bound is not None
+    assert bound.response_event_id == "$answer"
+    assert bound.completed is True
+    assert bound.source_event_ids == ("$source",)
+
+
+@pytest.mark.asyncio
+async def test_a_record_that_already_names_an_answer_is_left_alone(
+    journal_store: EventJournalStore,
+) -> None:
+    """The first answer ever sent must not overwrite a later, better one.
+
+    Recovery can acknowledge a frozen row long after the turn moved on, and
+    the event that row names may be older than the one the record already
+    holds. Binding it anyway would replace the current answer with a stale one.
+    """
+    store = await _store(journal_store)
+    await store.record_turn(TurnRecord.create(["$source"], response_event_id="$better"))
+
+    assert store.terminal_turn_record("$source", "$first-ever-sent") is None
+
+
+@pytest.mark.asyncio
+async def test_an_incomplete_placeholder_is_completed_without_rebinding_response_identity(
+    journal_store: EventJournalStore,
+) -> None:
+    """A FINAL edit completes the visible placeholder in its acknowledgement commit.
+
+    Streaming binds the placeholder before its final edit is sent.  The edit's
+    Matrix event ID is a transport receipt, while later edits must keep
+    targeting the original visible event.  Refusing the terminal write here
+    leaves an acknowledged answer with an incomplete turn after a crash.
+    """
+    store = await _store(journal_store)
+    await store.record_pending_turn(
+        TurnRecord.create(
+            ["$source"],
+            completed=False,
+            response_event_id="$placeholder",
+            response_owner="agent",
+        ),
+    )
+
+    bound = store.terminal_turn_record("$source", "$final-edit")
+
+    assert bound is not None
+    assert bound.completed is True
+    assert bound.response_event_id == "$placeholder"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_turn_has_no_record_to_commit(journal_store: EventJournalStore) -> None:
+    """An acknowledgement for a turn this ledger never recorded carries nothing."""
+    store = await _store(journal_store)
+
+    assert store.terminal_turn_record("$never-seen", "$answer") is None
+
+
+@pytest.mark.asyncio
+async def test_preparing_the_record_does_not_publish_it(journal_store: EventJournalStore) -> None:
+    """Reading the record must not mark the turn answered before the commit lands.
+
+    This runs *before* the transaction, and the transaction can lose the
+    acknowledgement race -- first writer wins. Publishing here would leave the
+    ledger calling a turn finished on the strength of a write that never
+    happened, and the answer that did land named by nobody.
+    """
+    store = await _store(journal_store)
+    await store.record_pending_turn(
+        TurnRecord.create(["$source"], completed=False, response_owner="agent"),
+    )
+
+    assert store.terminal_turn_record("$source", "$answer") is not None
+
+    still_pending = store.get_turn_record("$source")
+    assert still_pending is not None
+    assert still_pending.completed is False
+    assert still_pending.response_event_id is None
+    assert store.is_handled("$source") is False
+
+
+@pytest.mark.asyncio
+async def test_record_responded_turn_rejects_empty_response_event_id(journal_store: EventJournalStore) -> None:
     """The durable response boundary should reject a noncanonical empty event ID."""
-    store = _store(tmp_path)
+    store = await _store(journal_store)
     noncanonical_record = TurnRecord(source_event_ids=("$source",), response_event_id="")
 
     with pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"):
-        store.record_responded_turn(noncanonical_record)
+        await store.record_responded_turn(noncanonical_record)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("recovery_response_event_id", [None, "$stale-response"])
-def test_recovery_cannot_overwrite_concurrent_terminal_outcome(
-    tmp_path: Path,
+async def test_recovery_cannot_overwrite_concurrent_terminal_outcome(
+    journal_store: EventJournalStore,
     recovery_response_event_id: str | None,
 ) -> None:
     """Slow incomplete or delivered recovery must preserve a concurrent terminal write."""
-    store = _store(tmp_path)
-    store._ledger.record_handled_turn(
+    store = await _store(journal_store)
+    await store._ledger.record_handled_turn(
         TurnRecord.create(["$event"], response_event_id="$old-response", timestamp=9),
     )
-    recovery_started = threading.Event()
-    release_recovery = threading.Event()
-    load_finished = threading.Event()
-    loaded_record: list[TurnRecord | None] = []
     recovery_record = TurnRecord.create(
         ["$event"],
         response_event_id=recovery_response_event_id,
@@ -2728,43 +2373,38 @@ def test_recovery_cannot_overwrite_concurrent_terminal_outcome(
         response_owner="agent",
         timestamp=10,
     )
+    real_update = store._ledger.update_handled_turn
+    terminal_recorded = False
 
-    def load_recovery(_request: object) -> TurnRecord:
-        recovery_started.set()
-        assert release_recovery.wait(timeout=2)
-        return recovery_record
+    async def record_terminal_before_repair(*args: object, **kwargs: object) -> TurnRecord | None:
+        # The recovery read is over by the time this runs, so landing the
+        # terminal write here reproduces exactly what the repair guards
+        # against: the ledger moved on while the run metadata was loading.
+        nonlocal terminal_recorded
+        if not terminal_recorded:
+            terminal_recorded = True
+            with patch("mindroom.handled_turns.time.time", return_value=10.9):
+                await store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
+        return await real_update(*args, **kwargs)
 
-    def load_turn() -> None:
-        loaded_record.append(
-            store.load_turn(
-                room=MagicMock(room_id="!room:example.org"),
-                thread_id=None,
-                original_event_id="$event",
-                requester_user_id="@user:example.org",
-            ),
+    with (
+        patch.object(store, "_load_persisted_turn_record", return_value=recovery_record),
+        patch.object(store._ledger, "update_handled_turn", side_effect=record_terminal_before_repair),
+    ):
+        loaded = await store.load_turn(
+            room=MagicMock(room_id="!room:example.org"),
+            thread_id=None,
+            original_event_id="$event",
+            requester_user_id="@user:example.org",
         )
-        load_finished.set()
 
-    with patch.object(store, "_load_persisted_turn_record", side_effect=load_recovery):
-        load_thread = threading.Thread(target=load_turn)
-        load_thread.start()
-        assert recovery_started.wait(timeout=2)
-
-        with patch("mindroom.handled_turns.time.time", return_value=10.9):
-            store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
-        release_recovery.set()
-        assert load_finished.wait(timeout=2)
-        load_thread.join(timeout=2)
-
-    assert not load_thread.is_alive()
-    assert len(loaded_record) == 1
-    assert loaded_record[0] is not None
-    assert loaded_record[0].completed
-    assert loaded_record[0].response_event_id == "$response"
-    assert loaded_record[0].response_owner == "agent"
-    assert loaded_record[0].timestamp > 10.9
+    assert loaded is not None
+    assert loaded.completed
+    assert loaded.response_event_id == "$response"
+    assert loaded.response_owner == "agent"
+    assert loaded.timestamp > 10.9
     record = store.get_turn_record("$event")
-    assert record == loaded_record[0]
+    assert record == loaded
 
 
 def test_only_turn_store_imports_handled_turn_ledger_in_production() -> None:
@@ -2791,7 +2431,7 @@ def test_only_turn_store_imports_handled_turn_ledger_in_production() -> None:
 def test_agent_bot_does_not_expose_removed_handled_turn_ledger_shim(tmp_path: Path) -> None:
     """AgentBot instances should route handled-turn state only through TurnStore."""
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
-    bot = AgentBot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="agent",
             user_id="@mindroom_agent:localhost",
@@ -2809,15 +2449,20 @@ def test_agent_bot_does_not_expose_removed_handled_turn_ledger_shim(tmp_path: Pa
     assert removed_attr not in vars(bot)
 
 
-def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
     """Router relay turns have durable ledger state but no Agno run storage."""
 
-    def router_store() -> TurnStore:
+    async def router_store() -> TurnStore:
         config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
-        return TurnStore(
+        store = TurnStore(
             TurnStoreDeps(
                 agent_name="router",
-                tracking_base_path=tmp_path / "tracking",
+                turn_records=journal_store.turn_records("router"),
+                legacy_responses_file=None,
                 state_writer=ConversationStateWriter(
                     ConversationStateWriterDeps(
                         runtime=SimpleNamespace(config=config),
@@ -2830,6 +2475,8 @@ def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(tmp_path: 
                 tool_runtime=MagicMock(),
             ),
         )
+        await store.warm()
+        return store
 
     target = MessageTarget.resolve("!room:localhost", "$thread", "$source")
     expected = TurnRecord.create(
@@ -2839,17 +2486,17 @@ def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(tmp_path: 
         requester_id="@user:localhost",
         conversation_target=target,
     )
-    router_store().record_turn(expected)
+    await (await router_store()).record_turn(expected)
 
     for _restart in range(2):
         _reset_handled_turn_ledger_runtime()
-        restarted = router_store()
+        restarted = await router_store()
         with patch.object(
             restarted,
             "_load_persisted_turn_record",
             side_effect=AssertionError("ledger-only entity attempted run recovery"),
         ):
-            loaded = restarted.load_turn(
+            loaded = await restarted.load_turn(
                 room=MagicMock(room_id="!room:localhost"),
                 thread_id="$thread",
                 original_event_id="$source",

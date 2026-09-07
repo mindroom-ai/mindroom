@@ -108,9 +108,9 @@ class VoiceSTTConfig(SpeechServiceConfig):
 
 
 class _VoiceLLMConfig(BaseModel):
-    """Configuration for voice command intelligence."""
+    """Configuration for voice transcript normalization."""
 
-    model: str = Field(default="default", description="Model for command recognition")
+    model: str = Field(default="default", description="Model for mention normalization and light ASR cleanup")
 
 
 class VoiceConfig(BaseModel):
@@ -127,5 +127,5 @@ class VoiceConfig(BaseModel):
     )
     intelligence: _VoiceLLMConfig = Field(
         default_factory=_VoiceLLMConfig,
-        description="Command intelligence configuration",
+        description="Transcript normalization configuration",
     )

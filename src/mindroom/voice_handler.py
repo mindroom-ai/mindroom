@@ -16,7 +16,7 @@ from agno.media import Audio
 
 from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
-from mindroom.authorization import responder_candidate_entities_for_room
+from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.config.voice import normalize_speech_base_url
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -150,6 +151,7 @@ async def _compute_normalized_voice_message(
     event: AudioMessageEvent,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
     *,
     thread_id: str | None,
 ) -> _NormalizedVoiceMessage | None:
@@ -177,6 +179,7 @@ async def _compute_normalized_voice_message(
         event,
         config,
         runtime_paths,
+        membership_index,
         audio=audio,
     )
     if not isinstance(transcribed_message, str) or not transcribed_message.strip():
@@ -195,6 +198,7 @@ async def _normalize_voice_message(
     event: AudioMessageEvent,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
     *,
     thread_id: str | None,
 ) -> _NormalizedVoiceMessage | None:
@@ -218,6 +222,7 @@ async def _normalize_voice_message(
                     event,
                     config,
                     runtime_paths,
+                    membership_index,
                     thread_id=thread_id,
                 )
 
@@ -237,6 +242,7 @@ async def prepare_voice_message(
     *,
     runtime_paths: RuntimePaths,
     thread_id: str | None,
+    membership_index: AgentReplyMembershipIndex,
 ) -> _PreparedVoiceMessage | None:
     """Download/register audio and normalize it into a synthetic text event."""
     normalized = await _normalize_voice_message(
@@ -246,6 +252,7 @@ async def prepare_voice_message(
         event,
         config,
         runtime_paths,
+        membership_index,
         thread_id=thread_id,
     )
     if normalized is None:
@@ -370,6 +377,7 @@ async def _handle_voice_message(
     event: AudioMessageEvent,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
     audio: Audio | None = None,
 ) -> str | None:
     """Handle a voice message event.
@@ -380,6 +388,7 @@ async def _handle_voice_message(
         event: Voice message event
         config: Application configuration
         runtime_paths: Explicit runtime context for secrets and agent mention resolution
+        membership_index: Shared authoritative grant-room membership index
         audio: Optional pre-downloaded audio payload to reuse across fallbacks
 
     Returns:
@@ -408,15 +417,15 @@ async def _handle_voice_message(
 
         logger.info("voice_transcription_received", transcription=transcription)
 
-        available_agent_names, available_team_names = await _get_available_entities_for_sender(
-            client,
+        available_agent_names, available_team_names = _get_available_entities_for_sender(
             room,
             event.sender,
             config,
             runtime_paths,
+            membership_index,
         )
 
-        # Process transcription with AI for command/agent recognition
+        # Normalize mentions and light ASR errors without inventing commands
         formatted_message = await _process_transcription(
             transcription,
             config,
@@ -592,7 +601,7 @@ async def _process_transcription(
         # Get the AI model to process the transcription
         model = model_loading.get_model_instance(config, runtime_paths, config.voice.intelligence.model)
 
-        # Create an agent for voice command processing
+        # Create an agent for voice transcript normalization
         agent = Agent(
             name="VoiceTranscriptionNormalizer",
             role="Normalize voice transcriptions while preserving natural language and mention intent",
@@ -634,24 +643,24 @@ async def _process_transcription(
         return transcription
 
 
-async def _get_available_entities_for_sender(
-    client: nio.AsyncClient,
+def _get_available_entities_for_sender(
     room: nio.MatrixRoom,
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
 ) -> tuple[list[str], list[str]]:
     """Return available agent and team names in this room for a specific sender."""
     available_agent_names: list[str] = []
     available_team_names: list[str] = []
     registry = entity_identity_registry(config, runtime_paths)
 
-    for matrix_id in await responder_candidate_entities_for_room(
-        client,
+    for matrix_id in responder_candidate_entities_from_cached_room(
         room,
         sender_id,
         config,
         runtime_paths,
+        membership_index,
     ):
         name = registry.current_entity_name_for_user_id(matrix_id.full_id, include_router=False)
         if name is None:

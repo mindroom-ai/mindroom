@@ -63,17 +63,13 @@ This follows [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/
 
 ## Image Persistence
 
-Images are saved under `mindroom_data/attachments/` and `mindroom_data/incoming_media/` and registered as attachment records with 30-day retention.
+Image bytes are saved under `mindroom_data/incoming_media/`, while their attachment metadata is saved under `mindroom_data/attachments/`; both are subject to the attachment retention policy.
 In addition to being passed to the AI model as vision input, each image is also registered as an `att_*` attachment ID so agents can reference it via tool calls.
 See [Attachments](attachments.md) for details on retention and context scoping.
 
 ## Encryption
 
 Both unencrypted and E2E encrypted images are supported. Encrypted images are decrypted transparently using the key material from the Matrix event.
-
-## Caching
-
-AI response caching is automatically skipped when images are present, since image payloads are large and unlikely to repeat.
 
 ## Media Fallback
 
@@ -82,8 +78,11 @@ The retried prompt includes `[Inline media unavailable for this model]` to infor
 Agents can still reference the files via attachment IDs and tools.
 
 This fallback is transparent — no user action is required.
-Any failure of a media-bearing request triggers one retry without media — no error wording decides whether to retry, so unknown provider prose degrades gracefully instead of surfacing a raw provider error.
-When the retry succeeds, the model route learns that the dropped media kinds are unsupported, and later requests omit them up front instead of paying a failed API call.
+Any ordinary failure of a media-bearing request triggers one retry without media — no error wording decides whether to retry, so unknown provider prose degrades gracefully instead of surfacing a raw provider error.
+Provider safeguard refusals are returned as refusals and are not retried without media.
+When the retry succeeds after exactly one previously unknown media kind was present, the model route learns that kind is unsupported, and later requests omit it up front instead of paying a failed API call.
+Failures involving multiple previously unknown media kinds still retry once, but do not teach the capability cache because one stripped attempt cannot identify which kind caused the failure.
+Fallback retries are eligible only before provider output reaches the caller; streams are never replayed after partial output.
 This learned capability state is process-local and resets on restart.
 Payload-size and context-overflow rejections never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
 Transient failures (HTTP 5xx and 429 status codes on the provider exception) also never teach, since their retry can succeed simply because the outage or rate limit passed.

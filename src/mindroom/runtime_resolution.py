@@ -11,7 +11,13 @@ from mindroom.agent_policy import (
     resolve_agent_policy_from_data,
     resolve_private_knowledge_base_agent,
 )
-from mindroom.constants import RuntimePaths, resolve_config_relative_path, resolve_config_relative_path_preserving_leaf
+from mindroom.constants import (
+    RuntimePaths,
+    resolve_config_relative_path,
+    resolve_config_relative_path_preserving_leaf,
+    resolve_session_state_root,
+)
+from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
@@ -55,9 +61,19 @@ class ResolvedAgentRuntime:
 
     execution: ResolvedAgentExecution
     state_root: Path
+    session_state_root: Path
     workspace: ResolvedAgentWorkspace | None
     tool_base_dir: Path | None
     file_memory_root: Path | None
+
+
+@dataclass(frozen=True)
+class ResolvedAgentStorage:
+    """Purely resolved state roots for one agent execution without workspace reconciliation."""
+
+    execution: ResolvedAgentExecution
+    state_root: Path
+    session_state_root: Path
 
 
 @dataclass(frozen=True)
@@ -146,18 +162,21 @@ def resolve_agent_execution(
         private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     )
     execution_scope = policy.effective_execution_scope
+    if policy.is_private:
+        if execution_identity is None:
+            msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
+            raise ValueError(msg)
+        if not execution_identity.requester_id or not execution_identity.requester_id.strip():
+            msg = f"Private agent '{agent_name}' requires a requester identity to resolve requester-local state"
+            raise ValueError(msg)
     resolved_worker_execution = resolve_worker_execution_scope(
         execution_scope,
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
-    if policy.is_private:
-        if resolved_worker_execution.execution_identity is None:
-            msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
-            raise ValueError(msg)
-        if resolved_worker_execution.worker_key is None:
-            msg = f"Private agent '{agent_name}' could not resolve a worker key for execution scope '{execution_scope}'"
-            raise ValueError(msg)
+    if policy.is_private and resolved_worker_execution.worker_key is None:
+        msg = f"Private agent '{agent_name}' could not resolve a worker key for execution scope '{execution_scope}'"
+        raise ValueError(msg)
     return ResolvedAgentExecution(
         agent_name=agent_name,
         policy=policy,
@@ -176,26 +195,26 @@ def resolve_agent_runtime(
     create: bool = False,
 ) -> ResolvedAgentRuntime:
     """Resolve one agent's canonical runtime roots for the current execution scope."""
-    resolved_execution = resolve_agent_execution(
+    resolved_storage = resolve_agent_storage(
         agent_name,
         config,
+        runtime_paths,
         execution_identity=execution_identity,
     )
-    if resolved_execution.policy.private_workspace_enabled:
+    resolved_execution = resolved_storage.execution
+    state_root = resolved_storage.state_root
+
+    if create and resolved_execution.policy.private_workspace_enabled:
+        execution_identity = resolved_execution.execution_identity
         worker_key = resolved_execution.worker_key
-        if worker_key is None:
-            msg = f"Private agent '{agent_name}' could not resolve a worker key"
+        if execution_identity is None or worker_key is None or execution_identity.requester_id is None:
+            msg = f"Private agent '{agent_name}' has unresolved private execution state"
             raise ValueError(msg)
-        state_root = _resolved_private_state_root(
-            runtime_paths=runtime_paths,
+        ensure_private_instance_identity(
+            runtime_paths.storage_root,
             worker_key=worker_key,
-            agent_name=agent_name,
+            requester_id=execution_identity.requester_id,
         )
-    else:
-        state_root = resolve_agent_state_storage_path(
-            agent_name=agent_name,
-            base_storage_path=runtime_paths.storage_root,
-        ).resolve()
 
     workspace = resolve_agent_workspace_from_state_path(
         agent_name,
@@ -239,9 +258,44 @@ def resolve_agent_runtime(
     return ResolvedAgentRuntime(
         execution=resolved_execution,
         state_root=state_root,
+        session_state_root=resolved_storage.session_state_root,
         workspace=workspace,
         tool_base_dir=tool_base_dir,
         file_memory_root=file_memory_root,
+    )
+
+
+def resolve_agent_storage(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> ResolvedAgentStorage:
+    """Resolve canonical state roots without creating or reconciling workspace content."""
+    resolved_execution = resolve_agent_execution(
+        agent_name,
+        config,
+        execution_identity=execution_identity,
+    )
+    if resolved_execution.policy.private_workspace_enabled:
+        worker_key = resolved_execution.worker_key
+        if worker_key is None:
+            msg = f"Private agent '{agent_name}' could not resolve a worker key"
+            raise ValueError(msg)
+        state_root = _resolved_private_state_root(
+            runtime_paths=runtime_paths,
+            worker_key=worker_key,
+            agent_name=agent_name,
+        )
+    else:
+        state_root = resolve_agent_state_storage_path(
+            agent_name=agent_name,
+            base_storage_path=runtime_paths.storage_root,
+        ).resolve()
+    return ResolvedAgentStorage(
+        execution=resolved_execution,
+        state_root=state_root,
+        session_state_root=resolve_session_state_root(state_root, runtime_paths),
     )
 
 
@@ -306,9 +360,11 @@ def resolve_knowledge_binding(
 __all__ = [
     "ResolvedAgentExecution",
     "ResolvedAgentRuntime",
+    "ResolvedAgentStorage",
     "ResolvedKnowledgeBinding",
     "resolve_agent_execution",
     "resolve_agent_runtime",
+    "resolve_agent_storage",
     "resolve_knowledge_binding",
     "resolve_private_requester_scope_root",
 ]

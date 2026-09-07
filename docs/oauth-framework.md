@@ -5,39 +5,54 @@ icon: lucide/key-round
 # OAuth Integration Framework
 
 MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account.
-Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
+Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, requester-only credential placement, explicitly permitted manual fallback fields and runtime environment names, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
-The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, and `/api/oauth/{provider}/disconnect`.
-Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the `authorize` URL so the user opens a normal authenticated MindRoom page before MindRoom redirects to the external provider.
+The generic API surface is `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/success`, `/api/oauth/{provider}/status`, `/api/oauth/{provider}/disconnect`, and the browser-confirmed `GET`/`POST` `/api/oauth/{provider}/reset` flow.
+When a scoped token exists but cannot be decoded, status returns `reset_required: true`, and the dashboard offers the decode-free scoped disconnect path before reconnecting.
+Agent-facing OAuth tools return the same structured `reset_required` signal and direct the requester to the authenticated dashboard Integrations page, which supports every credential scope and avoids prescribing an unavailable agent tool or unusable connect link.
+Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the browser-openable `authorize` URL before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
-When an OAuth request targets an agent with `agent_name`, MindRoom also requires the authenticated dashboard requester to satisfy `authorization.agent_reply_permissions` for that agent.
+When an OAuth request targets a shared agent with `agent_name`, the authenticated dashboard requester must be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+An authenticated requester may manage their own isolated OAuth connection for a requester-private agent without a static credential-manager entry.
+Responder access and room membership never grant OAuth-management access.
 Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
-That connect token also carries the requester identity from the tool runtime, and MindRoom rejects redemption unless the authenticated dashboard user resolves to the same requester for scoped credentials.
+That token is a bearer capability for the exact provider, Matrix requester, worker target, and credential connection generation, so its authorize and callback requests do not require a dashboard login.
+MindRoom rechecks the requester's current agent credential-management permission at authorization and callback, and rejects a link if its credential generation changed after issuance.
+Shared-scope reset links use the same capability model for configured credential managers: the GET is non-mutating, the confirmation POST consumes the reset capability before deleting the scoped credential, and reconnection continues through a fresh single-use connect capability.
+Requester-scoped reset links still require the original authenticated browser user.
+Executions without a concrete requester cannot form a conversation capability; their links omit the connect token and use the existing dashboard-authenticated flow.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` through pairing so dashboard credential management and agent-issued OAuth links resolve to the owner Matrix user instead of the generic dashboard API-key principal.
 `MINDROOM_OWNER_USER_ID` is a single-owner shortcut and is not suitable for a hosted multi-user private-agent deployment.
 Hosted deployments that put MindRoom behind an external access layer should enable trusted upstream auth and configure the exact headers MindRoom may trust.
 When trusted upstream auth is enabled, MindRoom reads the configured stable user ID and optional email headers into `request.scope["auth_user"]`.
 For Matrix-backed private agents, the trusted identity must resolve to a Matrix user ID either from a configured Matrix user ID header or from `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE`.
 The email-to-Matrix template must contain exactly one `{localpart}` placeholder and requires `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER`.
-If a browser request cannot map to the requester stored in the conversation connect token, the OAuth authorize or callback path fails closed and no credential is saved.
 The access layer must strip any client-supplied copies of the trusted headers before injecting verified values.
 
 Plugins may declare an `oauth_module` in `mindroom.plugin.json`.
 That module exposes `register_oauth_providers(settings, runtime_paths)` and returns `OAuthProvider` objects.
 This keeps FastAPI routing and state handling in core while still letting plugin authors define provider IDs, scopes, token exchange details, optional claim validators, and tool metadata.
+Plugins can use `OAuthDiscoveryConfig` with `oauth_runtime_bootstrapper()` to resolve protected-resource and authorization-server metadata lazily and optionally register an OAuth client.
+Automatic discovery first checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
+Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
-OAuth token writes always go through `resolve_request_credentials_target()` and `save_scoped_credentials()`.
-For private agents, the target worker key is derived from the authenticated requester and the agent's saved `worker_scope`, so a user-owned OAuth token lands under the same scope normal tools will read at runtime.
-For shared-scope agents, OAuth tokens land in a per-agent primary-runtime store, so a connection made for one agent never becomes visible to other agents.
-Only agents without any worker scope share OAuth tokens through the global credential store.
-If MindRoom cannot resolve the authenticated dashboard user to the requester carried by a conversation-issued link, the link fails closed and no credential is saved.
+OAuth token writes always resolve the provider's canonical credential target and publish through the OAuth credential lifecycle into that scope's private SQLite store.
+On first access, MindRoom adopts a scope's legacy `<credential_service>_credentials.json` token document into a sibling `<credential_service>_credentials.sqlite3` store and removes the legacy file only after its bytes are durably represented or an explicit reset or replacement commits.
+If enabling credential encryption leaves a plaintext legacy token unadopted, disabling encryption before reset or replacement lets MindRoom re-adopt that retained token into the unencrypted store.
+Back up both files during an upgrade if an immediate rollback may be necessary.
+Versions that predate the SQLite lifecycle ignore the new store, so downgrading can expose stale legacy state or require the user to reconnect rather than preserving changes made after adoption.
+Providers can declare that credentials follow the requester independently of agent worker reuse.
+GitHub uses that policy, so its managed token always lands in the requester's `user` scope and can never fall back to a shared or global token store.
+For providers without that policy, private-agent tokens follow the authenticated requester and the agent's saved `worker_scope`, shared-scope agent tokens use a per-agent primary-runtime store, and unscoped agents use the global credential store.
+Conversation capabilities reconstruct the bound requester and worker target from server-side state; invalid, expired, reused, unauthorized, or stale links fail closed and save no credentials.
 Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`.
 That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections.
 Storage, API routing, OAuth provider loading, and worker identity derivation stay in their existing modules.
 Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent.
-Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need Google OAuth client config or user refresh tokens.
+GitHub and Google OAuth tools always execute in the primary MindRoom runtime so worker runtimes never need OAuth client config or user refresh tokens.
 OAuth token documents and editable tool setting documents should be separate services.
+Every provider token `credential_service` must end with `_oauth` so placement and worker-grant policy recognize it without loading provider code.
 The OAuth callback writes only the provider's `credential_service`, while dashboard configuration reads and writes the provider's `tool_config_service` when one is declared.
 OAuth app client config is stored separately from both of those services.
 Providers declare `client_config_services` in lookup order, and MindRoom reads `client_id`, `client_secret`, and optional `redirect_uri` from those services.
@@ -61,6 +76,7 @@ Identity restrictions are provider settings, not MindRoom policy.
 Providers can enforce allowed email domains, allowed hosted-domain claims, and custom claim validators.
 If a configured restriction cannot be checked from verified provider claims, the callback fails closed and no credential is saved.
 
+The built-in GitHub provider uses the generic framework for GitHub App user tokens, requests no classic OAuth scopes, and requires S256 PKCE.
 Built-in Google providers use the generic framework for Drive, Docs, Calendar, Sheets, and Gmail.
 Each provider has minimal service-specific scopes, stores OAuth tokens under its own `*_oauth` service, stores editable tool settings separately, and uses `/api/oauth/*`.
 Each provider first checks its provider-specific client config service, then the shared `google_oauth_client` service.
@@ -71,7 +87,11 @@ MindRoom synthesizes an OAuth provider from each `mcp_servers.*.auth.type: oauth
 Generated MCP OAuth token services use the `<provider_id>_oauth` naming pattern; the default provider ID is already `mcp_<server_id>`.
 Custom provider IDs that do not start with `mcp_` get an `mcp_` credential-service prefix.
 These token services stay in the primary runtime credential store.
-The matching MCP toolkit loads the token for the current requester before opening the remote MCP transport, so the transport sends a requester-scoped bearer token instead of a process-global static header.
+The matching MCP toolkit loads the token from the selected agent's effective credential scope before opening the remote MCP transport.
+Generated MCP OAuth credentials and sessions follow the same `shared`, `user`, `user_agent`, or unscoped ownership policy as other OAuth providers that do not declare requester-only credentials.
+Private agents derive the corresponding credential scope from `private.per`.
 Generated MCP OAuth providers can use public clients with `token_endpoint_auth_method: none`, PKCE, and empty scope lists.
 Generated MCP OAuth providers can also discover protected-resource metadata and authorization-server metadata lazily when the first OAuth flow starts.
 If the authorization server advertises dynamic client registration and no client config is stored yet, MindRoom registers a public client and persists the returned registration metadata in the generated OAuth client config service.
+Hosted OAuth entrypoints accept that dynamically registered client only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` produces an exact, unambiguous HTTPS callback without a query or fragment on the same non-special-use fully qualified ASCII DNS hostname as the initiating request and the authorization server confirms that callback in its registration response.
+Missing, replaced, insecure, local-only, IP-literal, cross-host, non-ASCII, or ambiguous callback metadata keeps the provisioned client restricted to localhost, and MindRoom rejects a new registration before persistence when the response does not confirm the requested callback.

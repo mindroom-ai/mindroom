@@ -42,6 +42,23 @@ class _MCPTransportHandle:
 
     transport: MCPTransport
     opener: Callable[[], AbstractAsyncContextManager[_TransportStreams]]
+    authorization_rejected: Callable[[], bool] = lambda: False
+
+
+@dataclass
+class _MCPHTTPAuthorizationTracker:
+    """Latch structured HTTP bearer rejection before the MCP SDK hides it."""
+
+    rejected: bool = False
+
+    async def observe_response(self, response: httpx.Response) -> None:
+        """Remember only the status class; never retain provider-controlled content."""
+        if response.status_code == 401:
+            self.rejected = True
+
+    def is_rejected(self) -> bool:
+        """Return whether this exact transport observed HTTP 401."""
+        return self.rejected
 
 
 def _interpolate_value(value: str, runtime_paths: RuntimePaths) -> str:
@@ -65,6 +82,7 @@ def _server_fetch_mcp_http_client(
     headers: dict[str, str] | None = None,
     timeout: httpx.Timeout | None = None,
     auth: httpx.Auth | None = None,
+    authorization_tracker: _MCPHTTPAuthorizationTracker | None = None,
     **_ignored: object,
 ) -> httpx.AsyncClient:
     """Create an MCP HTTP client that validates requests, redirects, and dialed addresses."""
@@ -78,7 +96,31 @@ def _server_fetch_mcp_http_client(
         kwargs["headers"] = headers
     if auth is not None:
         kwargs["auth"] = auth
+    if authorization_tracker is not None:
+        kwargs["event_hooks"] = {"response": [authorization_tracker.observe_response]}
     return httpx.AsyncClient(**kwargs)
+
+
+def _tracked_mcp_http_client_factory(
+    authorization_tracker: _MCPHTTPAuthorizationTracker,
+) -> Callable[..., httpx.AsyncClient]:
+    """Bind one response-status latch to one deferred remote transport."""
+
+    def factory(
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+        **kwargs: object,
+    ) -> httpx.AsyncClient:
+        return _server_fetch_mcp_http_client(
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+            authorization_tracker=authorization_tracker,
+            **kwargs,
+        )
+
+    return factory
 
 
 def _build_stdio_server_parameters(
@@ -119,6 +161,7 @@ async def _open_remote_transport(
     *,
     transport: MCPTransport,
     client: _RemoteTransportClient,
+    httpx_client_factory: Callable[..., httpx.AsyncClient],
     extra_headers: Mapping[str, str] | None = None,
 ) -> AsyncIterator[_TransportStreams]:
     if server_config.url is None:
@@ -134,7 +177,7 @@ async def _open_remote_transport(
         headers=headers,
         timeout=server_config.startup_timeout_seconds,
         sse_read_timeout=server_config.call_timeout_seconds,
-        httpx_client_factory=_server_fetch_mcp_http_client,
+        httpx_client_factory=httpx_client_factory,
     ) as streams:
         yield cast("_TransportStreams", streams[:2])
 
@@ -150,6 +193,7 @@ def build_transport_handle(
     if server_config.transport == "stdio":
         return _MCPTransportHandle(transport="stdio", opener=lambda: _open_stdio(server_config, runtime_paths))
     if server_config.transport == "sse":
+        authorization_tracker = _MCPHTTPAuthorizationTracker()
         return _MCPTransportHandle(
             transport="sse",
             opener=lambda: _open_remote_transport(
@@ -157,10 +201,13 @@ def build_transport_handle(
                 runtime_paths,
                 transport="sse",
                 client=sse_client,
+                httpx_client_factory=_tracked_mcp_http_client_factory(authorization_tracker),
                 extra_headers=extra_headers,
             ),
+            authorization_rejected=authorization_tracker.is_rejected,
         )
     if server_config.transport == "streamable-http":
+        authorization_tracker = _MCPHTTPAuthorizationTracker()
         return _MCPTransportHandle(
             transport="streamable-http",
             opener=lambda: _open_remote_transport(
@@ -168,8 +215,10 @@ def build_transport_handle(
                 runtime_paths,
                 transport="streamable-http",
                 client=streamablehttp_client,
+                httpx_client_factory=_tracked_mcp_http_client_factory(authorization_tracker),
                 extra_headers=extra_headers,
             ),
+            authorization_rejected=authorization_tracker.is_rejected,
         )
     msg = f"Unsupported MCP transport for server '{server_id}': {server_config.transport}"
     raise ValueError(msg)

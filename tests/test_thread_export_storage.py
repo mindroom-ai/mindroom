@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from mindroom.thread_export import clear_thread_export_root
 from mindroom.thread_export.models import ThreadExportRoom
 from mindroom.thread_export.storage import (
     _ROOT_MARKER_FILENAME,
@@ -61,6 +62,96 @@ def _write_thread_export(room_dir: Path, thread_id: str = "$thread:localhost") -
         encoding="utf-8",
     )
     return path
+
+
+def test_clear_thread_export_root_removes_only_owned_content(tmp_path: Path) -> None:
+    """Plugins can retract a target without owning path traversal or broad deletion."""
+    output_dir = tmp_path / "agent" / "workspace" / "thread_exports"
+    _mark_export_root(output_dir)
+    room_dir = output_dir / "lobby"
+    room_dir.mkdir()
+    _write_thread_export(room_dir)
+    (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+    note = output_dir / "operator-note.txt"
+    note.write_text("keep", encoding="utf-8")
+
+    clear_thread_export_root(output_dir, trusted_root=tmp_path)
+
+    assert not room_dir.exists()
+    assert (output_dir / _ROOT_MARKER_FILENAME).exists()
+    assert note.read_text(encoding="utf-8") == "keep"
+
+    prepare_export_root(output_dir, trusted_root=tmp_path)
+
+
+def test_clear_thread_export_root_retains_empty_owned_directory(
+    tmp_path: Path,
+) -> None:
+    """Cleanup retains the owned root so later exports can reuse it safely."""
+    output_dir = tmp_path / "agent" / "workspace" / "thread_exports"
+    _mark_export_root(output_dir)
+
+    clear_thread_export_root(output_dir, trusted_root=tmp_path)
+
+    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+
+
+def test_clear_thread_export_root_never_drops_ownership_before_cleanup_finishes(
+    tmp_path: Path,
+) -> None:
+    """Cleanup must not expose a markerless root to concurrent writers."""
+    output_dir = tmp_path / "agent" / "workspace" / "thread_exports"
+    _mark_export_root(output_dir)
+
+    with patch("mindroom.thread_export.storage.os.unlink") as unlink:
+        clear_thread_export_root(output_dir, trusted_root=tmp_path)
+
+    unlink.assert_not_called()
+    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+
+
+def test_clear_thread_export_root_rejects_replaced_parent(tmp_path: Path) -> None:
+    """Cleanup cannot follow an intermediate symlink installed after discovery."""
+    instance_root = tmp_path / "private_instances" / "scope" / "agent"
+    output_dir = instance_root / "workspace" / "thread_exports"
+    _mark_export_root(output_dir)
+    saved_instance_root = instance_root.with_name("agent-saved")
+    instance_root.rename(saved_instance_root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    instance_root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="thread export root parent"):
+        clear_thread_export_root(output_dir, trusted_root=tmp_path)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert (saved_instance_root / "workspace" / "thread_exports" / _ROOT_MARKER_FILENAME).exists()
+
+
+def test_write_thread_payload_rejects_replaced_parent(tmp_path: Path) -> None:
+    """A prepared target cannot be redirected before a later write."""
+    instance_root = tmp_path / "private_instances" / "scope" / "agent"
+    output_dir = instance_root / "workspace" / "thread_exports"
+    prepare_export_root(output_dir, trusted_root=tmp_path)
+    saved_instance_root = instance_root.with_name("agent-saved")
+    instance_root.rename(saved_instance_root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    instance_root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="thread export root parent"):
+        write_thread_payload(
+            output_dir,
+            _room(),
+            "$thread:localhost",
+            {"messages": []},
+            trusted_root=tmp_path,
+        )
+
+    assert not (outside / "workspace" / "thread_exports").exists()
+    assert (saved_instance_root / "workspace" / "thread_exports" / _ROOT_MARKER_FILENAME).exists()
 
 
 def test_safe_path_segment_blocks_dot_directory_segments() -> None:

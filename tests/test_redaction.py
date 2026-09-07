@@ -86,6 +86,35 @@ def test_redact_sensitive_data_redacts_oauth_callback_query_values_in_urls() -> 
     }
 
 
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql://journal_user:hunter2@db.example:5432/journal",
+        "postgres://journal_user:hunter2@db.example/journal",
+        "postgresql://journal_user@db.example:5432/journal?password=hunter2",
+        "postgresql://db.example/journal?sslpassword=hunter2",
+        "host=db.example dbname=journal user=journal_user password=hunter2",
+    ],
+)
+def test_a_database_password_does_not_survive_any_of_its_spellings(dsn: str) -> None:
+    """Userinfo credentials belong to the URI grammar, not to HTTP.
+
+    A ``postgresql://`` DSN used to walk straight through, because the URL
+    scan matched ``http`` and ``https`` only, so nothing ever looked at its
+    userinfo. A password reaches a connection string through at least four
+    different spellings and every one of them lands in the same logs.
+    """
+    redacted = redact_sensitive_text(dsn)
+
+    assert "hunter2" not in redacted
+    assert "db.example" in redacted, "an operator still has to be able to tell which server this was"
+
+
+def test_a_scheme_carrying_no_credentials_is_left_alone() -> None:
+    """Widening the scan must not start rewriting URLs that hold nothing secret."""
+    assert redact_sensitive_text("postgresql://db.example:5432/journal") == "postgresql://db.example:5432/journal"
+
+
 def test_redact_url_in_escaped_shell_command_keeps_json_arguments_valid() -> None:
     """URL redaction must not eat the backslash escaping the quote after the URL.
 

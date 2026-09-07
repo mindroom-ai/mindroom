@@ -19,6 +19,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
+from mindroom.api.connections import router as connections_router
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
@@ -33,9 +34,13 @@ from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
 from mindroom.api.schedules import router as schedules_router
+from mindroom.api.script_gateway import bind_script_tool_broker
+from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.api.skills import router as skills_router
+from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.embedder_health import get_embedder_failure
 from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
@@ -43,17 +48,10 @@ from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
-from mindroom.orchestration.runtime import matrix_sync_cache_write_grace_seconds, matrix_sync_startup_timeout_seconds
+from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.backend import maintain_workers
-from mindroom.workers.runtime import (
-    get_primary_worker_manager,
-    primary_worker_backend_available,
-    primary_worker_backend_name,
-    serialized_kubernetes_worker_config_snapshot,
-    serialized_kubernetes_worker_validation_snapshot,
-)
+from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -61,8 +59,12 @@ if TYPE_CHECKING:
 
     from starlette.types import ASGIApp, Receive, Scope, Send
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
+    from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.script_runs.broker import ScriptToolBroker
+    from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
@@ -71,6 +73,7 @@ _DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGI
 _DASHBOARD_CORS_EXPOSE_HEADERS = (
     config_lifecycle.CONFIG_GENERATION_HEADER,
     config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
+    config_lifecycle.CONFIG_PENDING_RESTART_HEADER,
 )
 _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
     "http://localhost:3003",
@@ -194,40 +197,19 @@ def _cleanup_workers_once(
     runtime_paths: constants.RuntimePaths,
     *,
     runtime_config: Config | None = None,
-    worker_grantable_credentials: frozenset[str] | None = None,
+    touch_live_workers: Callable[[WorkerBackend], None] | None = None,
 ) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
-    proxy_config = sandbox_proxy_config(runtime_paths)
-    if not primary_worker_backend_available(
+    worker_lease = lease_configured_primary_worker_manager(
         runtime_paths,
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-    ):
-        return 0
-
-    if runtime_config is None and primary_worker_backend_name(runtime_paths) == "kubernetes":
-        return 0
-
-    kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
-    kubernetes_config_snapshot: dict[str, object] | None = None
-    if runtime_config is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
-        kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
-            runtime_paths,
-            runtime_config=runtime_config,
-        )
-        kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
-        if worker_grantable_credentials is None:
-            worker_grantable_credentials = runtime_config.get_worker_grantable_credentials()
-    worker_manager = get_primary_worker_manager(
-        runtime_paths,
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-        storage_root=runtime_paths.storage_root,
-        kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
-        kubernetes_config_snapshot=kubernetes_config_snapshot,
-        worker_grantable_credentials=worker_grantable_credentials,
+        runtime_config=runtime_config,
     )
-    maintenance = maintain_workers(worker_manager)
+    if worker_lease is None:
+        return 0
+    with worker_lease as worker_manager:
+        if touch_live_workers is not None:
+            touch_live_workers(worker_manager)
+        maintenance = maintain_workers(worker_manager)
     if maintenance.cleaned:
         logger.info(
             "Cleaned idle workers",
@@ -273,11 +255,7 @@ async def _worker_cleanup_loop(
                     _cleanup_workers_once,
                     runtime_paths,
                     runtime_config=runtime_config,
-                    worker_grantable_credentials=(
-                        runtime_config.get_worker_grantable_credentials()
-                        if runtime_config is not None
-                        else constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
-                    ),
+                    touch_live_workers=config_lifecycle.app_state(api_app).script_worker_keepalive,
                 )
             except Exception:
                 logger.exception("Background worker cleanup failed")
@@ -304,7 +282,11 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
     previous_state = app_state.api_state
     if previous_state is None:
+        app_state.thread_export_runner = None
+        app_state.leave_matrix_room = None
         app_state.external_trigger_runtime = None
+        app_state.script_worker_keepalive = None
+        bind_script_tool_broker(api_app, None)
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
             snapshot=ApiSnapshot(
@@ -332,7 +314,11 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         )
         source_files = current_snapshot.source_files if current_snapshot.runtime_paths == runtime_paths else None
         if current_snapshot.runtime_paths != runtime_paths:
+            app_state.thread_export_runner = None
+            app_state.leave_matrix_room = None
             app_state.external_trigger_runtime = None
+            app_state.script_worker_keepalive = None
+            bind_script_tool_broker(api_app, None)
         previous_state.snapshot = config_lifecycle._published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
@@ -344,6 +330,23 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             source_files=source_files,
         )
     config_lifecycle.register_api_app(api_app)
+
+
+def bind_script_runtime(
+    api_app: FastAPI,
+    *,
+    broker: ScriptToolBroker,
+    touch_live_workers: Callable[[WorkerBackend], None],
+) -> None:
+    """Bind the lifecycle-owned broker and worker keepalive to the primary API."""
+    bind_script_tool_broker(api_app, broker)
+    config_lifecycle.ensure_app_state(api_app).script_worker_keepalive = touch_live_workers
+
+
+def unbind_script_runtime(api_app: FastAPI) -> None:
+    """Clear script capabilities and keepalive when an API runtime is replaced."""
+    bind_script_tool_broker(api_app, None)
+    config_lifecycle.ensure_app_state(api_app).script_worker_keepalive = None
 
 
 async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:
@@ -491,7 +494,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Sync API keys from environment to CredentialsManager
     logger.info("Syncing API credentials from runtime env")
-    sync_env_to_credentials(runtime_paths=runtime_paths)
+    await run_blocking_until_complete(sync_env_to_credentials, runtime_paths)
 
     api_owned_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None
@@ -537,17 +540,23 @@ def bind_orchestrator_knowledge_refresh_scheduler(
 def bind_external_trigger_runtime(
     api_app: FastAPI,
     client: object,
-    conversation_cache: object,
+    conversation_reader: object,
     *,
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
+    agent_reply_memberships: AgentReplyMembershipIndex,
+    response_admission_gate: ResponseAdmissionGate,
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
 ) -> None:
     """Attach router Matrix delivery runtime to one API app."""
     api_state = config_lifecycle.require_api_state(api_app)
     config_lifecycle.app_state(api_app).external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
         client=client,
-        conversation_cache=conversation_cache,
+        conversation_reader=conversation_reader,
         config_generation=api_state.snapshot.generation,
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+        agent_reply_memberships=agent_reply_memberships,
+        response_admission_gate=response_admission_gate,
+        wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
     )
 
 
@@ -698,10 +707,12 @@ def _set_config_generation_header(response: Response, generation: int) -> None:
 
 # Include routers
 app.include_router(auth_router)
+app.include_router(connections_router)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
 app.include_router(integrations_router, dependencies=[Depends(verify_user)])
 app.include_router(matrix_router, dependencies=[Depends(verify_user)])
+app.include_router(thread_exports_router, dependencies=[Depends(verify_user)])
 app.include_router(oauth_router)
 app.include_router(schedules_router, dependencies=[Depends(verify_user)])
 app.include_router(knowledge_router, dependencies=[Depends(verify_user)])
@@ -711,6 +722,7 @@ app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)
 app.include_router(external_triggers_router)
+app.include_router(script_gateway_router)
 app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
 
 
@@ -721,7 +733,7 @@ async def health_check(request: Request) -> JSONResponse:
     runtime_paths = _api_runtime_paths(request)
     sync_health = get_matrix_sync_health_snapshot(
         startup_grace_seconds=matrix_sync_startup_timeout_seconds(runtime_paths),
-        cache_write_grace_seconds=matrix_sync_cache_write_grace_seconds(runtime_paths),
+        ingestion_grace_seconds=matrix_ingestion_grace_seconds(runtime_paths),
     )
 
     response: dict[str, object] = {
@@ -768,9 +780,13 @@ async def load_config(
     payload = config_lifecycle.read_committed_config(request, lambda config_data: dict(config_data))
     _set_config_generation_header(response, generation)
     # The payload is the config itself, so the includes flag rides in a header
-    # like the generation does.
+    # like the generation does, and so does the notice that the saved
+    # event_journal is not the one this process has open.
     response.headers[config_lifecycle.CONFIG_USES_INCLUDES_HEADER] = (
         "true" if config_lifecycle.config_uses_includes(request) else "false"
+    )
+    response.headers[config_lifecycle.CONFIG_PENDING_RESTART_HEADER] = (
+        "true" if config_lifecycle.config_pending_restart(request) else "false"
     )
     return payload
 

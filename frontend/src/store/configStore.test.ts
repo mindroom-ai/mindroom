@@ -47,7 +47,6 @@ describe("configStore", () => {
       draftVersion: 0,
       agents: [],
       teams: [],
-      cultures: [],
       rooms: [],
       agentPoliciesByAgent: {},
       agentPoliciesStale: false,
@@ -56,7 +55,6 @@ describe("configStore", () => {
       saveConfigRequestId: 0,
       selectedAgentId: null,
       selectedTeamId: null,
-      selectedCultureId: null,
       selectedRoomId: null,
       isDirty: false,
       dirtyRoots: [],
@@ -64,6 +62,7 @@ describe("configStore", () => {
       diagnostics: [],
       syncStatus: "disconnected",
       configUsesIncludes: false,
+      configJournalPendingRestart: false,
       privateWorkerScopeBackups: {},
     });
 
@@ -110,7 +109,6 @@ describe("configStore", () => {
       expect(state.config).toEqual({
         ...mockConfig,
         knowledge_bases: {},
-        cultures: {},
       });
       expect(state.agents).toHaveLength(1);
       expect(state.agents[0].id).toBe("test");
@@ -145,6 +143,33 @@ describe("configStore", () => {
       await useConfigStore.getState().loadConfig();
 
       expect(useConfigStore.getState().configUsesIncludes).toBe(true);
+    });
+
+    it("records when the saved event journal only takes effect after a restart", async () => {
+      // The backend accepts the edit and keeps using the store it opened at
+      // startup, so the editor showing the saved value without saying so would
+      // be reporting a database nothing is writing to.
+      const mockConfig = {
+        agents: {},
+        models: { default: { provider: "ollama", id: "test-model" } },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+        headers: {
+          get: (name: string) =>
+            name === "x-mindroom-config-pending-restart" ? "true" : null,
+        },
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: {} }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      expect(useConfigStore.getState().configJournalPendingRestart).toBe(true);
     });
 
     it("uses the room id fallback for blank authored room display names", async () => {
@@ -963,7 +988,6 @@ describe("configStore", () => {
           },
         },
         knowledge_bases: {},
-        cultures: {},
         agents: {
           assistant: {
             display_name: "Assistant",
@@ -1379,7 +1403,6 @@ describe("configStore", () => {
           },
         },
         knowledge_bases: {},
-        cultures: {},
         agents: {
           existing: {
             display_name: "Existing Agent",
@@ -1460,7 +1483,6 @@ describe("configStore", () => {
       expect(state.config).toEqual({
         ...replacementConfig,
         knowledge_bases: {},
-        cultures: {},
       });
       expect(state.agents).toEqual([
         {
@@ -3638,14 +3660,6 @@ describe("configStore", () => {
 
     it("should delete agent", () => {
       useConfigStore.setState({
-        cultures: [
-          {
-            id: "engineering",
-            description: "Engineering standards",
-            agents: ["agent1", "agent2"],
-            mode: "automatic",
-          },
-        ],
         teams: [
           {
             id: "team1",
@@ -3663,15 +3677,14 @@ describe("configStore", () => {
       const state = useConfigStore.getState();
       expect(state.agents).toHaveLength(1);
       expect(state.agents[0].id).toBe("agent2");
-      expect(state.cultures[0].agents).toEqual(["agent2"]);
       expect(state.teams[0].agents).toEqual(["agent2"]);
       expect(state.isDirty).toBe(true);
       expect(state.dirtyRoots).toEqual(
-        expect.arrayContaining(["agents", "teams", "cultures"]),
+        expect.arrayContaining(["agents", "teams"]),
       );
     });
 
-    it("serializes dependent team and culture removals after deleteAgent", async () => {
+    it("serializes dependent team removals after deleteAgent", async () => {
       const mockConfig = {
         agents: {
           agent1: {
@@ -3698,13 +3711,6 @@ describe("configStore", () => {
             agents: ["agent1", "agent2"],
             rooms: [],
             mode: "coordinate",
-          },
-        },
-        cultures: {
-          engineering: {
-            description: "Engineering standards",
-            agents: ["agent1", "agent2"],
-            mode: "automatic",
           },
         },
         models: {
@@ -3762,14 +3768,6 @@ describe("configStore", () => {
             mode: "coordinate",
           },
         ],
-        cultures: [
-          {
-            id: "engineering",
-            description: "Engineering standards",
-            agents: ["agent1", "agent2"],
-            mode: "automatic",
-          },
-        ],
       });
 
       (global.fetch as any).mockResolvedValueOnce({
@@ -3801,12 +3799,6 @@ describe("configStore", () => {
         teams: {
           team1: {
             ...mockConfig.teams.team1,
-            agents: ["agent2"],
-          },
-        },
-        cultures: {
-          engineering: {
-            ...mockConfig.cultures.engineering,
             agents: ["agent2"],
           },
         },
@@ -4038,85 +4030,6 @@ describe("configStore", () => {
       expect(state.teams).toHaveLength(1);
       expect(state.teams[0].id).toBe("team2");
       expect(state.selectedTeamId).toBe(null);
-      expect(state.isDirty).toBe(true);
-    });
-  });
-
-  describe("cultures", () => {
-    beforeEach(() => {
-      useConfigStore.setState({
-        cultures: [
-          {
-            id: "engineering",
-            description: "Engineering standards",
-            agents: ["agent1"],
-            mode: "automatic",
-          },
-          {
-            id: "support",
-            description: "Support playbooks",
-            agents: ["agent2"],
-            mode: "manual",
-          },
-        ],
-        selectedCultureId: "engineering",
-      });
-    });
-
-    it("should select culture", () => {
-      const { selectCulture } = useConfigStore.getState();
-      selectCulture("support");
-
-      const state = useConfigStore.getState();
-      expect(state.selectedCultureId).toBe("support");
-    });
-
-    it("should update culture and enforce unique agent assignment", () => {
-      const { updateCulture } = useConfigStore.getState();
-      updateCulture("support", {
-        agents: ["agent1", "agent2"],
-        mode: "agentic",
-      });
-
-      const state = useConfigStore.getState();
-      expect(
-        state.cultures.find((culture) => culture.id === "support")?.mode,
-      ).toBe("agentic");
-      expect(
-        state.cultures.find((culture) => culture.id === "support")?.agents,
-      ).toEqual(["agent1", "agent2"]);
-      expect(
-        state.cultures.find((culture) => culture.id === "engineering")?.agents,
-      ).toEqual([]);
-      expect(state.isDirty).toBe(true);
-    });
-
-    it("should create new culture", () => {
-      const { createCulture } = useConfigStore.getState();
-      createCulture({
-        description: "Product knowledge",
-        agents: ["agent3"],
-        mode: "automatic",
-      });
-
-      const state = useConfigStore.getState();
-      expect(state.cultures).toHaveLength(3);
-      const newCulture = state.cultures.find(
-        (culture) => culture.id === "product_knowledge",
-      );
-      expect(newCulture?.description).toBe("Product knowledge");
-      expect(state.selectedCultureId).toBe("product_knowledge");
-      expect(state.isDirty).toBe(true);
-    });
-
-    it("should delete culture", () => {
-      const { deleteCulture } = useConfigStore.getState();
-      deleteCulture("engineering");
-
-      const state = useConfigStore.getState();
-      expect(state.cultures).toHaveLength(1);
-      expect(state.cultures[0].id).toBe("support");
-      expect(state.selectedCultureId).toBe(null);
       expect(state.isDirty).toBe(true);
     });
   });

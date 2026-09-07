@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="modelslabs",
     display_name="ModelsLabs",
-    description="AI model marketplace for generating videos, audio, and GIFs from text prompts",
+    description="AI model marketplace for generating images, videos, audio, and GIFs from text prompts",
     category=ToolCategory.DEVELOPMENT,  # From docs URL: /tools/toolkits/others/
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key
     setup_type=SetupType.API_KEY,  # Uses api_key parameter
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
             # The agno default is FileType.MP4, which has value "mp4"
             default="mp4",
             placeholder="mp4",
-            description="The type of file to generate (mp4, gif, or mp3)",
+            description="The type of file to generate (png, jpg, mp4, gif, mp3, or wav)",
         ),
         ConfigField(
             name="model_id",
@@ -103,6 +103,40 @@ if TYPE_CHECKING:
 )
 def modelslabs_tools() -> type[ModelsLabTools]:
     """Return ModelsLabs tool for AI-powered media generation."""
+    from agno.models.response import FileType
     from agno.tools.models_labs import ModelsLabTools
 
-    return ModelsLabTools
+    class MindRoomModelsLabTools(ModelsLabTools):
+        """ModelsLab toolkit that accepts authored string file types."""
+
+        def __init__(
+            self,
+            api_key: str | None = None,
+            wait_for_completion: bool = False,
+            add_to_eta: int = 15,
+            max_wait_time: int = 60,
+            file_type: FileType | str | None = FileType.MP4,
+            model_id: str | None = None,
+            width: int = 512,
+            height: int = 512,
+            **kwargs: object,
+        ) -> None:
+            if isinstance(file_type, str):
+                normalized_file_type = file_type.strip().lower()
+                resolved_file_type = FileType(normalized_file_type) if normalized_file_type else FileType.MP4
+            else:
+                resolved_file_type = file_type or FileType.MP4
+            super().__init__(
+                api_key=api_key,
+                wait_for_completion=wait_for_completion,
+                add_to_eta=add_to_eta,
+                max_wait_time=max_wait_time,
+                file_type=resolved_file_type,
+                model_id=model_id,
+                width=width,
+                height=height,
+                **kwargs,
+            )
+
+    MindRoomModelsLabTools.__init__.__annotations__["file_type"] = FileType | str | None
+    return MindRoomModelsLabTools

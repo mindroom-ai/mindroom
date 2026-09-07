@@ -22,6 +22,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import (
     LocalWorkerStatePaths,
+    ensure_local_script_worker_state_locked,
     ensure_local_worker_state_locked,
     get_local_worker_manager,
     local_worker_state_paths_for_root,
@@ -147,6 +148,7 @@ def _prepare_worker(
     runtime_paths: RuntimePaths,
     *,
     runner_token: str | None = None,
+    run_scoped_script: bool = False,
 ) -> WorkerHandle:
     """Ensure a worker is ready and return its handle."""
     dedicated_worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
@@ -160,7 +162,10 @@ def _prepare_worker(
             raise WorkerBackendError(msg)
         paths = local_worker_state_paths_for_root(dedicated_root)
         try:
-            ensure_local_worker_state_locked(paths)
+            if run_scoped_script:
+                ensure_local_script_worker_state_locked(paths)
+            else:
+                ensure_local_worker_state_locked(paths)
         except Exception as exc:
             failure_reason = f"Failed to initialize dedicated worker '{worker_key}': {exc}"
             raise WorkerBackendError(failure_reason) from exc
@@ -182,6 +187,21 @@ def _prepare_worker(
             },
         )
     return get_local_worker_manager(runtime_paths).ensure_worker(WorkerSpec(worker_key))
+
+
+def prepare_script_worker(
+    worker_key: str,
+    runtime_paths: RuntimePaths,
+    *,
+    runner_token: str | None = None,
+) -> WorkerHandle:
+    """Prepare one run-scoped script worker with its lightweight runtime."""
+    return _prepare_worker(
+        worker_key,
+        runtime_paths,
+        runner_token=runner_token,
+        run_scoped_script=True,
+    )
 
 
 def normalize_request_worker_key(

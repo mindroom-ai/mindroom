@@ -12,12 +12,14 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 from agno.db.base import SessionType
 from agno.models.message import Message
+from agno.run.agent import RunOutput
+from agno.run.team import TeamRunOutput
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import (
     _PreparedAgentRun,
 )
 from mindroom.bot import AgentBot
-from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -28,6 +30,7 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.event_journal import PrincipalStore
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.types import HistoryScope, PreparedHistoryState
@@ -37,7 +40,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
-from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
@@ -50,15 +53,20 @@ from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
 )
+from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
-    make_event_cache_mock,
+    ignore_final_delivery_handoff,
+    make_conversation_reader_mock,
+    make_membership_stub,
+    make_outbox_mock,
+    make_relation_lookup,
     request_envelope,
 )
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable
+    from collections.abc import Awaitable, Callable, Generator, Iterable
     from pathlib import Path
 
     from agno.knowledge.knowledge import Knowledge
@@ -97,56 +105,64 @@ def _entity_alias_for_test(config: Config, runtime_paths: RuntimePaths, matrix_i
 
 
 def _config() -> Config:
-    return Config(
-        agents={"general": AgentConfig(display_name="General")},
-        models={"default": ModelConfig(provider="openai", id="test-model")},
+    return with_current_room_member_access(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
     )
 
 
 def _config_with_matrix_message() -> Config:
-    return Config(
-        agents={
-            "general": AgentConfig(
-                display_name="General",
-                tools=["matrix_message"],
-            ),
-        },
-        models={"default": ModelConfig(provider="openai", id="test-model")},
+    return with_current_room_member_access(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    tools=["matrix_message"],
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
     )
 
 
 def _config_with_team() -> Config:
-    return Config(
-        agents={"general": AgentConfig(display_name="General")},
-        teams={
-            "ultimate": TeamConfig(
-                display_name="Ultimate",
-                role="Coordinate the team",
-                agents=["general"],
-                mode="coordinate",
-            ),
-        },
-        models={"default": ModelConfig(provider="openai", id="test-model")},
+    return with_current_room_member_access(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            teams={
+                "ultimate": TeamConfig(
+                    display_name="Ultimate",
+                    role="Coordinate the team",
+                    agents=["general"],
+                    mode="coordinate",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
     )
 
 
 def _config_with_team_matrix_message() -> Config:
-    return Config(
-        agents={
-            "general": AgentConfig(
-                display_name="General",
-                tools=["matrix_message"],
-            ),
-        },
-        teams={
-            "ultimate": TeamConfig(
-                display_name="Ultimate",
-                role="Coordinate the team",
-                agents=["general"],
-                mode="coordinate",
-            ),
-        },
-        models={"default": ModelConfig(provider="openai", id="test-model")},
+    return with_current_room_member_access(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    tools=["matrix_message"],
+                ),
+            },
+            teams={
+                "ultimate": TeamConfig(
+                    display_name="Ultimate",
+                    role="Coordinate the team",
+                    agents=["general"],
+                    mode="coordinate",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
     )
 
 
@@ -203,6 +219,30 @@ class _SessionStorageView:
 
     def upsert_session(self, session: AgentSession | TeamSession) -> None:
         self._store.session = session
+
+    def upsert_run(
+        self,
+        run: object,
+        session_id: str,
+        user_id: str | None = None,
+        run_index: int | None = None,
+    ) -> None:
+        """Store the run as its own row: replace by run_id or append, like agno's runs table."""
+        del user_id, run_index
+        stored = self._store.session
+        if stored is None or stored.session_id != session_id:
+            return
+        assert isinstance(run, RunOutput | TeamRunOutput)
+        runs = [existing for existing in stored.runs or [] if existing.run_id != run.run_id]
+        stored.runs = [*runs, run]
+        self._store.session = stored
+
+    def delete_runs(self, run_ids: list[str]) -> None:
+        stored = self._store.session
+        if stored is None:
+            return
+        stored.runs = [run for run in stored.runs or [] if run.run_id not in run_ids]
+        self._store.session = stored
 
     def close(self) -> None:
         return None
@@ -288,6 +328,12 @@ def _knowledge_access_support(
                 unavailable=unavailable or {},
             ),
         ),
+        resolve_for_agent_async=AsyncMock(
+            return_value=_KnowledgeResolution(
+                knowledge=cast("Knowledge | None", knowledge),
+                unavailable=unavailable or {},
+            ),
+        ),
     )
 
 
@@ -341,12 +387,8 @@ def _build_response_runner(
         return_value=thread_history_result([], is_full_history=True),
     )
     bot._conversation_resolver.deps = SimpleNamespace(
-        conversation_cache=SimpleNamespace(
-            get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
-            notify_outbound_message=MagicMock(),
-            notify_outbound_event=MagicMock(),
-            notify_outbound_redaction=MagicMock(),
-        ),
+        conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(),
     )
     bot._conversation_state_writer = MagicMock()
     bot._conversation_state_writer.create_storage = MagicMock(
@@ -356,7 +398,7 @@ def _build_response_runner(
             else history_storage,
         ),
     )
-    bot._conversation_state_writer.persist_response_event_id_in_session_run = MagicMock()
+    bot._conversation_state_writer.apersist_response_event_id_in_session_run = AsyncMock()
     bot._conversation_state_writer.history_scope = MagicMock(
         return_value=HistoryScope(
             kind="team" if bot.agent_name in config.teams else "agent",
@@ -391,17 +433,16 @@ def _build_response_runner(
         side_effect=lambda scope: SessionType.TEAM if scope.kind == "team" else SessionType.AGENT,
     )
     bot._edit_message = AsyncMock(return_value=True)
-    runtime = BotRuntimeState(
+    agent_reply_memberships = AgentReplyMembershipIndex()
+    bot.agent_reply_memberships = agent_reply_memberships
+    runtime = SimpleNamespace(
         client=bot.client,
         config=config,
-        runtime_paths=runtime_paths,
+        agent_reply_memberships=agent_reply_memberships,
         enable_streaming=bot.enable_streaming,
         orchestrator=bot.orchestrator,
-        event_cache=make_event_cache_mock(),
-        event_cache_write_coordinator=None,
         response_admission_gate=bot.admission_gate,
         runtime_started_at=0.0,
-        runtime_generation="test-generation",
     )
     hook_context = HookContextSupport(
         runtime=runtime,
@@ -423,6 +464,8 @@ def _build_response_runner(
             redact_message_event=AsyncMock(return_value=True),
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
+            outbox=make_outbox_mock(),
+            turn_handoff=ignore_final_delivery_handoff,
         ),
     )
     _set_gateway_method(
@@ -439,6 +482,7 @@ def _build_response_runner(
     )
     _set_gateway_method(delivery_gateway, "edit_text", AsyncMock(return_value=True))
     _set_gateway_method(delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
+    membership = make_membership_stub()
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
         logger=bot.logger,
@@ -448,16 +492,20 @@ def _build_response_runner(
         matrix_id=bot.matrix_id,
         resolver=bot._conversation_resolver,
         hook_context=hook_context,
+        membership=membership,
     )
 
     post_response_effects = PostResponseEffectsSupport(
         runtime=runtime,
         logger=bot.logger,
         runtime_paths=runtime_paths,
-        delivery_gateway=delivery_gateway,
-        conversation_cache=bot._conversation_resolver.deps.conversation_cache,
+        conversation_reader=make_conversation_reader_mock(),
+        membership=membership,
+        agent_name=bot.agent_name,
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
+    approval_store = MagicMock(spec=PrincipalStore)
+    approval_store.approval_continuation_for_source = AsyncMock(return_value=None)
 
     return ResponseRunner(
         ResponseRunnerDeps(
@@ -480,6 +528,9 @@ def _build_response_runner(
                 agent_name=bot.agent_name,
                 logger=bot.logger,
             ),
+            approval_store=approval_store,
+            retry_approval_sources=lambda _source_event_ids: None,
+            approval_runtime_generation="test-runtime",
         ),
     )
 
@@ -526,11 +577,11 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
         self,
         *,
         room_id: str,
-        interactive_agent_name: str,
+        membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
-        persist_response_event_id: Callable[[str, str], None] | None = None,
+        persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
-        del room_id, interactive_agent_name, queue_memory_persistence, persist_response_event_id
+        del room_id, membership_turn_id, queue_memory_persistence, persist_response_event_id
         return PostResponseEffectsDeps(logger=self.logger)
 
 
@@ -543,7 +594,8 @@ def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
             runtime=support.runtime,
             logger=support.logger,
             runtime_paths=support.runtime_paths,
-            delivery_gateway=support.delivery_gateway,
-            conversation_cache=support.conversation_cache,
+            conversation_reader=support.conversation_reader,
+            membership=support.membership,
+            agent_name=support.agent_name,
         ),
     )

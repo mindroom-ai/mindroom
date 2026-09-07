@@ -8,16 +8,15 @@
     "dev:docker": "vite --host",
     "preview:docker": "vite preview --host 0.0.0.0",
     "prebuild": "node scripts/generate-icon-imports.cjs",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && vite build --config vite.connections.config.ts",
     "preview": "vite preview",
-    "lint": "eslint \"src/**/*.{ts,tsx}\" vite.config.ts vitest.config.ts --report-unused-disable-directives --max-warnings 0",
+    "lint": "eslint \"src/**/*.{ts,tsx}\" vite.config.ts vite.connections.config.ts vitest.config.ts --report-unused-disable-directives --max-warnings 0",
     "type-check": "tsc --noEmit",
     "screenshot": "node scripts/screenshot.cjs",
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",
-    "test:unit": "vitest run --reporter=verbose",
-    "test:e2e": "node ../e2e-tests/gmail-oauth.test.js"
+    "test:unit": "vitest run --reporter=verbose"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

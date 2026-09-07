@@ -25,11 +25,14 @@ from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_ru
 def _config_with_worker_scope(
     worker_scope: str | None,
     *,
-    authorization: dict[str, object] | None = None,
+    administrators: list[str] | None = None,
+    credential_managers: list[str] | None = None,
+    private_per: str | None = None,
     worker_grantable_credentials: list[str] | None = None,
 ) -> Config:
     payload: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "administrators": administrators if administrators is not None else ["@alice:example.org"],
         "agents": {
             "general": {
                 "display_name": "General",
@@ -37,6 +40,10 @@ def _config_with_worker_scope(
                 "tools": ["calculator"],
                 "instructions": ["hi"],
                 "rooms": ["lobby"],
+                "credential_managers": (
+                    credential_managers if credential_managers is not None else ["@alice:example.org"]
+                ),
+                **({"private": {"per": private_per}} if private_per is not None else {}),
             },
         },
         "defaults": {
@@ -44,10 +51,9 @@ def _config_with_worker_scope(
             "worker_grantable_credentials": worker_grantable_credentials,
         },
     }
-    if authorization is not None:
-        payload["authorization"] = authorization
     config = Config.model_validate(payload)
-    config.agents["general"].worker_scope = worker_scope
+    if private_per is None:
+        config.agents["general"].worker_scope = worker_scope
     return config
 
 
@@ -78,9 +84,10 @@ def client(tmp_path: Path) -> TestClient:
         constants.resolve_primary_runtime_paths(
             config_path=tmp_path / "config.yaml",
             storage_path=tmp_path / "mindroom_data",
-            process_env={},
+            process_env={constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
         ),
     )
+    _publish_committed_runtime_config(app, _config_with_worker_scope(None))
     return TestClient(app)
 
 
@@ -462,6 +469,40 @@ class TestCredentialsAPI:
             "list_files": False,
             "max_read_size": 42,
             "_source": "ui",
+        }
+
+    def test_github_manual_access_token_round_trips_through_tool_config(
+        self,
+        client: TestClient,
+    ) -> None:
+        """The OAuth tool-config boundary must preserve declared manual fallbacks."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+
+        response = client.post(
+            "/api/credentials/github",
+            json={
+                "credentials": {
+                    "access_token": "github-manual-token",
+                    "base_url": "https://github.example.test/api/v3",
+                },
+            },
+        )
+        get_response = client.get("/api/credentials/github")
+
+        assert response.status_code == 200
+        assert manager.load_credentials("github") == {
+            "access_token": "github-manual-token",
+            "base_url": "https://github.example.test/api/v3",
+            "_source": "ui",
+        }
+        assert get_response.status_code == 200
+        assert get_response.json() == {
+            "service": "github",
+            "credentials": {
+                "access_token": "github-manual-token",
+                "base_url": "https://github.example.test/api/v3",
+            },
         }
 
     def test_get_oauth_credentials_filters_token_fields(
@@ -1149,6 +1190,29 @@ class TestCredentialsAPI:
         assert response.status_code == 400
         assert "OAuth token credentials" in response.json()["detail"]
 
+    def test_unregistered_oauth_token_service_rejects_generic_credential_writes(
+        self,
+        client: TestClient,
+    ) -> None:
+        """OAuth token service names stay reserved before their provider is registered."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        manager = get_runtime_credentials_manager(runtime_paths)
+
+        response = client.post(
+            "/api/credentials/acme_oauth",
+            json={"credentials": {"token": "posted-token"}},
+        )
+
+        assert response.status_code == 400
+        assert "OAuth token credentials" in response.json()["detail"]
+        assert manager.load_credentials("acme_oauth") is None
+        manager.save_credentials("acme_oauth", {"token": "legacy-token"})
+
+        list_response = client.get("/api/credentials/list")
+
+        assert list_response.status_code == 200
+        assert "acme_oauth" not in list_response.json()
+
     def test_oauth_token_service_rejects_legacy_credential_routes(
         self,
         client: TestClient,
@@ -1374,11 +1438,11 @@ class TestCredentialsAPI:
         assert deleted_list_response.status_code == 200
         assert deleted_list_response.json() == []
 
-    def test_list_services_discovers_shared_agent_oauth_store(
+    def test_list_services_hides_shared_agent_oauth_stores(
         self,
         client: TestClient,
     ) -> None:
-        """Shared-scope listings should discover agent-store tokens and ignore stale global ones."""
+        """Shared-scope listings must hide registered, orphaned, and stale OAuth token stores."""
         _use_owner_runtime(client.app)
         config = _config_with_worker_scope("shared")
         _publish_committed_runtime_config(client.app, config)
@@ -1412,9 +1476,7 @@ class TestCredentialsAPI:
         response = client.get("/api/credentials/list?agent_name=general")
 
         assert response.status_code == 200
-        # The orphaned agent-store token service is discoverable, the registered
-        # provider token stays hidden, and the stale global token never surfaces.
-        assert response.json() == ["acme_oauth"]
+        assert response.json() == []
 
     def test_primary_runtime_scoped_services_for_shared_agent_target(
         self,
@@ -1446,17 +1508,96 @@ class TestCredentialsAPI:
         self,
         client: TestClient,
     ) -> None:
-        """Private-scope writes stay limited to registered OAuth credential services."""
-        config = _config_with_worker_scope("user_agent")
+        """Private-agent self-service stays limited to registered connection credentials."""
+        _use_owner_runtime(client.app)
+        config = _config_with_worker_scope(
+            None,
+            administrators=[],
+            credential_managers=[],
+            private_per="user_agent",
+        )
         _publish_committed_runtime_config(client.app, config)
-
         response = client.post(
             "/api/credentials/weather?agent_name=general",
             json={"credentials": {"api_key": "weather-key"}},
         )
 
-        assert response.status_code == 400
-        assert "worker_scope=user_agent" in response.json()["detail"]
+        assert response.status_code == 403
+
+    def test_private_agent_requester_cannot_edit_global_oauth_client_config(self, client: TestClient) -> None:
+        """Private-agent ownership must not grant deployment-global OAuth client authority."""
+        runtime_paths = _use_owner_runtime(client.app)
+        config = _config_with_worker_scope(
+            None,
+            administrators=["@admin:example.org"],
+            credential_managers=[],
+            private_per="user_agent",
+        )
+        _publish_committed_runtime_config(client.app, config)
+
+        response = client.post(
+            "/api/credentials/google_drive_oauth_client?agent_name=general",
+            json={"credentials": {"client_id": "attacker", "client_secret": "secret"}},
+        )
+
+        assert response.status_code == 403
+        assert get_runtime_credentials_manager(runtime_paths).load_credentials("google_drive_oauth_client") is None
+
+    @pytest.mark.parametrize("agent_name", [None, "general"])
+    @pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
+    def test_non_admin_cannot_manage_global_oauth_client_config(
+        self,
+        client: TestClient,
+        agent_name: str | None,
+        method: str,
+    ) -> None:
+        """Neither global access nor agent-manager authority may edit deployment-global OAuth clients."""
+        runtime_paths = _use_owner_runtime(client.app)
+        config = _config_with_worker_scope(
+            "shared",
+            administrators=["@admin:example.org"],
+            credential_managers=["@alice:example.org"],
+        )
+        _publish_committed_runtime_config(client.app, config)
+        manager = get_runtime_credentials_manager(runtime_paths)
+        manager.save_credentials(
+            "google_drive_oauth_client",
+            {"client_id": "original", "client_secret": "original-secret", "_source": "ui"},
+        )
+        query = f"?agent_name={agent_name}" if agent_name is not None else ""
+
+        response = client.request(
+            method,
+            f"/api/credentials/google_drive_oauth_client{query}",
+            json={"credentials": {"client_id": "attacker", "client_secret": "secret"}},
+        )
+
+        assert response.status_code == 403
+        assert manager.load_credentials("google_drive_oauth_client") == {
+            "client_id": "original",
+            "client_secret": "original-secret",
+            "_source": "ui",
+        }
+
+    @pytest.mark.parametrize("agent_name", [None, "general"])
+    def test_admin_can_manage_global_oauth_client_config(self, client: TestClient, agent_name: str | None) -> None:
+        """Platform administrators retain global OAuth client configuration authority."""
+        runtime_paths = _use_owner_runtime(client.app)
+        config = _config_with_worker_scope("shared")
+        _publish_committed_runtime_config(client.app, config)
+        query = f"?agent_name={agent_name}" if agent_name is not None else ""
+
+        response = client.post(
+            f"/api/credentials/google_drive_oauth_client{query}",
+            json={"credentials": {"client_id": "admin-client", "client_secret": "admin-secret"}},
+        )
+
+        assert response.status_code == 200
+        assert get_runtime_credentials_manager(runtime_paths).load_credentials("google_drive_oauth_client") == {
+            "client_id": "admin-client",
+            "client_secret": "admin-secret",
+            "_source": "ui",
+        }
 
     def test_resolve_request_credentials_target_keeps_one_runtime_for_identity(
         self,
@@ -1466,12 +1607,20 @@ class TestCredentialsAPI:
         runtime_a = constants.resolve_primary_runtime_paths(
             config_path=tmp_path / "first.yaml",
             storage_path=tmp_path / "first-store",
-            process_env={"CUSTOMER_ID": "tenant-a", "ACCOUNT_ID": "account-a"},
+            process_env={
+                "CUSTOMER_ID": "tenant-a",
+                "ACCOUNT_ID": "account-a",
+                constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+            },
         )
         runtime_b = constants.resolve_primary_runtime_paths(
             config_path=tmp_path / "second.yaml",
             storage_path=tmp_path / "second-store",
-            process_env={"CUSTOMER_ID": "tenant-b", "ACCOUNT_ID": "account-b"},
+            process_env={
+                "CUSTOMER_ID": "tenant-b",
+                "ACCOUNT_ID": "account-b",
+                constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+            },
         )
         initialize_api_app(app, runtime_a)
         request = Request(
@@ -1536,7 +1685,7 @@ class TestCredentialsAPI:
         use_trusted_upstream_runtime(client.app)
         config = _config_with_worker_scope(
             "shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            credential_managers=["@alice:example.org"],
         )
         _publish_committed_runtime_config(client.app, config)
         bob_headers = trusted_upstream_headers(
@@ -1563,7 +1712,7 @@ class TestCredentialsAPI:
         use_trusted_upstream_runtime(client.app)
         config = _config_with_worker_scope(
             "shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            credential_managers=["@alice:example.org"],
         )
         _publish_committed_runtime_config(client.app, config)
         bob_headers = trusted_upstream_headers(
@@ -1584,12 +1733,53 @@ class TestCredentialsAPI:
         assert token_response.status_code == 403
         assert copy_response.status_code == 403
 
+    def test_unregistered_agent_oauth_token_service_authorizes_before_generic_rejection(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Reserved OAuth service names must retain agent authorization and private-scope ordering."""
+        use_trusted_upstream_runtime(client.app)
+        config = _config_with_worker_scope(
+            "user_agent",
+            credential_managers=["@alice:example.org"],
+        )
+        _publish_committed_runtime_config(client.app, config)
+        bob_headers = trusted_upstream_headers(
+            user_id="bob",
+            email="bob@example.org",
+            matrix_user_id="@bob:example.org",
+        )
+        alice_headers = trusted_upstream_headers(
+            user_id="alice",
+            email="alice@example.org",
+            matrix_user_id="@alice:example.org",
+        )
+
+        unauthorized_response = client.get(
+            "/api/credentials/acme_oauth?agent_name=general",
+            headers=bob_headers,
+        )
+        authorized_response = client.get(
+            "/api/credentials/acme_oauth?agent_name=general",
+            headers=alice_headers,
+        )
+        authorized_test_response = client.post(
+            "/api/credentials/acme_oauth/test?agent_name=general",
+            headers=alice_headers,
+        )
+
+        assert unauthorized_response.status_code == 403
+        assert authorized_response.status_code == 400
+        assert "OAuth token credentials" in authorized_response.json()["detail"]
+        assert authorized_test_response.status_code == 400
+        assert "OAuth token credentials" in authorized_test_response.json()["detail"]
+
     def test_homeassistant_token_connect_authorizes_before_probe(self, client: TestClient) -> None:
         """Unauthorized agent-scoped Home Assistant connects should not contact the provider."""
         use_trusted_upstream_runtime(client.app)
         config = _config_with_worker_scope(
             "shared",
-            authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+            credential_managers=["@alice:example.org"],
         )
         _publish_committed_runtime_config(client.app, config)
         bob_headers = trusted_upstream_headers(

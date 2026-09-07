@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.authorization import responder_candidate_entities_for_room
+from mindroom.authorization import (
+    is_platform_administrator,
+    responder_candidate_entities_with_membership_refresh,
+)
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.desktop_commands import (
@@ -16,11 +19,17 @@ from mindroom.commands.desktop_commands import (
 from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
+from mindroom.commands.room_model_commands import handle_room_model_command
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
+from mindroom.entity_resolution import (
+    configured_routable_entity_ids_for_room,
+    entity_identity_registry,
+)
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
+from mindroom.matrix.room_membership import cached_member_ids
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.scheduling import (
     SchedulingRuntime,
     cancel_all_scheduled_tasks,
@@ -37,10 +46,12 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.hooks import HookMatrixAdmin
-    from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.plugins import PluginReloadResult
@@ -55,6 +66,7 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.EDIT_SCHEDULE,
         CommandType.DESKTOP,
         CommandType.MODEL,
+        CommandType.ROOM_MODEL,
         CommandType.THREAD_MODE,
         CommandType.ENCRYPT,
     },
@@ -68,9 +80,10 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
         config=context.config,
         runtime_paths=context.runtime_paths,
         room=room,
-        conversation_cache=context.conversation_cache,
-        event_cache=context.event_cache,
+        conversation_reader=context.conversation_reader,
         matrix_admin=context.matrix_admin,
+        agent_reply_memberships=context.agent_reply_memberships,
+        responder_candidates_for_room=context.responder_candidates_for_room,
     )
 
 
@@ -103,15 +116,16 @@ class CommandHandlerContext:
     config: Config
     runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
-    conversation_cache: ConversationCacheProtocol
-    event_cache: ConversationEventCache
+    conversation_reader: ConversationReader
     stable_target: MessageTarget
-    record_handled_turn: Callable[[TurnRecord], None]
+    record_handled_turn: Callable[[TurnRecord], Awaitable[None]]
     record_command_result: Callable[[str], Awaitable[None]]
     send_response: _CommandResponseSender
+    agent_reply_memberships: AgentReplyMembershipIndex
+    responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
-    responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]] | None = None
+    controller_identity: Callable[[str], DesktopControllerIdentity] | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -195,17 +209,25 @@ def _format_welcome_message(
 
 
 async def generate_welcome_message_for_room(
-    client: nio.AsyncClient | None,
+    client: nio.AsyncClient,
     room: nio.MatrixRoom,
     sender_id: str | None,
     config: Config,
     runtime_paths: RuntimePaths,
+    agent_reply_memberships: AgentReplyMembershipIndex,
 ) -> str:
     """Generate a welcome message for callers without a live turn-policy candidate source."""
     if sender_id is None:
         candidate_entities = configured_routable_entity_ids_for_room(config, room.room_id, runtime_paths)
     else:
-        candidate_entities = await responder_candidate_entities_for_room(client, room, sender_id, config, runtime_paths)
+        candidate_entities = await responder_candidate_entities_with_membership_refresh(
+            client,
+            room,
+            sender_id,
+            config,
+            runtime_paths,
+            agent_reply_memberships,
+        )
     return _format_welcome_message(candidate_entities, config, runtime_paths)
 
 
@@ -239,7 +261,7 @@ def agent_owns_command(
         return True
     if command.type is not CommandType.DESKTOP:
         return False
-    return chat_pairing_desktop_error(config, agent_name) is None and set(room.users) == {
+    return chat_pairing_desktop_error(config, agent_name) is None and cached_member_ids(room) == {
         requester_user_id,
         room.own_user_id,
     }
@@ -251,16 +273,7 @@ async def _desktop_agent_for_room(
     requester_user_id: str,
 ) -> str | None:
     """Resolve one eligible agent from a room containing only the requester and serving bots."""
-    if context.responder_candidates_for_room is None:
-        candidates = await responder_candidate_entities_for_room(
-            context.client,
-            room,
-            requester_user_id,
-            context.config,
-            context.runtime_paths,
-        )
-    else:
-        candidates = await context.responder_candidates_for_room(room, requester_user_id)
+    candidates = await context.responder_candidates_for_room(room, requester_user_id)
     registry = entity_identity_registry(context.config, context.runtime_paths)
     eligible: list[tuple[str, str]] = []
     for candidate in candidates:
@@ -273,7 +286,7 @@ async def _desktop_agent_for_room(
         return None
     agent_name, agent_user_id = eligible[0]
     expected_members = {requester_user_id, room.own_user_id, agent_user_id}
-    if set(room.users) != expected_members:
+    if cached_member_ids(room) != expected_members:
         return None
     return agent_name
 
@@ -298,8 +311,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = get_command_help(topic)
 
     elif command.type == CommandType.RELOAD_PLUGINS:
-        resolved_requester_user_id = context.config.authorization.resolve_alias(requester_user_id)
-        if resolved_requester_user_id not in context.config.authorization.global_users:
+        if not is_platform_administrator(requester_user_id, context.config, context.runtime_paths):
             response_text = "❌ Admin only."
         elif context.reload_plugins is None:
             response_text = "❌ Plugin reload unavailable."
@@ -311,17 +323,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 response_text = f"❌ Plugin reload failed: {exc}"
 
     elif command.type == CommandType.HI:
-        if context.responder_candidates_for_room is None:
-            response_text = await generate_welcome_message_for_room(
-                context.client,
-                room,
-                requester_user_id,
-                context.config,
-                context.runtime_paths,
-            )
-        else:
-            candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
-            response_text = _format_welcome_message(candidate_entities, context.config, context.runtime_paths)
+        candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
+        response_text = _format_welcome_message(candidate_entities, context.config, context.runtime_paths)
 
     elif command.type == CommandType.DESKTOP:
         desktop_agent_name = await _desktop_agent_for_room(context, room, requester_user_id)
@@ -330,6 +333,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 "❌ Use `!desktop` in a private room containing only you, the serving bot, "
                 "and exactly one Desktop-enabled agent."
             )
+        elif context.controller_identity is None:
+            response_text = "❌ Desktop setup is unavailable until the target agent is running."
         else:
             response_text = handle_desktop_command(
                 command.args.get("args_text", ""),
@@ -338,13 +343,20 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     runtime_paths=context.runtime_paths,
                     agent_name=desktop_agent_name,
                     requester_id=requester_user_id,
+                    controller_identity=context.controller_identity,
                 ),
             )
 
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]
 
-        mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config, context.runtime_paths)
+        mentioned_agents, _, _ = check_agent_mentioned(
+            event.source,
+            None,
+            context.config,
+            context.runtime_paths,
+            room=room,
+        )
 
         _, response_text = await schedule_task(
             runtime=_scheduling_runtime(context, room),
@@ -397,12 +409,16 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     elif command.type == CommandType.CONFIG:
         authorization = context.config.authorization
-        resolved_requester_user_id = authorization.resolve_alias(requester_user_id)
         if not authorization.config_command_enabled:
             response_text = "❌ Config command disabled."
-        elif resolved_requester_user_id not in authorization.global_users:
+        elif not is_platform_administrator(requester_user_id, context.config, context.runtime_paths):
             response_text = "❌ Admin only."
         else:
+            resolved_requester_user_id = resolve_human_requester_alias(
+                requester_user_id,
+                context.config,
+                context.runtime_paths,
+            )
             # Handle config command
             args_text = command.args.get("args_text", "")
             response_text, change_info = await handle_config_command(
@@ -434,7 +450,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     requester=resolved_requester_user_id,
                 )
 
-                context.record_handled_turn(handled_turn)
+                await context.record_handled_turn(handled_turn)
                 return  # Exit early since we've handled the response
 
     elif command.type == CommandType.MODEL:
@@ -445,6 +461,17 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             room_id=room.room_id,
             thread_id=effective_thread_id,
             requester_user_id=requester_user_id,
+        )
+
+    elif command.type == CommandType.ROOM_MODEL:
+        response_text = await handle_room_model_command(
+            command.args.get("args_text", ""),
+            client=context.client,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            room_id=room.room_id,
+            requester_user_id=requester_user_id,
+            sender_user_id=event.sender,
         )
 
     elif command.type == CommandType.THREAD_MODE:
@@ -484,7 +511,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             skip_mentions=True,
         )
         response_event_id = _require_response_event_id(raw_response_event_id)
-        context.record_handled_turn(
+        await context.record_handled_turn(
             TurnRecord.create(
                 [event.event_id],
                 response_event_id=response_event_id,

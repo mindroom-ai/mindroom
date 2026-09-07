@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
-from mindroom.authorization import is_sender_allowed_for_agent_reply
+from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -21,14 +21,16 @@ from mindroom.constants import (
     VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
-from mindroom.dispatch_handoff import PreparedTextEvent, payload_metadata_from_source
+from mindroom.dispatch_handoff import PreparedIngress, payload_metadata_from_source
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
+from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
+from mindroom.matrix.room_membership import cached_member_ids
+from mindroom.response_admission import admitted_response_decision
 from mindroom.turn_origin import original_sender_for_router_relay
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     import nio
     import structlog
@@ -199,6 +201,7 @@ class VisibleVoiceEchoDeps:
     delivery_gateway: DeliveryGateway
     turn_store: TurnStore
     ingress: IngressValidator
+    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
 
 
 @dataclass
@@ -282,20 +285,23 @@ class VisibleVoiceEchoLifecycle:
         if orchestrator is None or orchestrator.entity_first_sync_complete(ROUTER_AGENT_NAME) is not True:
             return False
         if not any(
-            self.deps.ingress.managed_entity_name_for_sender(user_id) == ROUTER_AGENT_NAME for user_id in room.users
+            self.deps.ingress.managed_entity_name_for_sender(user_id) == ROUTER_AGENT_NAME
+            for user_id in cached_member_ids(room)
         ):
             return False
-        return is_sender_allowed_for_agent_reply(
+        return is_sender_allowed_for_agent_reply_in_room(
             requester_user_id,
             ROUTER_AGENT_NAME,
             config,
+            room.room_id,
             self.deps.runtime.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
         )
 
     async def finish(
         self,
         handle: _VisibleVoiceEchoHandle | None,
-        normalized_event: PreparedTextEvent,
+        normalized_event: PreparedIngress,
     ) -> None:
         """Best-effort settle one started lifecycle without blocking canonical dispatch."""
         if handle is None:
@@ -321,7 +327,7 @@ class VisibleVoiceEchoLifecycle:
     def finish_after_cancellation(
         self,
         handle: _VisibleVoiceEchoHandle | None,
-        fallback_event: PreparedTextEvent,
+        fallback_event: PreparedIngress,
     ) -> None:
         """Schedule terminal fallback cleanup without swallowing caller cancellation."""
         if handle is None:
@@ -343,7 +349,7 @@ class VisibleVoiceEchoLifecycle:
     def _spawn_settle(
         self,
         handle: _VisibleVoiceEchoHandle,
-        event: PreparedTextEvent,
+        event: PreparedIngress,
         *,
         name: str,
     ) -> asyncio.Task[str | None]:
@@ -397,14 +403,22 @@ class VisibleVoiceEchoLifecycle:
         request: VisibleVoiceEchoRequest,
         barrier: _EchoBarrier,
     ) -> str | None:
-        async with _serialize_update(self._update_key(request)):
+        async with (
+            _serialize_update(self._update_key(request)),
+            admitted_response_decision(
+                self.deps.runtime.response_admission_gate,
+                self.deps.wait_for_admission_or_shutdown,
+            ),
+        ):
+            if not self._sender_is_authorized(request):
+                return None
             existing_event_id = self.deps.turn_store.visible_echo_for_source(request.source_event_id)
             if existing_event_id is not None:
                 _publish_echo_barrier(barrier, existing_event_id)
                 return existing_event_id
             existing_event_id = await self._recover_visible_echo_event_id(request)
             if existing_event_id is not None:
-                self.deps.turn_store.record_visible_echo(request.source_event_id, existing_event_id)
+                await self.deps.turn_store.record_visible_echo(request.source_event_id, existing_event_id)
                 _publish_echo_barrier(barrier, existing_event_id)
                 return existing_event_id
             event_id = await self.deps.delivery_gateway.send_text(
@@ -419,21 +433,29 @@ class VisibleVoiceEchoLifecycle:
                 ),
             )
             if event_id is not None:
-                self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
                 _publish_echo_barrier(barrier, event_id)
             return event_id
 
     async def _settle(
         self,
         handle: _VisibleVoiceEchoHandle,
-        normalized_event: PreparedTextEvent,
+        normalized_event: PreparedIngress,
     ) -> str | None:
         request = handle.request
         is_fallback = _is_raw_audio_fallback(normalized_event)
         placeholder_event_id = (
             await asyncio.shield(handle.placeholder_task) if handle.placeholder_task is not None else None
         )
-        async with _serialize_update(self._update_key(request)):
+        async with (
+            _serialize_update(self._update_key(request)),
+            admitted_response_decision(
+                self.deps.runtime.response_admission_gate,
+                self.deps.wait_for_admission_or_shutdown,
+            ),
+        ):
+            if not self._sender_is_authorized(request):
+                return None
             finalized = self.deps.turn_store.finalized_visible_echo(request.source_event_id)
             if finalized is not None and (not finalized.is_fallback or is_fallback):
                 return finalized.event_id
@@ -448,7 +470,7 @@ class VisibleVoiceEchoLifecycle:
             if event_id is None:
                 event_id = await self._recover_visible_echo_event_id(request)
                 if event_id is not None:
-                    self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                    await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
             if event_id is None:
                 event_id = await self.deps.delivery_gateway.send_text(
                     SendTextRequest(
@@ -460,7 +482,7 @@ class VisibleVoiceEchoLifecycle:
                 )
                 if event_id is None:
                     return None
-                self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
             else:
                 edited = await self.deps.delivery_gateway.edit_text(
                     EditTextRequest(
@@ -474,12 +496,23 @@ class VisibleVoiceEchoLifecycle:
                 if not edited:
                     return None
 
-            self.deps.turn_store.record_finalized_visible_echo(
+            await self.deps.turn_store.record_finalized_visible_echo(
                 request.source_event_id,
                 event_id,
                 is_fallback=is_fallback,
             )
             return event_id
+
+    def _sender_is_authorized(self, request: VisibleVoiceEchoRequest) -> bool:
+        """Return whether the current router policy permits this echo requester."""
+        return is_sender_allowed_for_agent_reply_in_room(
+            request.requester_user_id,
+            self.deps.agent_name,
+            self.deps.runtime.config,
+            request.target.room_id,
+            self.deps.runtime.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+        )
 
     async def _recover_visible_echo_event_id(self, request: VisibleVoiceEchoRequest) -> str | None:
         """Adopt one untracked marked echo before replay can send another."""
@@ -544,6 +577,6 @@ class VisibleVoiceEchoLifecycle:
         return extra_content
 
 
-def _is_raw_audio_fallback(event: PreparedTextEvent) -> bool:
+def _is_raw_audio_fallback(event: PreparedIngress) -> bool:
     content = event.source.get("content")
     return isinstance(content, dict) and content.get(VOICE_RAW_AUDIO_FALLBACK_KEY) is True

@@ -441,7 +441,6 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
         duration_ms=5.0,
         timing=ToolCallTiming(
             before_hooks_ms=1.111,
-            approval_ms=2.222,
             tool_body_ms=3.333,
             result_ready_ms=6.666,
         ),
@@ -476,7 +475,6 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
     assert success_record.reply_to_event_id == "$reply"
     assert success_record.timing == ToolCallTiming(
         before_hooks_ms=1.111,
-        approval_ms=2.222,
         tool_body_ms=3.333,
         result_ready_ms=6.666,
     )
@@ -488,7 +486,6 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
     assert records[0]["success"] is True
     assert records[0]["reply_to_event_id"] == "$reply"
     assert records[0]["timing"] == {
-        "approval_ms": 2.22,
         "before_hooks_ms": 1.11,
         "result_ready_ms": 6.67,
         "tool_body_ms": 3.33,

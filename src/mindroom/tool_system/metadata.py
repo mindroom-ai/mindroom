@@ -169,6 +169,19 @@ def _tool_config_fields(metadata: ToolMetadata | ToolValidationInfo) -> tuple[Co
     return fields + tuple(field for field in _TOOLKIT_FILTER_CONFIG_FIELDS if field.name not in declared_names)
 
 
+def _authored_tool_config_fields(
+    metadata: ToolMetadata | ToolValidationInfo,
+    *,
+    include_agent_only: bool = True,
+) -> tuple[ConfigField, ...]:
+    """Return fields that may be set on one authored tool entry."""
+    fields = _tool_config_fields(metadata)
+    if not include_agent_only:
+        return fields
+    declared_names = {field.name for field in fields}
+    return fields + tuple(field for field in (metadata.agent_override_fields or ()) if field.name not in declared_names)
+
+
 def _validate_text_authored_override_value(
     tool_name: str,
     field: ConfigField,
@@ -261,7 +274,13 @@ def _validate_authored_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
-    fields_by_name = {field.name: field for field in _tool_config_fields(metadata)}
+    fields_by_name = {
+        field.name: field
+        for field in _authored_tool_config_fields(
+            metadata,
+            include_agent_only=config_path_prefix is None or not config_path_prefix.startswith("defaults.tools"),
+        )
+    }
     unexpected_fields = sorted(set(overrides) - set(fields_by_name))
     if unexpected_fields:
         unexpected = ", ".join(unexpected_fields)
@@ -389,7 +408,7 @@ def coerce_optional_finite_number(value: object) -> int | float | None:
         raise TypeError
     if isinstance(value, int | float):
         if math.isfinite(value):
-            return value
+            return int(value) if isinstance(value, float) and value.is_integer() else value
         raise OverflowError
     if isinstance(value, str):
         raw_value = value.strip()
@@ -475,7 +494,7 @@ def _build_tool_config_init_kwargs(
     _apply_tool_config_init_values(
         init_kwargs,
         tool_name=tool_name,
-        fields=fields,
+        fields=_authored_tool_config_fields(metadata),
         values=tool_config_overrides,
         skip_inherited=True,
     )
@@ -547,6 +566,7 @@ def _build_managed_tool_init_kwargs(
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
     worker_target: ResolvedWorkerTarget | None,
+    runtime_config: Config | None,
     tool_output_workspace_root: Path | None,
     worker_tools_override: list[str] | None,
 ) -> dict[str, object]:
@@ -559,6 +579,8 @@ def _build_managed_tool_init_kwargs(
             init_kwargs[init_arg.value] = credentials_manager
         elif init_arg == ToolManagedInitArg.WORKER_TARGET:
             init_kwargs[init_arg.value] = worker_target
+        elif init_arg == ToolManagedInitArg.RUNTIME_CONFIG:
+            init_kwargs[init_arg.value] = runtime_config
         elif init_arg == ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT:
             init_kwargs[init_arg.value] = tool_output_workspace_root
         elif init_arg == ToolManagedInitArg.WORKER_TOOLS_OVERRIDE:
@@ -566,6 +588,8 @@ def _build_managed_tool_init_kwargs(
         elif init_arg == ToolManagedInitArg.CURRENT_ROOM_ID:
             execution_identity = worker_target.execution_identity if worker_target is not None else None
             init_kwargs[init_arg.value] = execution_identity.room_id if execution_identity is not None else None
+        elif init_arg == ToolManagedInitArg.AGENT_NAME:
+            init_kwargs[init_arg.value] = worker_target.routing_agent_name if worker_target is not None else None
     return init_kwargs
 
 
@@ -590,6 +614,7 @@ def _build_tool_instance(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
+    runtime_config: Config | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
@@ -659,6 +684,7 @@ def _build_tool_instance(
             runtime_paths=runtime_paths,
             credentials_manager=resolved_credentials_manager,
             worker_target=worker_target,
+            runtime_config=runtime_config,
             tool_output_workspace_root=tool_output_workspace_root,
             worker_tools_override=worker_tools_override,
         ),
@@ -704,6 +730,7 @@ def get_tool_by_name(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
+    runtime_config: Config | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
@@ -727,6 +754,7 @@ def get_tool_by_name(
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
         credentials_manager=credentials_manager,
+        runtime_config=runtime_config,
         tool_config_overrides=tool_config_overrides,
         tool_init_overrides=tool_init_overrides,
         worker_tools_override=worker_tools_override,
@@ -1318,6 +1346,10 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
         tool_dict["default_execution_target"] = metadata.default_execution_target.value
+        if metadata.oauth_fallback_fields:
+            tool_dict["oauth_fallback_fields"] = list(metadata.oauth_fallback_fields)
+        else:
+            tool_dict.pop("oauth_fallback_fields", None)
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("supports_toolkit_filters", None)

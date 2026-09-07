@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 import yaml
 
+from mindroom.config.main import Config
+
 
 def _render_chart(
     chart_dir: Path,
@@ -77,6 +79,28 @@ def _render_runtime_chart() -> list[dict[str, Any]]:
         "eventCache.postgres.auth.password=test-password",
         release_name="mindroom-runtime",
     )
+
+
+def test_runtime_chart_exposes_exact_script_resource_profiles_to_primary() -> None:
+    """The primary receives the same three bounded quantities configured in Helm values."""
+    deployment = _resource(_render_runtime_chart(), "Deployment", "mindroom-runtime")
+    env = _env_by_name(_container(deployment, "mindroom"))
+
+    assert env["MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE"]["value"] == "small"
+    assert json.loads(env["MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON"]["value"]) == {
+        "small": {
+            "requests": {"cpu": "100m", "memory": "256Mi"},
+            "limits": {"cpu": "500m", "memory": "1Gi"},
+        },
+        "standard": {
+            "requests": {"cpu": "250m", "memory": "512Mi"},
+            "limits": {"cpu": "1", "memory": "2Gi"},
+        },
+        "large": {
+            "requests": {"cpu": "500m", "memory": "2Gi"},
+            "limits": {"cpu": "2", "memory": "8Gi"},
+        },
+    }
 
 
 def _render_runtime_chart_with_separate_worker_namespace() -> list[dict[str, Any]]:
@@ -222,10 +246,12 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
         "baseDomain=example.test",
         "matrixOidc.enabled=true",
         "matrixOidc.issuer=https://api.example.test/matrix-oidc",
-        "matrixRoomAccess.mode=multi_user",
-        "matrixRoomAccess.reconcileExistingRooms=true",
+        "roomDefaults.joinPolicy=public",
+        "roomDefaults.listed=false",
         set_string_args=(
-            "authorizationGlobalUsers[0]=@owner:42.example.test",
+            "administrators[0]=@owner:42.example.test",
+            "roomDefaults.inviteUsers[0]=@owner:42.example.test",
+            "roomDefaults.admins[0]=@owner:42.example.test",
             "matrixAutoJoinRoomKeys[0]=lobby",
             "matrixAutoJoinRoomKeys[1]=dev",
         ),
@@ -233,14 +259,16 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
     mindroom_config = yaml.safe_load(_resource(docs, "ConfigMap", "mindroom-config-42")["data"]["config.yaml"])
     synapse_config = yaml.safe_load(_resource(docs, "ConfigMap", "synapse-config-42")["data"]["homeserver.yaml"])
 
-    assert mindroom_config["authorization"]["global_users"] == ["@owner:42.example.test"]
-    assert mindroom_config["matrix_room_access"] == {
-        "mode": "multi_user",
-        "multi_user_join_rule": "public",
-        "publish_to_room_directory": False,
-        "invite_only_rooms": [],
-        "reconcile_existing_rooms": True,
+    assert "access_model" not in mindroom_config
+    assert mindroom_config["administrators"] == ["@owner:42.example.test"]
+    assert mindroom_config["room_defaults"] == {
+        "join_policy": "public",
+        "listed": False,
+        "encrypted": False,
+        "invite_users": ["@owner:42.example.test"],
+        "admins": ["@owner:42.example.test"],
     }
+    Config.model_validate(mindroom_config)
     assert synapse_config["auto_join_rooms"] == [
         "#lobby:42.example.test",
         "#dev:42.example.test",

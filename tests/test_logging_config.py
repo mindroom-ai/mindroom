@@ -310,13 +310,16 @@ def test_setup_logging_text_mode_does_not_emit_json(
         json.loads(line)
 
 
+@pytest.mark.parametrize("is_terminal", [False, True])
 def test_setup_logging_text_mode_redacts_exception_tracebacks_without_pretty_exception_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    is_terminal: bool,
 ) -> None:
-    """Text mode should keep pretty exception formatting without leaking exception secrets."""
+    """Text tracebacks suit their output stream without leaking exception secrets."""
     monkeypatch.delenv("MINDROOM_LOG_FORMAT", raising=False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: is_terminal)
     setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
     capsys.readouterr()
 
@@ -337,6 +340,9 @@ def test_setup_logging_text_mode_redacts_exception_tracebacks_without_pretty_exc
     assert "api-secret" not in output
     assert "auth-secret" not in output
     assert "***redacted***" in output
+    assert ("\x1b[" in output) is is_terminal
+    if not is_terminal:
+        assert "Traceback (most recent call last):" in output
 
 
 def test_setup_logging_json_mode_renders_exception_field_for_exc_info_true(

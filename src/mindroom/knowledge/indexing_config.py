@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 from agno.knowledge.embedder.base import Embedder
@@ -229,30 +230,6 @@ class IndexingSettings:
         )
 
 
-class _CollectionExistenceEmbedder(Embedder):
-    """Minimal embedder for collection probes that must never embed content."""
-
-    def get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    async def async_get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-
 def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
     """Check collection existence without constructing Agno Knowledge."""
     from agno.vectordb.chroma import ChromaDb  # noqa: PLC0415
@@ -261,7 +238,8 @@ def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
         collection=collection_name,
         path=str(storage_path),
         persistent_client=True,
-        embedder=_CollectionExistenceEmbedder(),
+        # The base Embedder raises on every embed call, so a probe can never embed content.
+        embedder=Embedder(),
     )
     return vector_db.exists()
 
@@ -271,8 +249,14 @@ def _safe_identifier(value: str) -> str:
     return sanitized or "default"
 
 
+@lru_cache(maxsize=64)
 def storage_key_for_base(base_id: str, knowledge_path: Path) -> str:
-    """Return the persisted storage-directory key for one knowledge base binding."""
+    """Return the persisted storage-directory key for one knowledge base binding.
+
+    Cached because this runs on the event loop for every agent turn while
+    ``Path.resolve`` is a blocking syscall against the knowledge source root,
+    which can be a network mount.
+    """
     digest_source = f"{base_id}:{knowledge_path.resolve()}"
     digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:8]
     return f"{_safe_identifier(base_id)}_{digest}"

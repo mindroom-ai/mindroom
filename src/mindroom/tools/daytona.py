@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
@@ -9,6 +10,21 @@ from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools.daytona import DaytonaTools
+
+
+def _parse_string_mapping(value: dict[str, str] | str | None, *, field_name: str) -> dict[str, str] | None:
+    """Parse one JSON-authored mapping while preserving native mappings."""
+    if value is None or isinstance(value, dict):
+        return value
+    if not value.strip():
+        return None
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict) or not all(
+        isinstance(key, str) and isinstance(item, str) for key, item in parsed.items()
+    ):
+        msg = f"{field_name} must be a JSON object with string keys and values"
+        raise ValueError(msg)
+    return parsed
 
 
 @register_tool_with_metadata(
@@ -52,9 +68,9 @@ if TYPE_CHECKING:
             label="Sandbox Language",
             type="text",
             required=False,
-            default="PYTHON",
-            placeholder="PYTHON",
-            description="Primary language for the sandbox (PYTHON, JAVASCRIPT, TYPESCRIPT)",
+            default="python",
+            placeholder="python",
+            description="Primary language for the sandbox (python, javascript, typescript)",
         ),
         ConfigField(
             name="sandbox_target",
@@ -128,7 +144,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Automatically create sandbox if none exists",
+            description="Create a fallback sandbox after a sandbox-management error",
         ),
         ConfigField(
             name="verify_ssl",
@@ -144,7 +160,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Whether to reuse the same sandbox across agent sessions",
+            description="Whether to reuse the same sandbox within the current agent session",
         ),
         ConfigField(
             name="sandbox_public",
@@ -186,5 +202,59 @@ if TYPE_CHECKING:
 def daytona_tools() -> type[DaytonaTools]:
     """Return Daytona tools for secure code execution in remote sandbox environments."""
     from agno.tools.daytona import DaytonaTools
+    from daytona import CodeLanguage
 
-    return DaytonaTools
+    class MindRoomDaytonaTools(DaytonaTools):
+        """Daytona toolkit that normalizes dashboard-authored values."""
+
+        def __init__(
+            self,
+            api_key: str | None = None,
+            api_url: str | None = None,
+            sandbox_id: str | None = None,
+            sandbox_language: CodeLanguage | str | None = None,
+            sandbox_target: str | None = None,
+            sandbox_os: str | None = None,
+            auto_stop_interval: int | None = 60,
+            sandbox_os_user: str | None = None,
+            sandbox_env_vars: dict[str, str] | str | None = None,
+            sandbox_labels: dict[str, str] | str | None = None,
+            sandbox_public: bool | None = None,
+            organization_id: str | None = None,
+            timeout: int = 300,
+            auto_create_sandbox: bool = True,
+            verify_ssl: bool | None = False,
+            persistent: bool = True,
+            instructions: str | None = None,
+            add_instructions: bool = False,
+            **kwargs: object,
+        ) -> None:
+            normalized_language = sandbox_language.strip() if isinstance(sandbox_language, str) else sandbox_language
+            if isinstance(normalized_language, str):
+                resolved_language = CodeLanguage(normalized_language.lower()) if normalized_language else None
+            else:
+                resolved_language = normalized_language
+            super().__init__(
+                api_key=api_key,
+                api_url=api_url,
+                sandbox_id=sandbox_id,
+                sandbox_language=resolved_language,
+                sandbox_target=sandbox_target,
+                sandbox_os=sandbox_os,
+                auto_stop_interval=auto_stop_interval,
+                sandbox_os_user=sandbox_os_user,
+                sandbox_env_vars=_parse_string_mapping(sandbox_env_vars, field_name="sandbox_env_vars"),
+                sandbox_labels=_parse_string_mapping(sandbox_labels, field_name="sandbox_labels"),
+                sandbox_public=sandbox_public,
+                organization_id=organization_id,
+                timeout=timeout,
+                auto_create_sandbox=auto_create_sandbox,
+                verify_ssl=verify_ssl,
+                persistent=persistent,
+                instructions=instructions,
+                add_instructions=add_instructions,
+                **kwargs,
+            )
+
+    MindRoomDaytonaTools.__init__.__annotations__["sandbox_language"] = CodeLanguage | str | None
+    return MindRoomDaytonaTools

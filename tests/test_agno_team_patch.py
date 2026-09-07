@@ -4,42 +4,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 from agno.agent import _messages as agent_messages
-from agno.media import Image
+from agno.media import Audio, File, Image, Video
 from agno.models.message import Message
 from agno.models.openai.chat import OpenAIChat
 from agno.models.response import ModelResponse
 from agno.run.base import RunContext
+from agno.run.messages import RunMessages
 from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
 from agno.team import Team, _messages
 from pydantic import BaseModel
 
-from mindroom.attachment_media import (
-    _INLINE_MEDIA_RECORDS_BY_ID,
-    _INLINE_MEDIA_RECORDS_BY_PATH,
-    resolve_scoped_attachments,
-)
-from mindroom.attachments import AttachmentRecord, register_local_attachment
 from mindroom.history import agno_team_patch
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from pathlib import Path
-
-    from agno.run.messages import RunMessages
-
-
-@pytest.fixture(autouse=True)
-def _clear_inline_media_caches() -> Iterator[None]:
-    _INLINE_MEDIA_RECORDS_BY_ID.clear()
-    _INLINE_MEDIA_RECORDS_BY_PATH.clear()
-    yield
-    _INLINE_MEDIA_RECORDS_BY_ID.clear()
-    _INLINE_MEDIA_RECORDS_BY_PATH.clear()
 
 
 @dataclass
@@ -73,33 +53,6 @@ def _team(model: RecordingOpenAIChat) -> Team:
         members=[],
         markdown=False,
         telemetry=False,
-    )
-
-
-def _register_image_attachment(
-    tmp_path: Path,
-    attachment_id: str,
-    payload: bytes,
-) -> AttachmentRecord:
-    image_path = tmp_path / f"{attachment_id}.png"
-    image_path.write_bytes(payload)
-    record = register_local_attachment(
-        tmp_path,
-        image_path,
-        kind="image",
-        attachment_id=attachment_id,
-        filename=image_path.name,
-        mime_type="image/png",
-    )
-    assert record is not None
-    return record
-
-
-def _image(record: AttachmentRecord, *, image_id: str | None = None) -> Image:
-    return Image(
-        id=image_id if image_id is not None else record.attachment_id,
-        filepath=record.local_path,
-        mime_type=record.mime_type,
     )
 
 
@@ -137,13 +90,7 @@ def _conversation_messages(model: RecordingOpenAIChat) -> list[dict[str, Any]]:
     ]
 
 
-async def _patched_history_run_messages(
-    tmp_path: Path,
-    records: list[AttachmentRecord],
-    history_messages: list[Message],
-    current_images: list[Image],
-) -> RunMessages:
-    resolve_scoped_attachments(tmp_path, [record.attachment_id for record in records])
+async def _patched_history_run_messages(history_messages: list[Message], current_images: list[Image]) -> RunMessages:
     model = RecordingOpenAIChat(id="gpt-test", api_key="sk-test")
     team = _team(model)
     team.num_history_runs = len(history_messages)
@@ -166,10 +113,6 @@ async def _patched_history_run_messages(
         add_history_to_context=True,
         images=current_images,
     )
-
-
-def _all_images(run_messages: RunMessages) -> list[Image]:
-    return [image for message in run_messages.messages for image in (message.images or [])]
 
 
 @pytest.mark.asyncio
@@ -308,106 +251,51 @@ def test_team_list_message_patch_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cross_run_image_dedupe_collapses_22_replays_to_3_inlines(tmp_path: Path) -> None:
-    records = [
-        _register_image_attachment(tmp_path, "att_a", b"\x89PNG\r\n\x1a\na"),
-        _register_image_attachment(tmp_path, "att_b", b"\x89PNG\r\n\x1a\nb"),
-        _register_image_attachment(tmp_path, "att_c", b"\x89PNG\r\n\x1a\nc"),
-    ]
-    history_messages = [
-        Message(role="user", content=f"history {index}", images=[_image(record) for record in records])
-        for index in range(22)
-    ]
-
-    run_messages = await _patched_history_run_messages(
-        tmp_path,
-        records,
-        history_messages,
-        [_image(record) for record in records],
+async def test_persisted_history_media_is_not_replayed() -> None:
+    history_message = Message(
+        role="user",
+        content="history",
+        images=[Image(id="att_history", content=b"history")],
     )
+    current_image = Image(id="att_current", content=b"current")
 
-    images = _all_images(run_messages)
-    history_user_messages = [
-        message for message in run_messages.messages if message.from_history and message.role == "user"
-    ]
-    assert len(images) == 3
-    assert {image.id for image in images} == {"att_a", "att_b", "att_c"}
-    assert len(history_user_messages) == 22
-    assert {image.id for image in (history_user_messages[0].images or [])} == {"att_a", "att_b", "att_c"}
-    assert all((message.images or []) == [] for message in history_user_messages[1:])
-    assert run_messages.user_message is not None
-    assert run_messages.user_message.images == []
+    run_messages = await _patched_history_run_messages([history_message], [current_image])
 
-
-@pytest.mark.asyncio
-async def test_two_att_ids_with_identical_bytes_collapse_to_one(tmp_path: Path) -> None:
-    older = _register_image_attachment(tmp_path, "att_older", b"\x89PNG\r\n\x1a\nsame")
-    newer = _register_image_attachment(tmp_path, "att_newer", b"\x89PNG\r\n\x1a\nsame")
-    history_message = Message(role="user", content="history", images=[_image(older)])
-
-    run_messages = await _patched_history_run_messages(
-        tmp_path,
-        [older, newer],
-        [history_message],
-        [_image(newer)],
-    )
-
-    history_user_messages = [
-        message for message in run_messages.messages if message.from_history and message.role == "user"
-    ]
-    assert [image.id for image in _all_images(run_messages)] == ["att_older"]
-    assert run_messages.user_message is not None
-    assert run_messages.user_message.images == []
+    history_user_messages = [message for message in run_messages.messages if message.from_history]
     assert len(history_user_messages) == 1
-    assert [image.id for image in (history_user_messages[0].images or [])] == ["att_older"]
-
-
-@pytest.mark.asyncio
-async def test_history_image_wins_over_matching_current_image(tmp_path: Path) -> None:
-    record = _register_image_attachment(tmp_path, "att_same", b"\x89PNG\r\n\x1a\nsame")
-    history_message = Message(role="user", content="history", images=[_image(record)])
-
-    run_messages = await _patched_history_run_messages(
-        tmp_path,
-        [record],
-        [history_message],
-        [_image(record)],
-    )
-
-    history_user_messages = [
-        message for message in run_messages.messages if message.from_history and message.role == "user"
-    ]
-    assert [image.id for image in _all_images(run_messages)] == ["att_same"]
+    assert history_user_messages[0].images is None
     assert run_messages.user_message is not None
-    assert run_messages.user_message.images == []
-    assert len(history_user_messages) == 1
-    assert [image.id for image in (history_user_messages[0].images or [])] == ["att_same"]
+    assert run_messages.user_message.images == [current_image]
 
 
-@pytest.mark.asyncio
-async def test_non_att_image_id_not_used_as_lookup_key(tmp_path: Path) -> None:
-    wrong_record = _register_image_attachment(tmp_path, "att_wrong", b"\x89PNG\r\n\x1a\nwrong")
-    filepath_record = _register_image_attachment(tmp_path, "att_filepath", b"\x89PNG\r\n\x1a\nfilepath")
-    random_id = "random-uuid-from-agno"
-    resolve_scoped_attachments(tmp_path, [wrong_record.attachment_id, filepath_record.attachment_id])
-    _INLINE_MEDIA_RECORDS_BY_ID[random_id] = wrong_record
-    history_message = Message(role="user", content="history", images=[_image(filepath_record, image_id=random_id)])
-
-    run_messages = await _patched_history_run_messages(
-        tmp_path,
-        [wrong_record, filepath_record],
-        [history_message],
-        [_image(filepath_record)],
+def test_inline_media_cleanup_strips_every_kind_only_from_history() -> None:
+    history_message = Message(
+        role="user",
+        from_history=True,
+        audio=[Audio(content=b"history-audio", mime_type="audio/ogg")],
+        images=[Image(content=b"history-image")],
+        files=[File(content=b"history-file")],
+        videos=[Video(content=b"history-video")],
     )
+    current_message = Message(
+        role="user",
+        audio=[Audio(content=b"current-audio", mime_type="audio/ogg")],
+        images=[Image(content=b"current-image")],
+        files=[File(content=b"current-file")],
+        videos=[Video(content=b"current-video")],
+    )
+    run_messages = RunMessages(messages=[history_message, current_message], user_message=current_message)
 
-    history_user_messages = [
-        message for message in run_messages.messages if message.from_history and message.role == "user"
-    ]
-    assert [image.id for image in _all_images(run_messages)] == [random_id]
-    assert run_messages.user_message is not None
-    assert run_messages.user_message.images == []
-    assert len(history_user_messages) == 1
-    assert [image.id for image in (history_user_messages[0].images or [])] == [random_id]
+    agno_team_patch._strip_history_inline_media(run_messages)
+
+    assert history_message.audio is None
+    assert history_message.images is None
+    assert history_message.files is None
+    assert history_message.videos is None
+    assert current_message.audio
+    assert current_message.images
+    assert current_message.files
+    assert current_message.videos
 
 
 def test_apply_patch_is_idempotent() -> None:
@@ -423,10 +311,6 @@ def test_apply_patch_is_idempotent() -> None:
     assert _messages._aget_run_messages is patched_team_async
     assert agent_messages.get_run_messages is patched_agent_sync
     assert agent_messages.aget_run_messages is patched_agent_async
-
-
-def test_media_content_key_ignores_empty_filepath() -> None:
-    assert agno_team_patch._media_content_key("image", Image(filepath="")) is None
 
 
 @pytest.mark.parametrize(

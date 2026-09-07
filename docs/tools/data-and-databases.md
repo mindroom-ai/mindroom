@@ -33,7 +33,7 @@ Use these tools when you need database access, dataframe-style analysis, Google 
 `sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_drive`, `google_docs`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
 `duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed.
 MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML.
-Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, `obb`, and `session`.
+Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, and `obb`.
 Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields.
 `src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Drive, Docs, and Sheets use the generic `/api/oauth/google_drive/*`, `/api/oauth/google_docs/*`, and `/api/oauth/google_sheets/*` flows.
 `google_drive`, `google_docs`, and `google_sheets` declare per-service `auth_provider` values and store OAuth tokens separately from editable tool settings.
@@ -162,8 +162,8 @@ When IAM auth is enabled, the toolkit can fall back to environment variables suc
 | `host` | `url` | `yes` | `null` | Redshift cluster endpoint. |
 | `port` | `number` | `no` | `5439` | Redshift port. |
 | `database` | `text` | `yes` | `null` | Database name. |
-| `user` | `text` | `yes` | `null` | Username for password auth. |
-| `password` | `password` | `yes` | `null` | Password for standard authentication. |
+| `user` | `text` | `yes` | `null` | Username; current dashboard configured-state checks require it even when `iam` is enabled. |
+| `password` | `password` | `yes` | `null` | Password; current dashboard configured-state checks require it even when `iam` is enabled. |
 | `iam` | `boolean` | `no` | `false` | Use IAM-based auth instead of password auth. |
 | `cluster_identifier` | `text` | `no` | `null` | Cluster identifier, required for IAM auth against provisioned clusters. |
 | `region` | `text` | `no` | `null` | AWS region for IAM auth. |
@@ -184,10 +184,8 @@ agents:
       - redshift:
           host: my-cluster.abc123.us-east-1.redshift.amazonaws.com
           database: dev
-          iam: true
-          cluster_identifier: analytics-prod
-          region: us-east-1
-          db_user: analyst
+          user: analyst
+          table_schema: reporting
 ```
 
 ```python
@@ -200,7 +198,7 @@ export_table_to_path("fact_orders", "/tmp/fact_orders.csv")
 
 ### Notes
 
-- If `iam: true`, the toolkit can use `profile` or explicit AWS credentials instead of `user` and `password`.
+- The upstream toolkit supports IAM through `profile` or explicit AWS credentials, but MindRoom's current dashboard configured-state check still requires stored `user` and `password` values before the tool becomes available.
 - If you use password auth, store `password` through the dashboard or credential store rather than inline YAML.
 - `redshift` is the better fit than generic `sql` when you want Redshift-aware connection options and warehouse export helpers.
 
@@ -411,9 +409,9 @@ MindRoom's metadata marks `dataset`, `project`, and `location` as required, even
 | `project` | `text` | `yes` | `null` | Google Cloud project ID. |
 | `location` | `text` | `yes` | `null` | BigQuery location such as `US` or `EU`. |
 | `credentials` | `text` | `no` | `null` | Advanced Google credentials object passed directly to the BigQuery client. |
-| `enable_list_tables` | `boolean` | `no` | `true` | Enable `list_tables()`. |
-| `enable_describe_table` | `boolean` | `no` | `true` | Enable `describe_table()`. |
-| `enable_run_sql_query` | `boolean` | `no` | `true` | Enable `run_sql_query()`. |
+| `list_tables` | `boolean` | `no` | `true` | Enable `list_tables()`. |
+| `describe_table` | `boolean` | `no` | `true` | Enable `describe_table()`. |
+| `run_sql_query` | `boolean` | `no` | `true` | Enable `run_sql_query()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full BigQuery toolkit. |
 
 ### Example
@@ -673,13 +671,20 @@ get_price_targets("NVDA")
 
 `yfinance` exposes `get_current_stock_price()`, `get_company_info()`, `get_historical_stock_prices()`, `get_stock_fundamentals()`, `get_income_statements()`, `get_key_financial_ratios()`, `get_analyst_recommendations()`, `get_company_news()`, and `get_technical_indicators()`.
 Unlike `openbb`, it does not require a PAT or provider selection.
-The optional `session` field is an advanced programmatic HTTP session hook for callers that need custom transport behavior.
-
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `session` | `text` | `no` | `null` | Advanced programmatic HTTP session object. |
+| `enable_stock_price` | `boolean` | `no` | `true` | Enable `get_current_stock_price()`. |
+| `enable_company_info` | `boolean` | `no` | `false` | Enable `get_company_info()`. |
+| `enable_stock_fundamentals` | `boolean` | `no` | `false` | Enable `get_stock_fundamentals()`. |
+| `enable_income_statements` | `boolean` | `no` | `false` | Enable `get_income_statements()`. |
+| `enable_key_financial_ratios` | `boolean` | `no` | `false` | Enable `get_key_financial_ratios()`. |
+| `enable_analyst_recommendations` | `boolean` | `no` | `false` | Enable `get_analyst_recommendations()`. |
+| `enable_company_news` | `boolean` | `no` | `false` | Enable `get_company_news()`. |
+| `enable_technical_indicators` | `boolean` | `no` | `false` | Enable `get_technical_indicators()`. |
+| `enable_historical_prices` | `boolean` | `no` | `false` | Enable `get_historical_stock_prices()`. |
+| `all` | `boolean` | `no` | `false` | Enable the full Yahoo Finance toolkit. |
 
 ### Example
 
@@ -687,7 +692,10 @@ The optional `session` field is an advanced programmatic HTTP session hook for c
 agents:
   market:
     tools:
-      - yfinance
+      - yfinance:
+          enable_company_info: true
+          enable_historical_prices: true
+          enable_company_news: true
 ```
 
 ```python
@@ -700,7 +708,6 @@ get_company_news("TSLA", num_stories=5)
 ### Notes
 
 - `yfinance` has no required setup fields for normal use.
-- `session` is only useful for programmatic customization and is not a common `config.yaml` setting.
 - Choose `yfinance` when you want the widest Yahoo Finance surface with the fewest setup requirements.
 
 ## [`financial_datasets_api`]

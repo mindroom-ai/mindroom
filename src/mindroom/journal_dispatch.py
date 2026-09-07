@@ -1,0 +1,516 @@
+"""Turning admitted journal events into the typed Matrix callbacks MindRoom has.
+
+The journal owns what was accepted and what still owes work. This owns the
+fan-out: which callback runs for an event, whether the callback finished the
+work or handed it to a turn, and who is allowed to consume a reaction that
+several features could each claim.
+
+The important asymmetry is between callbacks that finish and callbacks that
+defer. Most reactions finish in their handler; an interactive reaction and a
+message hand work to a response task that may still run long after the callback
+returns. So a deferring handler leaves its event pending, and the source is
+settled when its answer is durably owed to a room -- the FINAL outbox enqueue
+-- or when the turn deliberately owes no answer at all. That is why a crash
+mid-turn replays the message rather than losing the answer, and why a crash
+after the answer is durable does not spend the model again.
+"""
+
+from __future__ import annotations
+
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any
+
+import nio
+
+from mindroom.constants import SILENT_SCHEDULE_EVENT_TYPE, SOURCE_KIND_KEY
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.event_journal import (
+    TURN_BACKED_KINDS,
+    EventKind,
+    SemanticConsumer,
+)
+from mindroom.logging_config import get_logger
+from mindroom.matrix.journal_ingress import (
+    TEXTUAL_MESSAGE_EVENT_TYPE,
+    JournalCorruptionError,
+    parse_journal_event,
+)
+from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent
+from mindroom.pending_event_worker import PendingEventWorker
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from mindroom.event_journal import DispatchView, InteractiveSelection
+
+from mindroom.event_journal import JournalEvent
+
+logger = get_logger(__name__)
+
+# The journal event whose callback is executing on this task. Callbacks reach
+# it to claim a consumer or read their receipt order without every one of them
+# having to thread the event through its own signature.
+_RUNNING_EVENT: ContextVar[JournalEvent | None] = ContextVar("running_journal_event", default=None)
+
+
+def _needs_turn_replay(event: JournalEvent) -> bool:
+    """Return whether replay needs responders and turn recovery semantics."""
+    return event.kind in TURN_BACKED_KINDS or (
+        event.kind is EventKind.REACTION and event.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
+    )
+
+
+type _MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageFormatted], Awaitable[TurnDispatchOutcome]]
+type _MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
+type _ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[TurnDispatchOutcome]]
+type _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
+type _RtcCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
+type _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
+type _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
+type _ApprovalContinuationCallback = Callable[[str], Awaitable[bool | None]]
+
+
+@dataclass(frozen=True, slots=True)
+class JournalCallbacks:
+    """The typed Matrix callbacks the journal dispatches to."""
+
+    on_message: _MessageCallback
+    on_media: _MediaCallback
+    on_reaction: _ReactionCallback
+    on_approval: _ApprovalCallback
+    on_room_lifecycle: _RoomLifecycleCallback
+    on_redaction: _RedactionCallback
+    on_approval_continuation: _ApprovalContinuationCallback
+    source_has_live_owner: Callable[[str], bool]
+    turn_has_live_claim: Callable[[str], bool]
+    on_rtc: _RtcCallback | None = None
+
+
+@dataclass
+class JournalDispatcher:
+    """Admit Matrix events durably, then run their callbacks from the journal."""
+
+    store: DispatchView
+    callbacks: JournalCallbacks
+    room_for_id: Callable[[str], nio.MatrixRoom]
+    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False
+    runtime_generation: str = "unmanaged"
+    # Replaying a turn needs the agent fleet up, so the orchestrator releases
+    # turn-backed replay separately from the rest of startup. Until it does,
+    # those events stay pending; everything else drains immediately.
+    _turn_replay_released: bool = field(default=False, init=False, repr=False)
+    _worker: PendingEventWorker = field(init=False, repr=False)
+    # Reactions normally complete inline. Only one whose callback explicitly
+    # deferred has a managed response owner worth probing on later scans.
+    _deferred_reaction_ids: set[str] = field(default_factory=set, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Build the worker this dispatcher owns."""
+        self._worker = PendingEventWorker(
+            store=self.store,
+            handle=self._run_event,
+            runtime_generation=self.runtime_generation,
+            deferral_is_live=self._deferral_is_live,
+        )
+
+    def start(self) -> None:
+        """Begin draining everything that does not need the agent fleet."""
+        self._worker.start()
+
+    def release_turn_replay(self) -> None:
+        """Allow turn-backed events left by a previous process to replay."""
+        self._turn_replay_released = True
+        self._worker.wake()
+
+    def wake(self) -> None:
+        """Signal that newly admitted work is waiting."""
+        self._worker.wake()
+
+    async def stop(self) -> None:
+        """Stop draining, leaving unfinished work pending for the next start."""
+        await self._worker.stop()
+
+    async def drain_once(self) -> int:
+        """Run everything currently pending to completion.
+
+        This is the explicit recovery entry point, so it releases turn replay.
+        What it deliberately does not do is forget which sources are in flight.
+        A drain runs beside live turns rather than before them -- every bot
+        that reports ready schedules one, and so does every hot reload -- and a
+        source it hands to a second turn is not merely wasteful. `TurnStore`
+        refuses the second claim, but refusing is not returning: the loser
+        waits for the winner to settle, and it waits inside the room's lane, so
+        the room answers nothing until the original turn ends.
+
+        A deferral nobody kept is still reconsidered, because the liveness
+        probe answers that question exactly rather than by assumption.
+        """
+        self._turn_replay_released = True
+        return await self._worker.drain_once()
+
+    def _has_live_owner(self, event_id: str) -> bool:
+        """Return whether something in this process is already holding one source.
+
+        The single question both ends of a deferral ask. At dispatch it decides
+        whether handing the source to a turn would put a second one inside it;
+        on a later scan it decides whether the turn it was handed to still
+        exists to hand it back. Two answers to that from two places is how a
+        recovery pass ends up re-entering work it can see is running.
+        """
+        return self.callbacks.source_has_live_owner(event_id) or self.callbacks.turn_has_live_claim(event_id)
+
+    def _deferral_is_live(self, event: JournalEvent) -> bool:
+        """Return whether the owner one deferred event was handed to still exists.
+
+        Mirrors the reasons ``_run_event`` defers, in the same order, because
+        this is that question inverted: the event is still owed to someone only
+        while the thing it was handed to is still there to hand it back.
+
+        Every answer is conservative. A wrong "live" only reproduces the stall
+        this replaces; a wrong "gone" costs a re-dispatch that ``TurnStore``
+        then has to refuse.
+        """
+        needs_turn_replay = _needs_turn_replay(event)
+        if not needs_turn_replay and event.event_id not in self._deferred_reaction_ids:
+            # A completing callback settles or raises. It never defers, so a
+            # deferral for one of these kinds cannot exist to begin with.
+            return True
+        if needs_turn_replay and not self._turn_replay_released:
+            # Replay is parked on the fleet, and it is released by draining
+            # rather than by calling back, so nothing here has died.
+            return True
+        return self._has_live_owner(event.event_id)
+
+    async def _run_event(self, event: JournalEvent) -> bool:
+        """Run one journal event's callback and report whether it may settle.
+
+        True means the event's semantic work is over. False means something in
+        this process still owns it, so the row stays pending and the worker
+        offers it again. Why the work ended is not part of the answer: nothing
+        durable records it and nothing reads it back.
+
+        There is no "has this turn finished?" question here any more. A source
+        leaves the journal when its answer is durably owed to a room, and a
+        turn that owes no answer settles through the intentionally-ignored
+        path. Asking `TurnStore` was the duplicate execution authority the
+        journal was meant to remove, and it answered the wrong question: a turn
+        can be terminal with nothing durable behind it.
+        """
+        needs_turn_replay = _needs_turn_replay(event)
+        if needs_turn_replay and not self._turn_replay_released:
+            # Turn work waits until the orchestrator has started responders.
+            return False
+        has_deferrable_owner = needs_turn_replay or event.event_id in self._deferred_reaction_ids
+        if has_deferrable_owner and self._has_live_owner(event.event_id):
+            # A coalescing batch or a running turn already holds this source
+            # and will hand it back. Starting a second turn on it does not
+            # answer twice, but the loser of the claim blocks until the winner
+            # settles, and it blocks holding the room's lane. Returning here
+            # leaves the source deferred, which is what it already was.
+            return False
+        approval_settled = await self.callbacks.on_approval_continuation(event.event_id)
+        if approval_settled is not None:
+            # A paused run already owns every prepared execution fact. Sending
+            # its source through ingress again would rerun hooks and current
+            # routing policy, either duplicating side effects or settling the
+            # source before the continuation can resume.
+            return approval_settled
+        try:
+            matrix_event = parse_journal_event(event)
+        except JournalCorruptionError:
+            logger.exception(
+                "journal_event_unreplayable",
+                event_id=event.event_id,
+                kind=event.kind.value,
+                room_id=event.room_id,
+            )
+            return True
+        room = self.room_for_id(event.room_id)
+        with turn_dispatch_recovery_scope(active=needs_turn_replay):
+            return await self._invoke(event, room, matrix_event)
+
+    async def _invoke(
+        self,
+        event: JournalEvent,
+        room: nio.MatrixRoom,
+        matrix_event: nio.Event,
+    ) -> bool:
+        """Dispatch to the one callback that owns this event's kind."""
+        binding = _BINDINGS.get(event.kind)
+        if binding is None or not isinstance(matrix_event, binding.event_types):
+            # The stored kind and the payload disagree, which means the payload
+            # is not the event that was admitted. Nothing can run -- but the
+            # journal has just dropped work it accepted, so this is a
+            # corruption report like `journal_event_unreplayable` above, not a
+            # routine outcome. It was silent once, and an `m.emote` admitted as
+            # actionable work fell through it into nothing for a whole release
+            # with no line anywhere saying a message had been discarded.
+            logger.error(
+                "journal_event_kind_mismatch",
+                event_id=event.event_id,
+                kind=event.kind.value,
+                room_id=event.room_id,
+                payload_type=type(matrix_event).__name__,
+            )
+            return True
+        if event.kind is EventKind.REACTION and event.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION:
+            self._deferred_reaction_ids.add(event.event_id)
+        token = _RUNNING_EVENT.set(event)
+        try:
+            settles = await binding.run(self, room, matrix_event)
+            if event.kind is EventKind.REACTION and settles:
+                # A deferring reaction is never re-added here: the interactive
+                # path registered before starting its detached owner, so a fast
+                # owner's terminal settlement is not undone by this callback.
+                self._deferred_reaction_ids.discard(event.event_id)
+            return settles
+        finally:
+            _RUNNING_EVENT.reset(token)
+
+    def semantic_consumer(self) -> SemanticConsumer | None:
+        """Return the durable consumer already claimed for the running event."""
+        event = _RUNNING_EVENT.get()
+        return None if event is None else event.semantic_consumer
+
+    async def source_is_terminal(self, event_id: str) -> bool:
+        """Return whether an admitted source has finished its journal work."""
+        return await self.store.load_event(event_id) is not None and not await self.store.is_pending(event_id)
+
+    async def claim_semantic_consumer(self, consumer: SemanticConsumer) -> bool:
+        """Freeze the running event's consumer if it remains actionable."""
+        event = _RUNNING_EVENT.get()
+        if event is None:
+            msg = "A semantic consumer can only be claimed inside a journal callback"
+            raise RuntimeError(msg)
+        claimed = await self.store.claim_semantic_consumer(event.event_id, consumer)
+        if claimed is None:
+            return False
+        if claimed is not consumer:
+            msg = f"Journal event is already owned by {claimed.value!r}"
+            raise RuntimeError(msg)
+        _RUNNING_EVENT.set(replace(event, semantic_consumer=consumer))
+        if event.kind is EventKind.REACTION and consumer is SemanticConsumer.INTERACTIVE_REACTION:
+            # Register before the detached response can start and settle. If
+            # registration waited for the callback's deferred return, a fast
+            # response could discard nothing and then be added back forever.
+            self._deferred_reaction_ids.add(event.event_id)
+        return True
+
+    async def claim_interactive_reaction(
+        self,
+    ) -> InteractiveSelection | None:
+        """Atomically transfer one journal-owned selection to the running reaction."""
+        event = _RUNNING_EVENT.get()
+        if event is None or event.kind is not EventKind.REACTION:
+            msg = "An interactive reaction can only be claimed inside its journal callback"
+            raise RuntimeError(msg)
+        selection = await self.store.claim_interactive_reaction(
+            source_event_id=event.event_id,
+        )
+        if selection is None:
+            return None
+        _RUNNING_EVENT.set(replace(event, semantic_consumer=SemanticConsumer.INTERACTIVE_REACTION))
+        self._deferred_reaction_ids.add(event.event_id)
+        return selection
+
+    async def receipt_order(self) -> int:
+        """Return the durable admission order of the running event."""
+        event = _RUNNING_EVENT.get()
+        if event is None:
+            msg = "Receipt order is only available inside a journal callback"
+            raise RuntimeError(msg)
+        return event.receipt_order
+
+    def release_delivered_turn_sources(self, event_ids: tuple[str, ...]) -> None:
+        """Forget sources the outbox has taken over, after their commit.
+
+        The durable half of contract 2's handoff belongs to the transaction
+        that recorded the answer: settling separately would leave a window in
+        which a crash left the journal and the outbox both owning the turn,
+        and the replay that follows would spend the model a second time on a
+        question already answered. What is left here is the in-memory half --
+        the worker still lists these events as deferred to a turn that has now
+        ended, and nothing else would ever clear them.
+        """
+        self._release_sources(event_ids)
+
+    async def settle_intentionally_ignored_turn_sources(self, event_ids: tuple[str, ...]) -> None:
+        """Settle turn-backed events that produced no dispatch payload."""
+        self._release_sources(event_ids)
+        await self.store.settle_many(event_ids)
+
+    async def settle_running_event_intentionally_ignored(self) -> None:
+        """Settle the current callback's event before releasing an authorization fence."""
+        event = _RUNNING_EVENT.get()
+        if event is None:
+            msg = "A running event can only be settled inside its journal callback"
+            raise RuntimeError(msg)
+        await self.settle_intentionally_ignored_turn_sources((event.event_id,))
+
+    def retry_turn_source(self, event_id: str) -> None:
+        """Return one undelivered turn source to the worker."""
+        self.retry_turn_sources((event_id,))
+
+    def retry_turn_sources(self, event_ids: tuple[str, ...]) -> None:
+        """Return several undelivered turn sources to the worker."""
+        self._release_sources(event_ids)
+        self._worker.wake()
+
+    def _release_sources(self, event_ids: tuple[str, ...]) -> None:
+        """Release worker ownership and forget any deferred-reaction markers."""
+        self._deferred_reaction_ids.difference_update(event_ids)
+        self._worker.release(event_ids)
+
+    async def unsettled_event_ids(self) -> frozenset[str]:
+        """Return every event that still owes semantic work."""
+        return await self.store.unsettled_event_ids()
+
+
+@dataclass(frozen=True, slots=True)
+class _Binding:
+    """The event types one kind accepts, and what to run for them."""
+
+    event_types: type | tuple[type, ...]
+    run: Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[bool]]
+
+
+def _turn_backed(
+    callback: Callable[[JournalCallbacks], Callable[[nio.MatrixRoom, Any], Awaitable[TurnDispatchOutcome]]],
+) -> Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[bool]]:
+    """Wrap a callback whose work may outlive it inside a turn.
+
+    Neither of these two asks whether someone already owns the source. That is
+    the same question for both of them, so ``_run_event`` asks it once for the
+    kind rather than each of them answering it for itself -- which is how the
+    media path came to have a guard the message path did not.
+    """
+
+    async def run(
+        dispatcher: JournalDispatcher,
+        room: nio.MatrixRoom,
+        event: Any,  # noqa: ANN401 - the binding already checked the type
+    ) -> bool:
+        return _turn_settles(await callback(dispatcher.callbacks)(room, event))
+
+    return run
+
+
+def _completing(
+    callback: Callable[[JournalCallbacks], Callable[[nio.MatrixRoom, Any], Awaitable[None]]],
+) -> Callable[[JournalDispatcher, nio.MatrixRoom, Any], Awaitable[bool]]:
+    """Wrap a callback whose work is finished when it returns."""
+
+    async def run(
+        dispatcher: JournalDispatcher,
+        room: nio.MatrixRoom,
+        event: Any,  # noqa: ANN401 - the binding already checked the type
+    ) -> bool:
+        await callback(dispatcher.callbacks)(room, event)
+        return True
+
+    return run
+
+
+def _scheduled_trigger_as_message(event: nio.UnknownEvent) -> nio.RoomMessageFormatted:
+    """Validate and normalize one silent schedule trigger as a text message."""
+    if event.type != SILENT_SCHEDULE_EVENT_TYPE:
+        msg = "Schedule trigger has the wrong event type"
+        raise ValueError(msg)
+    content = event.source.get("content")
+    if not isinstance(content, dict):
+        msg = "Schedule trigger content is not an object"
+        raise TypeError(msg)
+    if content.get(SOURCE_KIND_KEY) != SILENT_SCHEDULE_SOURCE_KIND:
+        msg = "Schedule trigger has the wrong source marker"
+        raise ValueError(msg)
+    body = content.get("body")
+    if not isinstance(body, str):
+        msg = "Schedule trigger body is not a string"
+        raise TypeError(msg)
+    if not body.strip():
+        msg = "Schedule trigger body is not a nonempty string"
+        raise ValueError(msg)
+
+    source = {
+        **event.source,
+        "type": "m.room.message",
+        "content": {**content, "msgtype": "m.text"},
+    }
+    message = nio.Event.parse_event(source)
+    if not isinstance(message, nio.RoomMessageFormatted) or message.event_id != event.event_id:
+        msg = f"Schedule trigger {event.event_id!r} did not normalize as itself"
+        raise JournalCorruptionError(msg)
+    message.decrypted = event.decrypted
+    message.verified = event.verified
+    message.sender_key = event.sender_key
+    message.session_id = event.session_id
+    return message
+
+
+async def _run_scheduled_trigger(
+    dispatcher: JournalDispatcher,
+    room: nio.MatrixRoom,
+    event: nio.UnknownEvent,
+) -> bool:
+    """Run a valid schedule trigger through the existing message callback."""
+    if not dispatcher.schedule_trigger_sender_is_managed(event.sender):
+        logger.warning(
+            "schedule_trigger_invalid",
+            event_id=event.event_id,
+            room_id=room.room_id,
+        )
+        return True
+    try:
+        message = _scheduled_trigger_as_message(event)
+    except (TypeError, ValueError, JournalCorruptionError):
+        logger.exception(
+            "schedule_trigger_invalid",
+            event_id=event.event_id,
+            room_id=room.room_id,
+        )
+        return True
+    return _turn_settles(await dispatcher.callbacks.on_message(room, message))
+
+
+async def _run_rtc_event(
+    dispatcher: JournalDispatcher,
+    room: nio.MatrixRoom,
+    event: nio.UnknownEvent,
+) -> bool:
+    """Run a supported durable MatrixRTC room event when calls are enabled."""
+    callback = dispatcher.callbacks.on_rtc
+    if callback is not None:
+        await callback(room, event)
+    return True
+
+
+_BINDINGS: dict[EventKind, _Binding] = {
+    EventKind.MESSAGE: _Binding(TEXTUAL_MESSAGE_EVENT_TYPE, _turn_backed(lambda c: c.on_message)),
+    EventKind.MEDIA: _Binding(MATRIX_MEDIA_EVENT_TYPES, _turn_backed(lambda c: c.on_media)),
+    EventKind.SCHEDULE_TRIGGER: _Binding(nio.UnknownEvent, _run_scheduled_trigger),
+    EventKind.REACTION: _Binding(nio.ReactionEvent, _turn_backed(lambda c: c.on_reaction)),
+    EventKind.APPROVAL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_approval)),
+    EventKind.ROOM_LIFECYCLE: _Binding(nio.RoomMemberEvent, _completing(lambda c: c.on_room_lifecycle)),
+    EventKind.RTC: _Binding(nio.UnknownEvent, _run_rtc_event),
+    EventKind.REDACTION: _Binding(nio.RedactionEvent, _completing(lambda c: c.on_redaction)),
+}
+
+
+def _turn_settles(outcome: TurnDispatchOutcome) -> bool:
+    """Translate a turn callback's report into a settlement decision."""
+    if outcome is TurnDispatchOutcome.DEFERRED:
+        return False
+    if outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED:
+        return True
+    msg = f"Turn callback returned invalid outcome {outcome!r}"
+    raise TypeError(msg)
+
+
+__all__ = [
+    "TURN_BACKED_KINDS",
+    "JournalCallbacks",
+    "JournalDispatcher",
+]

@@ -50,6 +50,9 @@ If traffic goes `worker -> Agent Vault -> Squid`, Squid only sees the Agent Vaul
 
 Use `approvedEgress.parentProxy` to make the chart render a layered Squid config and point Agent Vault tool traffic at approved egress first:
 
+Before enabling the server and bootstrap job, create `workers.kubernetes.agentVault.bootstrapSecretName` (default `agent-vault-bootstrap`) with both `AGENT_VAULT_MASTER_PASSWORD` and `AGENT_VAULT_OWNER_PASSWORD`.
+Create the Secret in the worker namespace too when it differs from the release namespace.
+
 ```yaml
 workers:
   backend: kubernetes
@@ -121,7 +124,7 @@ Requests for `worker_scope: user` are rejected because one user-scoped worker ca
 ## Secure Minimum
 
 Use `workers.backend: kubernetes`.
-Keep `workers.kubernetes.networkPolicy.create` and `egressProxy.networkPolicy.create` enabled.
+Keep `workers.kubernetes.networkPolicy.create`, `egressProxy.networkPolicy.create`, and `approvedEgress.networkPolicy.create` enabled.
 Provide `approvedEgress.token.existingSecret` or `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest`.
 Keep `request_network_access` behind `tool_approval`.

@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.knowledge.indexing_config import IndexingSettings, storage_key_for_base
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    import pytest
 
 
 def _settings(base_id: str = "docs") -> IndexingSettings:
@@ -69,6 +70,25 @@ def test_storage_key_for_base_sanitizes_unsafe_identifiers(tmp_path: Path) -> No
     key = storage_key_for_base("my docs/v1", knowledge_path)
     assert key.startswith("my_docs_v1_")
     assert key != storage_key_for_base("my docs.v1", knowledge_path)
+
+
+def test_storage_key_for_base_resolves_each_path_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repeated lookups must not re-enter the filesystem, which can be a slow network mount."""
+    storage_key_for_base.cache_clear()
+    knowledge_path = tmp_path / "docs"
+    resolved: list[Path] = []
+    original_resolve = Path.resolve
+
+    def counting_resolve(self: Path, strict: bool = False) -> Path:
+        resolved.append(self)
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", counting_resolve)
+    first = storage_key_for_base("docs", knowledge_path)
+    second = storage_key_for_base("docs", knowledge_path)
+
+    assert first == second
+    assert resolved == [knowledge_path]
 
 
 def test_indexing_settings_metadata_round_trip() -> None:

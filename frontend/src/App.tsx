@@ -16,7 +16,6 @@ import {
   Plug,
   Puzzle,
   Settings2,
-  Sparkles,
   type LucideIcon,
   Users,
 } from "lucide-react";
@@ -25,8 +24,6 @@ import { AgentList } from "@/components/AgentList/AgentList";
 import { AgentEditor } from "@/components/AgentEditor/AgentEditor";
 import { TeamList } from "@/components/TeamList/TeamList";
 import { TeamEditor } from "@/components/TeamEditor/TeamEditor";
-import { CultureList } from "@/components/CultureList/CultureList";
-import { CultureEditor } from "@/components/CultureEditor/CultureEditor";
 import { RoomList } from "@/components/RoomList/RoomList";
 import { RoomEditor } from "@/components/RoomEditor/RoomEditor";
 import { RoomAdmins } from "@/components/RoomAdmins/RoomAdmins";
@@ -80,7 +77,6 @@ const NAV_ITEMS: NavItem[] = [
   },
   { value: "agents", label: "Agents", icon: Bot, group: "Workspace" },
   { value: "teams", label: "Teams", icon: Users, group: "Workspace" },
-  { value: "cultures", label: "Culture", icon: Sparkles, group: "Workspace" },
   { value: "rooms", label: "Rooms", icon: Home, group: "Workspace" },
   {
     value: "schedules",
@@ -167,10 +163,10 @@ function AppContent() {
     syncStatus,
     diagnostics,
     configUsesIncludes,
+    configJournalPendingRestart,
     isLoading,
     selectedAgentId,
     selectedTeamId,
-    selectedCultureId,
     selectedRoomId,
   } = useConfigStore();
   const navigate = useNavigate();
@@ -277,8 +273,7 @@ function AppContent() {
 
   const getPlatformUrl = () => {
     const configured = (import.meta as any).env?.VITE_PLATFORM_URL as
-      | string
-      | undefined;
+      string | undefined;
     if (configured && configured.length > 0) return configured;
     if (typeof window !== "undefined") {
       const host = window.location.host;
@@ -521,6 +516,17 @@ function AppContent() {
           </div>
         )}
 
+        {configJournalPendingRestart && (
+          <div className="border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-100 sm:px-6">
+            The saved <code>event_journal</code> names a different database from
+            the one this process has open. It is read once, when the store is
+            opened, so the change takes effect at the next restart — and
+            MindRoom refuses to start against a journal it is not bound to, so
+            run <code>mindroom journal adopt</code> first if the move is
+            deliberate.
+          </div>
+        )}
+
         {visibleGlobalDiagnostics.map((diagnostic, index) => (
           <div
             key={`${diagnostic.kind}-${diagnostic.message}-${index}`}
@@ -689,28 +695,6 @@ function AppContent() {
                   }`}
                 >
                   <TeamEditor />
-                </div>
-              </div>
-            </TabsContent>
-
-            <TabsContent
-              value="cultures"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
-                <div
-                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                    selectedCultureId ? "hidden lg:block" : "block"
-                  }`}
-                >
-                  <CultureList />
-                </div>
-                <div
-                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                    selectedCultureId ? "block" : "hidden lg:block"
-                  }`}
-                >
-                  <CultureEditor />
                 </div>
               </div>
             </TabsContent>

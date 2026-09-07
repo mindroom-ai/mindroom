@@ -55,6 +55,7 @@ describe("ModelConfig", () => {
         openai_local: {
           provider: "openai",
           id: "gpt-4.1-mini",
+          api: "responses",
           context_window: 16384,
           extra_kwargs: { base_url: "http://localhost:9292/v1" },
         },
@@ -283,9 +284,30 @@ describe("ModelConfig", () => {
           provider: "openai",
           id: "gpt-4.1-mini",
           context_window: 32768,
+          api: "responses",
           extra_kwargs: { base_url: "http://localhost:11434/v1" },
         }),
       );
+    });
+  });
+
+  it("clears OpenAI API selection when changing provider", async () => {
+    render(<ModelConfig />);
+    fireEvent.click(screen.getByText("openai_local"));
+    const row = screen.getByDisplayValue("openai_local").closest("tr");
+    if (!row) throw new Error("row not found");
+
+    fireEvent.click(within(row).getAllByRole("combobox")[0]);
+    fireEvent.click(screen.getByRole("option", { name: /Anthropic/i }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(mockStore.updateModel).toHaveBeenCalledWith("openai_local", {
+        provider: "anthropic",
+        id: "gpt-4.1-mini",
+        api: null,
+        context_window: 16384,
+      });
     });
   });
 

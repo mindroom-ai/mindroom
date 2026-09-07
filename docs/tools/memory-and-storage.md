@@ -25,7 +25,8 @@ If the effective backend is `none`, MindRoom does not attach the `memory` tool t
 Use [Memory System](../memory.md) for the canonical docs on backend selection, automatic extraction, file-backed memory, Agno Learning, and storage layout.
 `mem0` and `zep` are separate upstream Agno toolkits that talk to external memory providers directly.
 Enabling `mem0` or `zep` does not change MindRoom's own memory backend, automatic memory extraction, or the behavior of the `memory` tool.
-`mem0` can work with a hosted Mem0 API key or with local/default upstream Mem0 configuration.
+`mem0` can work with a hosted Mem0 API key or upstream defaults.
+The upstream local config object is not currently expressible through MindRoom's authored YAML schema.
 `zep` requires a Zep API key, either through stored credentials or the `ZEP_API_KEY` environment variable.
 If optional dependencies for these tools are missing, MindRoom can auto-install them at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 This page does not document conversation-scoped file attachments even though they are storage-like.
@@ -94,15 +95,14 @@ delete_memory("abc123")
 `mem0` exposes `add_memory()`, `search_memory()`, `get_all_memories()`, and `delete_all_memories()`.
 It uses the upstream `mem0ai` client directly rather than MindRoom's built-in memory API.
 If `api_key` is set, or `MEM0_API_KEY` is present in the environment, the toolkit connects to Mem0's hosted platform client.
-If no API key is present but `config` is supplied, the toolkit initializes upstream Mem0 from that local config object.
-If neither `api_key` nor `config` is supplied, the toolkit falls back to upstream Mem0 defaults.
+If no API key is present, the toolkit falls back to upstream Mem0 defaults.
 Operations need a `user_id`, either from tool config or from the run context, and they return an error string when no user ID can be resolved.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `config` | `text` | `no` | `null` | Advanced upstream Mem0 config passed through to `Memory.from_config()`, typically used for local or self-managed setups. |
+| `config` | mapping | unsupported | — | Upstream local Mem0 config object; MindRoom's authored YAML schema does not currently expose mapping-valued fields. |
 | `api_key` | `password` | `no` | `null` | Optional Mem0 Platform API key, also read from `MEM0_API_KEY`. |
 | `user_id` | `text` | `no` | `null` | Fixed user scope for all calls when you do not want to rely on runtime user context. |
 | `org_id` | `text` | `no` | `null` | Optional Mem0 organization ID for platform usage, also read from `MEM0_ORG_ID`. |
@@ -134,7 +134,7 @@ delete_all_memories()
 
 ### Notes
 
-- `api_key` is optional because the toolkit can use local/default upstream Mem0 initialization instead of the hosted Mem0 platform.
+- `api_key` is optional because the toolkit can use upstream defaults instead of the hosted Mem0 platform.
 - This toolkit is separate from MindRoom's `memory.backend: mem0` setting, so enabling `mem0` here does not configure or replace MindRoom's built-in memory backend.
 - If you want MindRoom's automatic memory extraction and built-in memory retrieval to use Mem0, configure that in [Memory System](../memory.md) instead of relying on this toolkit alone.
 - Store API keys outside authored YAML even when the current metadata marks them as optional.

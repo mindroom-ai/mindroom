@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.models.metrics import Metrics
+from agno.metrics import RunMetrics
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -21,7 +21,7 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.teams import TeamMode, team_response, team_response_stream
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
-from tests.test_team_media_fallback import _build_test_config, _make_test_agent, _make_test_team
+from tests.test_team_response import _build_test_config, _make_test_agent, _make_test_team
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -62,7 +62,7 @@ def _team_run_output_with_metrics(
         model_provider="openai",
         member_responses=[RunOutput(agent_name="GeneralAgent", content="Member answer")],
     )
-    output.metrics = Metrics(
+    output.metrics = RunMetrics(
         input_tokens=800,
         output_tokens=120,
         total_tokens=920,
@@ -112,7 +112,7 @@ async def test_team_response_collects_run_metadata() -> None:
 
 def _member_output_with_metrics() -> RunOutput:
     member = RunOutput(agent_name="GeneralAgent", content="Member answer")
-    member.metrics = Metrics(input_tokens=300, output_tokens=50, total_tokens=350, duration=6.0)
+    member.metrics = RunMetrics(input_tokens=300, output_tokens=50, total_tokens=350, duration=6.0)
     return member
 
 
@@ -183,11 +183,11 @@ async def test_team_response_stream_collects_run_metadata_from_completed_event()
     orchestrator, config = _make_orchestrator()
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
         yield TeamRunCompletedEvent(
             run_id="team-run-1",
             session_id="session-1",
-            metrics=Metrics(input_tokens=800, output_tokens=120, total_tokens=920),
+            metrics=RunMetrics(input_tokens=800, output_tokens=120, total_tokens=920),
             member_responses=[_member_output_with_metrics()],
         )
 
@@ -227,7 +227,7 @@ async def test_team_response_stream_falls_back_to_model_request_totals() -> None
     orchestrator, config = _make_orchestrator()
 
     async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
         yield TeamModelRequestCompletedEvent(
             model="test-model",
             model_provider="openai",

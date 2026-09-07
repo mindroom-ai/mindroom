@@ -17,12 +17,12 @@ from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING
 
-from mindroom.file_locks import async_exclusive_file_lock
+from mindroom.file_locks import async_exclusive_file_lock, expose_inherited_file_lock
 from mindroom.knowledge.registry import resolve_refresh_target
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from typing import Literal
+    from typing import Literal, TextIO
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -106,10 +106,14 @@ def _refresh_file_lock_path(key: KnowledgeSourceRoot) -> Path:
 
 
 @asynccontextmanager
-async def _acquire_refresh_file_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
+async def _acquire_refresh_file_lock(key: KnowledgeSourceRoot) -> AsyncIterator[TextIO]:
     """Serialize source-root refresh and mutation work across processes."""
-    async with async_exclusive_file_lock(_refresh_file_lock_path(key), poll_seconds=_REFRESH_FILE_LOCK_POLL_SECONDS):
-        yield
+    async with async_exclusive_file_lock(
+        _refresh_file_lock_path(key),
+        poll_seconds=_REFRESH_FILE_LOCK_POLL_SECONDS,
+        retain_for_inherited_fds=True,
+    ) as lock_file:
+        yield lock_file
 
 
 @asynccontextmanager
@@ -130,8 +134,9 @@ async def refresh_source_root_lock(key: KnowledgeSourceRoot) -> AsyncIterator[No
     order rather than queueing, and the borrow counts that keep the lock table from
     evicting a live entry would never be recorded.
     """
-    async with _acquire_refresh_lock(key), _acquire_refresh_file_lock(key):
-        yield
+    async with _acquire_refresh_lock(key), _acquire_refresh_file_lock(key) as lock_file:
+        with expose_inherited_file_lock(lock_file, scope=Path(key.knowledge_path)):
+            yield
 
 
 def mark_refresh_active(key: KnowledgeRefreshTarget) -> None:

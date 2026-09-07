@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 from agno.media import Audio, File, Image, Video
@@ -17,38 +16,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_MAX_INLINE_MEDIA_RECORDS = 512
-_INLINE_MEDIA_RECORDS_BY_ID: OrderedDict[str, AttachmentRecord] = OrderedDict()
-_INLINE_MEDIA_RECORDS_BY_PATH: OrderedDict[str, AttachmentRecord] = OrderedDict()
-
-
-def _remember_attachment_record(record: AttachmentRecord) -> None:
-    _INLINE_MEDIA_RECORDS_BY_ID[record.attachment_id] = record
-    _INLINE_MEDIA_RECORDS_BY_ID.move_to_end(record.attachment_id)
-    while len(_INLINE_MEDIA_RECORDS_BY_ID) > _MAX_INLINE_MEDIA_RECORDS:
-        _INLINE_MEDIA_RECORDS_BY_ID.popitem(last=False)
-
-    path_key = str(record.local_path.absolute())
-    _INLINE_MEDIA_RECORDS_BY_PATH[path_key] = record
-    _INLINE_MEDIA_RECORDS_BY_PATH.move_to_end(path_key)
-    while len(_INLINE_MEDIA_RECORDS_BY_PATH) > _MAX_INLINE_MEDIA_RECORDS:
-        _INLINE_MEDIA_RECORDS_BY_PATH.popitem(last=False)
-
-
-def _inline_media_content_key(record: AttachmentRecord) -> tuple[str, ...]:
-    mime_type = record.mime_type or ""
-    if record.content_sha256:
-        return (record.kind, mime_type, record.content_sha256)
-    return (record.kind, mime_type, "filepath", str(record.local_path))
-
 
 def attachment_records_to_media(
     attachment_records: list[AttachmentRecord],
 ) -> tuple[list[Audio], list[Image], list[File], list[Video]]:
-    """Convert attachment records into Agno media objects and remember them for dedupe."""
-    for record in attachment_records:
-        _remember_attachment_record(record)
-
+    """Convert attachment records into Agno media objects."""
     audio: list[Audio] = []
     images: list[Image] = []
     files: list[File] = []
@@ -132,8 +104,6 @@ def resolve_scoped_attachments(
                 room_id=room_id,
                 thread_id=thread_id,
             )
-    for record in attachment_records:
-        _remember_attachment_record(record)
     emit_elapsed_timing(
         "response_payload.resolve_scoped_attachments",
         started,

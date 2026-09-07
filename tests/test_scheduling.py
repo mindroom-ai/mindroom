@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -43,11 +43,21 @@ from mindroom.scheduling import (
     scheduled_task_read_sort_key,
 )
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
-from tests.conftest import bind_runtime_paths, make_event_cache_mock
+from tests.authorization_helpers import (
+    make_test_scheduling_runtime,
+)
+from tests.bot_helpers import _visible_message
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    serve_conversation_reader,
+)
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+
+    from mindroom.matrix.conversation_reads import ConversationReader
 
 
 def _runtime_paths() -> object:
@@ -62,20 +72,33 @@ def _test_runtime_paths(tmp_path: Path) -> object:
     )
 
 
-def _event_cache() -> AsyncMock:
-    return make_event_cache_mock()
+def _conversation_reader(*, latest_thread_event_id: str | None = None) -> AsyncMock:
+    reader = AsyncMock()
+    reader.latest_thread_event_id = AsyncMock(return_value=latest_thread_event_id)
+    return reader
 
 
-def _conversation_cache(
-    thread_history: list[object] | None = None,
-    *,
-    latest_thread_event_id: str | None = None,
-) -> AsyncMock:
-    access = AsyncMock()
-    access.get_thread_history = AsyncMock(return_value=list(thread_history or []))
-    access.get_latest_thread_event_id_if_needed = AsyncMock(return_value=latest_thread_event_id)
-    access.notify_outbound_message = Mock()
-    return access
+def test_silent_new_thread_confirmation_describes_actual_visible_placement() -> None:
+    """The confirmation must not promise a thread beneath a hidden trigger."""
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="check the queue",
+        description="queue check",
+        new_thread=True,
+        silent=True,
+    )
+
+    response = scheduling._scheduled_task_response_text(
+        workflow,
+        task_id="task1234",
+        new_thread=True,
+        config=Config(),
+    )
+
+    assert "**Mode:** Silent (hidden trigger; no-report final omitted)" in response
+    assert "**Delivery:** Room-level roots for findings/failures" in response
+    assert "New thread per fire" not in response
 
 
 def _matrix_room(
@@ -97,17 +120,15 @@ def _scheduling_runtime(
     config: object | None = None,
     runtime_paths: object | None = None,
     room: object | None = None,
-    conversation_cache: AsyncMock | None = None,
-    event_cache: AsyncMock | None = None,
+    conversation_reader: ConversationReader | None = None,
     matrix_admin: object | None = None,
 ) -> SchedulingRuntime:
-    return SchedulingRuntime(
+    return make_test_scheduling_runtime(
         client=client or AsyncMock(),
         config=config or MagicMock(),
         runtime_paths=runtime_paths or _runtime_paths(),
         room=room or MagicMock(),
-        conversation_cache=conversation_cache or _conversation_cache(),
-        event_cache=event_cache or _event_cache(),
+        conversation_reader=conversation_reader or make_conversation_reader_mock(),
         matrix_admin=matrix_admin,
     )
 
@@ -199,11 +220,13 @@ def test_scheduled_task_read_model_derives_display_fields_and_sort_order() -> No
     assert once_model.next_run_at == datetime(2026, 1, 2, 9, 30, tzinfo=UTC)
     assert once_model.cron_expression is None
     assert once_model.new_thread is True
+    assert once_model.silent is False
     assert cron_model.cron_expression == "0 9 * * *"
     assert cron_model.cron_description == "At 09:00"
     assert cron_model.next_run_at == datetime(2026, 1, 2, 9, 0, tzinfo=UTC)
     assert cron_model.created_by == "@user:server"
     assert cron_model.thread_id == "$thread1"
+    assert cron_model.silent is False
     assert sorted([once_model, cron_model], key=scheduled_task_read_sort_key) == [cron_model, once_model]
 
 
@@ -339,7 +362,7 @@ async def test_restore_scheduled_tasks_queues_overdue_one_time_tasks() -> None:
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task") as mock_start:
         restored = await restore_scheduled_tasks(
@@ -347,8 +370,7 @@ async def test_restore_scheduled_tasks_queues_overdue_one_time_tasks() -> None:
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     assert restored == 1
@@ -406,7 +428,7 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task") as mock_start_during_restore:
         await restore_scheduled_tasks(
@@ -414,8 +436,7 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
             room_id="!test:server",
             config=config,
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     mock_start_during_restore.assert_not_called()
@@ -428,8 +449,7 @@ async def test_drain_deferred_overdue_tasks_starts_queued_tasks_after_sync() -> 
             client,
             config,
             _runtime_paths(),
-            _event_cache(),
-            conversation_cache,
+            conversation_reader,
         )
 
     assert drained == 2
@@ -488,7 +508,7 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task") as mock_start_during_restore:
         await restore_scheduled_tasks(
@@ -496,8 +516,7 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
             room_id="!test:server",
             config=config,
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     mock_start_during_restore.assert_not_called()
@@ -513,8 +532,7 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
             client,
             config,
             _runtime_paths(),
-            _event_cache(),
-            conversation_cache,
+            conversation_reader,
         )
 
     assert drained == 1
@@ -552,7 +570,7 @@ async def test_restore_scheduled_tasks_keeps_cron_restoration_unchanged() -> Non
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task", return_value=True) as mock_start:
         restored = await restore_scheduled_tasks(
@@ -560,8 +578,7 @@ async def test_restore_scheduled_tasks_keeps_cron_restoration_unchanged() -> Non
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     assert restored == 1
@@ -599,7 +616,7 @@ async def test_restore_scheduled_tasks_does_not_queue_when_nothing_is_overdue() 
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task", return_value=True) as mock_start:
         restored = await restore_scheduled_tasks(
@@ -607,8 +624,7 @@ async def test_restore_scheduled_tasks_does_not_queue_when_nothing_is_overdue() 
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     assert restored == 1
@@ -665,7 +681,7 @@ async def test_restore_scheduled_tasks_uses_canonical_state_parser_for_mixed_rec
         room_id="!test:server",
     )
     client.room_get_state = AsyncMock(return_value=state_response)
-    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+    conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch("mindroom.scheduling._start_scheduled_task", return_value=True) as mock_start:
         restored = await restore_scheduled_tasks(
@@ -673,8 +689,7 @@ async def test_restore_scheduled_tasks_uses_canonical_state_parser_for_mixed_rec
             room_id="!test:server",
             config=MagicMock(),
             runtime_paths=_runtime_paths(),
-            event_cache=_event_cache(),
-            conversation_cache=conversation_cache,
+            conversation_reader=conversation_reader,
         )
 
     assert restored == 1
@@ -1022,8 +1037,7 @@ async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _event_cache(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_not_awaited()
@@ -1067,8 +1081,7 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
             initial_workflow,
             config,
             _runtime_paths(),
-            _event_cache(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_awaited_once()
@@ -1127,8 +1140,7 @@ async def test_run_once_task_retries_transient_state_read_failure() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _event_cache(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     sleep.assert_awaited_once()
@@ -1169,8 +1181,7 @@ async def test_run_once_task_marks_completed_after_success() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _event_cache(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_awaited_once()
@@ -1216,8 +1227,7 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
             workflow,
             config,
             _runtime_paths(),
-            _event_cache(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_awaited_once()
@@ -1272,7 +1282,7 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
             {},
             config,
             _runtime_paths(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_awaited_once()
@@ -1319,7 +1329,7 @@ async def test_run_cron_task_keeps_pending_state_after_success() -> None:
             {},
             config,
             _runtime_paths(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_awaited_once()
@@ -1357,7 +1367,7 @@ async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
             {},
             config,
             _runtime_paths(),
-            _conversation_cache(),
+            _conversation_reader(),
         )
 
     execute_mock.assert_not_awaited()
@@ -1820,6 +1830,7 @@ async def test_edit_scheduled_task_reuses_existing_thread() -> None:
     assert call_kwargs["existing_task"].task_id == "task123"
     assert call_kwargs["existing_task"].workflow.thread_id == "$original_thread"
     assert call_kwargs["history_limit"] is None
+    assert call_kwargs["silent"] is None
 
 
 @pytest.mark.asyncio
@@ -1902,8 +1913,8 @@ async def test_edit_scheduled_task_preserves_new_thread_mode() -> None:
 
 
 @pytest.mark.asyncio
-async def test_edit_scheduled_task_persists_via_admin_when_active_agent_lacks_state_power(tmp_path: Path) -> None:
-    """Editing should use the same privileged schedule-state persistence fallback as creation."""
+async def test_edit_scheduled_task_persists_via_admin_and_preserves_omitted_silent_mode(tmp_path: Path) -> None:
+    """Editing preserves omitted fields while using privileged state persistence."""
     client = AsyncMock()
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     room_state: dict[str, dict[str, Any]] = {}
@@ -1927,6 +1938,7 @@ async def test_edit_scheduled_task_persists_via_admin_when_active_agent_lacks_st
         created_by="@alice:server",
         thread_id="$thread",
         room_id="!test:server",
+        silent=True,
     )
     client.room_get_state_event = AsyncMock(
         return_value=nio.RoomGetStateEventResponse(
@@ -1949,7 +1961,10 @@ async def test_edit_scheduled_task_persists_via_admin_when_active_agent_lacks_st
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=updated_workflow)),
     ):
         result = await edit_scheduled_task(
@@ -1972,6 +1987,7 @@ async def test_edit_scheduled_task_persists_via_admin_when_active_agent_lacks_st
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server")
     assert [task.task_id for task in tasks] == ["taskedit"]
     assert tasks[0].workflow.message == "updated message"
+    assert tasks[0].workflow.silent is True
 
 
 @pytest.mark.asyncio
@@ -2146,7 +2162,7 @@ async def test_schedule_task_returns_error_when_sender_blocked_from_all_agents()
 
     with (
         patch(
-            "mindroom.scheduling.responder_candidate_entities_for_room",
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
             return_value=[],
         ),
         patch(
@@ -2175,7 +2191,7 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
 
     with (
         patch(
-            "mindroom.scheduling.responder_candidate_entities_for_room",
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
             return_value=[],
         ),
         patch(
@@ -2300,7 +2316,10 @@ async def test_schedule_task_persists_via_admin_when_active_agent_lacks_state_po
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch("mindroom.scheduling._start_scheduled_task", return_value=True),
@@ -2361,7 +2380,10 @@ async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_tr
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch("mindroom.scheduling._start_scheduled_task", return_value=True),
@@ -2380,15 +2402,19 @@ async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_tr
             scheduled_by="@alice:server",
             full_text="every 25 minutes poll the queue with only the last 5 messages",
             history_limit=5,
+            silent=True,
         )
 
     assert task_id == "task1234"
     assert "**History:** last 5 messages" in message
+    assert "**Mode:** Silent" in message
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server")
     assert [task.task_id for task in tasks] == ["task1234"]
     assert tasks[0].workflow.history_limit == 5
+    assert tasks[0].workflow.silent is True
     listed = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread", config=config)
     assert "History: last 5 messages" in listed
+    assert "Mode: Silent" in listed
 
 
 @pytest.mark.asyncio
@@ -2418,7 +2444,10 @@ async def test_schedule_task_keeps_parse_produced_history_limit(tmp_path: Path) 
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch("mindroom.scheduling._start_scheduled_task", return_value=True),
@@ -2489,7 +2518,10 @@ async def test_schedule_task_returns_error_when_state_write_fails_without_admin_
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch("mindroom.scheduling._start_scheduled_task", return_value=True) as start_task,
@@ -2560,7 +2592,10 @@ async def test_schedule_task_returns_error_when_active_write_returns_unexpected_
     )
 
     with (
-        patch("mindroom.scheduling.responder_candidate_entities_for_room", return_value=[ids["assistant"]]),
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
         patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch("mindroom.scheduling._start_scheduled_task", return_value=True) as start_task,
@@ -2671,15 +2706,14 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
         runtime_paths,
         usernames={"assistant": "actual_assistant", "writer": "actual_writer"},
     )
-    thread_message = MagicMock()
-    thread_message.sender = ids["assistant"].full_id
-    runtime = _scheduling_runtime(
-        client=client,
-        config=config,
-        runtime_paths=runtime_paths,
-        room=room,
-        conversation_cache=_conversation_cache(thread_history=[thread_message]),
+    thread_message = _visible_message(
+        sender=ids["assistant"].full_id,
+        body="earlier",
+        event_id="$earlier:localhost",
+        timestamp=1,
     )
+    conversation_reader = make_conversation_reader_mock()
+    serve_conversation_reader(conversation_reader, [thread_message])
     parse_result = ScheduledWorkflow(
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
@@ -2691,12 +2725,19 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
 
     with (
         patch(
-            "mindroom.scheduling.responder_candidate_entities_for_room",
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
             new=AsyncMock(return_value=[ids["assistant"], ids["writer"]]),
         ),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=parse_result)),
         patch("mindroom.scheduling._save_pending_scheduled_task", new=AsyncMock()) as save_task,
     ):
+        runtime = _scheduling_runtime(
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            room=room,
+            conversation_reader=conversation_reader,
+        )
         task_id, message = await schedule_task(
             runtime=runtime,
             room_id="!test:server",

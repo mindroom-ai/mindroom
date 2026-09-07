@@ -43,6 +43,7 @@ def register_tool_with_metadata(
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT,
     dependencies: list[str] | None = None,
     auth_provider: str | None = None,
+    oauth_fallback_fields: tuple[str, ...] = (),
     docs_url: str | None = None,
     helper_text: str | None = None,
     function_names: tuple[str, ...] = (),
@@ -50,6 +51,15 @@ def register_tool_with_metadata(
     supports_toolkit_filters: bool = True,
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
     """Register a tool factory and its declarative metadata."""
+    if oauth_fallback_fields:
+        if setup_type != SetupType.OAUTH:
+            msg = "OAuth fallback fields require setup_type=oauth"
+            raise ValueError(msg)
+        config_field_names = {field.name for field in config_fields or ()}
+        missing_fields = sorted(set(oauth_fallback_fields) - config_field_names)
+        if missing_fields:
+            msg = f"OAuth fallback fields must reference config fields: {', '.join(missing_fields)}"
+            raise ValueError(msg)
 
     def decorator(factory: Callable[[], type]) -> Callable[[], type]:
         metadata = ToolMetadata(
@@ -69,6 +79,7 @@ def register_tool_with_metadata(
             authored_override_validator=authored_override_validator,
             dependencies=dependencies,
             auth_provider=auth_provider,
+            oauth_fallback_fields=oauth_fallback_fields,
             docs_url=docs_url,
             helper_text=helper_text,
             function_names=function_names,

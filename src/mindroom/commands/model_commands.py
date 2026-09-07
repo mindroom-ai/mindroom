@@ -31,7 +31,7 @@ def _show_thread_model(config: Config, runtime_paths: RuntimePaths, thread_id: s
         model = config.models[override]
         current = f"This thread uses the `{override}` override ({model.provider} {model.id})."
     else:
-        current = "No thread model override is set; agents use their configured models."
+        current = "No thread model override is set; room-level model selection applies."
     return (
         f"{current}\n\n**Available models:**\n{_available_models_text(config)}\n\n"
         "Use `!model <name>` inside a thread to switch it, or `!model reset` to remove the override."
@@ -58,7 +58,7 @@ def handle_model_command(  # noqa: PLR0911
             return _THREAD_REQUIRED_MESSAGE
         if requested.lower() in _RESET_ARGUMENTS:
             if clear_thread_model_override(runtime_paths, thread_id):
-                return "✅ Thread model override removed. Agents use their configured models again."
+                return "✅ Thread model override removed; room-level model selection applies again."
             return "This thread has no model override."
         return f"❌ Unknown model `{requested}`. Available models:\n{_available_models_text(config)}"
     if thread_id is None:
@@ -73,5 +73,5 @@ def handle_model_command(  # noqa: PLR0911
     model = config.models[requested]
     return (
         f"✅ This thread now uses `{requested}` ({model.provider} {model.id}) for all agents and teams.\n"
-        "Use `!model reset` to restore the configured models."
+        "Use `!model reset` to restore room-level model selection."
     )

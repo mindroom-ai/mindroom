@@ -19,7 +19,6 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Agents | `configuration/agents.md` | `configuration/agents/index.md` | `page__configuration__agents__index.md` |
 | Models | `configuration/models.md` | `configuration/models/index.md` | `page__configuration__models__index.md` |
 | Teams | `configuration/teams.md` | `configuration/teams/index.md` | `page__configuration__teams__index.md` |
-| Cultures | `configuration/cultures.md` | `configuration/cultures/index.md` | `page__configuration__cultures__index.md` |
 | Router | `configuration/router.md` | `configuration/router/index.md` | `page__configuration__router__index.md` |
 | Overview | `tools/index.md` | `tools/index.md` | `page__tools__index.md` |
 | Dynamic Tools | `tools/dynamic-tools.md` | `tools/dynamic-tools/index.md` | `page__tools__dynamic-tools__index.md` |
@@ -38,6 +37,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Calendar & Scheduling | `tools/calendar-and-scheduling.md` | `tools/calendar-and-scheduling/index.md` | `page__tools__calendar-and-scheduling__index.md` |
 | Memory & Storage | `tools/memory-and-storage.md` | `tools/memory-and-storage/index.md` | `page__tools__memory-and-storage__index.md` |
 | Agent Orchestration | `tools/agent-orchestration.md` | `tools/agent-orchestration/index.md` | `page__tools__agent-orchestration__index.md` |
+| Background Python Scripts | `tools/background-scripts.md` | `tools/background-scripts/index.md` | `page__tools__background-scripts__index.md` |
 | Automation & Platforms | `tools/automation-and-platforms.md` | `tools/automation-and-platforms/index.md` | `page__tools__automation-and-platforms__index.md` |
 | Location, Commerce & Home | `tools/location-commerce-and-home.md` | `tools/location-commerce-and-home/index.md` | `page__tools__location-commerce-and-home__index.md` |
 | All Tools (Redirect) | `tools/builtin.md` | `tools/builtin/index.md` | `page__tools__builtin__index.md` |
@@ -66,6 +66,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Matrix Integration | `architecture/matrix.md` | `architecture/matrix/index.md` | `page__architecture__matrix__index.md` |
 | Agent Orchestration | `architecture/orchestration.md` | `architecture/orchestration/index.md` | `page__architecture__orchestration__index.md` |
 | Overview | `deployment/index.md` | `deployment/index.md` | `page__deployment__index.md` |
+| Nio 1.0 Upgrade | `deployment/nio-upgrade.md` | `deployment/nio-upgrade/index.md` | `page__deployment__nio-upgrade__index.md` |
 | Hosted Matrix + Local Backend | `deployment/hosted-matrix.md` | `deployment/hosted-matrix/index.md` | `page__deployment__hosted-matrix__index.md` |
 | Overview | `deployment/bridges/index.md` | `deployment/bridges/index.md` | `page__deployment__bridges__index.md` |
 | Telegram | `deployment/bridges/telegram.md` | `deployment/bridges/telegram/index.md` | `page__deployment__bridges__telegram__index.md` |

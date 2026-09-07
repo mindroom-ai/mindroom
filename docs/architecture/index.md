@@ -32,7 +32,7 @@ MindRoom's architecture consists of several key components working together.
 │                                                          │
 │  ┌─────────────────────────────────────────────────┐    │
 │  │                Memory System                     │    │
-│  │  (Mem0 + ChromaDB, agent/team scopes)           │    │
+│  │  (Mem0, file, or none; agent/team scopes)       │    │
 │  └─────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -42,6 +42,8 @@ MindRoom's architecture consists of several key components working together.
 - [Matrix Integration](matrix.md) - How MindRoom connects to Matrix
 - [Agent Orchestration](orchestration.md) - How agents are managed
 - [Bot Runtime](bot-runtime.md) - The inbound turn pipeline and its module boundaries
+- [Matrix Event-Journal Security](matrix-event-journal-security.md) - Which decrypted plaintext is durable, who owns it, and what removes it
+- [Matrix Event-Journal Contracts](../dev/matrix-event-journal-contracts.md) - What the journal guarantees, and the homeserver behaviour you would otherwise rediscover by debugging
 
 ## Key Internal Modules
 
@@ -54,14 +56,17 @@ MindRoom's architecture consists of several key components working together.
 | `runtime_resolution.py` | Authoritative runtime resolution for agent materialization |
 | `team_exact_members.py` | Runtime resolution for team member materialization |
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
-| `ai_runtime.py` | Agent-run input preparation, queued-notice hooks, and inline-media fallback helpers |
+| `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
+| `legacy_session_migration.py` | Post-readiness retirement of Agno 2 session run blobs |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
-| `dispatch_obligations/` | Durable exact Matrix callback storage, admission, execution, and startup recovery |
-| `turn_settlement_retry.py` | Event-loop retry owner for settling callback obligations after terminal TurnStore persistence |
+| `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
+| `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
+| `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
+| `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `turn_controller.py` | TurnController — owns one inbound turn from ingress to recorded outcome |
 | `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
@@ -77,6 +82,9 @@ MindRoom's architecture consists of several key components working together.
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
+| `response_turn.py` | Shared blocking and streaming response-turn drivers, including retries and dynamic-tool continuation |
+| `response_attempt.py` | Executes one visible response attempt with stop tracking |
+| `response_terminal.py` | Classifies pending-visible failures and terminal stream outcomes |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
@@ -84,9 +92,9 @@ MindRoom's architecture consists of several key components working together.
 | `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
-| `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
+| `streaming.py` | Streaming state machine and progressive response state |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
-| `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
+| `provider_media_fallback.py` | Retries provider requests without rejected inline media and remembers unsupported kinds per model route for the process lifetime |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
@@ -95,12 +103,12 @@ MindRoom's architecture consists of several key components working together.
 
 ## Data Flow
 
-1. **Message arrives** from the Matrix homeserver and `bot.py` hands it through `dispatch_obligations/` to `turn_controller.py`, which owns the turn from ingress to recorded outcome
+1. **Message arrives** from the Matrix homeserver and is committed by `matrix/journal_ingress.py` before nio is told it was accepted; `journal_dispatch.py` then hands it through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome
 2. **Input is validated, normalized, and resolved**: `ingress_validation.py` checks trust and the effective requester, deduplicates handled event ids, and drops trusted router echoes; `inbound_turn_normalizer.py` shapes raw text, voice, and media into canonical turn inputs, and `conversation_resolver.py` resolves thread identity and history; `!commands` are control inputs that dispatch directly here instead of entering coalescing
 3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches per conversation — a live batch ending in text is a complete utterance and dispatches immediately, a live batch ending in media waits a debounce window for more attachments or a trailing caption, and follow-up backlogs queued behind an active response flush as one combined turn at idle; conversations never wait on each other
 4. **The turn is planned**: `turn_policy.py` decides to ignore, route, or respond; a direct responder is resolved when one eligible agent or team remains, otherwise the router selects among candidates
 5. **Selected entity processes** the message via `response_runner.py` and the Agno runtime, executing tools as needed
-6. **Response is delivered** through `streaming.py` (progressive edits) and `delivery_gateway.py` (Matrix send/edit)
+6. **Response is delivered** through `delivery_gateway.py`, which owns Matrix send/edit/finalization while `streaming.py` owns progressive response state
 7. **The turn is recorded** in the durable handled-turn ledger (`turn_store.py` / `handled_turns.py`) so restarts do not double-reply
 8. **Memory updates** asynchronously in background
 

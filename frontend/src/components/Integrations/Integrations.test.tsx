@@ -74,6 +74,7 @@ const {
   mockPlexOnAction,
   mockPlexOnDisconnect,
   mockGenericOAuthOnAction,
+  mockGenericOAuthOnDisconnect,
   mockGenericOAuthLoadStatus,
   mockGoogleDriveLoadStatus,
   mockGoogleGmailLoadStatus,
@@ -91,6 +92,7 @@ const {
   mockPlexOnAction: vi.fn(),
   mockPlexOnDisconnect: vi.fn(),
   mockGenericOAuthOnAction: vi.fn(),
+  mockGenericOAuthOnDisconnect: vi.fn(),
   mockGenericOAuthLoadStatus: vi
     .fn()
     .mockResolvedValue({ status: "available", connected: false }),
@@ -148,6 +150,9 @@ vi.mock("@/hooks/useTools", () => ({
     config_fields: tool.config_fields,
     helper_text: tool.helper_text,
     docs_url: tool.docs_url,
+    oauth_fallback_fields: tool.oauth_fallback_fields,
+    manual_auth_configured: tool.manual_auth_configured,
+    environment_auth_configured: tool.environment_auth_configured,
   }),
 }));
 
@@ -201,6 +206,7 @@ vi.mock("./integrations/index", () => ({
       return {
         integration: this.integration,
         onAction: () => mockGenericOAuthOnAction(this.providerId),
+        onDisconnect: () => mockGenericOAuthOnDisconnect(this.providerId),
       };
     }
 
@@ -368,6 +374,7 @@ describe("Integrations", () => {
     mockPlexOnAction.mockResolvedValue(undefined);
     mockPlexOnDisconnect.mockResolvedValue(undefined);
     mockGenericOAuthOnAction.mockResolvedValue(undefined);
+    mockGenericOAuthOnDisconnect.mockResolvedValue(undefined);
     mockEnhancedConfigDialogProps.mockClear();
     mockGenericOAuthLoadStatus.mockResolvedValue({
       status: "available",
@@ -549,6 +556,149 @@ describe("Integrations", () => {
       ).toBeInTheDocument();
       expect(screen.queryByText("Needs client config")).not.toBeInTheDocument();
     });
+  });
+
+  it("offers a reset action when OAuth credentials are unreadable", async () => {
+    const refetch = vi.fn();
+    const disconnect = createDeferred();
+    mockGoogleDriveOnDisconnect.mockReturnValueOnce(disconnect.promise);
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "google_drive",
+          display_name: "Google Drive",
+          description: "Google Drive with a manual fallback",
+          icon: "Google Drive Icon",
+          icon_color: null,
+          category: "productivity",
+          status: "available",
+          setup_type: "oauth",
+          config_fields: [
+            {
+              name: "credentials_json",
+              label: "Credentials JSON",
+              type: "password",
+              required: false,
+            },
+          ],
+          oauth_fallback_fields: ["credentials_json"],
+          manual_auth_configured: true,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch,
+      statusAuthoritative: true,
+    });
+    global.fetch = vi.fn().mockResolvedValue({ ok: true });
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: true,
+      oauth_client_config_service: "google_drive_oauth_client",
+      oauth_reset_required: true,
+      helper_text:
+        "Stored OAuth credentials cannot be read. Reset the connection to reconnect.",
+    });
+
+    render(<Integrations />);
+
+    const resetButton = await screen.findByRole("button", {
+      name: "Reset connection",
+    });
+    expect(
+      screen.queryByRole("button", { name: "Connect with Google Drive" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Stored OAuth credentials cannot be read. Reset the connection to reconnect.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Edit credentials json" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Remove credentials json" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(resetButton);
+
+    await waitFor(() => {
+      expect(mockGoogleDriveOnDisconnect).toHaveBeenCalledOnce();
+      const pendingResetButton = screen.getByRole("button", {
+        name: "Reset connection",
+      });
+      expect(pendingResetButton).toBeDisabled();
+      expect(pendingResetButton.querySelector(".animate-spin")).not.toBeNull();
+    });
+
+    await act(async () => disconnect.resolve());
+
+    await waitFor(() => {
+      expect(refetch).toHaveBeenCalledOnce();
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Connection reset",
+        description: "Google Drive OAuth has been reset.",
+      });
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("offers reset recovery when no fallback credential is configured", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "google_drive",
+          display_name: "Google Drive",
+          description: "Google Drive with an optional manual fallback",
+          icon: "Google Drive Icon",
+          icon_color: null,
+          category: "productivity",
+          status: "available",
+          setup_type: "oauth",
+          config_fields: [
+            {
+              name: "credentials_json",
+              label: "Credentials JSON",
+              type: "password",
+              required: false,
+            },
+          ],
+          oauth_fallback_fields: ["credentials_json"],
+          manual_auth_configured: false,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "not_connected",
+      connected: false,
+      oauth_client_configured: true,
+      oauth_reset_required: true,
+      helper_text:
+        "Stored OAuth credentials cannot be read. Reset the connection to reconnect.",
+    });
+
+    render(<Integrations />);
+
+    expect(
+      await screen.findByRole("button", { name: "Reset connection" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Use credentials json" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Stored OAuth credentials cannot be read. Reset the connection to reconnect.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("opens OAuth client config dialog when client config is missing", async () => {
@@ -1100,6 +1250,9 @@ describe("Integrations", () => {
         screen.getByText(/Requester-scoped tool status is preview only/i),
       ).toBeInTheDocument();
     });
+    expect(
+      screen.getByText(/OAuth-backed integrations can be connected/i),
+    ).toBeInTheDocument();
   });
 
   it("hides shared-only integrations for isolating worker scopes", async () => {
@@ -1453,6 +1606,197 @@ describe("Integrations", () => {
     });
     expect(
       screen.queryByText(/Connect acme_drive first/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers OAuth and manual credentials for providers with a fallback", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "github",
+          display_name: "GitHub",
+          description: "Manage GitHub repositories",
+          icon: "SiGithub",
+          icon_color: null,
+          category: "developer",
+          status: "requires_config",
+          setup_type: "oauth",
+          auth_provider: "github",
+          config_fields: [
+            {
+              name: "access_token",
+              label: "Access Token",
+              type: "password",
+              required: false,
+            },
+            {
+              name: "base_url",
+              label: "Base URL",
+              type: "url",
+              required: false,
+            },
+          ],
+          oauth_fallback_fields: ["access_token"],
+          manual_auth_configured: false,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    const githubCard = await waitFor(() => {
+      const card = screen.getByText("GitHub").closest(".h-full");
+      expect(card).toBeInstanceOf(HTMLElement);
+      return card as HTMLElement;
+    });
+    expect(
+      within(githubCard).getByRole("button", { name: "Connect with GitHub" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(githubCard).getByRole("button", { name: "Use access token" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
+      expect(screen.getByText("Service: github")).toBeInTheDocument();
+    });
+    expect(mockGenericOAuthOnAction).not.toHaveBeenCalled();
+  });
+
+  it("edits and removes a configured OAuth fallback without disconnecting OAuth", async () => {
+    const refetch = vi.fn();
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "github",
+          display_name: "GitHub",
+          description: "Manage GitHub repositories",
+          icon: "SiGithub",
+          icon_color: null,
+          category: "developer",
+          status: "available",
+          setup_type: "oauth",
+          auth_provider: "github",
+          config_fields: [
+            {
+              name: "access_token",
+              label: "Access Token",
+              type: "password",
+              required: false,
+            },
+            {
+              name: "base_url",
+              label: "Base URL",
+              type: "url",
+              required: false,
+            },
+          ],
+          oauth_fallback_fields: ["access_token"],
+          manual_auth_configured: true,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch,
+      statusAuthoritative: true,
+    });
+    global.fetch = vi.fn().mockResolvedValue({ ok: true });
+
+    render(<Integrations />);
+
+    const githubCard = await waitFor(() => {
+      const card = screen.getByText("GitHub").closest(".h-full");
+      expect(card).toBeInstanceOf(HTMLElement);
+      return card as HTMLElement;
+    });
+    expect(within(githubCard).getByText("Access Token")).toBeInTheDocument();
+    expect(
+      within(githubCard).getByRole("button", { name: "Edit access token" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(githubCard).getByRole("button", { name: "Remove access token" }),
+    );
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "http://localhost:8080/api/credentials/github",
+        {
+          method: "DELETE",
+        },
+      );
+      expect(refetch).toHaveBeenCalledTimes(1);
+    });
+    expect(mockGenericOAuthOnDisconnect).not.toHaveBeenCalled();
+  });
+
+  it("reports an environment OAuth fallback without offering to remove it", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        {
+          name: "github",
+          display_name: "GitHub",
+          description: "Manage GitHub repositories",
+          icon: "SiGithub",
+          icon_color: null,
+          category: "developer",
+          status: "available",
+          setup_type: "oauth",
+          auth_provider: "github",
+          config_fields: [
+            {
+              name: "access_token",
+              label: "Access Token",
+              type: "password",
+              required: false,
+            },
+            {
+              name: "base_url",
+              label: "Base URL",
+              type: "url",
+              required: false,
+            },
+          ],
+          oauth_fallback_fields: ["access_token"],
+          manual_auth_configured: false,
+          environment_auth_configured: true,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    const githubCard = await waitFor(() => {
+      const card = screen.getByText("GitHub").closest(".h-full");
+      expect(card).toBeInstanceOf(HTMLElement);
+      return card as HTMLElement;
+    });
+    expect(
+      within(githubCard).getByText("Environment Access Token"),
+    ).toBeInTheDocument();
+    expect(
+      within(githubCard).getByRole("button", { name: "Configure" }),
+    ).toBeInTheDocument();
+    expect(
+      within(githubCard).queryByRole("button", { name: "Connect with GitHub" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(githubCard).queryByRole("button", { name: "Remove access token" }),
     ).not.toBeInTheDocument();
   });
 

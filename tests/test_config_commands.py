@@ -32,35 +32,41 @@ from mindroom.commands.config_confirmation import (
     _add_confirmation_reactions,
     handle_confirmation_reaction,
 )
-from mindroom.commands.handler import CommandHandlerContext, handle_command
+from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delivery_gateway import SendTextRequest
+from mindroom.event_journal_open import record_opened_event_journal
 from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.plugins import PluginReloadResult
-from tests.conftest import make_event_cache_mock, write_config_yaml
+from tests.authorization_helpers import (
+    make_test_command_handler_context,
+)
+from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, write_config_yaml
 
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
     return resolve_runtime_paths(config_path=config_path)
 
 
-def _handler_authorization(
+def _handler_config_fields(
     *,
     config_command_enabled: bool,
-    global_users: list[str] | None = None,
+    administrators: list[str] | None = None,
     aliases: dict[str, list[str]] | None = None,
-) -> AuthorizationConfig:
-    return AuthorizationConfig(
-        config_command_enabled=config_command_enabled,
-        global_users=global_users or [],
-        aliases=aliases or {},
-    )
+) -> dict[str, object]:
+    return {
+        "administrators": administrators or [],
+        "authorization": AuthorizationConfig(
+            config_command_enabled=config_command_enabled,
+            aliases=aliases or {},
+        ),
+    }
 
 
 def _pending_config_change(
@@ -153,7 +159,7 @@ def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_pat
 @pytest.mark.asyncio
 async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations() -> None:
     """Config confirmation should add canonical Matrix annotation reactions."""
-    client = AsyncMock()
+    client = make_matrix_client_mock()
     response = MagicMock(spec=nio.RoomSendResponse)
     client.room_send.return_value = response
     await _add_confirmation_reactions(client, "!room:example.org", "$preview")
@@ -191,7 +197,7 @@ async def test_confirmation_setup_errors_remain_retryable() -> None:
     with pytest.raises(RuntimeError, match="Failed to store pending config change"):
         await config_confirmation._store_pending_change_in_matrix(state_client, "$preview", pending_change)
 
-    reaction_client = AsyncMock()
+    reaction_client = make_matrix_client_mock()
     reaction_client.room_send.return_value = nio.RoomSendError.from_dict(
         {"errcode": "M_LIMIT_EXCEEDED", "error": "Slow down"},
         "!room:example.org",
@@ -203,7 +209,7 @@ async def test_confirmation_setup_errors_remain_retryable() -> None:
 @pytest.mark.asyncio
 async def test_confirmation_setup_adopts_existing_duplicate_reaction() -> None:
     """A replayed setup should accept the homeserver's duplicate-annotation proof."""
-    client = AsyncMock()
+    client = make_matrix_client_mock()
     client.room_send.side_effect = [
         nio.RoomSendError("already exists", "M_DUPLICATE_ANNOTATION"),
         nio.RoomSendResponse("$cancel-reaction", "!room:example.org"),
@@ -416,20 +422,19 @@ class TestValueFormatting:
 async def test_handle_command_threads_config_path_to_config_commands(tmp_path: Path) -> None:
     """`!config` dispatch should use the orchestrator-owned config file path."""
     config_path = tmp_path / "custom-config.yaml"
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@alice:example.org"],
+                administrators=["@alice:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$response"),
     )
@@ -459,20 +464,19 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
 @pytest.mark.asyncio
 async def test_handle_command_config_disabled_by_default(tmp_path: Path) -> None:
     """Disabled config commands should reject before loading or previewing config."""
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=False,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
     )
@@ -503,20 +507,19 @@ async def test_handle_command_config_disabled_by_default(tmp_path: Path) -> None
 @pytest.mark.asyncio
 async def test_handle_command_config_enabled_requires_admin(tmp_path: Path) -> None:
     """Enabled config commands should still require a global admin."""
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
     )
@@ -547,15 +550,14 @@ async def test_handle_command_config_enabled_requires_admin(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_handle_command_records_response_event_id_for_standard_reply(tmp_path: Path) -> None:
     """Standard command replies should record the emitted Matrix response event ID."""
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
     )
@@ -597,15 +599,14 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
         return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 1),
     )
 
-    admin_context = CommandHandlerContext(
+    admin_context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
+        config=Config(administrators=["@admin:example.org"]),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
@@ -621,8 +622,8 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
     reload_plugins.assert_awaited_once()
     assert "demo-plugin" in admin_context.send_response.await_args.args[0]
 
-    user_context = CommandHandlerContext(
-        **{**admin_context.__dict__, "config": SimpleNamespace(authorization=AuthorizationConfig(global_users=[]))},
+    user_context = make_test_command_handler_context(
+        **{**admin_context.__dict__, "config": Config(administrators=[])},
     )
     await handle_command(
         context=user_context,
@@ -649,20 +650,19 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
     reload_plugins = AsyncMock(
         return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 0),
     )
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
+        config=Config(
+            administrators=["@admin:example.org"],
             authorization=AuthorizationConfig(
-                global_users=["@admin:example.org"],
                 aliases={"@admin:example.org": ["@telegram_admin:example.org"]},
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
@@ -691,15 +691,14 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
         source={"content": {"body": "!reload-plugins"}},
     )
     reload_plugins = AsyncMock(side_effect=RuntimeError("Plugin hooks module not found: /tmp/demo/hooks.py"))
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(authorization=AuthorizationConfig(global_users=["@admin:example.org"])),
+        config=Config(administrators=["@admin:example.org"]),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
@@ -722,21 +721,20 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
 @pytest.mark.asyncio
 async def test_handle_command_config_set_confirmation_records_preview_event_id(tmp_path: Path) -> None:
     """Config preview replies should persist confirmation state and record the preview event ID."""
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@alice:example.org"],
+                administrators=["@alice:example.org"],
                 aliases={"@alice:example.org": ["@telegram_alice:example.org"]},
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$preview"),
     )
@@ -795,20 +793,19 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
 @pytest.mark.asyncio
 async def test_handle_command_config_set_stays_retryable_after_post_send_failure(tmp_path: Path) -> None:
     """Confirmation setup failures should leave the command retryable."""
-    context = CommandHandlerContext(
+    context = make_test_command_handler_context(
         client=AsyncMock(),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@alice:example.org"],
+                administrators=["@alice:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         logger=MagicMock(),
-        conversation_cache=MagicMock(),
-        event_cache=make_event_cache_mock(),
+        conversation_reader=make_conversation_reader_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
-        record_handled_turn=MagicMock(),
+        record_handled_turn=AsyncMock(),
         record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$preview"),
     )
@@ -858,10 +855,10 @@ async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp
     target = MessageTarget.resolve("!room:example.org", None, "$preview")
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=False,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -910,10 +907,10 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
     target = MessageTarget.resolve("!room:example.org", None, "$preview")
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -926,10 +923,8 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
     event = SimpleNamespace(event_id="$reaction", sender="@admin:example.org", key="✅", reacts_to="$preview")
     pending_change = _pending_config_change()
     confirmation_context = _confirmation_context(bot)
-    bot.config.authorization = _handler_authorization(
-        config_command_enabled=True,
-        global_users=["@other-admin:example.org"],
-    )
+    bot.config.administrators = ["@other-admin:example.org"]
+    bot.config.authorization = AuthorizationConfig(config_command_enabled=True)
 
     with (
         patch.dict(config_confirmation._pending_changes, {"$preview": pending_change}, clear=True),
@@ -967,10 +962,10 @@ async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_p
     target = MessageTarget.resolve("!room:example.org", None, "$preview")
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
                 aliases={"@admin:example.org": ["@telegram_admin:example.org"]},
             ),
         ),
@@ -1039,10 +1034,10 @@ async def test_confirmation_reactions_serialize_one_decision(
     monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -1120,10 +1115,10 @@ async def test_checkpointed_confirmation_ignores_changed_authorization(
     monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=False,
-                global_users=[],
+                administrators=[],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -1225,10 +1220,10 @@ async def test_confirmation_send_failure_keeps_replay_state(
     monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -1289,7 +1284,7 @@ async def test_ambiguous_config_execution_reports_uncertainty_without_reapplying
     monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(authorization=_handler_authorization(config_command_enabled=True)),
+        config=Config(**_handler_config_fields(config_command_enabled=True)),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
         _conversation_resolver=SimpleNamespace(
             build_message_target=MagicMock(
@@ -1390,10 +1385,10 @@ async def test_confirmation_recovery_adopts_untracked_visible_response(
     monkeypatch.setattr(config_confirmation, "_pending_changes", {event_id: pending_change})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
-        config=SimpleNamespace(
-            authorization=_handler_authorization(
+        config=Config(
+            **_handler_config_fields(
                 config_command_enabled=True,
-                global_users=["@admin:example.org"],
+                administrators=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -1778,6 +1773,64 @@ async def test_apply_config_change_preserves_call_profile_authorship(tmp_path: P
         "cleared": "openai-realtime",
         "inherited": "openai-realtime",
     }
+
+
+@pytest.mark.asyncio
+async def test_apply_config_change_saves_a_journal_edit_and_says_it_waits_for_a_restart(
+    tmp_path: Path,
+) -> None:
+    """The journal is opened once at startup, so saying "affects new interactions" would be false."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths_for_config(config_path)
+    record_opened_event_journal(load_config(runtime_paths).event_journal, runtime_paths=runtime_paths)
+
+    response = await apply_config_change("event_journal.backend", "postgres", runtime_paths)
+
+    assert "Configuration updated successfully" in response
+    assert "applies after MindRoom restarts" in response
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["event_journal"]["backend"] == "postgres", "the edit the operator asked for was not saved"
+
+
+@pytest.mark.asyncio
+async def test_a_saved_journal_edit_survives_a_later_unrelated_write(tmp_path: Path) -> None:
+    """The authored file is the operator's, and nothing may quietly put it back.
+
+    The in-force journal is a separate runtime fact, so it must never be stamped
+    onto the adopted config: an authored dump carrying the in-force value would
+    make the next structured write revert an edit the operator deliberately made
+    and was told had been saved.
+    """
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _runtime_paths_for_config(config_path)
+    record_opened_event_journal(load_config(runtime_paths).event_journal, runtime_paths=runtime_paths)
+    await apply_config_change("event_journal.database_url", "postgresql://journal.invalid/moved", runtime_paths)
+    await apply_config_change("event_journal.backend", "postgres", runtime_paths)
+    after_journal_edit = yaml.safe_load(config_path.read_text(encoding="utf-8"))["event_journal"]
+
+    await apply_config_change("defaults.markdown", False, runtime_paths)
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["defaults"]["markdown"] is False
+    assert saved["event_journal"] == after_journal_edit, "an unrelated write reverted the operator's journal edit"
 
 
 @pytest.mark.asyncio
