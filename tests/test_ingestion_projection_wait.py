@@ -295,12 +295,18 @@ async def test_projected_reaction_settles_while_unrelated_outbox_debt_keeps_retr
 
 
 @pytest.mark.asyncio
-async def test_bot_projection_wait_cancels_during_shutdown(tmp_path: Path) -> None:
+async def test_bot_projection_wait_during_shutdown_retains_owner_until_caller_cancels(tmp_path: Path) -> None:
     bot = _agent_bot(tmp_path)
     bot._sync_shutting_down = True
-    with patch.object(bot, "_schedule_delivery_recovery") as schedule, pytest.raises(asyncio.CancelledError):
-        await bot._wait_for_delivery_projection()
-    schedule.assert_not_called()
+    waiting = asyncio.create_task(bot._wait_for_delivery_projection())
+    try:
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        assert bot._delivery_recovery_task is None
+    finally:
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
 
 
 @pytest.mark.asyncio
@@ -336,7 +342,7 @@ async def test_projection_wait_consumes_prior_pass_without_resetting_active_back
 
 
 @pytest.mark.asyncio
-async def test_bot_projection_wait_cancels_if_shutdown_starts_while_waiting(tmp_path: Path) -> None:
+async def test_bot_projection_wait_consumes_last_recovery_wake_during_shutdown(tmp_path: Path) -> None:
     bot = _agent_bot(tmp_path)
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -356,8 +362,8 @@ async def test_bot_projection_wait_cancels_if_shutdown_starts_while_waiting(tmp_
             recovery_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await recovery_task
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(waiting, timeout=1)
+            await asyncio.wait_for(waiting, timeout=1)
+            assert bot._delivery_recovery_task is None
         finally:
             release.set()
             waiting.cancel()

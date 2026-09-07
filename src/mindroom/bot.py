@@ -1495,16 +1495,17 @@ class AgentBot:
         )
 
     async def _wait_for_delivery_projection(self) -> None:
-        """Retry admission after one outbox pass, preserving unrelated backoff."""
-        if self._sync_shutting_down:
-            raise asyncio.CancelledError
+        """Retain the pump until projection advances or its supervisor cancels it.
+
+        A final recovery pass can still unblock captured input during shutdown.
+        Otherwise bounded source quiescence expires before supervisor teardown
+        cancels the pump; cancelling here would also abort the source it drains.
+        """
         task = self._delivery_recovery_task
         if task is None or task.done():
             self._schedule_delivery_recovery()
         await self._delivery_projection_progress.wait()
         self._delivery_projection_progress.clear()
-        if self._sync_shutting_down:
-            raise asyncio.CancelledError
 
     async def _run_scheduled_delivery_recovery(self) -> None:
         """Recover outbox debt without making Matrix receive progress wait."""
