@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import signal
 import subprocess
@@ -11,6 +12,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from mindroom.turn_record import RevisionReplay
 from scripts.testing import fuzz_live_matrix as live_fuzz
 
 if TYPE_CHECKING:
@@ -174,6 +176,377 @@ def test_generated_cleanup_probes_are_serialized_and_replay_verbatim() -> None:
     assert live_fuzz.LiveFuzzScenario.from_json(scenario.to_json()) == scenario
 
 
+def test_generated_cleanup_probes_include_exact_redacted_edit() -> None:
+    """Deleting one edit needs a later serialized probe naming that physical revision."""
+    scenario = live_fuzz.LiveFuzzScenario(
+        1,
+        (
+            (live_fuzz.LiveOperation(10, live_fuzz.LiveOperationKind.EDIT, 0, "root:0"),),
+            (live_fuzz.LiveOperation(11, live_fuzz.LiveOperationKind.REDACTION, 0, "op:10"),),
+        ),
+    )
+    saved = scenario.to_json()
+    qualified = live_fuzz._with_redaction_cleanup_probes(scenario)
+    assert qualified.batches[-1][0].cleanup_sources == ("op:10",)
+    assert qualified.batches[:2] == scenario.batches
+    assert live_fuzz.LiveFuzzScenario.from_json(qualified.to_json()) == qualified
+    assert live_fuzz.LiveFuzzScenario.from_json(saved).to_json() == saved
+
+
+def test_saved_trace_loading_never_adds_cleanup_operations(tmp_path: Path) -> None:
+    """Both saved-trace entry points preserve exact operations and leave source bytes untouched."""
+    operations = (
+        (live_fuzz.LiveOperation(10, live_fuzz.LiveOperationKind.EDIT, 0, "root:0"),),
+        (live_fuzz.LiveOperation(11, live_fuzz.LiveOperationKind.REDACTION, 0, "op:10"),),
+    )
+    original = live_fuzz.LiveFuzzScenario(1, operations)
+    saved = json.dumps(json.loads(original.to_json()), indent=4).encode()
+    trace = tmp_path / "saved.json"
+    trace.write_bytes(saved)
+    assert live_fuzz.LiveFuzzScenario.from_json(saved.decode()).batches == operations
+    assert live_fuzz._scenario_from_args(argparse.Namespace(trace=trace)).batches == operations
+    assert trace.read_bytes() == saved
+
+
+def test_cleanup_probe_rejects_contaminated_attempt_before_clean_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed first request leaking removed history cannot hide behind a clean retry."""
+    old = live_fuzz._source_marker("root:0", live_fuzz.ORIGINAL_REVISION)
+    later = live_fuzz._source_marker("op:1", live_fuzz.ORIGINAL_REVISION)
+    oracle = Mock(spec=live_fuzz.ExactReplyOracle)
+    oracle.expected_sources = {"$old": "root:0", "$probe": "op:1"}
+    monkeypatch.setattr(live_fuzz._ModelHandler, "observations_snapshot", lambda: {9: [later], 2: [later]})
+    auditor = live_fuzz.FinalStateAuditor(
+        Mock(spec=live_fuzz.LiveMatrixClient),
+        oracle,
+        agent_id="@agent:test",
+        expected_body_for=lambda _: "unused",
+        cleanup_probes={"$probe": ("$old",)},
+        full_request_markers_for=lambda call: frozenset({later, old} if call == 9 else {later}),
+    )
+    records = {
+        "$old": live_fuzz.TurnRecord.create(source_event_ids=("$old",), redacted_source_event_ids=("$old",)),
+        "$probe": live_fuzz.TurnRecord.create(source_event_ids=("$probe",), response_event_id="$reply"),
+    }
+    events = {
+        "$reply": {
+            "event_id": "$reply",
+            "sender": "@agent:test",
+            "type": "m.room.message",
+            "content": {"body": "LIVE-FUZZ call=2 END call=2"},
+        },
+    }
+    with pytest.raises(AssertionError, match="redaction cleanup probe"):
+        auditor._assert_redaction_cleanup_probes(events, records)
+
+
+@pytest.mark.parametrize("evidence", ["current", "visible", "none"])
+@pytest.mark.parametrize("pending", [False, True])
+def test_ordinary_edit_cleanup_requires_acknowledgement_for_any_call(
+    monkeypatch: pytest.MonkeyPatch,
+    evidence: str,
+    pending: bool,
+) -> None:
+    """Actual edit-cleanup requests require monotonic acknowledgement even without a terminal reply."""
+    removed = live_fuzz._source_marker("root:0", "edit:0")
+    later = live_fuzz._source_marker("op:1", live_fuzz.ORIGINAL_REVISION)
+    oracle = Mock(spec=live_fuzz.ExactReplyOracle)
+    oracle.expected_sources = {"$root": "root:0", "$probe": "op:1"}
+    monkeypatch.setattr(
+        live_fuzz._ModelHandler,
+        "observations_snapshot",
+        lambda: {7: [later]} if evidence == "current" else {},
+    )
+    auditor = live_fuzz.FinalStateAuditor(
+        Mock(spec=live_fuzz.LiveMatrixClient),
+        oracle,
+        agent_id="@agent:test",
+        expected_body_for=lambda _: "unused",
+        observed_cleanup_probes={"$probe": ("$edit",)},
+        source_revision_markers={"$root": {"$edit": removed}},
+        full_request_markers_for=lambda _: frozenset({later}),
+    )
+    records = {
+        "$root": live_fuzz.TurnRecord.create(
+            source_event_ids=("$root",),
+            revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True, cleanup_pending=pending)},
+        ),
+        "$probe": live_fuzz.TurnRecord.create(
+            source_event_ids=("$probe",),
+            completed=False,
+            redacted_source_event_ids=("$probe",),
+            response_event_id="$reply" if evidence == "visible" else None,
+        ),
+    }
+    events = {
+        "$reply": {
+            "event_id": "$reply",
+            "sender": "@agent:test",
+            "type": "m.room.message",
+            "content": {"body": "LIVE-FUZZ call=7 END call=7"},
+        },
+    }
+    if pending and evidence != "none":
+        with pytest.raises(AssertionError, match="pending or missing tombstone cleanup"):
+            auditor._assert_redaction_cleanup_probes(events, records)
+    else:
+        result = auditor._assert_redaction_cleanup_probes(events, records)
+        assert result["redaction_cleanup_uncovered_sources"] == int(evidence == "none")
+        assert result["redaction_cleanup_checked_calls"] == int(evidence != "none")
+
+
+@pytest.mark.parametrize("dedicated", [False, True])
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("contaminated", [False, True])
+def test_original_source_cleanup_distinguishes_ordinary_calls_from_dedicated_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    dedicated: bool,
+    pending: bool,
+    contaminated: bool,
+) -> None:
+    """Repeated source callbacks may re-arm final debt; actual inputs and dedicated probes stay strict."""
+    removed = live_fuzz._source_marker("root:0", live_fuzz.ORIGINAL_REVISION)
+    later = live_fuzz._source_marker("op:1", live_fuzz.ORIGINAL_REVISION)
+    oracle = Mock(spec=live_fuzz.ExactReplyOracle)
+    oracle.expected_sources = {"$root": "root:0", "$probe": "op:1"}
+    monkeypatch.setattr(live_fuzz._ModelHandler, "observations_snapshot", lambda: {7: [later]})
+    targets = {"$probe": ("$root",)}
+    auditor = live_fuzz.FinalStateAuditor(
+        Mock(spec=live_fuzz.LiveMatrixClient),
+        oracle,
+        agent_id="@agent:test",
+        expected_body_for=lambda _: "unused",
+        cleanup_probes=targets if dedicated else {},
+        observed_cleanup_probes=targets,
+        full_request_markers_for=lambda _: frozenset({later, removed} if contaminated else {later}),
+    )
+    records = {
+        "$root": live_fuzz.TurnRecord.create(
+            source_event_ids=("$root",),
+            redacted_source_event_ids=("$root",),
+            pending_redaction_cleanup_event_ids=("$root",) if pending else (),
+        ),
+        "$probe": live_fuzz.TurnRecord.create(source_event_ids=("$probe",), response_event_id="$reply"),
+    }
+    events = {
+        "$reply": {
+            "event_id": "$reply",
+            "sender": "@agent:test",
+            "type": "m.room.message",
+            "content": {"body": "LIVE-FUZZ call=7 END call=7"},
+        },
+    }
+    if dedicated and pending:
+        with pytest.raises(AssertionError, match="pending or missing tombstone cleanup"):
+            auditor._assert_redaction_cleanup_probes(events, records)
+    elif contaminated:
+        with pytest.raises(AssertionError, match="redacted history"):
+            auditor._assert_redaction_cleanup_probes(events, records)
+    else:
+        assert auditor._assert_redaction_cleanup_probes(events, records)["redaction_cleanup_checked_calls"] == 1
+
+
+def test_ordinary_cleanup_checks_visible_call_even_when_redacted_owner_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A visible generation cannot evade full-request checks through a nonterminal redaction tombstone."""
+    old = live_fuzz._source_marker("root:0", live_fuzz.ORIGINAL_REVISION)
+    later = live_fuzz._source_marker("op:1", live_fuzz.ORIGINAL_REVISION)
+    oracle = Mock(spec=live_fuzz.ExactReplyOracle)
+    oracle.expected_sources = {"$old": "root:0", "$probe": "op:1"}
+    monkeypatch.setattr(live_fuzz._ModelHandler, "observations_snapshot", dict)
+    auditor = live_fuzz.FinalStateAuditor(
+        Mock(spec=live_fuzz.LiveMatrixClient),
+        oracle,
+        agent_id="@agent:test",
+        expected_body_for=lambda _: "unused",
+        observed_cleanup_probes={"$probe": ("$old",)},
+        full_request_markers_for=lambda _: frozenset({later, old}),
+    )
+    records = {
+        "$old": live_fuzz.TurnRecord.create(source_event_ids=("$old",), redacted_source_event_ids=("$old",)),
+        "$probe": live_fuzz.TurnRecord.create(
+            source_event_ids=("$probe",),
+            response_event_id="$reply",
+            completed=False,
+            redacted_source_event_ids=("$probe",),
+        ),
+    }
+    events = {
+        "$reply": {
+            "event_id": "$reply",
+            "sender": "@agent:test",
+            "type": "m.room.message",
+            "content": {"body": "LIVE-FUZZ call=7 END call=7"},
+        },
+    }
+    with pytest.raises(AssertionError, match="redacted history"):
+        auditor._assert_redaction_cleanup_probes(events, records)
+
+
+@pytest.mark.parametrize("failure", [None, "history", "pending", "missing", "source", "original_only"])
+def test_edit_cleanup_probe_forbids_only_removed_revision(failure: str | None) -> None:
+    """Edit cleanup must be exact; original and surviving revision history stay legal."""
+    oracle = Mock(spec=live_fuzz.ExactReplyOracle)
+    oracle.expected_sources = {"$root": "root:0", "$probe": "op:3"}
+    removed = live_fuzz._source_marker("root:0", "edit:1")
+    surviving = live_fuzz._source_marker("root:0", "edit:2")
+    later = live_fuzz._source_marker("op:3", live_fuzz.ORIGINAL_REVISION)
+    observed = {later, surviving, live_fuzz._source_marker("root:0", live_fuzz.ORIGINAL_REVISION)}
+    if failure == "history":
+        observed.add(removed)
+    auditor = live_fuzz.FinalStateAuditor(
+        Mock(spec=live_fuzz.LiveMatrixClient),
+        oracle,
+        agent_id="@agent:test",
+        expected_body_for=lambda _: "unused",
+        cleanup_probes={"$probe": ("$a",)},
+        source_revision_markers={"$root": {"$a": removed, "$b": surviving}},
+        full_request_markers_for=lambda _: frozenset(observed),
+    )
+    records = {
+        "$root": live_fuzz.TurnRecord.create(
+            source_event_ids=("$root",),
+            redacted_source_event_ids=("$root",) if failure == "original_only" else (),
+            revision_replay={}
+            if failure in {"missing", "original_only"}
+            else {
+                "$a": RevisionReplay(
+                    "$wrong" if failure == "source" else "$root",
+                    100,
+                    redacted=True,
+                    cleanup_pending=failure == "pending",
+                ),
+                "$unrelated": RevisionReplay("$root", 200, redacted=True, cleanup_pending=True),
+            },
+        ),
+        "$probe": live_fuzz.TurnRecord.create(source_event_ids=("$probe",), response_event_id="$reply"),
+    }
+    events = {
+        "$reply": {
+            "event_id": "$reply",
+            "sender": "@agent:test",
+            "type": "m.room.message",
+            "content": {"body": "LIVE-FUZZ call=1 END call=1"},
+        },
+    }
+    if failure is None:
+        auditor._assert_redaction_cleanup_probes(events, records)
+    else:
+        with pytest.raises(AssertionError, match="redaction cleanup probe"):
+            auditor._assert_redaction_cleanup_probes(events, records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [live_fuzz.LiveOperationKind.THREAD_MESSAGE, live_fuzz.LiveOperationKind.PLAIN_REPLY])
+async def test_saved_later_message_qualifies_only_after_observed_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: live_fuzz.LiveOperationKind,
+) -> None:
+    """A tombstone appearing during send cannot retrospectively qualify that source."""
+    stack = live_fuzz.ManagedTuwunelStack()
+    client = live_fuzz.LiveMatrixClient("http://matrix.invalid", "!room:test")
+    runner = live_fuzz.LiveFuzzRunner(
+        stack,
+        (client,),
+        live_fuzz.LiveFuzzScenario(1, ()),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    runner.event_ids["root:0"] = "$root"
+    runner.oracle._ledger_observations = runner.oracle._ledger_records
+    runner.oracle.expect("root:0", "$root", thread=0)
+    runner.source_revision_markers["$root"]["$a"] = live_fuzz._source_marker("root:0", "edit:0")
+    runner.redacted_targets["$a"] = "$redaction"
+    reads = 0
+
+    def refresh(**_kwargs: object) -> None:
+        nonlocal reads
+        reads += 1
+
+    async def send(operation: live_fuzz.LiveOperation, *_args: object) -> str:
+        runner.oracle._ledger_records["$root"] = live_fuzz.TurnRecord.create(
+            source_event_ids=("$root",),
+            revision_replay={"$a": RevisionReplay("$root", 100, redacted=True, cleanup_pending=True)},
+        )
+        return f"$later-{operation.operation_id}"
+
+    monkeypatch.setattr(runner.oracle, "refresh_ledger_attributions", refresh)
+    monkeypatch.setattr(runner.oracle, "pump", AsyncMock(side_effect=AssertionError("ordinary send added a wait")))
+    monkeypatch.setattr(runner, "_send_expected_message", send)
+    monkeypatch.setattr(runner, "_room_for_thread", lambda _: "!room:test")
+    try:
+        await runner._apply(live_fuzz.LiveOperation(1, kind, 0, "root:0"))
+        assert runner._cleanup_probe_targets == {}
+        await runner._apply(live_fuzz.LiveOperation(2, kind, 0, "root:0"))
+        assert runner._cleanup_probe_targets == {"$later-2": ("$a",)}
+        assert reads == 2
+    finally:
+        await client.close()
+        stack.close()
+
+
+@pytest.mark.parametrize("target", ["op:10", "op:9", "op:99"])
+def test_cleanup_probe_rejects_live_edit_reaction_and_unknown_targets(target: str) -> None:
+    """Only an earlier-batch redaction of the exact source or edit can qualify a probe."""
+    operations = (
+        (live_fuzz.LiveOperation(9, live_fuzz.LiveOperationKind.REACTION, 0, "root:0"),),
+        (live_fuzz.LiveOperation(10, live_fuzz.LiveOperationKind.EDIT, 0, "root:0"),),
+        (live_fuzz.LiveOperation(11, live_fuzz.LiveOperationKind.REDACTION, 0, "op:9"),),
+        (
+            live_fuzz.LiveOperation(
+                12,
+                live_fuzz.LiveOperationKind.THREAD_MESSAGE,
+                0,
+                "root:0",
+                cleanup_sources=(target,),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="cleanup probe"):
+        live_fuzz.LiveFuzzScenario(1, operations).validate()
+
+
+def test_cleanup_probe_rejects_same_batch_edit_redaction() -> None:
+    """Concurrent redaction and probe send provide no causal cleanup boundary."""
+    operations = (
+        (live_fuzz.LiveOperation(10, live_fuzz.LiveOperationKind.EDIT, 0, "root:0"),),
+        (
+            live_fuzz.LiveOperation(11, live_fuzz.LiveOperationKind.REDACTION, 0, "op:10"),
+            live_fuzz.LiveOperation(
+                12,
+                live_fuzz.LiveOperationKind.THREAD_MESSAGE,
+                0,
+                "root:0",
+                cleanup_sources=("op:10",),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="cleanup probe"):
+        live_fuzz.LiveFuzzScenario(1, operations).validate()
+
+
+def test_edit_cleanup_probe_uses_originating_source_thread() -> None:
+    """An edit's routing thread cannot relabel the original source's cleanup session."""
+    scenario = live_fuzz.LiveFuzzScenario(
+        2,
+        (
+            (live_fuzz.LiveOperation(10, live_fuzz.LiveOperationKind.EDIT, 0, "root:1"),),
+            (live_fuzz.LiveOperation(11, live_fuzz.LiveOperationKind.REDACTION, 0, "op:10"),),
+        ),
+    )
+    qualified = live_fuzz._with_redaction_cleanup_probes(scenario)
+    assert qualified.batches[-1][0].thread == 1
+    wrong = live_fuzz.LiveOperation(
+        12,
+        live_fuzz.LiveOperationKind.THREAD_MESSAGE,
+        0,
+        "root:0",
+        cleanup_sources=("op:10",),
+    )
+    with pytest.raises(ValueError, match="cleanup probe"):
+        live_fuzz.LiveFuzzScenario(2, (*scenario.batches, (wrong,))).validate()
+
+
 @pytest.mark.parametrize("bad_source", ["root:0", "op:99"])
 def test_cleanup_probe_rejects_unredacted_or_unknown_sources(bad_source: str) -> None:
     """A trace cannot claim cleanup coverage for an unredacted or absent source."""
@@ -284,7 +657,11 @@ def test_model_capture_keeps_historical_markers_separate(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
-async def test_fuzz_cleanup_probe_waits_for_durable_tombstone_before_send(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("edit_target", [False, True])
+async def test_fuzz_cleanup_probe_waits_for_durable_tombstone_before_send(
+    monkeypatch: pytest.MonkeyPatch,
+    edit_target: bool,
+) -> None:
     """An explicit fuzz probe must not race the source redaction callback."""
     stack = live_fuzz.ManagedTuwunelStack()
     client = live_fuzz.LiveMatrixClient("http://matrix.invalid", "!room:test")
@@ -296,20 +673,36 @@ async def test_fuzz_cleanup_probe_waits_for_durable_tombstone_before_send(monkey
         settle_seconds=0,
     )
     runner.event_ids["root:0"] = "$old"
-    runner._pending_source_tombstones.add("$old")
+    runner.oracle._ledger_observations = runner.oracle._ledger_records
+    runner.event_ids["op:0"] = "$edit"
+    target = "$edit" if edit_target else "$old"
+    runner._pending_source_tombstones.add(target)
+    if edit_target:
+        runner.source_revision_markers["$old"]["$edit"] = live_fuzz._source_marker("root:0", "edit:0")
     tombstone = live_fuzz.TurnRecord.create(
         source_event_ids=("$old",),
         completed=True,
         redacted_source_event_ids=("$old",),
         pending_redaction_cleanup_event_ids=("$old",),
+        revision_replay={"$edit": RevisionReplay("$old", 100, redacted=True, cleanup_pending=True)}
+        if edit_target
+        else {},
     )
+    pumps = 0
 
     async def pump(**_kwargs: object) -> None:
-        runner.oracle._ledger_records["$old"] = tombstone
+        nonlocal pumps
+        pumps += 1
+        runner.oracle._ledger_records["$old"] = (
+            live_fuzz.TurnRecord.create(source_event_ids=("$old",), redacted_source_event_ids=("$old",))
+            if edit_target and pumps == 1
+            else tombstone
+        )
 
     async def send(*_args: object) -> str:
         assert runner.oracle.source_tombstoned("$old")
         assert not runner._pending_source_tombstones
+        assert pumps == (2 if edit_target else 1)
         return "$probe"
 
     monkeypatch.setattr(runner.oracle, "pump", pump)
@@ -323,7 +716,7 @@ async def test_fuzz_cleanup_probe_waits_for_durable_tombstone_before_send(monkey
             live_fuzz.LiveOperationKind.THREAD_MESSAGE,
             0,
             "root:0",
-            cleanup_sources=("root:0",),
+            cleanup_sources=("op:0" if edit_target else "root:0",),
         )
         assert (await runner._apply(probe))[1] == "$probe"
     finally:

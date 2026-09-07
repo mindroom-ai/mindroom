@@ -78,13 +78,14 @@ import json
 import shutil
 from collections import defaultdict
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import scripts.testing.fuzz_live_matrix as live_fuzz
 from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
+from mindroom.turn_record import RevisionReplay
 from scripts.testing.fuzz_live_matrix import (
     ORIGINAL_REVISION,
     ChaosTuning,
@@ -5843,6 +5844,234 @@ def _write_ledger(ledger_path: Path, records: dict[str, TurnRecord]) -> None:
         database.commit()
 
 
+def _cleanup_qualification_runner(tmp_path: Path) -> LiveFuzzRunner:
+    """Keep real runner, oracle, codec, and SQLite reads; replace only Matrix transport."""
+    client = Mock(spec=LiveMatrixClient)
+    client.user_id = "@user:example"
+    client.room_id = "!room:example"
+    client.send_event = AsyncMock(side_effect=["$ordinary", "$anchor"])
+    stack = Mock(spec=ManagedTuwunelStack)
+    stack.agent_id = "@agent:example"
+    stack.router_id = "@router:example"
+    stack.storage_path = tmp_path
+    stack.room_keys = ("room",)
+    stack.room_ids = {"room": "!room:example"}
+    stack.room_id = "!room:example"
+    runner = LiveFuzzRunner(
+        stack,
+        (client,),
+        LiveFuzzScenario(1, (), profile="chaos"),
+        reply_timeout=0.01,
+        settle_seconds=0,
+    )
+    (tmp_path / "tracking").mkdir()
+    runner.event_ids = {"root:0": "$root", "op:0": "$edit"}
+    runner.oracle.expect("root:0", "$root", thread=0)
+    runner.source_current_markers["$root"] = _source_marker("root:0", ORIGINAL_REVISION)
+    runner.source_revision_markers["$root"]["$edit"] = _source_marker("root:0", "edit:0")
+    runner.redacted_targets["$edit"] = "$delete-edit"
+    return runner
+
+
+def _cleanup_sent_events(runner: LiveFuzzRunner) -> dict[str, dict[str, Any]]:
+    """Build transport-visible originals or exact redaction shells for the final audit fixture."""
+    events: dict[str, dict[str, Any]] = {}
+    for sent in runner.sent_records:
+        events[sent.event_id] = {
+            "event_id": sent.event_id,
+            "type": sent.event_type,
+            "sender": sent.sender,
+            "content": {} if sent.event_id in runner.redacted_targets else dict(sent.content or {}),
+        }
+        if sent.event_id in runner.redacted_targets:
+            events[sent.event_id]["unsigned"] = {
+                "redacted_because": {"event_id": runner.redacted_targets[sent.event_id]},
+            }
+    return events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["superseded", "redacted", "missing", "incomplete"])
+@pytest.mark.parametrize("attempt", ["none", "clean", "contaminated", "pending"])
+@pytest.mark.parametrize("dedicated", [False, True])
+async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+    attempt: str,
+    dedicated: bool,
+) -> None:
+    """Real ordinary qualification must audit attempts without inventing a response obligation."""
+    runner = _cleanup_qualification_runner(tmp_path)
+    ledger = tmp_path / "tracking/event_journal.db"
+    root_record = TurnRecord.create(
+        source_event_ids=("$root",),
+        response_event_id="$root-reply",
+        revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True, cleanup_pending=True)},
+    )
+    _write_ledger(ledger, {"$root": root_record})
+    operation = LiveOperation(
+        1,
+        LiveOperationKind.THREAD_MESSAGE,
+        0,
+        "root:0",
+        cleanup_sources=("op:0",) if dedicated else (),
+    )
+    runner.scenario = replace(
+        runner.scenario,
+        batches=(
+            (LiveOperation(0, LiveOperationKind.EDIT, 0, "root:0"),),
+            (LiveOperation(10, LiveOperationKind.REDACTION, 0, "op:0"),),
+            (operation,),
+        ),
+    )
+    runner.scenario.validate()
+    runner._record_batch_results([await runner._apply(operation)])
+    assert runner._cleanup_probe_targets == {"$ordinary": ("$edit",)}
+    events = {
+        "$root": {
+            "event_id": "$root",
+            "type": "m.room.message",
+            "sender": runner.client.user_id,
+            "content": {"body": "root"},
+        },
+        "$root-reply": _agent_reply_event("$root", "$root-reply", _short_body_for(1)),
+    }
+    records = {
+        "$root": replace(
+            root_record,
+            revision_replay={
+                "$edit": RevisionReplay(
+                    "$root",
+                    100,
+                    redacted=True,
+                    cleanup_pending=attempt == "pending" or (outcome == "redacted" and attempt == "none"),
+                ),
+            },
+        ),
+    }
+    observed = {1: frozenset({_source_marker("root:0", ORIGINAL_REVISION)})}
+    if outcome != "redacted":
+        await runner._apply(LiveOperation(2, LiveOperationKind.THREAD_MESSAGE, 0, "root:0"))
+        events["$anchor-reply"] = _agent_reply_event("$anchor", "$anchor-reply", _short_body_for(3))
+        events["$anchor-reply"]["content"]["m.relates_to"]["event_id"] = "$root"
+        records["$anchor"] = TurnRecord.create(source_event_ids=("$anchor",), response_event_id="$anchor-reply")
+        observed[3] = frozenset({_source_marker("op:2", ORIGINAL_REVISION)})
+    if outcome != "missing":
+        records["$ordinary"] = TurnRecord.create(
+            source_event_ids=("$ordinary",),
+            completed=outcome == "superseded",
+            redacted_source_event_ids=("$ordinary",) if outcome == "redacted" else (),
+        )
+    if outcome == "redacted":
+        runner.redacted_targets["$ordinary"] = "$delete-ordinary"
+        runner.oracle.mark_source_optional("$ordinary")
+    events.update(_cleanup_sent_events(runner))
+    _write_ledger(ledger, records)
+    runner.client.paginate_room = AsyncMock(return_value=list(events.values()))
+    for event in events.values():
+        runner.oracle._ingest_event(event)
+    if attempt != "none":
+        observed[2] = frozenset({_source_marker("op:1", ORIGINAL_REVISION)})
+    full_requests = dict(observed)
+    if attempt == "contaminated":
+        full_requests[2] |= {_source_marker("root:0", "edit:0")}
+    monkeypatch.setattr(_ModelHandler, "_observed_markers", observed)
+    monkeypatch.setattr(_ModelHandler, "_full_request_markers", full_requests)
+    monkeypatch.setattr(_ModelHandler, "response_text_for", _short_body_for)
+    failure = {"missing": "supersession record", "incomplete": "incomplete"}.get(outcome)
+    if dedicated and failure is None:
+        failure = "has no completed response"
+    failure = failure or {"pending": "pending or missing tombstone cleanup", "contaminated": "redacted history"}.get(
+        attempt,
+    )
+    if failure is not None:
+        with pytest.raises(AssertionError, match=failure):
+            await runner._audit_final_state()
+    else:
+        result = await runner._audit_final_state()
+        assert result["redaction_cleanup_uncovered_sources"] == int(attempt == "none")
+        assert result["redaction_cleanup_checked_calls"] == int(outcome != "redacted") + int(attempt != "none")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("provenance", ["wrong_source", "wrong_edit", "not_redacted"])
+async def test_cleanup_admission_rejects_inexact_incomplete_owner_tombstone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit: bool,
+    provenance: str,
+) -> None:
+    """Keeping unfinished observation records must not relax exact edit provenance."""
+    runner = _cleanup_qualification_runner(tmp_path)
+    ledger = tmp_path / "tracking/event_journal.db"
+    record = TurnRecord.create(
+        source_event_ids=("$root",),
+        completed=False,
+        revision_replay={
+            "$wrong" if provenance == "wrong_edit" else "$edit": RevisionReplay(
+                "$wrong" if provenance == "wrong_source" else "$root",
+                100,
+                redacted=provenance != "not_redacted",
+                cleanup_pending=True,
+            ),
+        },
+    )
+    _write_ledger(ledger, {"$root": record})
+    monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
+    operation = LiveOperation(
+        1,
+        LiveOperationKind.THREAD_MESSAGE,
+        0,
+        "root:0",
+        cleanup_sources=("op:0",) if explicit else (),
+    )
+    if explicit:
+        with pytest.raises(AssertionError, match="cleanup probe tombstones"):
+            await runner._apply(operation)
+    else:
+        await runner._apply(operation)
+    assert runner._cleanup_probe_targets == {}
+    assert not runner.oracle.source_completed_without_response("$root")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_cleanup_admission_reads_incomplete_owner_edit_tombstone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit: bool,
+) -> None:
+    """Serialized edit tombstones admit later input while their live owner remains unfinished."""
+    runner = _cleanup_qualification_runner(tmp_path)
+    ledger = tmp_path / "tracking/event_journal.db"
+    incomplete = TurnRecord.create(
+        source_event_ids=("$root",),
+        completed=False,
+        response_event_id="$inflight",
+        revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True, cleanup_pending=True)},
+    )
+    _write_ledger(ledger, {"$root": incomplete})
+    monkeypatch.setattr(
+        runner.oracle,
+        "pump",
+        AsyncMock(side_effect=AssertionError("waited despite committed edit tombstone")),
+    )
+    await runner._apply(
+        LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 0, "root:0", cleanup_sources=("op:0",) if explicit else ()),
+    )
+    assert runner._cleanup_probe_targets == {"$ordinary": ("$edit",)}
+    assert runner.oracle.ledger_response("$root") is None
+    assert not runner.oracle.source_completed_without_response("$root")
+    assert "$root" in runner.oracle.unsettled_required_sources()
+    assert live_fuzz.read_ledger_records(ledger) == {}
+    with pytest.raises(AssertionError, match="incomplete"):
+        live_fuzz.read_ledger_records(ledger, strict=True)
+    with pytest.raises(AssertionError, match="incomplete"):
+        live_fuzz.read_ledger_records(ledger, strict=True, include_incomplete=True)
+
+
 @pytest.mark.asyncio
 async def test_coalescing_oracle_settles_via_ledger_attribution(tmp_path: Path) -> None:
     """Sources swallowed into a combined follow-up turn settle via the durable ledger.
@@ -5986,7 +6215,9 @@ async def test_redacting_settled_coalesced_source_does_not_mark_optional(tmp_pat
         runner.redacted_targets = {}
         runner.sent_records = []
         runner._edit_event_source = {}
-        runner._pending_source_markers = {}
+        runner.redacted_edit_evidence = {}
+        runner.source_revision_markers = defaultdict(dict)
+        runner._pending_edit_markers = {}
         runner._pending_source_tombstones = set()
         runner._resolve_target = lambda _logical_ref: asyncio.sleep(0, result="$first")  # type: ignore[method-assign]
         runner._client_for_operation = lambda _operation: RedactionClient()  # type: ignore[method-assign]
@@ -6040,7 +6271,9 @@ async def test_source_redaction_pumps_visible_reply_before_optional_classificati
         runner.redacted_targets = {}
         runner.sent_records = []
         runner._edit_event_source = {}
-        runner._pending_source_markers = {}
+        runner.redacted_edit_evidence = {}
+        runner.source_revision_markers = defaultdict(dict)
+        runner._pending_edit_markers = {}
         runner._pending_source_tombstones = set()
         runner._resolve_target = lambda _logical_ref: asyncio.sleep(0, result="$source")  # type: ignore[method-assign]
         runner._client_for_operation = lambda _operation: RedactionClient()  # type: ignore[method-assign]
@@ -7274,7 +7507,258 @@ def _revision_runner() -> LiveFuzzRunner:
     runner.source_revision_markers = defaultdict(dict)
     runner._source_revision_stack = {}
     runner._edit_event_source = {}
+    runner.redacted_edit_evidence = {}
     return runner
+
+
+def _temporal_revision_runner() -> LiveFuzzRunner:
+    """Use real oracle state with only Matrix HTTP replaced by a typed boundary mock."""
+    runner = _revision_runner()
+    runner.client = Mock(spec=LiveMatrixClient)
+    runner.client.user_id = "@user:example"
+    runner.client.redact = AsyncMock(return_value="$redaction")
+    runner.oracle = ExactReplyOracle(runner.client, "@agent:example", coalescing_threads=True)
+    runner.oracle._ledger_observations = runner.oracle._ledger_records
+    runner.oracle.expect("root:0", "$root", thread=0)
+    runner.source_current_markers["$root"] = _source_marker("root:0", ORIGINAL_REVISION)
+    runner._pending_edit_markers = {}
+    runner._pending_source_tombstones = set()
+    runner.redacted_edit_evidence = {}
+    runner.redacted_targets = {}
+    runner.sent_records = []
+    runner.event_ids = {"root:0": "$root", "op:1": "$a", "op:2": "$b"}
+    runner._client_for_operation = lambda _: runner.client  # type: ignore[method-assign]
+    runner._room_for_thread = lambda _: "!room:example"  # type: ignore[method-assign]
+    return runner
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        None,
+        "source",
+        "edit",
+        "call",
+        "response",
+        "missing",
+        "registered",
+        "selected_only",
+        "uncompleted",
+        "later_live",
+        "newer_live",
+        "pending",
+        "missing_sibling",
+        "ledger_source",
+        "unredacted",
+        "both_markers",
+    ],
+)
+async def test_redacted_edit_preserves_completed_historical_answer(tmp_path: Path, failure: str | None) -> None:
+    """Only the exact terminal consumed edit and frozen visible generation may survive rollback."""
+    marker = _source_marker("root:0", "edit:1")
+    sibling = _source_marker("op:9", ORIGINAL_REVISION)
+    observed = {marker} if failure == "missing_sibling" else {marker, sibling}
+    if failure == "both_markers":
+        observed.add(_source_marker("root:0", ORIGINAL_REVISION))
+    auditor = _model_source_auditor(
+        ledger_path=tmp_path / "event_journal.db",
+        expected_sources={"$root": "root:0", "$sibling": "op:9"},
+        source_current_markers={"$root": _source_marker("root:0", ORIGINAL_REVISION), "$sibling": sibling},
+        observed={7: frozenset(observed)},
+    )
+    auditor.source_revision_markers = {"$root": {"$a": marker}}
+    auditor.redacted_edit_evidence = {
+        "$a": live_fuzz.RedactedEditEvidence(
+            "$wrong" if failure == "source" else "$root",
+            "$wrong" if failure == "edit" else "$a",
+            marker,
+            frozenset({2} if failure == "call" else {7}),
+            frozenset({"$a", "$b"} if failure == "newer_live" else {"$a"}),
+        ),
+    }
+    revision = RevisionReplay(
+        "$wrong" if failure == "ledger_source" else "$root",
+        100,
+        redacted=True,
+        response_event_id="$wrong" if failure == "response" else "$reply",
+    )
+    if failure == "registered":
+        revision = replace(revision, response_event_id=None)
+    record = TurnRecord.create(
+        source_event_ids=("$root", "$sibling"),
+        response_event_id="$reply",
+        completed=failure != "uncompleted",
+        revision_replay={} if failure in {"missing", "selected_only"} else {"$a": revision},
+        source_event_revisions={"$root": (100, "$a")} if failure == "selected_only" else {"$root": (0, "$root")},
+    )
+    events = {
+        "$reply": _agent_reply_event("$root", "$reply", _short_body_for(7)),
+        "$a": {"event_id": "$a", "origin_server_ts": 100},
+    }
+    if failure in {"later_live", "newer_live"}:
+        auditor.source_revision_markers["$root"]["$b"] = _source_marker("root:0", "edit:2")
+        events["$b"] = {"event_id": "$b", "origin_server_ts": 50 if failure == "later_live" else 200}
+    if failure == "pending":
+        auditor.pending_edit_markers = {"$root": {"$b": _source_marker("root:0", "edit:2")}}
+    try:
+        if failure is None:
+            auditor._assert_model_saw_current_sources(
+                events,
+                records={"$root": record},
+                redacted_targets={"$a": "$redaction"},
+            )
+        else:
+            with pytest.raises(AssertionError, match="model source-revision audit"):
+                auditor._assert_model_saw_current_sources(
+                    events,
+                    records={"$root": record},
+                    redacted_targets={} if failure == "unredacted" else {"$a": "$redaction"},
+                )
+    finally:
+        await auditor.client.close()
+
+
+@pytest.mark.asyncio
+async def test_redacted_edit_creates_no_original_regeneration_debt() -> None:
+    """Removing an edit restores content without ordering another historical answer."""
+    runner = _temporal_revision_runner()
+    marker = _source_marker("root:0", "edit:1")
+    runner._push_source_revision("$root", "$a", marker)
+    runner._edit_event_source["$a"] = "$root"
+    await runner._apply_redaction(LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:1"))
+    assert not runner._pending_edit_markers
+    assert runner._pending_source_tombstones == {"$a"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deleted", ["$a", "$b"])
+async def test_redaction_preserves_unresolved_surviving_edit_debts(deleted: str) -> None:
+    """A newer unconsumed edit and its deletion cannot erase an older live obligation."""
+    runner = _temporal_revision_runner()
+    markers = {"$a": _source_marker("root:0", "edit:1"), "$b": _source_marker("root:0", "edit:2")}
+    for edit, marker in markers.items():
+        runner._push_source_revision("$root", edit, marker)
+        runner._edit_event_source[edit] = "$root"
+    runner._pending_edit_markers["$root"] = dict(markers)
+    await runner._apply_redaction(
+        LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:1" if deleted == "$a" else "op:2"),
+    )
+    surviving = "$b" if deleted == "$a" else "$a"
+    assert runner._pending_edit_markers == {"$root": {surviving: markers[surviving]}}
+
+
+@pytest.mark.asyncio
+async def test_redacted_edit_snapshot_does_not_expand(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Duplicate deletion must retain exact observed IDs, even when later IDs are numerically lower."""
+    runner = _temporal_revision_runner()
+    marker = _source_marker("root:0", "edit:1")
+    runner._push_source_revision("$root", "$a", marker)
+    runner._edit_event_source["$a"] = "$root"
+    observations = {9: [marker], 6: [_source_marker("root:9", ORIGINAL_REVISION)]}
+    monkeypatch.setattr(_ModelHandler, "observations_snapshot", lambda: dict(observations))
+    operation = LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:1")
+    await runner._apply_redaction(operation)
+    evidence = runner.redacted_edit_evidence["$a"]
+    observations[2] = [marker]
+    runner.source_revision_markers["$root"]["$b"] = _source_marker("root:0", "edit:2")
+    await runner._apply_redaction(operation)
+    assert runner.redacted_edit_evidence["$a"] is evidence
+    assert evidence.observed_call_ids == {9}
+    assert evidence.known_edit_event_ids == {"$a"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attributed", [False, True])
+async def test_redacted_edit_request_records_terminal_response_after_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    attributed: bool,
+) -> None:
+    """Pre-deletion observation can finish later, but registration and selected replay cannot prove it."""
+    runner = _temporal_revision_runner()
+    marker = _source_marker("root:0", "edit:1")
+    runner._push_source_revision("$root", "$a", marker)
+    runner._edit_event_source["$a"] = "$root"
+    registered = TurnRecord.create(
+        source_event_ids=("$root",),
+        completed=False,
+        revision_replay={"$a": RevisionReplay("$root", 100)},
+    )
+    runner.oracle._ledger_records["$root"] = registered
+    monkeypatch.setattr(_ModelHandler, "observations_snapshot", lambda: {7: [marker]})
+    await runner._apply_redaction(LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:1"))
+    completed = replace(
+        registered,
+        completed=True,
+        response_event_id="$reply",
+        source_event_revisions={"$root": (0, "$root")},
+        revision_replay={
+            "$a": RevisionReplay("$root", 100, redacted=True, response_event_id="$reply" if attributed else None),
+        },
+    )
+    auditor = _model_source_auditor(
+        ledger_path=tmp_path / "event_journal.db",
+        expected_sources={"$root": "root:0"},
+        source_current_markers=runner.source_current_markers,
+        observed={7: frozenset({marker})},
+    )
+    auditor.source_revision_markers = runner.source_revision_markers
+    auditor.redacted_edit_evidence = runner.redacted_edit_evidence
+    events = {
+        "$a": {"event_id": "$a", "origin_server_ts": 100},
+        "$reply": _agent_reply_event("$root", "$reply", _short_body_for(7)),
+    }
+    try:
+        if attributed:
+            auditor._assert_model_saw_current_sources(
+                events,
+                records={"$root": completed},
+                redacted_targets=runner.redacted_targets,
+            )
+        else:
+            with pytest.raises(AssertionError, match="model source-revision audit"):
+                auditor._assert_model_saw_current_sources(
+                    events,
+                    records={"$root": completed},
+                    redacted_targets=runner.redacted_targets,
+                )
+    finally:
+        await auditor.client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proof", ["completed", "registered", "older", "unobserved_order"])
+async def test_completed_newer_edit_supersedes_only_proven_older_debts(
+    monkeypatch: pytest.MonkeyPatch,
+    proof: str,
+) -> None:
+    """Canonical completed consumption supersedes older edits; send order and registration do not."""
+    runner = _temporal_revision_runner()
+    markers = {"$a": _source_marker("root:0", "edit:1"), "$b": _source_marker("root:0", "edit:2")}
+    for edit, marker in reversed(tuple(markers.items())):
+        runner._push_source_revision("$root", edit, marker)
+        runner._edit_event_source[edit] = "$root"
+    runner.oracle.event_summaries = {
+        "$a": {"origin_server_ts": 100},
+        "$b": {"origin_server_ts": 50 if proof == "older" else 200},
+    }
+    if proof == "unobserved_order":
+        del runner.oracle.event_summaries["$a"]
+    runner._pending_edit_markers = {"$root": dict(markers)}
+    assert runner._current_pending_edit_marker("$root") == markers["$a" if proof == "older" else "$b"]
+    runner.oracle._ledger_records["$root"] = TurnRecord.create(
+        source_event_ids=("$root",),
+        response_event_id="$reply",
+        revision_replay={
+            "$b": RevisionReplay("$root", 200, response_event_id=None if proof == "registered" else "$reply"),
+        },
+    )
+    runner.oracle.latest_reply_bodies["$reply"] = ((0, 0, "$reply"), _short_body_for(7))
+    monkeypatch.setattr(_ModelHandler, "observed_markers_for", lambda _: frozenset({markers["$b"]}))
+    await runner._apply_redaction(LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:2"))
+    assert runner._pending_edit_markers == ({} if proof == "completed" else {"$root": {"$a": markers["$a"]}})
+    assert runner._pending_source_tombstones == {"$b"}
 
 
 @pytest.mark.asyncio
@@ -7304,6 +7788,74 @@ async def test_final_source_revision_uses_matrix_order_not_completion_order() ->
         assert auditor.source_current_markers["$root"] == first
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("later_authored", [False, True])
+@pytest.mark.parametrize("frozen", [False, True])
+async def test_redacted_edit_late_completion_supersedes_only_preexisting_debt(
+    monkeypatch: pytest.MonkeyPatch,
+    later_authored: bool,
+    frozen: bool,
+) -> None:
+    """A frozen request finishing after deletion can cover older input, never an unseen later edit."""
+    runner = _temporal_revision_runner()
+    first = _source_marker("root:0", "edit:1")
+    second = _source_marker("root:0", "edit:2")
+    if not later_authored:
+        runner._push_source_revision("$root", "$a", first)
+    runner._push_source_revision("$root", "$b", second)
+    runner._edit_event_source["$b"] = "$root"
+    monkeypatch.setattr(_ModelHandler, "observations_snapshot", lambda: {7: [second]} if frozen else {})
+    monkeypatch.setattr(_ModelHandler, "observed_markers_for", lambda _: frozenset({second}))
+    await runner._apply_redaction(LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:2"))
+    if later_authored:
+        runner._push_source_revision("$root", "$a", first)
+    runner._pending_edit_markers = {"$root": {"$a": first}}
+    runner.oracle.event_summaries = {"$a": {"origin_server_ts": 100}, "$b": {"origin_server_ts": 200}}
+    runner.oracle._ledger_records["$root"] = TurnRecord.create(
+        source_event_ids=("$root",),
+        response_event_id="$reply",
+        revision_replay={"$b": RevisionReplay("$root", 200, redacted=True, response_event_id="$reply")},
+    )
+    runner.oracle.latest_reply_bodies["$reply"] = ((0, 0, "$reply"), _short_body_for(7))
+    runner._reconcile_edit_debts()
+    assert runner._pending_edit_markers == ({"$root": {"$a": first}} if later_authored or not frozen else {})
+
+
+@pytest.mark.asyncio
+async def test_redacted_edit_failure_never_creates_historical_allowance() -> None:
+    """Rejected HTTP redaction leaves no frozen proof, tombstone debt, or authored redaction."""
+    runner = _temporal_revision_runner()
+    runner._push_source_revision("$root", "$a", _source_marker("root:0", "edit:1"))
+    runner.client.redact = AsyncMock(side_effect=RuntimeError("redaction rejected"))
+    with pytest.raises(RuntimeError, match="redaction rejected"):
+        await runner._apply_redaction(LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:1"))
+    assert runner.redacted_edit_evidence == {}
+    assert runner.redacted_targets == {}
+    assert runner._pending_source_tombstones == set()
+
+
+@pytest.mark.asyncio
+async def test_redacted_edit_records_snapshot_before_landed_callback_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after landed accounting cannot erase the exact successful redaction snapshot."""
+    runner = _temporal_revision_runner()
+    marker = _source_marker("root:0", "edit:1")
+    runner._push_source_revision("$root", "$a", marker)
+    runner._edit_event_source["$a"] = "$root"
+    monkeypatch.setattr(_ModelHandler, "observations_snapshot", lambda: {7: [marker]})
+
+    def landed(_result: tuple[LiveOperation, str | None, _SentPayload | None]) -> None:
+        assert runner.redacted_edit_evidence["$a"].observed_call_ids == {7}
+        assert runner._pending_source_tombstones == {"$a"}
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner._apply_redaction(LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:1"), on_landed=landed)
+    assert runner.redacted_targets == {"$a": "$redaction"}
+    assert len(runner.sent_records) == 1
 
 
 def test_redacting_edit_event_reverts_source_marker_to_original() -> None:
@@ -7385,7 +7937,7 @@ async def test_edit_registers_latest_marker_as_pending_checkpoint_effect() -> No
     """A landed edit remains owed until its response regeneration is visible."""
     runner = _revision_runner()
     runner.source_current_markers["$source"] = _source_marker("op:1", ORIGINAL_REVISION)
-    runner._pending_source_markers = {}
+    runner._pending_edit_markers = {}
     runner._pending_source_tombstones = set()
     runner.sent_records = []
     runner.stack = SimpleNamespace(agent_id="@agent:example")
@@ -7414,7 +7966,7 @@ async def test_edit_registers_latest_marker_as_pending_checkpoint_effect() -> No
     await runner._apply(operation)
 
     marker = _source_marker("op:1", "edit:7")
-    assert runner._pending_source_markers == {"$source": marker}
+    assert runner._pending_edit_markers == {"$source": {"$edit": marker}}
     assert runner.source_current_markers["$source"] == marker
 
 
@@ -8717,147 +9269,86 @@ async def test_chaos_restart_registers_current_generation_maintenance() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chaos_checkpoint_waits_for_latest_marker_and_tombstone(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_chaos_checkpoint_waits_for_latest_marker_and_tombstone(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reply settlement alone cannot release delayed mutation effects."""
-    marker = _source_marker("op:edited", "edit:7")
-    calls: list[str] = []
-
-    class FakeOracle:
-        def __init__(self) -> None:
-            self.latest_reply_bodies = {"$reply": ((0, 0, "$reply"), _short_body_for(1))}
-            self.pumps = 0
-            self.tombstoned = False
-
-        @staticmethod
-        def unsettled_required_sources() -> list[str]:
-            return []
-
-        @staticmethod
-        async def wait_until_exact(*, deadline_seconds: float, settle_seconds: float) -> None:
-            assert (deadline_seconds, settle_seconds) == (12.0, 0.75)
-            calls.append("replies")
-
-        async def pump(self, *, timeout_ms: int) -> None:
-            assert timeout_ms == 250
-            self.pumps += 1
-            calls.append(f"pump:{self.pumps}")
-            if self.pumps == 1:
-                self.tombstoned = True
-            else:
-                self.latest_reply_bodies["$reply"] = ((1, 1, "$edit"), _short_body_for(2))
-
-        @staticmethod
-        def refresh_ledger_attributions(*, min_interval: float) -> None:
-            assert min_interval == 0.0
-
-        @staticmethod
-        def ledger_response(_source_event_id: str) -> str:
-            return "$reply"
-
-        def source_tombstoned(self, source_event_id: str) -> bool:
-            return source_event_id == "$redacted" and self.tombstoned
-
-    monkeypatch.setattr(
-        _ModelHandler,
-        "observed_markers_for",
-        lambda call_id: frozenset({marker}) if call_id == 2 else frozenset(),
+    runner = _temporal_revision_runner()
+    marker = _source_marker("root:0", "edit:7")
+    runner._pending_edit_markers = {"$root": {"$edit": marker}}
+    runner.source_revision_markers = {"$root": {"$edit": marker}}
+    runner._pending_source_tombstones = {"$redacted"}
+    runner.oracle.event_summaries = {"$edit": {"origin_server_ts": 100}}
+    runner.oracle._ledger_records["$root"] = TurnRecord.create(
+        source_event_ids=("$root",),
+        response_event_id="$reply",
+        revision_replay={"$edit": RevisionReplay("$root", 100, response_event_id="$reply")},
     )
-    runner = object.__new__(LiveFuzzRunner)
-    runner.oracle = FakeOracle()
+    runner.oracle.latest_reply_bodies["$reply"] = ((0, 0, "$reply"), _short_body_for(1))
     runner.reply_timeout = 12.0
     runner.settle_seconds = 0.75
     runner.pending_grace = 1.0
-    runner._pending_source_markers = {"$edited": marker}
-    runner._pending_source_tombstones = {"$redacted"}
+    calls: list[str] = []
 
+    async def wait_until_exact(*, deadline_seconds: float, settle_seconds: float) -> None:
+        assert (deadline_seconds, settle_seconds) == (12.0, 0.75)
+        calls.append("replies")
+
+    async def pump(*, timeout_ms: int) -> None:
+        assert timeout_ms == 250
+        calls.append(f"pump:{len(calls)}")
+        runner.oracle._ledger_records["$redacted"] = TurnRecord.create(
+            source_event_ids=("$redacted",),
+            redacted_source_event_ids=("$redacted",),
+        )
+        if len(calls) == 3:
+            runner.oracle.latest_reply_bodies["$reply"] = ((1, 1, "$edit"), _short_body_for(2))
+
+    monkeypatch.setattr(runner.oracle, "unsettled_required_sources", list)
+    monkeypatch.setattr(runner.oracle, "wait_until_exact", wait_until_exact)
+    monkeypatch.setattr(runner.oracle, "pump", pump)
+    monkeypatch.setattr(
+        _ModelHandler,
+        "observed_markers_for",
+        lambda call: frozenset({marker}) if call == 2 else frozenset(),
+    )
     await runner._checkpoint(batch_index=9)
-
     assert calls == ["replies", "pump:1", "pump:2"]
-    assert runner._pending_source_markers == {}
+    assert runner._pending_edit_markers == {}
     assert runner._pending_source_tombstones == set()
 
 
 @pytest.mark.asyncio
-async def test_chaos_checkpoint_releases_marker_for_no_response_source() -> None:
+async def test_chaos_checkpoint_releases_marker_for_no_response_source(monkeypatch: pytest.MonkeyPatch) -> None:
     """A durable no-response source has no visible reply mutation to await."""
-
-    class FakeOracle:
-        def __init__(self) -> None:
-            self.latest_reply_bodies: dict[str, tuple[tuple[int, int, str], str]] = {}
-
-        @staticmethod
-        async def pump(*, timeout_ms: int) -> None:
-            assert timeout_ms == 250
-
-        @staticmethod
-        def refresh_ledger_attributions(*, min_interval: float) -> None:
-            assert min_interval == 0.0
-
-        @staticmethod
-        def ledger_response(_source_event_id: str) -> None:
-            return None
-
-        @staticmethod
-        def source_tombstoned(_source_event_id: str) -> bool:
-            return False
-
-        @staticmethod
-        def source_completed_without_response(_source_event_id: str) -> bool:
-            return True
-
-    runner = object.__new__(LiveFuzzRunner)
-    runner.oracle = FakeOracle()
-    runner._pending_source_markers = {"$superseded": _source_marker("op:old", "edit:4")}
-    runner._pending_source_tombstones = set()
-
-    await runner._wait_for_pending_mutation_effects(
-        deadline_seconds=1.0,
-        batch_index=3,
-    )
-
-    assert runner._pending_source_markers == {}
+    runner = _temporal_revision_runner()
+    runner._pending_edit_markers = {"$root": {"$edit": _source_marker("root:0", "edit:4")}}
+    runner.oracle._ledger_records["$root"] = TurnRecord.create(source_event_ids=("$root",))
+    monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
+    await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=3)
+    assert runner._pending_edit_markers == {}
 
 
 @pytest.mark.asyncio
-async def test_chaos_checkpoint_tombstone_releases_same_source_marker() -> None:
+async def test_chaos_checkpoint_tombstone_releases_same_source_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     """A source tombstone supersedes a concurrently landed edit obligation."""
+    runner = _temporal_revision_runner()
+    runner._pending_edit_markers = {"$root": {"$edit": _source_marker("root:0", "edit:183")}}
+    runner._pending_source_tombstones = {"$root"}
+    pumps = 0
 
-    class FakeOracle:
-        def __init__(self) -> None:
-            self.latest_reply_bodies = {"$reply": ((0, 0, "$reply"), _short_body_for(1))}
-            self.tombstoned = False
-            self.pumps = 0
+    async def pump(*, timeout_ms: int) -> None:
+        nonlocal pumps
+        assert timeout_ms == 250
+        pumps += 1
+        runner.oracle._ledger_records["$root"] = TurnRecord.create(
+            source_event_ids=("$root",),
+            response_event_id="$reply",
+            redacted_source_event_ids=("$root",),
+        )
 
-        async def pump(self, *, timeout_ms: int) -> None:
-            assert timeout_ms == 250
-            self.pumps += 1
-            self.tombstoned = True
-
-        @staticmethod
-        def refresh_ledger_attributions(*, min_interval: float) -> None:
-            assert min_interval == 0.0
-
-        @staticmethod
-        def ledger_response(_source_event_id: str) -> str:
-            return "$reply"
-
-        def source_tombstoned(self, _source_event_id: str) -> bool:
-            return self.tombstoned
-
-    runner = object.__new__(LiveFuzzRunner)
-    runner.oracle = FakeOracle()
-    runner._pending_source_markers = {"$source": _source_marker("root:41", "edit:183")}
-    runner._pending_source_tombstones = {"$source"}
-
-    await runner._wait_for_pending_mutation_effects(
-        deadline_seconds=1.0,
-        batch_index=26,
-    )
-
-    assert runner.oracle.pumps == 1
-    assert runner._pending_source_markers == {}
+    monkeypatch.setattr(runner.oracle, "pump", pump)
+    await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=26)
+    assert pumps == 1
+    assert runner._pending_edit_markers == {}
     assert runner._pending_source_tombstones == set()
 
 
@@ -9458,7 +9949,9 @@ def _redaction_accounting_runner(
     runner.redacted_targets = {}
     runner.sent_records = []
     runner._edit_event_source = {}
-    runner._pending_source_markers = {}
+    runner.redacted_edit_evidence = {}
+    runner.source_revision_markers = defaultdict(dict)
+    runner._pending_edit_markers = {}
     runner._pending_source_tombstones = set()
     runner.operation_count = 0
     runner._realized_sequence = 0

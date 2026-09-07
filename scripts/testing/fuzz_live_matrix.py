@@ -362,6 +362,8 @@ class LiveFuzzScenario:
             for operation in batch:
                 if operation.kind in MESSAGE_KINDS:
                     source_threads[operation.event_ref] = operation.thread
+                elif operation.kind is LiveOperationKind.EDIT and operation.target in source_threads:
+                    source_threads[operation.event_ref] = source_threads[operation.target]
                 if operation.kind is LiveOperationKind.REDACTION and operation.target in source_threads:
                     assert operation.target is not None
                     redacted.add(operation.target)
@@ -4446,6 +4448,7 @@ def read_ledger_records(
     ledger_path: Path,
     *,
     strict: bool = False,
+    include_incomplete: bool = False,
 ) -> dict[str, TurnRecord]:
     """Read every terminal handled-turn record keyed by its source event.
 
@@ -4460,11 +4463,13 @@ def read_ledger_records(
     A fully redacted record is a durable tombstone even when ``completed``
     remains false. Session cleanup may remain pending until the next response;
     explicit cleanup probes audit that separate obligation.
+    Live tombstone observation may include unfinished owners; strict final
+    audits still reject their unfinished live sources.
     """
     raw_records = _load_ledger_rows(ledger_path, strict=strict)
     if raw_records is None:
         return {}
-    return _decode_ledger_rows(ledger_path, raw_records, strict=strict)
+    return _decode_ledger_rows(ledger_path, raw_records, strict=strict, include_incomplete=include_incomplete)
 
 
 def _invalid_ledger(ledger_path: Path, reason: str, *, strict: bool) -> None:
@@ -4509,6 +4514,7 @@ def _decode_ledger_rows(
     raw_records: Mapping[str, object],
     *,
     strict: bool,
+    include_incomplete: bool = False,
 ) -> dict[str, TurnRecord]:
     """Retain completed turns and durable tombstones, including deferred session cleanup."""
     records: dict[str, TurnRecord] = {}
@@ -4523,7 +4529,7 @@ def _decode_ledger_rows(
         # Redaction callbacks commit tombstones; the next response in this
         # session removes the saved run and clears pending cleanup. An idle
         # tombstoned session is therefore settled without eager cleanup.
-        if not record.completed and not fully_redacted:
+        if not record.completed and not fully_redacted and (strict or not include_incomplete):
             _invalid_ledger(ledger_path, f"record {event_id!r} is incomplete", strict=strict)
             continue
         records[event_id] = record
@@ -4575,6 +4581,7 @@ class ExactReplyOracle:
         self.ledger_path = ledger_path
         self.expected_body_for = expected_body_for
         self._ledger_records: dict[str, TurnRecord] = {}
+        self._ledger_observations: dict[str, TurnRecord] = {}
         self._ledger_read_at = 0.0
         self.internal_source_ids: set[str] = set()
         self.next_batch: str | None = None
@@ -4639,14 +4646,19 @@ class ExactReplyOracle:
             self._assert_no_wrong_replies()
 
     def refresh_ledger_attributions(self, *, min_interval: float = 0.5) -> None:
-        """Re-read MindRoom's durable per-source terminal turn records."""
+        """Observe all typed facts once, keeping only terminal owners for reply settlement."""
         if self.ledger_path is None:
             return
         now = time.monotonic()
         if now - self._ledger_read_at < min_interval:
             return
         self._ledger_read_at = now
-        self._ledger_records = read_ledger_records(self.ledger_path)
+        self._ledger_observations = read_ledger_records(self.ledger_path, include_incomplete=True)
+        self._ledger_records = {
+            event_id: record
+            for event_id, record in self._ledger_observations.items()
+            if record.completed or not record.replay_source_event_ids
+        }
 
     def ledger_response(self, event_id: str) -> str | None:
         """Return the durable response one source's completed record attributes."""
@@ -5341,6 +5353,35 @@ def _body_call_id(body: str) -> int | None:
     return int(digits) if digits.isdigit() else None
 
 
+@dataclass(frozen=True, slots=True)
+class RedactedEditEvidence:
+    """Exact model observations frozen when one physical edit's redaction returns."""
+
+    source_event_id: str
+    edit_event_id: str
+    marker: str
+    observed_call_ids: frozenset[int]
+    known_edit_event_ids: frozenset[str]
+
+
+def _redaction_target_state(
+    target_id: str,
+    records: Mapping[str, TurnRecord],
+    source_revision_markers: Mapping[str, Mapping[str, str]],
+) -> tuple[bool, bool]:
+    """Resolve exact source or physical-edit tombstone and its own cleanup debt."""
+    source_id = next((source for source, edits in source_revision_markers.items() if target_id in edits), None)
+    record = records.get(source_id if source_id is not None else target_id)
+    if record is None:
+        return False, False
+    if source_id is None:
+        return target_id in record.redacted_source_event_ids, target_id in record.pending_redaction_cleanup_event_ids
+    revision = (record.revision_replay or {}).get(target_id)
+    if revision is None or revision.source_event_id != source_id:
+        return False, False
+    return revision.redacted, revision.cleanup_pending
+
+
 class FinalStateAuditor:
     """Audit canonical end-state through fresh `/messages` pagination.
 
@@ -5363,6 +5404,9 @@ class FinalStateAuditor:
         observed_markers_for: Callable[[int], frozenset[str]] = _ModelHandler.observed_markers_for,
         cleanup_probes: Mapping[str, tuple[str, ...]] | None = None,
         full_request_markers_for: Callable[[int], frozenset[str]] = _ModelHandler.full_request_markers_for,
+        redacted_edit_evidence: Mapping[str, RedactedEditEvidence] | None = None,
+        pending_edit_markers: Mapping[str, Mapping[str, str]] | None = None,
+        observed_cleanup_probes: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.client = client
         self.oracle = oracle
@@ -5377,7 +5421,10 @@ class FinalStateAuditor:
         }
         self.observed_markers_for = observed_markers_for
         self.cleanup_probes = dict(cleanup_probes or {})
+        self.observed_cleanup_probes = dict(observed_cleanup_probes or {})
         self.full_request_markers_for = full_request_markers_for
+        self.redacted_edit_evidence = dict(redacted_edit_evidence or {})
+        self.pending_edit_markers = {source: dict(edits) for source, edits in (pending_edit_markers or {}).items()}
 
     async def audit(
         self,
@@ -5416,8 +5463,9 @@ class FinalStateAuditor:
                 events,
                 records=records,
                 redacted_source_event_ids=redacted_sources,
+                redacted_targets=redacted,
             )
-            self._assert_redaction_cleanup_probes(events, records)
+            ledger_metrics.update(self._assert_redaction_cleanup_probes(events, records))
         else:
             self._assert_direct_reply_model_sources(events, replies)
         return {
@@ -5431,34 +5479,19 @@ class FinalStateAuditor:
         self,
         events: Mapping[str, Mapping[str, Any]],
         records: Mapping[str, TurnRecord],
-    ) -> None:
-        """Explicit next turns must clear tombstone cleanup and omit redacted history."""
-        for probe_id, source_ids in self.cleanup_probes.items():
+    ) -> dict[str, int]:
+        """Dedicated probes owe responses; ordinary sources retain their own terminal contract."""
+        uncovered = 0
+        checked_calls = 0
+        for probe_id, source_ids in {**self.cleanup_probes, **self.observed_cleanup_probes}.items():
             record = records.get(probe_id)
-            if record is None or record.response_event_id is None or not record.completed:
+            response_id = record.response_event_id if record is not None else None
+            completed_response = record is not None and record.completed and response_id is not None
+            if probe_id in self.cleanup_probes and not completed_response:
                 msg = f"redaction cleanup probe {probe_id} has no completed response"
                 raise AssertionError(msg)
-            for source_id in source_ids:
-                tombstone = records.get(source_id)
-                if (
-                    tombstone is None
-                    or source_id not in tombstone.redacted_source_event_ids
-                    or source_id in tombstone.pending_redaction_cleanup_event_ids
-                ):
-                    msg = (
-                        f"redaction cleanup probe {probe_id} left pending or missing tombstone cleanup for {source_id}"
-                    )
-                    raise AssertionError(msg)
-            call_id = _body_call_id(self._latest_agent_body(events, record.response_event_id))
-            observed = self.full_request_markers_for(call_id) if call_id is not None else frozenset()
-            forbidden = {
-                marker
-                for source_id in source_ids
-                for marker in (
-                    _source_marker(self.oracle.expected_sources[source_id], ORIGINAL_REVISION),
-                    *self.source_revision_markers.get(source_id, {}).values(),
-                )
-            }
+            call_id = _body_call_id(self._latest_agent_body(events, response_id)) if response_id is not None else None
+            forbidden = {marker for source_id in source_ids for marker in self._cleanup_target_markers(source_id)}
             # A replay may edit or redact the probe itself later. Any authored
             # probe revision proves capture; the current-source audit above
             # independently enforces the latest revision for live sources.
@@ -5466,12 +5499,49 @@ class FinalStateAuditor:
                 _source_marker(self.oracle.expected_sources[probe_id], ORIGINAL_REVISION),
                 *self.source_revision_markers.get(probe_id, {}).values(),
             }
-            if not probe_markers & observed or forbidden & observed:
-                msg = (
-                    f"redaction cleanup probe {probe_id} has missing full-request evidence or redacted history: "
-                    f"{sorted(forbidden & observed)}"
-                )
-                raise AssertionError(msg)
+            calls = {
+                observed_call
+                for observed_call, markers in _ModelHandler.observations_snapshot().items()
+                if probe_markers.intersection(markers)
+            }
+            if call_id is not None:
+                calls.add(call_id)
+            for source_id in source_ids:
+                tombstoned, pending = _redaction_target_state(source_id, records, self.source_revision_markers)
+                is_edit = any(source_id in revisions for revisions in self.source_revision_markers.values())
+                # Edit acknowledgement is monotonic before model admission.
+                # Original-source callbacks can re-arm debt after an ordinary call.
+                requires_cleanup = probe_id in self.cleanup_probes or (bool(calls) and is_edit)
+                if not tombstoned or (pending and requires_cleanup):
+                    msg = (
+                        f"redaction cleanup probe {probe_id} left pending or missing tombstone cleanup for {source_id}"
+                    )
+                    raise AssertionError(msg)
+            if not calls:
+                if probe_id in self.cleanup_probes:
+                    msg = f"redaction cleanup probe {probe_id} has no model-call evidence"
+                    raise AssertionError(msg)
+                uncovered += 1
+            for observed_call in calls:
+                observed = self.full_request_markers_for(observed_call)
+                if not probe_markers & observed or forbidden & observed:
+                    msg = (
+                        f"redaction cleanup probe {probe_id} call {observed_call} has missing full-request evidence "
+                        f"or redacted history: {sorted(forbidden & observed)}"
+                    )
+                    raise AssertionError(msg)
+                checked_calls += 1
+        return {"redaction_cleanup_uncovered_sources": uncovered, "redaction_cleanup_checked_calls": checked_calls}
+
+    def _cleanup_target_markers(self, target_id: str) -> set[str]:
+        """An edit forbids only its removed marker; a source forbids all its revisions."""
+        for edits in self.source_revision_markers.values():
+            if target_id in edits:
+                return {edits[target_id]}
+        return {
+            _source_marker(self.oracle.expected_sources[target_id], ORIGINAL_REVISION),
+            *self.source_revision_markers.get(target_id, {}).values(),
+        }
 
     def _resolve_source_revision_markers(
         self,
@@ -5917,6 +5987,7 @@ class FinalStateAuditor:
         *,
         records: Mapping[str, TurnRecord] | None = None,
         redacted_source_event_ids: Collection[str] = (),
+        redacted_targets: Mapping[str, str] | None = None,
     ) -> None:
         """Every response-backed turn must be generated from its sources' current bodies.
 
@@ -5956,8 +6027,16 @@ class FinalStateAuditor:
                 continue
             covered_sources = set(record.source_event_ids) & set(expected_sources)
             live_sources = covered_sources - harness_redacted
+            body = self._latest_agent_body(events, record.response_event_id)
+            call_id = _body_call_id(body)
+            observed = self.observed_markers_for(call_id) if call_id is not None else frozenset()
             required_live = {
-                self.source_current_markers[covered]
+                (
+                    self._historical_source_marker(covered, record, call_id, events, redacted_targets or {})
+                    if self.source_current_markers[covered] not in observed and call_id is not None
+                    else None
+                )
+                or self.source_current_markers[covered]
                 for covered in live_sources
                 if covered in self.source_current_markers
             }
@@ -5969,9 +6048,6 @@ class FinalStateAuditor:
                     *self.source_revision_markers.get(covered, {}).values(),
                 )
             }
-            body = self._latest_agent_body(events, record.response_event_id)
-            call_id = _body_call_id(body)
-            observed = self.observed_markers_for(call_id) if call_id is not None else frozenset()
             missing = required_live - observed
             unexpected = observed - required_live - redacted_markers
             if missing or unexpected:
@@ -5984,6 +6060,51 @@ class FinalStateAuditor:
         if problems:
             msg = f"model source-revision audit failed: {problems}"
             raise AssertionError(msg)
+
+    def _historical_source_marker(
+        self,
+        source_id: str,
+        record: TurnRecord,
+        call_id: int,
+        events: Mapping[str, Mapping[str, Any]],
+        redacted_targets: Mapping[str, str],
+    ) -> str | None:
+        """Allow one frozen generation only with exact terminal removed-revision ownership."""
+        if (
+            source_id in redacted_targets
+            or source_id not in record.source_event_ids
+            or not record.completed
+            or record.response_event_id not in events
+            or self.pending_edit_markers.get(source_id)
+        ):
+            return None
+        revisions = self.source_revision_markers.get(source_id, {})
+        surviving = set(revisions) - set(redacted_targets)
+        for edit_id, evidence in self.redacted_edit_evidence.items():
+            revision = (record.revision_replay or {}).get(edit_id)
+            if (
+                edit_id not in redacted_targets
+                or edit_id not in events
+                or evidence.edit_event_id != edit_id
+                or evidence.source_event_id != source_id
+                or evidence.marker != revisions.get(edit_id)
+                or call_id not in evidence.observed_call_ids
+                or evidence.marker not in self.observed_markers_for(call_id)
+                or revision is None
+                or revision.source_event_id != source_id
+                or revision.response_event_id != record.response_event_id
+                or surviving - evidence.known_edit_event_ids
+            ):
+                continue
+            removed_order = _replacement_order(edit_id, events[edit_id].get("origin_server_ts"), is_edit=True)
+            if any(
+                live_id not in events
+                or _replacement_order(live_id, events[live_id].get("origin_server_ts"), is_edit=True) > removed_order
+                for live_id in surviving
+            ):
+                continue
+            return evidence.marker
+        return None
 
     def _assert_direct_reply_model_sources(
         self,
@@ -6196,6 +6317,8 @@ class LiveFuzzRunner:
         # The final audit requires both the redacted shell and its exact
         # ``unsigned.redacted_because`` provenance.
         self.redacted_targets: dict[str, str] = {}
+        self.redacted_edit_evidence: dict[str, RedactedEditEvidence] = {}
+        self._cleanup_probe_targets: dict[str, tuple[str, ...]] = {}
         # Per source event id, the marker of the latest valid revision that
         # reached Matrix (``orig`` on send, the edit marker after an edit
         # revises it). The final audit binds each turn's model call to these.
@@ -6213,10 +6336,9 @@ class LiveFuzzRunner:
         # redaction targeting that edit knows which source's stack to revert.
         self._edit_event_source: dict[str, str] = {}
         # Mutation sends complete before MindRoom's asynchronous regeneration
-        # and redaction cleanup. Checkpoints retain the latest owed effect per
-        # source until Matrix exposes the regenerated marker or the ledger
-        # exposes the exact tombstone.
-        self._pending_source_markers: dict[str, str] = {}
+        # and redaction cleanup. Keep every unresolved physical edit until
+        # exact terminal consumption supersedes it, or its own redaction lands.
+        self._pending_edit_markers: dict[str, dict[str, str]] = {}
         self._pending_source_tombstones: set[str] = set()
         self.operation_count = 0
         # Monotonic sequence for the realized journal, spanning both mutations
@@ -7601,6 +7723,9 @@ class LiveFuzzRunner:
                 for operation in batch
                 if operation.cleanup_sources
             },
+            observed_cleanup_probes=self._cleanup_probe_targets,
+            redacted_edit_evidence=self.redacted_edit_evidence,
+            pending_edit_markers=self._pending_edit_markers,
         )
         return await auditor.audit(
             room_ids=tuple(self.stack.room_ids.values()),
@@ -7686,35 +7811,93 @@ class LiveFuzzRunner:
     ) -> None:
         """Wait for owed regeneration markers and durable source tombstones."""
         deadline = time.monotonic() + deadline_seconds
-        while self._pending_source_markers or self._pending_source_tombstones:
+        while self._pending_edit_markers or self._pending_source_tombstones:
             if time.monotonic() >= deadline:
                 msg = (
                     f"timed out waiting for mutation effects at chaos checkpoint "
-                    f"(batch {batch_index}): markers={self._pending_source_markers}, "
+                    f"(batch {batch_index}): markers={self._pending_edit_markers}, "
+                    f"current={[self._current_pending_edit_marker(source) for source in self._pending_edit_markers]}, "
                     f"tombstones={sorted(self._pending_source_tombstones)}"
                 )
                 raise AssertionError(msg)
             await self.oracle.pump(timeout_ms=250)
             self.oracle.refresh_ledger_attributions(min_interval=0.0)
-            for source_event_id, marker in tuple(self._pending_source_markers.items()):
-                if self.oracle.source_tombstoned(source_event_id):
-                    del self._pending_source_markers[source_event_id]
-                    continue
-                response_event_id = self.oracle.ledger_response(source_event_id)
-                if response_event_id is None:
-                    if self.oracle.source_completed_without_response(source_event_id):
-                        del self._pending_source_markers[source_event_id]
-                    continue
-                latest = self.oracle.latest_reply_bodies.get(response_event_id)
-                body = latest[1] if latest is not None else ""
-                call_id = _body_call_id(body)
-                if call_id is not None and marker in _ModelHandler.observed_markers_for(call_id):
-                    del self._pending_source_markers[source_event_id]
+            self._reconcile_edit_debts()
             self._pending_source_tombstones.difference_update(
                 source_event_id
                 for source_event_id in tuple(self._pending_source_tombstones)
-                if self.oracle.source_tombstoned(source_event_id)
+                if _redaction_target_state(
+                    source_event_id,
+                    self.oracle._ledger_observations,
+                    self.source_revision_markers,
+                )[0]
             )
+
+    def _current_pending_edit_marker(self, source_id: str) -> str | None:
+        """Choose the newest observed live debt by canonical Matrix replacement order."""
+        pending = self._pending_edit_markers.get(source_id, {})
+        ordered = [
+            (_replacement_order(edit, self.oracle.event_summaries[edit].get("origin_server_ts"), is_edit=True), marker)
+            for edit, marker in pending.items()
+            if edit not in self.redacted_targets and edit in self.oracle.event_summaries
+        ]
+        return max(ordered)[1] if ordered else None
+
+    def _reconcile_edit_debts(self) -> None:
+        """Only exact visible terminal consumption can discharge or supersede live edit debt."""
+        for source_id, pending in tuple(self._pending_edit_markers.items()):
+            record = self.oracle._ledger_records.get(source_id)
+            if record is None or not record.completed or source_id not in record.source_event_ids:
+                continue
+            if self.oracle.source_tombstoned(source_id) or self.oracle.source_completed_without_response(source_id):
+                del self._pending_edit_markers[source_id]
+                continue
+            latest = self.oracle.latest_reply_bodies.get(record.response_event_id or "")
+            call_id = _body_call_id(latest[1]) if latest is not None else None
+            if call_id is None:
+                continue
+            consumed_orders = self._completed_edit_orders(source_id, record, call_id)
+            for edit in tuple(pending):
+                event = self.oracle.event_summaries.get(edit)
+                if event is not None and any(
+                    _replacement_order(edit, event.get("origin_server_ts"), is_edit=True) <= consumed
+                    and (evidence is None or edit in evidence.known_edit_event_ids)
+                    for consumed, evidence in consumed_orders
+                ):
+                    del pending[edit]
+            if not pending:
+                del self._pending_edit_markers[source_id]
+
+    def _completed_edit_orders(
+        self,
+        source_id: str,
+        record: TurnRecord,
+        call_id: int,
+    ) -> list[tuple[tuple[int, int, str], RedactedEditEvidence | None]]:
+        """Deleted consumption additionally needs its frozen call; later authored debt stays live."""
+        observed = _ModelHandler.observed_markers_for(call_id)
+        consumed: list[tuple[tuple[int, int, str], RedactedEditEvidence | None]] = []
+        for edit, revision in (record.revision_replay or {}).items():
+            marker = self.source_revision_markers.get(source_id, {}).get(edit)
+            if (
+                revision.source_event_id != source_id
+                or revision.response_event_id != record.response_event_id
+                or edit not in self.oracle.event_summaries
+                or marker not in observed
+            ):
+                continue
+            evidence = self.redacted_edit_evidence.get(edit) if edit in self.redacted_targets else None
+            if edit in self.redacted_targets and (
+                evidence is None
+                or evidence.source_event_id != source_id
+                or evidence.edit_event_id != edit
+                or evidence.marker != marker
+                or call_id not in evidence.observed_call_ids
+            ):
+                continue
+            order = _replacement_order(edit, self.oracle.event_summaries[edit].get("origin_server_ts"), is_edit=True)
+            consumed.append((order, evidence))
+        return consumed
 
     def _interrupt_outstanding_work(self, kind: LiveOperationKind, batch_index: int) -> None:
         """Take the process down while the journal still owes the batch a turn.
@@ -7925,10 +8108,7 @@ class LiveFuzzRunner:
         if operation.cleanup_sources:
             # The serialized probe may start only after the preceding source
             # redactions crossed the runtime's durable tombstone boundary.
-            await self._wait_for_pending_mutation_effects(
-                deadline_seconds=self.reply_timeout,
-                batch_index=self.executed_batches,
-            )
+            await self._wait_for_cleanup_tombstones(operation)
         if operation.kind is LiveOperationKind.REDACTION:
             return await self._apply_redaction(operation)
 
@@ -7951,7 +8131,10 @@ class LiveFuzzRunner:
                 marker=_source_marker(operation.event_ref, ORIGINAL_REVISION),
             )
             payload = _SentPayload("m.room.message", txn_id, content)
+            cleanup_targets = self._qualified_cleanup_targets(operation)
             event_id = await self._send_expected_message(operation, client, payload, room_id)
+            if cleanup_targets:
+                self._cleanup_probe_targets[event_id] = cleanup_targets
             self.source_current_markers[event_id] = _source_marker(operation.event_ref, ORIGINAL_REVISION)
             return operation, event_id, payload
 
@@ -7962,7 +8145,10 @@ class LiveFuzzRunner:
                 marker=_source_marker(operation.event_ref, ORIGINAL_REVISION),
             )
             payload = _SentPayload("m.room.message", txn_id, content)
+            cleanup_targets = self._qualified_cleanup_targets(operation)
             event_id = await self._send_expected_message(operation, client, payload, room_id)
+            if cleanup_targets:
+                self._cleanup_probe_targets[event_id] = cleanup_targets
             self.source_current_markers[event_id] = _source_marker(operation.event_ref, ORIGINAL_REVISION)
             return operation, event_id, payload
 
@@ -7992,9 +8178,10 @@ class LiveFuzzRunner:
             # revision keyed by this edit's event id so a later redaction of this
             # edit can revert the source to whatever revision was current beneath
             # it, even if a newer edit has since landed on top.
+            self._reconcile_edit_debts()
             self._push_source_revision(target_event_id, event_id, edit_marker)
             self._edit_event_source[event_id] = target_event_id
-            self._pending_source_markers[target_event_id] = edit_marker
+            self._pending_edit_markers.setdefault(target_event_id, {})[event_id] = edit_marker
             return operation, event_id, None
 
         if operation.kind is LiveOperationKind.REACTION:
@@ -8043,6 +8230,21 @@ class LiveFuzzRunner:
         client = self._client_for_operation(operation)
         room_id = self._room_for_thread(operation.thread)
         event_id = await client.redact(target_event_id, txn_id, room_id=room_id)
+        observations = _ModelHandler.observations_snapshot()
+        reverted_source = next(
+            (source for source, edits in self.source_revision_markers.items() if target_event_id in edits),
+            None,
+        )
+        if reverted_source is not None and target_event_id not in self.redacted_edit_evidence:
+            marker = self.source_revision_markers[reverted_source][target_event_id]
+            self.redacted_edit_evidence[target_event_id] = RedactedEditEvidence(
+                reverted_source,
+                target_event_id,
+                marker,
+                frozenset(call for call, markers in observations.items() if marker in markers),
+                frozenset(self.source_revision_markers[reverted_source]),
+            )
+        self._reconcile_edit_debts()
         self.redacted_targets[target_event_id] = event_id
         self.sent_records.append(
             _SentRecord(
@@ -8054,19 +8256,17 @@ class LiveFuzzRunner:
                 content={"reason": "live journal fuzz"},
             ),
         )
-        reverted_source = self._edit_event_source.get(target_event_id)
         if reverted_source is not None:
-            # Redacting an ``m.replace`` reverts its target source to the
-            # latest surviving revision, so the model correctly ends at that
-            # earlier body. Revert the expected marker rather than treating
-            # this as a source redaction so the audit does not demand a
-            # revision Matrix itself rolled back.
+            # Canonical content rolls back independently of completed output.
+            # Remove only this edit's debt; deletion orders no regeneration.
             self._pop_source_revision(reverted_source, target_event_id)
-            current_marker = self.source_current_markers.get(reverted_source)
-            if current_marker is not None:
-                self._pending_source_markers[reverted_source] = current_marker
+            pending = self._pending_edit_markers.get(reverted_source, {})
+            pending.pop(target_event_id, None)
+            if not pending:
+                self._pending_edit_markers.pop(reverted_source, None)
+            self._pending_source_tombstones.add(target_event_id)
         elif target_event_id in self.oracle.expected_sources:
-            self._pending_source_markers.pop(target_event_id, None)
+            self._pending_edit_markers.pop(target_event_id, None)
             self._pending_source_tombstones.add(target_event_id)
 
         result = (operation, event_id, None)
@@ -8081,6 +8281,43 @@ class LiveFuzzRunner:
                 # the in-flight response, so its exact cardinality is zero-or-one.
                 self.oracle.mark_source_optional(target_event_id)
         return result
+
+    async def _wait_for_cleanup_tombstones(self, operation: LiveOperation) -> None:
+        """Wait only for exact requested tombstones; the probe itself performs lazy cleanup."""
+        deadline = time.monotonic() + self.reply_timeout
+        targets = tuple(self.event_ids[source] for source in operation.cleanup_sources)
+        while True:
+            self.oracle.refresh_ledger_attributions(min_interval=0.0)
+            observed = {
+                target
+                for target in targets
+                if _redaction_target_state(target, self.oracle._ledger_observations, self.source_revision_markers)[0]
+            }
+            self._pending_source_tombstones.difference_update(observed)
+            if len(observed) == len(targets):
+                break
+            if time.monotonic() >= deadline:
+                msg = f"timed out waiting for cleanup probe tombstones: {sorted(set(targets) - observed)}"
+                raise AssertionError(msg)
+            await self.oracle.pump(timeout_ms=250)
+
+    def _qualified_cleanup_targets(self, operation: LiveOperation) -> tuple[str, ...]:
+        """Observe exact tombstones synchronously before a later source is sent."""
+        self.oracle.refresh_ledger_attributions(min_interval=0.0)
+        targets = {self.event_ids[source] for source in operation.cleanup_sources}
+        for target_id in self.redacted_targets:
+            source_id = next(
+                (source for source, edits in self.source_revision_markers.items() if target_id in edits),
+                target_id,
+            )
+            if (
+                self.oracle.source_threads.get(source_id) == operation.thread
+                and _redaction_target_state(target_id, self.oracle._ledger_observations, self.source_revision_markers)[
+                    0
+                ]
+            ):
+                targets.add(target_id)
+        return tuple(sorted(targets))
 
     def _push_source_revision(self, source_event_id: str, edit_event_id: str, marker: str) -> None:
         """Record a new current revision for a source and mirror it as the marker.
@@ -8344,6 +8581,8 @@ def _with_redaction_cleanup_probes(scenario: LiveFuzzScenario) -> LiveFuzzScenar
     for operation in operations:
         if operation.kind in MESSAGE_KINDS:
             sources[operation.event_ref] = operation.thread
+        elif operation.kind is LiveOperationKind.EDIT and operation.target in sources:
+            sources[operation.event_ref] = sources[operation.target]
         if operation.kind is LiveOperationKind.REDACTION and operation.target in sources:
             assert operation.target is not None
             redacted_by_thread[sources[operation.target]].add(operation.target)
