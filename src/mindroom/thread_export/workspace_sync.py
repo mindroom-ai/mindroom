@@ -103,27 +103,27 @@ class WorkspaceThreadExportRunner:
             self._task = asyncio.create_task(self._run(), name="thread_export_workspace_sync")
 
     async def stop(self) -> None:
-        """Cancel the loop, abandoning a pass in flight; every write it makes is atomic."""
+        """Cancel and drain every export before its borrowed runtime closes."""
         task = self._task
         self._task = None
-        if task is not None:
-            task.cancel()
-        try:
-            await self.cancel_manual_exports()
-        finally:
-            if task is not None:
-                _, cancellation = await gather_shutdown_phase(task)
-                if cancellation is not None:
-                    raise cancellation
-
-    async def cancel_manual_exports(self) -> None:
-        """Drain administrative readers before their borrowed runtime can be replaced."""
         tasks = tuple(self._manual_exports)
+        if task is not None:
+            tasks = (*tasks, task)
         for task in tasks:
             task.cancel()
         _, cancellation = await gather_shutdown_phase(*tasks)
         if cancellation is not None:
             raise cancellation
+
+    async def prepare_runtime_replacement(self) -> None:
+        """Drain old readers and queue a fresh pass behind closed replacement admission."""
+        was_running = self._task is not None
+        try:
+            await self.stop()
+        finally:
+            if was_running:
+                self.queue_full_pass()
+                self.start()
 
     async def export_once(
         self,
@@ -183,6 +183,7 @@ class WorkspaceThreadExportRunner:
             self._wakeup.clear()
             if self._deps.debounce_seconds > 0:
                 await asyncio.sleep(self._deps.debounce_seconds)
+            await self._deps.response_admission_gate.wait_until_open()
             await self._run_pass_once()
 
     async def _run_pass_once(self) -> None:

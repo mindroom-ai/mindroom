@@ -183,4 +183,6 @@ They never provision an account, renew credentials, or open the owned crypto sto
 Dashboard departures use the running bot's serialized durable membership gateway.
 CLI thread exports require the running API and borrow the same clients and principal-bound readers used by workspace exports.
 The CLI sends its config and storage paths so the API can reject a request aimed at a different installation before writing files.
-An export holds existing runtime replacement admission, and cancellation drains its own hydration tasks without closing borrowed clients or journals.
+Manual exports hold existing runtime replacement admission; automatic workspace exports are cancelled and drained at every replacement boundary.
+Both paths drain their hydration tasks before borrowed clients or journals close.
+The workspace runner queues a fresh full pass and waits for replacement admission to reopen before borrowing current owners.

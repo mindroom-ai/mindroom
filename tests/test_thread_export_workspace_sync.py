@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -32,8 +32,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
-    from mindroom.thread_export.models import ThreadExportStats
+    from mindroom.thread_export.models import ThreadExportSource, ThreadExportStats
 
 pytestmark = pytest.mark.asyncio
 
@@ -792,4 +793,93 @@ async def test_forced_replacement_waits_for_manual_export_cleanup(
             allow_cleanup.set()
             export.cancel()
             await asyncio.gather(export, replacement, return_exceptions=True)
+            await runner.stop()
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])
+async def test_replacement_drains_automatic_exports_and_resumes_current_owners(  # noqa: PLR0915
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    """Borrowed clients survive automatic cleanup; interrupted work resumes after publication."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+    orchestrator.config = _config(
+        tmp_path,
+        {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())},
+    )
+    write_thread_export_matrix_state(tmp_path)
+    original = _FakeBot("@mindroom_code:localhost")
+    current = _FakeBot("@mindroom_code:localhost")
+    orchestrator.agent_bots["code"] = cast("AgentBot", original)
+    runner = orchestrator._thread_export_runner
+    runner._deps = replace(runner._deps, debounce_seconds=0)
+    started, cleaning, allow_cleanup, cleaned = (asyncio.Event() for _ in range(4))
+    publishing, allow_publication, resumed = (asyncio.Event() for _ in range(3))
+    output = tmp_path / "exported.txt"
+
+    async def export_sources(**kwargs: object) -> tuple[ThreadExportStats, ...]:
+        sources = cast("Sequence[ThreadExportSource]", kwargs["sources"])
+        if sources[0].client is original.client:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await allow_cleanup.wait()
+                cleaned.set()
+        assert sources[0].client is current.client
+        assert {room.room_id for source in sources for room in source.rooms} == {"!lobby:localhost", "!dev:localhost"}
+        assert not orchestrator._response_admission_gate.closed
+        output.write_text("exported using the replacement owner")
+        resumed.set()
+        return _stats_for_targets(**kwargs)
+
+    async def publish() -> None:
+        assert cleaned.is_set(), "replacement closed a client still borrowed by an automatic export"
+        orchestrator.agent_bots["code"] = cast("AgentBot", current)
+        runner.start()  # Runtime worker synchronization also calls start during publication.
+        if outcome != "success":
+            runner.mark_room_activity("!lobby:localhost")
+        publishing.set()
+        await allow_publication.wait()
+        if outcome == "error":
+            msg = "publication interrupted after replacing the owner"
+            raise RuntimeError(msg)
+
+    with patch(EXPORT_PATH, side_effect=export_sources):
+        runner.start()
+        runner.mark_room_activity("!lobby:localhost")
+        await asyncio.wait_for(started.wait(), timeout=5)
+        replacement = asyncio.create_task(
+            orchestrator.config_reload.apply_with_response_admission(
+                publish,
+                operation_name="automatic export replacement",
+                request_is_current=lambda: True,
+            ),
+        )
+        try:
+            await asyncio.wait_for(cleaning.wait(), timeout=5)
+            assert not publishing.is_set()
+            allow_cleanup.set()
+            await asyncio.wait_for(publishing.wait(), timeout=5)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(resumed.wait(), timeout=0.05)
+            assert not output.exists()
+            if outcome == "cancelled":
+                replacement.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await replacement
+            elif outcome == "error":
+                allow_publication.set()
+                with pytest.raises(RuntimeError, match="publication interrupted"):
+                    await replacement
+            else:
+                allow_publication.set()
+                await replacement
+            await asyncio.wait_for(resumed.wait(), timeout=5)
+            assert output.read_text() == "exported using the replacement owner"
+        finally:
+            allow_cleanup.set()
+            allow_publication.set()
+            await asyncio.gather(replacement, return_exceptions=True)
             await runner.stop()

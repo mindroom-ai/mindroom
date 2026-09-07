@@ -466,7 +466,7 @@ class _MultiAgentOrchestrator:
             load_initial_config=self._load_initial_config,
             apply_update_plan=self._apply_config_update_plan,
             response_admission_gate=self._response_admission_gate,
-            before_runtime_replacement=self._thread_export_runner.cancel_manual_exports,
+            before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
