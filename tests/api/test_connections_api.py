@@ -139,6 +139,32 @@ def test_mutations_require_same_origin_and_empty_body(portal: dict[str, Any], ac
     assert client.post(url, headers=headers, json={"agent_name": "other"}).status_code == 422
 
 
+@pytest.mark.parametrize("configured_public_url", [True, False])
+@pytest.mark.parametrize("action", ["connect", "disconnect"])
+def test_personal_mutations_reject_cleartext_public_origin(
+    portal: dict[str, Any],
+    configured_public_url: bool,
+    action: str,
+) -> None:
+    """Same-origin alone must not authorize hosted account changes over HTTP."""
+    env = dict(portal["paths"].process_env)
+    if configured_public_url:
+        env["MINDROOM_PUBLIC_URL"] = "http://portal.example.org"
+    else:
+        env.pop("MINDROOM_PUBLIC_URL")
+    paths = replace(portal["paths"], process_env=env)
+    main.initialize_api_app(main.app, paths)
+    _publish_config(main.app, paths, portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    client = TestClient(main.app, base_url="http://portal.example.org")
+    response = client.post(
+        f"/api/connections/google_drive/{action}",
+        headers={**portal["headers"]["alice"], "Origin": "http://portal.example.org"},
+        json={},
+    )
+    assert response.status_code == 403
+
+
 def test_two_users_complete_and_disconnect_only_their_own_credentials(portal: dict[str, Any]) -> None:
     """Portal callbacks use the same private scope as tool execution."""
     client, headers = portal["client"], portal["headers"]

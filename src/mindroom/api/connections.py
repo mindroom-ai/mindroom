@@ -136,6 +136,8 @@ def _require_provider(context: _PersonalConnections, provider_id: str) -> OAuthP
 def _require_same_origin(request: Request, context: _PersonalConnections) -> None:
     public_url = context.runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
     parsed = urlsplit(public_url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise HTTPException(403, "Personal connections require an HTTPS public origin", headers=_PRIVATE_HEADERS)
     expected = f"{parsed.scheme}://{parsed.netloc}"
     if request.headers.get("origin") != expected or request.headers.get("sec-fetch-site") == "cross-site":
         raise HTTPException(403, "Connection changes require a same-origin request", headers=_PRIVATE_HEADERS)

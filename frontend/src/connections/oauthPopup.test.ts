@@ -1,3 +1,4 @@
+/// <reference types="vitest/jsdom" />
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { connectWithPopup } from "./oauthPopup";
 
@@ -6,6 +7,7 @@ const authorization = {
   auth_url: "https://auth.example.com/start",
   completion_origin: "https://portal.example.com",
 };
+const initialPageUrl = window.location.href;
 
 describe("connection popup", () => {
   let popup: {
@@ -25,6 +27,7 @@ describe("connection popup", () => {
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
   });
   afterEach(() => {
+    jsdom.reconfigure({ url: initialPageUrl });
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -196,4 +199,66 @@ describe("connection popup", () => {
       await operation;
     }
   });
+
+  it.each([
+    ["http://localhost:3000", "auth_url", "http://auth.example.com/start"],
+    ["http://localhost:3000", "completion_origin", "http://portal.example.com"],
+    ["https://portal.example.com", "auth_url", "http://localhost/start"],
+    ["https://portal.example.com", "completion_origin", "http://localhost"],
+    ["https://localhost", "auth_url", "http://localhost/start"],
+    ["http://portal.example.com", "auth_url", "http://localhost/start"],
+    ["http://localhost:3000", "auth_url", "http://localhost.example.com/start"],
+    ["http://localhost:3000", "auth_url", "http://127.0.0.1.example.com/start"],
+    ["http://localhost:3000", "auth_url", "javascript:alert(1)"],
+    ["http://localhost:3000", "completion_origin", "data:text/html,hello"],
+  ])(
+    "rejects %s portal's unsafe %s %s before navigating",
+    async (pageUrl, field, targetUrl) => {
+      jsdom.reconfigure({ url: pageUrl });
+      const settled = vi.fn();
+      const operation = connectWithPopup(
+        "mail",
+        async () => ({ ...authorization, [field]: targetUrl }),
+        controller.signal,
+      ).then(() => settled("connected"), settled);
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(settled).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: expect.stringMatching(/could not start/i),
+          }),
+        );
+        expect(popup.location.href).toBe("about:blank");
+        expect(popup.close).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        controller.abort();
+        await operation;
+      }
+    },
+  );
+
+  it.each(["localhost", "127.8.2.1", "[::1]", "app.localhost"])(
+    "allows HTTP loopback targets when the portal runs on HTTP %s",
+    async (hostname) => {
+      jsdom.reconfigure({ url: `http://${hostname}:3000/connections/` });
+      const authUrl = `http://${hostname}:8765/start`;
+      const completionOrigin = `http://${hostname}:8765`;
+      const operation = connectWithPopup(
+        "mail",
+        async () => ({
+          provider: "mail",
+          auth_url: authUrl,
+          completion_origin: completionOrigin,
+        }),
+        controller.signal,
+      );
+      await Promise.resolve();
+      expect(popup.location.href).toBe(authUrl);
+      complete({ origin: completionOrigin });
+      await expect(operation).resolves.toBeUndefined();
+      expect(popup.close).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 });

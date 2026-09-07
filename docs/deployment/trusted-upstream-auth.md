@@ -121,7 +121,7 @@ Keep these routes behind the authenticated upstream and exclude `/connections` f
 Portal assets are served under `/connections/assets/`; root `/assets/` can continue serving the other application.
 Use a runtime build containing the portal before enabling the routes.
 
-Connect and disconnect requests require a same-origin `Origin` header matching `MINDROOM_PUBLIC_URL`, or the request base URL when unset.
+Connect and disconnect requests require an HTTPS public origin and a same-origin `Origin` header matching `MINDROOM_PUBLIC_URL`, or the request base URL when unset.
 The portal API returns private, non-cacheable account status and never returns token or OAuth client configuration.
 It provides account onboarding for personal agents; it does not expose an aggregate MCP gateway endpoint.
 
