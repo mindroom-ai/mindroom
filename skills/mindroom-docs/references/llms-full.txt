@@ -18539,7 +18539,8 @@ Client applications need support for this OAuth registration and discovery flow;
 
 Access tokens last up to 15 minutes.
 Refresh tokens rotate on use; replay revokes the grant family.
-A managed-account grant expires after 30 days without successful refresh or tool use, and at most 180 days after approval.
+By default, a managed-account grant expires after 30 days without successful refresh or tool use and at most 180 days after approval.
+The configured idle and absolute lifetimes determine the actual deadlines.
 Successful tool discovery and calls update the portal's last-used time; token refresh extends idle expiry without pretending that a tool was used.
 Portal visits, failed calls, and invalid tokens do not extend idle expiry.
 Background token refresh counts as activity, so inactivity expiry alone does not bound a client that keeps refreshing.

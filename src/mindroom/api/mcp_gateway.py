@@ -37,7 +37,7 @@ from mindroom.mcp_gateway.server import GatewayServer, read_gateway_body, replay
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
 from mindroom.mcp_gateway.toolkits import drain_gateway_tool_cleanup
 from mindroom.mcp_gateway.tools import get_tool, invoke_tool, search_tools
-from mindroom.mcp_gateway.types import GatewayPrincipal
+from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode, GatewayPrincipal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -208,7 +208,20 @@ class GatewayRuntime:
         if name == "get_tool":
             return await get_tool(context, manager=self.manager, **arguments)
         if name == "invoke_tool":
-            return await invoke_tool(context, manager=self.manager, **arguments)
+            state = require_api_state(request.app)
+
+            def require_current_config() -> None:
+                with state.config_lock:
+                    current = state.snapshot
+                    if current.runtime_config != context.config or current.runtime_paths != context.runtime_paths:
+                        raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
+
+            return await invoke_tool(
+                context,
+                manager=self.manager,
+                require_current_config=require_current_config,
+                **arguments,
+            )
         raise HTTPException(400, "Unknown gateway operation")
 
 

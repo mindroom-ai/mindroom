@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING
@@ -11,18 +14,20 @@ from urllib.parse import parse_qs, urlsplit
 
 import jwt
 import pytest
+from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mindroom import constants
+from mindroom import agents, constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api.mcp_gateway import gateway_lifespan, install_gateway_routes
 from mindroom.config.main import Config
 from mindroom.mcp_gateway import admission
+from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     import httpx
@@ -222,6 +227,124 @@ def _list(client: TestClient, token: str | None = None, **headers: str) -> httpx
             **headers,
         },
     )
+
+
+def _native_dispatch_builder(
+    phase: str,
+    async_body: bool,
+    paused: threading.Event,
+    release: threading.Event,
+    events: list[str],
+) -> Callable[..., Toolkit]:
+    def pause(at: str) -> None:
+        if phase != at:
+            return
+        paused.set()
+        assert release.wait(10), "Dispatch was never released"
+
+    def account() -> str:
+        identity = get_tool_execution_identity()
+        assert identity is not None
+        assert identity.requester_id == "@alice:example.org"
+        assert identity.agent_name == "personal"
+        events.append("body")
+        return "account-result"
+
+    async def async_account() -> str:
+        return account()
+
+    async def before(name: str, func: Callable[..., Awaitable[str]], args: dict[str, object]) -> str:
+        assert name in {"account", "async_account"}
+        await asyncio.to_thread(pause, "hook")
+        return await func(**args)
+
+    class AccountToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[async_account if async_body else account])
+            self._requires_connect = True
+            function = next(iter({**self.functions, **self.async_functions}.values()))
+            function.tool_hooks = [before]
+
+        def connect(self) -> None:
+            pause("connect")
+
+        def close(self) -> None:
+            events.append("close")
+
+    def build(name: str, **_kwargs: object) -> Toolkit:
+        assert name == "calculator", "Unselected toolkit was built"
+        pause("build")
+        return AccountToolkit()
+
+    return build
+
+
+@pytest.mark.parametrize("phase", ["build", "connect", "hook"])
+@pytest.mark.parametrize("change", ["remove", "scope", "access", "unchanged"])
+@pytest.mark.parametrize("async_body", [False, True], ids=["sync", "async"])
+def test_native_dispatch_rejects_changed_publication(
+    gateway_client: TestClient,
+    gateway_app: FastAPI,
+    signed_headers: Callable,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    change: str,
+    async_body: bool,
+) -> None:
+    """A reload during preparation must stop the old provider body and still close its toolkit."""
+    client_id, code = _code(gateway_client, signed_headers("alice"))
+    token = _exchange(gateway_client, client_id, code).json()["access_token"]
+    paused = threading.Event()
+    release = threading.Event()
+    events: list[str] = []
+
+    build = _native_dispatch_builder(phase, async_body, paused, release, events)
+    monkeypatch.setattr(agents, "build_agent_toolkit", build)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(
+            gateway_client.post,
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "invoke_tool",
+                    "arguments": {
+                        "toolkit": "calculator",
+                        "function": "async_account" if async_body else "account",
+                        "arguments": {},
+                    },
+                },
+            },
+            headers={**MCP_HEADERS, "Authorization": f"Bearer {token}"},
+        )
+        try:
+            assert paused.wait(10), "Native dispatch never reached the preparation boundary"
+            state = config_lifecycle.require_api_state(gateway_app)
+            original = state.snapshot
+            assert original.runtime_config is not None
+            updated = original.runtime_config.authored_model_dump()
+            if change == "remove":
+                updated["agents"]["personal"]["tools"] = []
+            elif change == "scope":
+                updated["agents"]["personal"]["private"]["per"] = "user"
+            elif change == "access":
+                updated["agents"]["personal"]["access"]["users"] = ["@bob:example.org"]
+            config_lifecycle.persist_runtime_validated_config(Config.model_validate(updated), original.runtime_paths)
+            assert state.snapshot is not original
+        finally:
+            release.set()
+        response = pending.result(timeout=10)
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]["structuredContent"]
+    if change == "unchanged":
+        assert events == ["body", "close"]
+        assert result == {"result": "account-result"}
+    else:
+        assert events == ["close"], "Stale provider body ran after configuration publication"
+        assert result == {"error": {"code": "tool_unavailable", "message": "This tool is currently unavailable."}}
 
 
 def test_public_metadata_challenge_and_bearer_boundary(gateway_client: TestClient, signed_headers: Callable) -> None:

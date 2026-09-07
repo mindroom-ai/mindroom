@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 from contextlib import suppress
+from functools import wraps
 from typing import TYPE_CHECKING, Any, Never
 
 from agno.tools.function import FunctionCall
@@ -280,6 +281,25 @@ def _connection_required(result: object) -> bool:
     )
 
 
+def _guard_dispatch(function: Function, require_current_config: Callable[[], None]) -> None:
+    """Check the publication at the provider entrypoint, after hooks and thread scheduling."""
+    entrypoint = function.entrypoint
+    if entrypoint is None:
+        raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
+
+    @wraps(entrypoint)
+    def guarded_sync(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        require_current_config()
+        return entrypoint(*args, **kwargs)
+
+    @wraps(entrypoint)
+    async def guarded_async(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        require_current_config()
+        return await entrypoint(*args, **kwargs)
+
+    function.entrypoint = guarded_async if inspect.iscoroutinefunction(entrypoint) else guarded_sync
+
+
 async def invoke_tool(
     context: PersonalAgentContext,
     *,
@@ -287,6 +307,7 @@ async def invoke_tool(
     function: str,
     arguments: dict[str, object],
     manager: MCPServerManager | None = None,
+    require_current_config: Callable[[], None] | None = None,
 ) -> InvocationResult:
     """Invoke one selected function with canonical routing, hooks, and fresh credentials."""
     if not _handle(function):
@@ -313,6 +334,8 @@ async def invoke_tool(
         )
         prepend_tool_hook_bridge(built, bridge)
         target.cache_results = False
+        if require_current_config is not None:
+            _guard_dispatch(target, require_current_config)
         execution = await run_with_tool_execution_identity(
             context.execution_identity,
             operation=lambda: FunctionCall(function=target, arguments=arguments).aexecute(),

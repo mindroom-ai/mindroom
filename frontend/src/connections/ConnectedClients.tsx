@@ -54,6 +54,9 @@ function mergeClients(
   return [...byId.values()];
 }
 
+/**
+ * Render the connected-clients section, or return `null` when the gateway is disabled.
+ */
 export function ConnectedClients() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [clients, setClients] = useState<ConnectedClient[]>([]);

@@ -1,3 +1,11 @@
+/**
+ * Send a same-origin Connections API request and parse its JSON response.
+ *
+ * @param path - API path to request.
+ * @param signal - Abort signal for canceling the request.
+ * @param method - HTTP method, with POST requests using an empty JSON object.
+ * @returns A `Promise<T>` that resolves to the parsed response payload.
+ */
 export async function requestConnection<T>(
   path: string,
   signal: AbortSignal,
