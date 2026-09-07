@@ -20,6 +20,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
+from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_optional_extra_for_import_retry
 
@@ -596,7 +597,11 @@ def _request_auth_state(request: Request) -> ApiAuthState:
 async def request_has_frontend_access(request: Request) -> bool:
     """Return whether the current request may load the dashboard UI."""
     authorization = request.headers.get("authorization")
-    auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
+    snapshot = _bind_authenticated_request_snapshot(request)
+    auth_state = cast("ApiAuthState", snapshot.auth_state)
+    if _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") and _is_connections_path(request.url.path):
+        await require_personal_connections_user(request)
+        return True
     mindroom_api_key = auth_state.settings.mindroom_api_key
     try:
         trusted_auth_user = await _trusted_upstream_auth_user(
@@ -609,6 +614,7 @@ async def request_has_frontend_access(request: Request) -> bool:
             raise
         return False
     if trusted_auth_user is not None:
+        _require_connections_route_authorized(request, trusted_auth_user, snapshot)
         request.scope["auth_user"] = trusted_auth_user
         return True
 
@@ -801,6 +807,49 @@ def _render_standalone_login_page(
 </html>"""
 
 
+def _is_connections_path(path: str) -> bool:
+    """Recognize only the dedicated personal frontend and API path segments."""
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in ("/connections", "/api/connections"))
+
+
+def _require_connections_route_authorized(
+    request: Request,
+    auth_user: dict[str, Any],
+    snapshot: ApiSnapshot,
+) -> None:
+    """Keep trusted personal users outside administrator routes when the portal is enabled."""
+    if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
+        return
+    if _is_connections_path(request.url.path):
+        return
+    parts = request.url.path.split("/")
+    if len(parts) == 5 and parts[1:3] == ["api", "oauth"] and parts[3] and parts[4] in {"callback", "success", "reset"}:
+        # These handlers independently validate their state or reset capability.
+        return
+    matrix_user_id = auth_user.get("matrix_user_id")
+    if (
+        isinstance(matrix_user_id, str)
+        and snapshot.runtime_config is not None
+        and is_platform_administrator(matrix_user_id, snapshot.runtime_config, snapshot.runtime_paths)
+    ):
+        return
+    raise HTTPException(status_code=403, detail="Administrator access required")
+
+
+async def require_personal_connections_user(request: Request) -> dict[str, Any]:
+    """Authenticate a personal requester only through a signed upstream Matrix identity."""
+    auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
+    settings = auth_state.settings.trusted_upstream
+    if not settings.enabled or not settings.jwt.require_jwt:
+        raise HTTPException(status_code=403, detail="Personal connections require trusted signed authentication")
+    auth_user = await _trusted_upstream_auth_user(request, settings, auth_state.trusted_upstream_jwt_client)
+    matrix_user_id = auth_user.get("matrix_user_id") if auth_user is not None else None
+    if not isinstance(matrix_user_id, str) or try_parse_historical_matrix_user_id(matrix_user_id) is None:
+        raise HTTPException(status_code=403, detail="Personal connections require a verified Matrix identity")
+    request.scope["auth_user"] = auth_user
+    return cast("dict[str, Any]", auth_user)
+
+
 async def verify_user(
     request: Request,
     authorization: str | None = Header(None),
@@ -817,6 +866,7 @@ async def verify_user(
         auth_state.trusted_upstream_jwt_client,
     )
     if trusted_auth_user is not None:
+        _require_connections_route_authorized(request, trusted_auth_user, snapshot)
         request.scope["auth_user"] = trusted_auth_user
         return trusted_auth_user
 

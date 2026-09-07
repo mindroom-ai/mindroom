@@ -393,7 +393,7 @@ def test_ensure_frontend_dist_dir_builds_repo_checkout(
     def _fake_run(command: list[str], *, check: bool, cwd: Path) -> None:
         assert check is True
         commands.append((command, cwd))
-        if command[1:] == ["run", "vite", "build"]:
+        if command[1:] == ["run", "build"]:
             frontend_dist_dir.mkdir()
 
     monkeypatch.setattr(frontend_assets, "_PACKAGE_FRONTEND_DIR", tmp_path / "package-assets")
@@ -406,8 +406,7 @@ def test_ensure_frontend_dist_dir_builds_repo_checkout(
     assert frontend_assets.ensure_frontend_dist_dir(_runtime_paths(tmp_path)) == frontend_dist_dir
     assert commands == [
         (["/usr/bin/bun", "install", "--frozen-lockfile"], frontend_source_dir),
-        (["/usr/bin/bun", "run", "tsc"], frontend_source_dir),
-        (["/usr/bin/bun", "run", "vite", "build"], frontend_source_dir),
+        (["/usr/bin/bun", "run", "build"], frontend_source_dir),
     ]
 
 

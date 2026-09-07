@@ -191,6 +191,21 @@ def test_build_frontend_retries_bun_install_only(
             1,
             0.0,
         ),
+        (
+            [
+                "/usr/local/bin/bun",
+                "run",
+                "vite",
+                "build",
+                "--config",
+                "vite.connections.config.ts",
+                "--outDir",
+                str(output_dir / "connections"),
+            ],
+            frontend_dir,
+            1,
+            0.0,
+        ),
     ]
 
 

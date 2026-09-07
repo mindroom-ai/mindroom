@@ -902,6 +902,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.auth"
 depends_on = [
+    "mindroom.authorization",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.tool_system.dependencies",
@@ -1030,6 +1031,20 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.connections"
+depends_on = [
+    "mindroom.access_policy",
+    "mindroom.api.auth",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.dashboard_credential_scope",
+    "mindroom.api.oauth",
+    "mindroom.constants",
+    "mindroom.oauth",
+    "mindroom.oauth.service",
+    "mindroom.tool_system.catalog",
+]
+
+[[modules]]
 path = "mindroom.api.oauth"
 depends_on = [
     "mindroom.api.auth",
@@ -1059,6 +1074,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
+    "mindroom.api.connections",
     "mindroom.agent_policy",
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",

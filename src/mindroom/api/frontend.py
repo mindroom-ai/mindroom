@@ -61,6 +61,10 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
     if frontend_dir is None:
         raise HTTPException(status_code=404, detail="Frontend assets are not available")
 
+    if first_segment == "connections":
+        frontend_dir = frontend_dir / "connections"
+        path = path.removeprefix("connections").lstrip("/")
+
     asset_path = _resolve_frontend_asset(frontend_dir, path)
     if asset_path is None:
         raise HTTPException(status_code=404, detail="Frontend asset not found")

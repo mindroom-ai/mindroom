@@ -84,6 +84,19 @@ def _build_frontend(frontend_dir: Path, output_dir: Path, bun: str) -> None:
         [bun, "run", "vite", "build", "--outDir", str(output_dir)],
         cwd=frontend_dir,
     )
+    _run_command(
+        [
+            bun,
+            "run",
+            "vite",
+            "build",
+            "--config",
+            "vite.connections.config.ts",
+            "--outDir",
+            str(output_dir / "connections"),
+        ],
+        cwd=frontend_dir,
+    )
     _assert_no_git_lfs_pointers(output_dir)
 
 
