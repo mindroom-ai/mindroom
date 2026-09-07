@@ -17685,6 +17685,7 @@ An existing Nio 1.0 session is bound to its journal consumer; resetting that jou
 
 Nio classifies the first room snapshot without a known membership baseline as history.
 MindRoom stores those messages as context only, so they do not trigger replies or commands even when the fresh journal has no handled-event records.
+Encrypted events first seen as unreadable history remain context only when their keys arrive, including after a restart.
 Later live messages become actionable normally, and subsequent restarts preserve pending work and duplicate protection.
 Messages sent during downtime or before the first room baseline can therefore remain unanswered; resend any request you still want handled after startup completes.
 Room-member onboarding markers now live in the event journal; the old `tracking/room_member_joins.json` file is ignored.

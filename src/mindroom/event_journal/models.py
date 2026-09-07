@@ -60,7 +60,7 @@ class EventKind(StrEnum):
     ROOM_LIFECYCLE = "room_lifecycle"
     RTC = "rtc"
     REDACTION = "redaction"
-    DECRYPTION_FAILURE = "decryption_failure"
+    OPAQUE_HISTORY = "opaque_history"
 
 
 # Kinds whose work outlives its callback, because the callback only starts a
@@ -70,8 +70,8 @@ class EventKind(StrEnum):
 # them, because the journal's own reads need it too: a replay guard asking
 # "is there newer unfinished work here" means work that can still answer, and
 # pending alone does not mean that. Thread membership is derived from content
-# for every kind alike, so a pending reaction, approval, or undecryptable
-# message can sit in a thread and be mistaken for an unanswered turn.
+# for every readable kind alike, so a pending reaction or approval can sit
+# in a thread and be mistaken for an unanswered turn.
 TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER})
 
 

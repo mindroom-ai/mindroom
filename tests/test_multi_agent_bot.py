@@ -17,7 +17,6 @@ from agno.run.team import TeamRunOutput
 from nio.durable import DurableSyncConfig
 
 from mindroom.bot import AgentBot
-from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -45,7 +44,7 @@ from mindroom.orchestrator import (
     _MultiAgentOrchestrator,
 )
 from mindroom.startup_errors import PermanentStartupError
-from tests.access_schema_support import with_current_room_member_access, with_responder_access
+from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
     _make_matrix_client_mock,
@@ -308,74 +307,6 @@ class TestAgentBot(AgentBotTestBase):
         assert invite_callback == bot._on_invite_before_sync_certification
 
     @pytest.mark.asyncio
-    @patch("mindroom.config.main.load_config")
-    @pytest.mark.usefixtures("enforce_turn_authorization")
-    async def test_decrypt_failure_ingress_applies_sender_authorization(
-        self,
-        mock_load_config: MagicMock,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """The decrypt-failure notice requires both room and entity reply access."""
-        mock_load_config.return_value = self.create_mock_config(tmp_path)
-        config = mock_load_config.return_value
-        sender_id = "@stranger:localhost"
-        config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[])
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        event = MagicMock(spec=nio.MegolmEvent)
-        event.sender = sender_id
-
-        with patch("mindroom.bot.handle_decrypt_failure", new=AsyncMock()) as handler:
-            await bot._on_decryption_failure(room, event)
-
-        handler.assert_not_awaited()
-
-        config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[sender_id])
-        with patch("mindroom.bot.handle_decrypt_failure", new=AsyncMock()) as handler:
-            await bot._on_decryption_failure(room, event)
-
-        handler.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    @patch("mindroom.config.main.load_config")
-    async def test_decrypt_failure_notice_holds_response_admission(
-        self,
-        mock_load_config: MagicMock,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A config replacement cannot commit while a decrypt notice is being delivered."""
-        mock_load_config.return_value = self.create_mock_config(tmp_path)
-        config = mock_load_config.return_value
-        sender_id = "@user:localhost"
-        with_responder_access(config, mock_agent_user.agent_name, users=[sender_id])
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = AsyncMock()
-        room = MagicMock(spec=nio.MatrixRoom)
-        room.room_id = "!room:localhost"
-        event = MagicMock(spec=nio.MegolmEvent)
-        event.sender = sender_id
-        notice_started = asyncio.Event()
-        release_notice = asyncio.Event()
-
-        async def delayed_notice(*_args: object, **_kwargs: object) -> None:
-            notice_started.set()
-            await release_notice.wait()
-
-        with patch("mindroom.bot.handle_decrypt_failure", side_effect=delayed_notice):
-            task = asyncio.create_task(bot._on_decryption_failure(room, event))
-            await asyncio.wait_for(notice_started.wait(), timeout=1)
-            assert not bot.admission_gate.close_if_idle()
-            release_notice.set()
-            await task
-
-        assert bot.admission_gate.close_if_idle()
-        bot.admission_gate.reopen()
-
-    @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_owned_session")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
@@ -558,6 +489,7 @@ class TestAgentBot(AgentBotTestBase):
             wait_for_delivery_projection: object,
             before_admission: object,
             after_admission: object,
+            on_decryption_failure: object,
             schedule_trigger_sender_is_managed: object,
         ) -> None:
             assert after_sync == bot._on_ingestion_frame_completion
@@ -566,6 +498,7 @@ class TestAgentBot(AgentBotTestBase):
             assert before_admission == bot._before_ingestion_admission
             assert wait_for_delivery_projection == bot._wait_for_delivery_projection
             assert after_admission == bot._after_ingestion_admission
+            assert on_decryption_failure == bot._decryption_diagnostics.schedule
             assert schedule_trigger_sender_is_managed == bot._ingress_validator.sender_is_trusted_for_ingress_metadata
             pump_calls.append(
                 (

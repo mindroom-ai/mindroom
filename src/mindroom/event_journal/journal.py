@@ -117,6 +117,8 @@ def _validate_ingestion_record(item: IngestionRecordAdmission) -> None:
     require(event.thread_id is None or (type(event.thread_id) is str and bool(event.thread_id)))
     require(type(event.kind) is EventKind and type(event.event_class) is EventClass)
     require(type(event.origin_server_ts) is int and isinstance(event.source, Mapping))
+    if event.kind is EventKind.OPAQUE_HISTORY:
+        require(event.event_class is EventClass.CONTEXT_ONLY and p is None)
     if p is None:
         return
     require(type(p) is ProjectedEvent and isinstance(p.content, Mapping))
@@ -173,41 +175,35 @@ def _validate_membership_effect(item: IngestionRecordAdmission) -> None:
         raise invalid
 
 
-def _matching_semantic_event_exists(
+def _require_matching_semantic_event(
     transaction: Transaction,
     principal_id: str,
     event: InboundEvent,
-) -> bool:
+) -> Row:
     row = transaction.fetchone(
         """
-        SELECT room_id, thread_id, kind, sender, origin_server_ts
+        SELECT receipt_order, room_id, thread_id, kind, sender, origin_server_ts
         FROM journal_events
         WHERE principal_id = ? AND event_id = ?
         """,
         (principal_id, event.event_id),
     )
     if row is None:
-        return False
-    retained = tuple(row[column] for column in ("room_id", "thread_id", "kind", "sender", "origin_server_ts"))
-    expected = (
+        raise IngestionBatchIntegrityError
+    envelope = tuple(row[column] for column in ("room_id", "sender", "origin_server_ts"))
+    if tuple(map(type, envelope)) != (str, str, int) or envelope != (
         event.room_id,
-        encode_thread_id(event.thread_id),
-        event.kind.value,
         event.sender,
         event.origin_server_ts,
-    )
-    if tuple(map(type, retained)) != (str, str, str, str, int) or retained != expected:
+    ):
         raise IngestionBatchIntegrityError
-    return True
-
-
-def _require_matching_semantic_event(
-    transaction: Transaction,
-    principal_id: str,
-    event: InboundEvent,
-) -> None:
-    if not _matching_semantic_event_exists(transaction, principal_id, event):
+    # An opaque history marker identifies an envelope, whose encrypted kind
+    # and thread are unknown. It never owns a callback or becomes actionable.
+    if EventKind.OPAQUE_HISTORY not in (row["kind"], event.kind) and (
+        row["kind"] != event.kind.value or row["thread_id"] != encode_thread_id(event.thread_id)
+    ):
         raise IngestionBatchIntegrityError
+    return row
 
 
 def _admit_suppressed_semantic_identity(
@@ -243,7 +239,15 @@ def _apply_semantic_ingestion_disposition(
         return False
     semantic_result = admit(transaction, principal_id, event, projected)
     if semantic_result is AdmissionResult.DUPLICATE:
-        _require_matching_semantic_event(transaction, principal_id, event)
+        retained = _require_matching_semantic_event(transaction, principal_id, event)
+        if retained["kind"] == EventKind.OPAQUE_HISTORY and projected is not None:
+            _project_admitted_event(
+                transaction,
+                principal_id,
+                projected,
+                receipt_order=int(retained["receipt_order"]),
+                membership_epoch=state.membership_epoch,
+            )
     elif semantic_result is not AdmissionResult.ADMITTED:
         raise IngestionBatchIntegrityError
     if event.kind is EventKind.ROOM_LIFECYCLE and event.event_class is EventClass.CONTEXT_ONLY:
@@ -829,23 +833,40 @@ def admit(
     )
     if row is None:
         return AdmissionResult.DUPLICATE
-    tombstoned_event_id = None
     if projected is not None:
-        tombstoned_event_id = project(
+        _project_admitted_event(
             transaction,
             principal_id,
             projected,
             receipt_order=int(row["receipt_order"]),
             membership_epoch=epoch,
         )
+    return AdmissionResult.ADMITTED
+
+
+def _project_admitted_event(
+    transaction: Transaction,
+    principal_id: str,
+    projected: ProjectedEvent,
+    *,
+    receipt_order: int,
+    membership_epoch: int,
+) -> None:
+    """Project readable content and retire any source its redaction tombstones."""
+    tombstoned_event_id = project(
+        transaction,
+        principal_id,
+        projected,
+        receipt_order=receipt_order,
+        membership_epoch=membership_epoch,
+    )
     if tombstoned_event_id is not None:
         _settle_tombstoned_turn_source(
             transaction,
             principal_id,
-            room_id=event.room_id,
+            room_id=projected.room_id,
             event_id=tombstoned_event_id,
         )
-    return AdmissionResult.ADMITTED
 
 
 def _settle_tombstoned_turn_source(

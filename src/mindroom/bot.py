@@ -41,7 +41,7 @@ from mindroom.hooks import (
     emit,
     send_hook_message,
 )
-from mindroom.matrix.decrypt_failure import handle_decrypt_failure
+from mindroom.matrix.decrypt_diagnostics import DecryptionDiagnostics
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
 from mindroom.matrix.durable_membership import change_local_membership
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
@@ -79,7 +79,6 @@ from mindroom.tool_system.worker_routing import tool_execution_identity
 
 from . import constants
 from .agents import create_agent, show_tool_calls_for_agent
-from .authorization import is_sender_allowed_for_agent_reply_in_room
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
 from .coalescing_batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
@@ -378,6 +377,7 @@ class AgentBot:
     _reply_membership_sync: AgentReplyMembershipSync | None
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
+    _decryption_diagnostics: DecryptionDiagnostics
     _local_membership_lock: asyncio.Lock
     _ingestion_admission_progress: asyncio.Event
     _sync_continuity_store: SyncContinuityStore
@@ -666,7 +666,6 @@ class AgentBot:
                 on_room_lifecycle=self._on_room_member,
                 on_rtc=self._on_rtc_event,
                 on_redaction=self._on_redaction,
-                on_decryption_failure=self._on_decryption_failure,
                 on_approval_continuation=lambda event_id: self._response_runner.handoff_approval_source(event_id),
                 source_has_live_owner=lambda event_id: (
                     self._coalescing_gate.has_pending_source_event(event_id)
@@ -679,6 +678,14 @@ class AgentBot:
                 self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender)
             ),
             runtime_generation=self._approval_runtime_generation,
+        )
+        self._decryption_diagnostics = DecryptionDiagnostics(
+            agent_name=self.agent_name,
+            runtime=self._runtime_view,
+            runtime_paths=self.runtime_paths,
+            read_position=lambda room_id: self.journal_principal().ingestion_membership_position(room_id),
+            admit_response=lambda: admitted_response_decision(self.admission_gate, self.wait_for_admission_or_shutdown),
+            notice_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -2331,6 +2338,7 @@ class AgentBot:
                 after_admission=self._after_ingestion_admission,
                 after_sync=self._on_ingestion_frame_completion,
                 after_ack=self._ingestion_admission_progress.set,
+                on_decryption_failure=self._decryption_diagnostics.schedule,
                 authenticate_to_device=lambda source, event: cast("MindRoomAsyncClient", client).authenticate_to_device(
                     source,
                     event,
@@ -2570,13 +2578,6 @@ class AgentBot:
             reconcile_effects=self._reconcile_reply_membership_effects,
         )
 
-    async def _on_decryption_failure(self, room: nio.MatrixRoom, event: nio.MegolmEvent) -> None:
-        await self._handle_decryption_failure_event(
-            room,
-            event,
-            suppress_notice=self._room_lifecycle.decrypt_notice_is_fenced(room.room_id),
-        )
-
     def _delivered_turn_source_ids(self, turn_id: str) -> tuple[str, ...]:
         """Return every journal source one turn's answer discharges.
 
@@ -2588,43 +2589,6 @@ class AgentBot:
         """
         record = self._turn_store.get_turn_record(turn_id)
         return record.indexed_event_ids if record is not None else (turn_id,)
-
-    async def _handle_decryption_failure_event(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.MegolmEvent,
-        *,
-        suppress_notice: bool,
-    ) -> None:
-        """Apply authorization before encrypted-event recovery and visibility."""
-        client = self.client
-        assert client is not None
-        async with admitted_response_decision(
-            self.admission_gate,
-            self._response_runner.wait_for_admission_or_shutdown,
-        ):
-            if not is_sender_allowed_for_agent_reply_in_room(
-                event.sender,
-                self.agent_name,
-                self.config,
-                room.room_id,
-                self.runtime_paths,
-                self._runtime_view.agent_reply_memberships,
-            ):
-                self.logger.debug(
-                    "ignoring_decrypt_failure_from_unauthorized_sender",
-                    user_id=event.sender,
-                    room_id=room.room_id,
-                )
-                return
-            await handle_decrypt_failure(
-                client,
-                room,
-                event,
-                agent_name=self.agent_name,
-                runtime_paths=self.runtime_paths,
-                suppress_notice=suppress_notice,
-            )
 
     async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""

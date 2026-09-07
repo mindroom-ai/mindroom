@@ -110,6 +110,8 @@ An event that never reached either durable owner and later falls outside Matrix 
 Application first-sync readiness remains separate from the transport cursor and is published from an admitted batch's completion marker.
 `matrix/journal_ingress.py` uses nio provenance to admit `HISTORY` events as `CONTEXT_ONLY`, while live and recovered events may own actionable work.
 Historical events update the conversation projection without starting a turn.
+Unreadable history retains a settled identity so a late key can add context without reviving old work.
+Unreadable live and recovered ciphertext belongs to Nio recovery, with separate best-effort runtime diagnostics for authorized key requests and warnings; it does not claim or settle an application message ID.
 The same event-scoped provenance gates auxiliary room callbacks, so one live event cannot license unrelated historical call-state mutations.
 `SyncContinuityStore` persists only pending join/decrypt fences, with locked fresh-read updates and crash-atomic replacement.
 Only the v4 fence format is accepted; older continuity files must be archived during the explicit upgrade cutover.

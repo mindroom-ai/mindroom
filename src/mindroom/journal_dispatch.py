@@ -70,7 +70,6 @@ type _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[
 type _RtcCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
 type _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 type _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
-type _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
 type _ApprovalContinuationCallback = Callable[[str], Awaitable[bool | None]]
 
 
@@ -84,7 +83,6 @@ class JournalCallbacks:
     on_approval: _ApprovalCallback
     on_room_lifecycle: _RoomLifecycleCallback
     on_redaction: _RedactionCallback
-    on_decryption_failure: _DecryptionFailureCallback
     on_approval_continuation: _ApprovalContinuationCallback
     source_has_live_owner: Callable[[str], bool]
     turn_has_live_claim: Callable[[str], bool]
@@ -498,7 +496,6 @@ _BINDINGS: dict[EventKind, _Binding] = {
     EventKind.ROOM_LIFECYCLE: _Binding(nio.RoomMemberEvent, _completing(lambda c: c.on_room_lifecycle)),
     EventKind.RTC: _Binding(nio.UnknownEvent, _run_rtc_event),
     EventKind.REDACTION: _Binding(nio.RedactionEvent, _completing(lambda c: c.on_redaction)),
-    EventKind.DECRYPTION_FAILURE: _Binding(nio.MegolmEvent, _completing(lambda c: c.on_decryption_failure)),
 }
 
 

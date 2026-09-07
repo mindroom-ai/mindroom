@@ -40,6 +40,10 @@ The row is kept and the payload is dropped, which is the smallest thing that sur
 
 A context-only event never carries a payload at all: it is admitted already settled, so the field it would have used is written empty from the start.
 
+Unreadable historical ciphertext keeps only a settled envelope identity, without its encrypted payload.
+A later decrypted observation may populate conversation context but cannot make that identity actionable.
+Unreadable live and recovered ciphertext remains Nio's recovery responsibility and never owns application journal work; runtime diagnostics issue authorized, best-effort key requests and warnings separately.
+
 `visible_messages.content_json` holds the current visible body of one logical message and is the general long-lived conversation-body projection.
 
 The projection keeps no edit history, so an edit overwrites the body and the previous text is gone.

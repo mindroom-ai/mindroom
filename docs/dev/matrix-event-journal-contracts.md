@@ -66,6 +66,15 @@ and unknown statuses retain normal handling.
 Malformed ordinary timeline payloads have no semantic disposition and settle through the compatibility path so they cannot block later valid input.
 Malformed producer ownership or membership metadata still rejects admission.
 
+Unreadable live and recovered ciphertext never owns a canonical application event or a semantic callback.
+Nio owns its cryptographic recovery; a later readable observation is admitted using that observation's trusted provenance.
+Unreadable history retains only an opaque, settled envelope identity, without a ciphertext payload, so later decryption can populate conversation context but can never turn that old event into a request.
+Opaque duplicates must match the original room, sender, and timestamp; ordinary readable duplicates must also match kind and thread.
+An opaque reobservation cannot downgrade or settle an already admitted readable event.
+Runtime-owned decryption diagnostics wait off the ingestion pump for response admission, check current authorization and the original producer membership epoch, and use Nio's public room-key request API.
+They recheck authorization and tenure before sending a session-level warning and drain with their runtime before the client closes.
+These diagnostics are best effort after acknowledgement and never settle application event IDs.
+
 Quiesce stops new polling and drains already captured input while the pump stays alive, bounded by the five-second sync preparation timeout.
 If projection recovery prevents admission, shutdown continues and leaves the unacknowledged producer batch for restart.
 Close releases the session before the HTTP client.
@@ -179,7 +188,7 @@ An epoch advance drops conversation projections, reconciles approval cards and c
 The same transaction also **force-settles pending turn-backed events** for that room, clearing `source_json` and `semantic_consumer` while keeping the rows.
 This is what makes the enqueue refusal below *final* rather than permanent: left pending, the worker would offer the source again on every replay, the model would run again, and enqueue would refuse again, forever.
 Only turn-backed kinds and reactions already claimed by `INTERACTIVE_REACTION` are swept.
-Other reactions, redactions, approval replies, and decryption failures enqueue no answer, so the epoch predicate does not retire them; a redaction in particular still owes real cleanup that sweeping would drop silently.
+Other reactions, redactions, and approval replies enqueue no answer, so the epoch predicate does not retire them; a redaction in particular still owes real cleanup that sweeping would drop silently.
 An interactive-reaction claim that races after departure is rejected and settles that stale reaction against the new membership epoch.
 
 The in-flight turn is fenced at enqueue: `_enqueue_matrix_delivery` compares the epoch that admitted the turn against the room's current one and refuses to write the row when they differ.

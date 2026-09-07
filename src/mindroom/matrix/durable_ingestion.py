@@ -127,6 +127,7 @@ async def consume_one_ingestion_batch(
     after_admission: _AfterAdmission | None = None,
     after_sync: Callable[[], Awaitable[None]] | None = None,
     authenticate_to_device: _AuthenticateToDevice | None = None,
+    on_decryption_failure: Callable[[SyncRecord], None] | None = None,
     schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> ej.AdmissionFacts | None:
     """Commit the whole batch, run ordered hooks and callbacks, then acknowledge."""
@@ -146,24 +147,38 @@ async def consume_one_ingestion_batch(
     for record, converted_record, facts in zip(batch.records, converted.records, result.record_facts, strict=True):
         if after_admission is not None:
             await after_admission(converted_record, facts, record.provenance)
+        if (
+            record.kind is RecordKind.TIMELINE
+            and record.clear is None
+            and record.source.get("type") == "m.room.encrypted"
+        ):
+            if on_decryption_failure is not None:
+                on_decryption_failure(record)
+            continue
         if converted_record.disposition is ej.IngestionRecordDisposition.COMPATIBILITY_ONLY:
-            event = None
-            if record.kind is RecordKind.TO_DEVICE and authenticate_to_device is not None:
-                event = authenticate_to_device(record.source, restore_event(record))
-            # Auxiliary callbacks are at least once until ack. Semantic events
-            # belong to the journal dispatcher and never take this path.
-            if not (
-                record.kind is RecordKind.TIMELINE
-                and is_transport_progress_source(
-                    record.clear if record.clear is not None else record.source,
-                    self_sender=account_id,
-                )
-            ):
-                await session.dispatch(record, event=event)
+            await _dispatch_auxiliary_record(session, record, account_id, authenticate_to_device)
     if batch.completes_sync and after_sync is not None:
         await after_sync()
     await session.ack(batch)
     return result
+
+
+async def _dispatch_auxiliary_record(
+    session: _OwnedIngestionSession,
+    record: SyncRecord,
+    account_id: str,
+    authenticate_to_device: _AuthenticateToDevice | None,
+) -> None:
+    """Dispatch auxiliary callbacks at least once, filtering transport-only edits."""
+    if record.kind is RecordKind.TIMELINE and is_transport_progress_source(
+        record.clear if record.clear is not None else record.source,
+        self_sender=account_id,
+    ):
+        return
+    event = None
+    if record.kind is RecordKind.TO_DEVICE and authenticate_to_device is not None:
+        event = authenticate_to_device(record.source, restore_event(record))
+    await session.dispatch(record, event=event)
 
 
 async def run_ingestion_pump(
@@ -179,6 +194,7 @@ async def run_ingestion_pump(
     after_sync: Callable[[], Awaitable[None]] | None = None,
     after_ack: Callable[[], None] | None = None,
     authenticate_to_device: _AuthenticateToDevice | None = None,
+    on_decryption_failure: Callable[[SyncRecord], None] | None = None,
     schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> None:
     """Drain batches, waiting on work or the existing delivery projection barrier."""
@@ -193,6 +209,7 @@ async def run_ingestion_pump(
                 after_admission=after_admission,
                 after_sync=after_sync,
                 authenticate_to_device=authenticate_to_device,
+                on_decryption_failure=on_decryption_failure,
                 schedule_trigger_sender_is_managed=schedule_trigger_sender_is_managed,
             )
         except ej.DeliveryProjectionPendingError:

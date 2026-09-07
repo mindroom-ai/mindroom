@@ -782,7 +782,6 @@ def _obligation_runner(
             on_approval=cast("Any", noop),
             on_room_lifecycle=cast("Any", noop),
             on_redaction=cast("Any", noop),
-            on_decryption_failure=cast("Any", noop),
             on_approval_continuation=AsyncMock(return_value=None),
             source_has_live_owner=harness.gate.has_pending_source_event,
             turn_has_live_claim=harness.turn_store.has_live_turn_claim,

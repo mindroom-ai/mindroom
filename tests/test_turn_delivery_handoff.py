@@ -193,7 +193,6 @@ def _dispatcher(
             on_approval=cast("Any", unused),
             on_room_lifecycle=cast("Any", unused),
             on_redaction=on_redaction if on_redaction is not None else cast("Any", unused),
-            on_decryption_failure=cast("Any", unused),
             on_approval_continuation=AsyncMock(return_value=None),
             source_has_live_owner=lambda _event_id: owner_is_live,
             turn_has_live_claim=lambda _event_id: False,

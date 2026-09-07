@@ -105,7 +105,7 @@ _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     (_is_silent_schedule_trigger, EventKind.SCHEDULE_TRIGGER),
     (_is_rtc_event, EventKind.RTC),
     (_is_tool_approval_response, EventKind.APPROVAL),
-    (lambda event: isinstance(event, nio.MegolmEvent), EventKind.DECRYPTION_FAILURE),
+    (lambda event: isinstance(event, nio.MegolmEvent), EventKind.OPAQUE_HISTORY),
 )
 
 
@@ -272,6 +272,10 @@ def ingestion_timeline_views(
         raise ValueError(message)
     if security_metadata is not None:
         _restore_security_metadata(parsed, security_metadata, room_id=room_id, event_id=parsed.event_id)
+    if isinstance(parsed, nio.MegolmEvent) and provenance is not nio.TimelineEventProvenance.HISTORY:
+        # Nio owns ciphertext recovery. Only historical identities need an
+        # application tombstone so later decryption cannot revive old work.
+        return None
     kind = _event_kind(parsed)
     if kind is EventKind.SCHEDULE_TRIGGER and not schedule_trigger_sender_is_managed(parsed.sender):
         return None

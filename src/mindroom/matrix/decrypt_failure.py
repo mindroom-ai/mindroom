@@ -1,9 +1,8 @@
 """Visibility and recovery for undecryptable encrypted Matrix events.
 
-nio surfaces encrypted timeline events it cannot decrypt as ``MegolmEvent``.
-Without a registered callback those events vanish silently: the agent never
-answers and the logs show nothing, which makes wedged encryption sessions
-impossible to diagnose.
+Nio surfaces encrypted timeline events it cannot decrypt as ``MegolmEvent``.
+Runtime-owned diagnostics handle these observations without claiming their
+application event IDs or delaying admission of later decrypted content.
 This module logs each failure, sends a best-effort room-key request (nio
 delivers it to the bot account's own devices, so recovery normally needs the
 sender to post a new message), and posts one visible notice per (room,
@@ -26,6 +25,7 @@ from mindroom.constants import tracking_dir
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     import nio
@@ -152,7 +152,7 @@ async def handle_decrypt_failure(
     *,
     agent_name: str,
     runtime_paths: RuntimePaths,
-    suppress_notice: bool = False,
+    can_notify: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
     """Log one undecryptable event, request its key, and optionally notify."""
     session_id = event.session_id
@@ -186,7 +186,7 @@ async def handle_decrypt_failure(
                 session_id=session_id,
             )
 
-    if suppress_notice:
+    if can_notify is not None and not await can_notify():
         return
 
     # The check and the record run with no await between them, so concurrent
@@ -195,7 +195,7 @@ async def handle_decrypt_failure(
     if _notice_already_sent(runtime_paths, room.room_id, session_id):
         return
     # Record before sending so a process crash cannot cause a notice loop.
-    # An unsuccessful in-process attempt releases the claim for durable retry.
+    # An unsuccessful in-process attempt releases the claim for a later observation.
     _record_notice_sent(runtime_paths, room.room_id, session_id)
     delivered = False
     try:
