@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, cast
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
-from mindroom.access_policy import resolve_responder_access
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.auth import require_personal_connections_user
-from mindroom.api.dashboard_credential_scope import require_agent_oauth_connection_authorized
+from mindroom.api.personal_agent import resolve_personal_agent
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
@@ -70,32 +68,16 @@ async def _personal_connections(request: Request, response: Response) -> _Person
     agent_name = (snapshot.runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()
     if not agent_name:
         raise HTTPException(404, "Personal connections are not enabled", headers=_PRIVATE_HEADERS)
-    await require_personal_connections_user(request)
+    auth_user = await require_personal_connections_user(request)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     agent_name = (snapshot.runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()
     if not agent_name:
         raise HTTPException(404, "Personal connections are not enabled", headers=_PRIVATE_HEADERS)
     if request.query_params:
         raise HTTPException(400, "Connection target overrides are not accepted", headers=_PRIVATE_HEADERS)
-    config = snapshot.runtime_config
-    if config is None:
-        raise HTTPException(503, "Personal connections are unavailable", headers=_PRIVATE_HEADERS)
-    agent = config.agents.get(agent_name)
-    if agent is None or agent.private is None or agent.private.per not in {"user", "user_agent"}:
-        raise HTTPException(403, "Personal connections require a private agent", headers=_PRIVATE_HEADERS)
-    identity = require_agent_oauth_connection_authorized(
-        request,
-        config=config,
-        runtime_paths=snapshot.runtime_paths,
-        agent_name=agent_name,
-    )
-    # A browser has no conversation membership context. Use explicit user grants.
-    requester = identity.requester_id
-    access = resolve_responder_access(config, agent_name)
-    if requester is None or (
-        requester not in config.administrators and not any(fnmatchcase(requester, pattern) for pattern in access.users)
-    ):
-        raise HTTPException(403, "Personal agent access is required", headers=_PRIVATE_HEADERS)
+    personal = resolve_personal_agent(snapshot, cast("str", auth_user["matrix_user_id"]), channel="matrix")
+    config = personal.config
+    agent = config.agents[personal.agent_name]
     providers = load_oauth_providers_for_snapshot(snapshot)
     metadata = resolved_tool_metadata_for_runtime(snapshot.runtime_paths, config, tolerate_plugin_load_errors=True)
     services: dict[str, ConnectionService] = {}

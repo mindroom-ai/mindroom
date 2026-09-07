@@ -1,0 +1,296 @@
+"""Stateless MCP protocol, bounded payloads, and requester-owned cancellation."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
+
+import httpx
+import pytest
+from fastapi import HTTPException
+from starlette.applications import Starlette
+from starlette.routing import Route
+
+from mindroom.mcp_gateway.server import GatewayServer
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable
+
+    from starlette.requests import Request
+
+pytestmark = pytest.mark.asyncio
+
+_HEADERS = {"Accept": "application/json, text/event-stream", "Authorization": "Bearer alice"}
+
+
+async def _authenticate(request: Request) -> str:
+    header = request.headers.get("authorization")
+    if header not in {"Bearer alice", "Bearer bob"}:
+        raise HTTPException(
+            401,
+            "Invalid gateway token",
+            headers={
+                "WWW-Authenticate": 'Bearer resource_metadata="https://portal.example.org/.well-known/oauth-protected-resource/mcp"',
+            },
+        )
+    return "grant-" + header.removeprefix("Bearer ")
+
+
+@asynccontextmanager
+async def _client(
+    dispatch: Callable[[Request, str, dict[str, object]], Awaitable[dict[str, object]]],
+    *,
+    deadline_seconds: float = 60,
+) -> AsyncIterator[httpx.AsyncClient]:
+    server = GatewayServer(
+        authenticate=_authenticate,
+        dispatch=dispatch,
+        public_url="https://portal.example.org",
+        timeout_seconds=deadline_seconds,
+    )
+    app = Starlette(routes=[Route("/mcp", endpoint=server, methods=["GET", "POST", "DELETE"])])
+    async with (
+        server.run(),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="https://portal.example.org",
+            headers=_HEADERS,
+        ) as client,
+    ):
+        yield client
+
+
+def _call(
+    request_id: int | str = 1,
+    *,
+    name: str = "search_tools",
+    arguments: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments or {}},
+    }
+
+
+def _cancel(request_id: int | str) -> dict[str, object]:
+    return {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": request_id}}
+
+
+async def test_gateway_lists_only_static_bounded_meta_tools() -> None:
+    """Adding hundreds of integrations cannot enter initial model context."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        pytest.fail("Initial tool list must not invoke provider discovery")
+
+    async with _client(dispatch) as client:
+        initialized = await client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            },
+        )
+        assert initialized.status_code == 200
+        assert "mcp-session-id" not in initialized.headers
+        response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        assert response.status_code == 200
+        tools = response.json()["result"]["tools"]
+        assert {tool["name"] for tool in tools} == {"search_tools", "get_tool", "invoke_tool"}
+        assert len(response.content) < 8192
+
+
+async def test_every_request_authenticates_its_own_identity() -> None:
+    """SDK background context must not retain an earlier requester's identity."""
+
+    async def dispatch(request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        return {"user": request.headers["authorization"]}
+
+    async with _client(dispatch) as client:
+        alice = await client.post("/mcp", json=_call())
+        bob = await client.post("/mcp", json=_call(), headers={"Authorization": "Bearer bob"})
+        missing = await client.post("/mcp", json=_call(), headers={"Authorization": ""})
+        assert alice.json()["result"]["structuredContent"]["user"] == "Bearer alice"
+        assert bob.json()["result"]["structuredContent"]["user"] == "Bearer bob"
+        assert missing.status_code == 401
+        assert "resource_metadata=" in missing.headers["www-authenticate"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [_call(name="arbitrary"), _call(arguments={"limit": 999}), _call(arguments={"agent_name": "other"})],
+)
+async def test_meta_tool_names_and_inputs_cannot_bypass_static_surface(body: dict[str, object]) -> None:
+    """Unknown operations and targeting fields never reach the dispatcher."""
+    calls: list[str] = []
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        calls.append(_name)
+        return {"ok": True}
+
+    async with _client(dispatch) as client:
+        response = await client.post("/mcp", json=body)
+        result = response.json()
+        assert "error" in result or result["result"]["isError"]
+        assert calls == []
+
+
+async def test_gateway_hides_backend_exception_text() -> None:
+    """Provider secrets and exception payloads cannot become model output."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        message = "sensitive-test-credential"
+        raise RuntimeError(message)
+
+    async with _client(dispatch) as client:
+        response = await client.post("/mcp", json=_call())
+        assert response.json()["result"]["isError"] is True
+        assert "sensitive-test-credential" not in response.text
+
+
+async def test_cancel_is_bound_to_grant_and_typed_request_id() -> None:
+    """Another user or a stringified request ID cannot cancel an active call."""
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        return {}
+
+    async with _client(dispatch) as client:
+        call = asyncio.create_task(client.post("/mcp", json=_call(12)))
+        await asyncio.wait_for(started.wait(), 2)
+        assert (await client.post("/mcp", json=_cancel(12), headers={"Authorization": "Bearer bob"})).status_code == 202
+        assert not cancelled.is_set()
+        assert (await client.post("/mcp", json=_cancel("12"))).status_code == 202
+        assert not cancelled.is_set()
+        assert (await client.post("/mcp", json=_cancel(12))).status_code == 202
+        await asyncio.wait_for(cancelled.wait(), 2)
+        response = await asyncio.wait_for(call, 2)
+        assert response.status_code == 200
+        assert response.json()["result"]["structuredContent"]["error"]["code"] == "cancelled"
+
+
+async def test_duplicate_active_request_cannot_replace_cancellation_owner() -> None:
+    """A duplicate ID must not hide the first call from cancellation."""
+    started, finished = asyncio.Event(), asyncio.Event()
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finished.set()
+        return {}
+
+    async with _client(dispatch) as client:
+        first = asyncio.create_task(client.post("/mcp", json=_call(7)))
+        await asyncio.wait_for(started.wait(), 2)
+        second = await client.post("/mcp", json=_call(7))
+        assert second.json()["result"]["structuredContent"]["error"]["code"] == "duplicate_request"
+        await client.post("/mcp", json=_cancel(7))
+        await asyncio.wait_for(finished.wait(), 2)
+        await asyncio.wait_for(asyncio.gather(first, return_exceptions=True), 2)
+
+
+async def test_timeout_is_bounded_and_does_not_retry_execution() -> None:
+    """A deadline must end the wait without replaying a potentially mutating call."""
+    calls = 0
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        await asyncio.Event().wait()
+        return {}
+
+    async with _client(dispatch, deadline_seconds=0.02) as client:
+        response = await client.post("/mcp", json=_call())
+        assert response.json()["result"]["structuredContent"]["error"]["code"] == "timeout"
+        assert calls == 1
+
+
+async def test_gateway_rejects_oversized_requests_and_wrong_origins() -> None:
+    """Protocol limits and origin checks also protect cancellation interception."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        pytest.fail("Rejected request reached dispatcher")
+
+    async with _client(dispatch) as client:
+        oversized = await client.post(
+            "/mcp",
+            content=json.dumps({"padding": "x" * 131073}),
+            headers={"Content-Type": "application/json"},
+        )
+        assert oversized.status_code == 413
+        origin = await client.post("/mcp", json=_cancel(1), headers={"Origin": "https://evil.example.org"})
+        assert origin.status_code == 403
+
+
+@pytest.mark.parametrize("request_id", [True, 1.0, None])
+async def test_cancel_rejects_coercible_noninteger_request_ids(request_id: object) -> None:
+    """Boolean and float JSON values must not acquire an integer call's authority."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        return {}
+
+    async with _client(dispatch) as client:
+        response = await client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": request_id}},
+        )
+        assert response.status_code == 400
+
+
+async def test_invalid_arguments_cannot_expand_sdk_error_beyond_response_limit() -> None:
+    """SDK schema errors must not echo a large invalid input into model context."""
+    calls: list[str] = []
+
+    async def dispatch(_request: Request, name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        calls.append(name)
+        return {}
+
+    async with _client(dispatch) as client:
+        response = await client.post("/mcp", json=_call(arguments={"query": "\n" * 60000}))
+        assert response.status_code == 200
+        assert len(response.content) <= 131072
+        assert response.json()["result"]["isError"] is True
+        assert calls == []
+
+
+async def test_request_id_cannot_expand_an_ordinary_response_beyond_limit() -> None:
+    """Client-controlled envelope data must fit the complete response budget."""
+    calls: list[str] = []
+
+    async def dispatch(_request: Request, name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        calls.append(name)
+        return {"result": "x" * 40000}
+
+    async with _client(dispatch) as client:
+        response = await client.post("/mcp", json=_call("a" * 60000))
+        assert response.status_code == 400
+        assert len(response.content) <= 131072
+        assert calls == []
+
+
+async def test_response_limit_includes_valid_request_id_and_jsonrpc_envelope() -> None:
+    """A result near the payload ceiling cannot overflow through its response envelope."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        return {"result": "x" * 65460}
+
+    async with _client(dispatch) as client:
+        response = await client.post("/mcp", json=_call("a" * 126))
+        assert response.status_code == 200
+        assert len(response.content) <= 131072

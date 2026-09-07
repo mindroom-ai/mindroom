@@ -1,0 +1,465 @@
+"""SDK authorization provider with one-use, requester-bound durable grants."""
+
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import json
+import secrets
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, override
+from urllib.parse import urlencode, urlsplit
+
+from mcp.server.auth.provider import (
+    AccessToken,
+    AuthorizationCode,
+    AuthorizationParams,
+    AuthorizeError,
+    OAuthAuthorizationServerProvider,
+    RefreshToken,
+    RegistrationError,
+    TokenError,
+)
+from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+from mindroom.mcp_gateway.store import GatewayOAuthStore
+
+if TYPE_CHECKING:
+    import sqlite3
+
+    from mindroom.constants import RuntimePaths
+
+_SCOPES = ["mcp:tools"]
+_CONSENT_TTL = 600
+_CODE_TTL = 300
+_ACCESS_TTL = 900
+_GRANT_TTL = 2_592_000
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _secret() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _consent_callback(callback: str, **params: str | None) -> str:
+    """Append OAuth response fields without normalizing the validated callback."""
+    _, query_marker, query = callback.partition("?")
+    separator = "&" if query_marker else "?"
+    if query_marker and not query:
+        separator = ""
+    return callback + separator + urlencode({key: value for key, value in params.items() if value is not None})
+
+
+def _valid_url(value: str) -> bool:
+    parsed = urlsplit(value)
+    if not parsed.hostname or parsed.username or parsed.password or "#" in value or len(value) > 2048:
+        return False
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme != "http":
+        return False
+    if parsed.hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        return False
+
+
+class _GatewayAuthorizationCode(AuthorizationCode):
+    """Code bound to the user, agent and grant approved in the browser."""
+
+    requester_id: str
+    authenticated_user_id: str
+    agent_name: str
+    grant_id: str
+
+
+class GatewayAccessToken(AccessToken):
+    """Bearer principal scoped to one personal agent and OAuth grant."""
+
+    requester_id: str
+    authenticated_user_id: str
+    agent_name: str
+    grant_id: str
+
+
+class _GatewayRefreshToken(RefreshToken):
+    """Rotating capability that cannot extend its grant's maximum lifetime."""
+
+    requester_id: str
+    authenticated_user_id: str
+    agent_name: str
+    grant_id: str
+    resource: str
+
+
+@dataclass(frozen=True)
+class _GatewayConsent:
+    """Only validated display metadata and the current browser CSRF nonce."""
+
+    client_name: str
+    redirect_uri: str
+    csrf_token: str
+
+
+class GatewayOAuthProvider(
+    OAuthAuthorizationServerProvider[_GatewayAuthorizationCode, _GatewayRefreshToken, GatewayAccessToken],
+):
+    """Implement the MCP SDK authorization-server provider protocol."""
+
+    def __init__(self, runtime_paths: RuntimePaths, *, public_url: str) -> None:
+        origin = public_url.rstrip("/")
+        parsed = urlsplit(origin)
+        if not _valid_url(origin) or parsed.path or parsed.query:
+            msg = "MCP public URL must be an HTTPS origin or loopback HTTP origin"
+            raise ValueError(msg)
+        self.resource_url = origin + "/mcp"
+        self.issuer_url = origin + "/mcp/oauth"
+        self.consent_url = origin + "/connections/mcp/authorize"
+        self.store = GatewayOAuthStore(runtime_paths.storage_root)
+
+    @override
+    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        """Load registered client metadata without network fetches."""
+
+        def read(connection: sqlite3.Connection) -> OAuthClientInformationFull | None:
+            row = connection.execute("SELECT metadata FROM clients WHERE client_id = ?", (client_id,)).fetchone()
+            return OAuthClientInformationFull.model_validate_json(row["metadata"]) if row else None
+
+        return await self.store.transact(read)
+
+    @override
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        """Accept bounded metadata for public authorization-code/refresh clients."""
+        if (
+            not client_info.client_id
+            or len(client_info.client_id) > 256
+            or client_info.client_secret is not None
+            or client_info.token_endpoint_auth_method != "none"  # noqa: S105
+            or sorted(client_info.grant_types) != ["authorization_code", "refresh_token"]
+            or client_info.response_types != ["code"]
+            or client_info.scope not in (None, "mcp:tools")
+            or len(client_info.client_name or "") > 256
+            or len(client_info.model_dump_json()) > 16_384
+        ):
+            raise RegistrationError("invalid_client_metadata", "Unsupported public client metadata")  # noqa: EM101
+        redirects = client_info.redirect_uris
+        if not redirects or len(redirects) > 10 or any(not _valid_url(str(uri)) for uri in redirects):
+            raise RegistrationError("invalid_redirect_uri", "Invalid callback URL")  # noqa: EM101
+        normalized = client_info.model_copy(update={"scope": "mcp:tools"})
+
+        def save(connection: sqlite3.Connection) -> None:
+            existing = connection.execute(
+                "SELECT metadata FROM clients WHERE client_id = ?",
+                (normalized.client_id,),
+            ).fetchone()
+            if existing and existing["metadata"] != normalized.model_dump_json():
+                raise RegistrationError("invalid_client_metadata", "Client is already registered")  # noqa: EM101
+            connection.execute(
+                "INSERT OR IGNORE INTO clients VALUES (?, ?)",
+                (normalized.client_id, normalized.model_dump_json()),
+            )
+
+        await self.store.transact(save)
+
+    @override
+    async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
+        """Create an opaque, short-lived browser consent request."""
+        registered = await self.get_client(client.client_id or "")
+        if registered is None:
+            raise AuthorizeError("unauthorized_client", "Unknown client")  # noqa: EM101
+        if params.resource != self.resource_url:
+            raise AuthorizeError("invalid_request", "Exact MCP resource is required")  # noqa: EM101
+        if params.scopes != _SCOPES:
+            raise AuthorizeError("invalid_scope", "Only mcp:tools is supported")  # noqa: EM101
+        if params.redirect_uri not in (registered.redirect_uris or []):
+            raise AuthorizeError("invalid_request", "Unregistered callback")  # noqa: EM101
+        if len(params.code_challenge) != 43 or len(params.state or "") > 2048:
+            raise AuthorizeError("invalid_request", "Invalid authorization parameters")  # noqa: EM101
+        state = _secret()
+        payload = json.dumps(
+            {
+                "client_id": registered.client_id,
+                "client_name": registered.client_name or "MCP client",
+                "params": params.model_dump(mode="json"),
+            },
+        )
+
+        def save(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "INSERT INTO pending (state_hash, payload, expires_at) VALUES (?, ?, ?)",
+                (_digest(state), payload, time.time() + _CONSENT_TTL),
+            )
+
+        await self.store.transact(save)
+        return self.consent_url + "?" + urlencode({"state": state})
+
+    def _pending(self, connection: sqlite3.Connection, state: str) -> sqlite3.Row:
+        row = connection.execute("SELECT * FROM pending WHERE state_hash = ?", (_digest(state),)).fetchone()
+        if row is None or row["expires_at"] <= time.time():
+            raise AuthorizeError("invalid_request", "Consent is invalid or expired")  # noqa: EM101
+        payload = json.loads(row["payload"])
+        if payload["params"]["resource"] != self.resource_url:
+            raise AuthorizeError("invalid_request", "Consent resource changed")  # noqa: EM101
+        return row
+
+    async def begin_consent(
+        self,
+        state: str,
+        *,
+        requester_id: str,
+        authenticated_user_id: str,
+        agent_name: str,
+    ) -> _GatewayConsent:
+        """Bind the first authenticated visitor and issue a fresh browser nonce."""
+
+        def bind(connection: sqlite3.Connection) -> _GatewayConsent:
+            row = self._pending(connection, state)
+            if (
+                not requester_id
+                or not authenticated_user_id
+                or not agent_name
+                or (
+                    row["requester_id"] is not None
+                    and (
+                        row["requester_id"] != requester_id
+                        or row["agent_name"] != agent_name
+                        or row["authenticated_user_id"] != authenticated_user_id
+                    )
+                )
+            ):
+                raise AuthorizeError("access_denied", "Consent belongs to another principal")  # noqa: EM101
+            csrf = _secret()
+            connection.execute(
+                "UPDATE pending SET requester_id = ?, authenticated_user_id = ?, agent_name = ?, csrf_hash = ? WHERE state_hash = ?",
+                (requester_id, authenticated_user_id, agent_name, _digest(csrf), _digest(state)),
+            )
+            payload = json.loads(row["payload"])
+            return _GatewayConsent(payload["client_name"], payload["params"]["redirect_uri"], csrf)
+
+        return await self.store.transact(bind)
+
+    async def finish_consent(
+        self,
+        state: str,
+        *,
+        requester_id: str,
+        authenticated_user_id: str,
+        agent_name: str,
+        csrf_token: str,
+        allow: bool,
+    ) -> str:
+        """Consume browser consent once and return its authoritative callback."""
+
+        def finish(connection: sqlite3.Connection) -> str:
+            row = self._pending(connection, state)
+            if (
+                row["requester_id"] != requester_id
+                or row["authenticated_user_id"] != authenticated_user_id
+                or row["agent_name"] != agent_name
+                or not row["csrf_hash"]
+                or not secrets.compare_digest(row["csrf_hash"], _digest(csrf_token))
+            ):
+                raise AuthorizeError("access_denied", "Invalid consent principal or nonce")  # noqa: EM101
+            payload = json.loads(row["payload"])
+            params = AuthorizationParams.model_validate(payload["params"])
+            connection.execute("DELETE FROM pending WHERE state_hash = ?", (_digest(state),))
+            if not allow:
+                return _consent_callback(str(params.redirect_uri), error="access_denied", state=params.state)
+            now = time.time()
+            grant_id = _secret()
+            grant = {
+                "client_id": payload["client_id"],
+                "requester_id": requester_id,
+                "authenticated_user_id": authenticated_user_id,
+                "agent_name": agent_name,
+                "grant_id": grant_id,
+                "resource": self.resource_url,
+                "scopes": _SCOPES,
+            }
+            connection.execute(
+                "INSERT INTO grants (grant_id, payload, expires_at) VALUES (?, ?, ?)",
+                (grant_id, json.dumps(grant), now + _GRANT_TTL),
+            )
+            code = _GatewayAuthorizationCode(
+                **grant,
+                code=_secret(),
+                expires_at=now + _CODE_TTL,
+                code_challenge=params.code_challenge,
+                redirect_uri=params.redirect_uri,
+                redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
+            )
+            self._save_capability(connection, "code", code.code, code)
+            return _consent_callback(str(params.redirect_uri), code=code.code, state=params.state)
+
+        return await self.store.transact(finish)
+
+    @staticmethod
+    def _save_capability(
+        connection: sqlite3.Connection,
+        kind: str,
+        raw: str,
+        capability: _GatewayAuthorizationCode | GatewayAccessToken | _GatewayRefreshToken,
+    ) -> None:
+        payload = capability.model_dump(mode="json", exclude={"code", "token"})
+        connection.execute(
+            "INSERT INTO capabilities (token_hash, kind, grant_id, payload, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (_digest(raw), kind, capability.grant_id, json.dumps(payload), capability.expires_at),
+        )
+
+    def _load(
+        self,
+        connection: sqlite3.Connection,
+        kind: str,
+        raw: str,
+        *,
+        include_consumed: bool = False,
+    ) -> sqlite3.Row | None:
+        row = connection.execute(
+            """SELECT c.*, g.payload AS grant_payload, g.expires_at AS grant_expires_at, g.revoked
+               FROM capabilities c JOIN grants g ON g.grant_id = c.grant_id
+               WHERE c.token_hash = ? AND c.kind = ?""",
+            (_digest(raw), kind),
+        ).fetchone()
+        if row is None or row["revoked"] or (row["consumed"] and not include_consumed):
+            return None
+        if min(row["expires_at"], row["grant_expires_at"]) <= time.time():
+            return None
+        if json.loads(row["grant_payload"])["resource"] != self.resource_url:
+            return None
+        return row
+
+    @override
+    async def load_authorization_code(
+        self,
+        client: OAuthClientInformationFull,
+        authorization_code: str,
+    ) -> _GatewayAuthorizationCode | None:
+        """Look up a code without consuming it before SDK PKCE validation."""
+
+        def read(connection: sqlite3.Connection) -> _GatewayAuthorizationCode | None:
+            row = self._load(connection, "code", authorization_code)
+            if row is None:
+                return None
+            code = _GatewayAuthorizationCode(code=authorization_code, **json.loads(row["payload"]))
+            return code if code.client_id == client.client_id else None
+
+        return await self.store.transact(read)
+
+    @override
+    async def load_access_token(self, token: str) -> GatewayAccessToken | None:
+        """Resolve only an unexpired, unrevoked principal for this fixed resource."""
+
+        def read(connection: sqlite3.Connection) -> GatewayAccessToken | None:
+            row = self._load(connection, "access", token)
+            return GatewayAccessToken(token=token, **json.loads(row["payload"])) if row else None
+
+        return await self.store.transact(read)
+
+    @override
+    async def load_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: str,
+    ) -> _GatewayRefreshToken | None:
+        """Look up a refresh token; exchange detects reuse and revokes its family."""
+
+        def read(connection: sqlite3.Connection) -> _GatewayRefreshToken | None:
+            row = self._load(connection, "refresh", refresh_token, include_consumed=True)
+            if row is None:
+                return None
+            token = _GatewayRefreshToken(token=refresh_token, **json.loads(row["payload"]))
+            return token if token.client_id == client.client_id else None
+
+        return await self.store.transact(read)
+
+    def _issue_tokens(self, connection: sqlite3.Connection, row: sqlite3.Row) -> OAuthToken:
+        now = int(time.time())
+        expires_at = min(now + _ACCESS_TTL, int(row["grant_expires_at"]))
+        grant = json.loads(row["grant_payload"])
+        access = GatewayAccessToken(**grant, token=_secret(), expires_at=expires_at)
+        refresh = _GatewayRefreshToken(**grant, token=_secret(), expires_at=int(row["grant_expires_at"]))
+        self._save_capability(connection, "access", access.token, access)
+        self._save_capability(connection, "refresh", refresh.token, refresh)
+        return OAuthToken(
+            access_token=access.token,
+            refresh_token=refresh.token,
+            expires_in=expires_at - now,
+            scope="mcp:tools",
+        )
+
+    @override
+    async def exchange_authorization_code(
+        self,
+        client: OAuthClientInformationFull,
+        authorization_code: _GatewayAuthorizationCode,
+    ) -> OAuthToken:
+        """Consume a validated authorization code and issue its first token pair."""
+
+        def exchange(connection: sqlite3.Connection) -> OAuthToken:
+            row = self._load(connection, "code", authorization_code.code)
+            if (
+                row is None
+                or authorization_code.client_id != client.client_id
+                or json.loads(row["payload"]) != authorization_code.model_dump(mode="json", exclude={"code"})
+            ):
+                raise TokenError("invalid_grant", "Invalid authorization code")  # noqa: EM101
+            connection.execute(
+                "UPDATE capabilities SET consumed = 1 WHERE token_hash = ?",
+                (_digest(authorization_code.code),),
+            )
+            return self._issue_tokens(connection, row)
+
+        return await self.store.transact(exchange)
+
+    @override
+    async def exchange_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: _GatewayRefreshToken,
+        scopes: list[str],
+    ) -> OAuthToken:
+        """Rotate once; concurrent reuse revokes the whole grant, including the winner."""
+        if scopes != _SCOPES:
+            raise TokenError("invalid_scope", "Only mcp:tools is supported")  # noqa: EM101
+
+        def exchange(connection: sqlite3.Connection) -> OAuthToken | None:
+            row = self._load(connection, "refresh", refresh_token.token, include_consumed=True)
+            if (
+                row is None
+                or refresh_token.client_id != client.client_id
+                or json.loads(row["payload"]) != refresh_token.model_dump(mode="json", exclude={"token"})
+            ):
+                raise TokenError("invalid_grant", "Invalid refresh token")  # noqa: EM101
+            if row["consumed"]:
+                connection.execute("UPDATE grants SET revoked = 1 WHERE grant_id = ?", (row["grant_id"],))
+                return None
+            connection.execute(
+                "UPDATE capabilities SET consumed = 1 WHERE grant_id = ? AND kind IN ('access', 'refresh')",
+                (row["grant_id"],),
+            )
+            return self._issue_tokens(connection, row)
+
+        result = await self.store.transact(exchange)
+        if result is None:
+            raise TokenError("invalid_grant", "Refresh token was already used")  # noqa: EM101
+        return result
+
+    @override
+    async def revoke_token(self, token: GatewayAccessToken | _GatewayRefreshToken) -> None:
+        """Revoke the entire family using the stored capability's authoritative grant."""
+
+        def revoke(connection: sqlite3.Connection) -> None:
+            row = connection.execute(
+                "SELECT grant_id, payload FROM capabilities WHERE token_hash = ? AND kind IN ('access', 'refresh')",
+                (_digest(token.token),),
+            ).fetchone()
+            if row and json.loads(row["payload"]) == token.model_dump(mode="json", exclude={"token"}):
+                connection.execute("UPDATE grants SET revoked = 1 WHERE grant_id = ?", (row["grant_id"],))
+
+        await self.store.transact(revoke)

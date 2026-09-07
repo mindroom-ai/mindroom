@@ -119,7 +119,8 @@ Use a runtime build containing the portal before enabling the routes.
 
 Connect and disconnect requests require an HTTPS public origin and a same-origin `Origin` header matching `MINDROOM_PUBLIC_URL`, or the request base URL when unset.
 The portal API returns private, non-cacheable account status and never returns token or OAuth client configuration.
-It provides account onboarding for personal agents; it does not expose an aggregate MCP gateway endpoint.
+The optional [Personal MCP Gateway](https://docs.mindroom.chat/deployment/personal-mcp-gateway/) reuses these accounts to expose assigned tools to external MCP clients.
+Its machine endpoints use separate gateway OAuth bearer authentication; the browser consent page uses this same signed login.
 
 ## Instance Chart
 

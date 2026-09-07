@@ -1,0 +1,398 @@
+"""Real HTTP OAuth and personal MCP authorization boundaries."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+from dataclasses import replace
+from html.parser import HTMLParser
+from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlsplit
+
+import jwt
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from mindroom import constants
+from mindroom.api import config_lifecycle, main
+from mindroom.api.mcp_gateway import gateway_lifespan, install_gateway_routes
+from mindroom.config.main import Config
+from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+    from pathlib import Path
+
+    import httpx
+
+ORIGIN = "https://assistant.example.org"
+RESOURCE = ORIGIN + "/mcp"
+CALLBACK = "https://client.example.org/callback?flag=&tenant=one"
+VERIFIER = "v" * 64
+MCP_HEADERS = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-11-25"}
+
+
+class _Inputs(HTMLParser):
+    def __init__(self, html: str) -> None:
+        super().__init__()
+        self.values: dict[str, str] = {}
+        self.feed(html)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "input" and values.get("name") and values.get("value"):
+            self.values[str(values["name"])] = str(values["value"])
+
+
+@pytest.fixture
+def signed_headers(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], dict[str, str]]:
+    """Exercise production JWT verification with locally signed identities."""
+    key = _trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
+
+    def headers(user: str = "alice") -> dict[str, str]:
+        return {
+            "X-Trusted-User": user,
+            "X-Trusted-Email": f"{user}@example.org",
+            "X-Trusted-Jwt": _trusted_upstream_jwt(
+                key,
+                user_id=user,
+                email=f"{user}@example.org",
+                matrix_user_id=f"@{user}:example.org",
+                issuer="https://issuer.example.org",
+            ),
+        }
+
+    return headers
+
+
+@pytest.fixture
+def gateway_app(tmp_path: Path) -> FastAPI:
+    """Build the production gateway routes without starting Matrix or an LLM."""
+    env = {
+        "MINDROOM_PUBLIC_URL": ORIGIN,
+        "MINDROOM_MCP_GATEWAY_ENABLED": "true",
+        "MINDROOM_CONNECTIONS_AGENT": "personal",
+        "MATRIX_HOMESERVER": "https://example.org",
+        "MINDROOM_API_KEY": "owner-key",
+        "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+        "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+        "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+        "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
+        "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER": "X-Trusted-Jwt",
+        "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL": "https://issuer.example.org/jwks",
+        "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE": "mindroom-dashboard",
+        "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER": "https://issuer.example.org",
+        "MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM": "sub",
+        "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM": "matrix_user_id",
+    }
+    paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env=env,
+    )
+    config = Config.model_validate(
+        {
+            "agents": {
+                "personal": {
+                    "display_name": "Personal assistant",
+                    "role": "Help",
+                    "tools": ["calculator"],
+                    "private": {"per": "user_agent"},
+                    "access": {"users": ["@alice:example.org", "@bob:example.org"]},
+                },
+            },
+        },
+    )
+    app = FastAPI(lifespan=gateway_lifespan)
+    main.initialize_api_app(app, paths)
+    main._add_dashboard_cors_middleware(app, paths)
+    snapshot = config_lifecycle.require_api_state(app).snapshot
+    snapshot.runtime_config = config
+    snapshot.config_data = config.model_dump()
+    install_gateway_routes(app)
+    return app
+
+
+@pytest.fixture
+def gateway_client(gateway_app: FastAPI) -> Iterator[TestClient]:
+    """Run the gateway's real SDK and manager lifecycle."""
+    with TestClient(gateway_app, base_url=ORIGIN, follow_redirects=False) as client:
+        yield client
+
+
+def _authorize(client: TestClient) -> tuple[str, str]:
+    registration = client.post(
+        "/mcp/oauth/register",
+        json={
+            "client_name": "Local client <script>alert(1)</script>",
+            "redirect_uris": [CALLBACK],
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "scope": "mcp:tools",
+        },
+    )
+    assert registration.status_code == 201, registration.text
+    client_id = registration.json()["client_id"]
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(VERIFIER.encode()).digest()).rstrip(b"=").decode()
+    response = client.get(
+        "/mcp/oauth/authorize",
+        params={
+            "client_id": client_id,
+            "redirect_uri": CALLBACK,
+            "response_type": "code",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "resource": RESOURCE,
+            "scope": "mcp:tools",
+            "state": "client-state",
+        },
+    )
+    assert response.status_code in {302, 303, 307}, response.text
+    return client_id, response.headers["location"]
+
+
+def _consent(client: TestClient, url: str, headers: dict[str, str]) -> dict[str, str]:
+    response = client.get(url, headers=headers)
+    assert response.status_code == 200, response.text
+    assert "<script>" not in response.text
+    assert "no-store" in response.headers["cache-control"]
+    assert response.headers["referrer-policy"] == "strict-origin"
+    return _Inputs(response.text).values
+
+
+def _code(client: TestClient, headers: dict[str, str]) -> tuple[str, str]:
+    client_id, url = _authorize(client)
+    fields = _consent(client, url, headers)
+    response = client.post(
+        "/connections/mcp/authorize",
+        data={**fields, "decision": "allow"},
+        headers={**headers, "Origin": ORIGIN},
+    )
+    assert response.status_code == 303, response.text
+    callback = response.headers["location"]
+    assert callback.startswith(CALLBACK + "&")
+    assert parse_qs(urlsplit(callback).query)["state"] == ["client-state"]
+    return client_id, parse_qs(urlsplit(callback).query)["code"][0]
+
+
+def _exchange(client: TestClient, client_id: str, code: str, **overrides: str) -> httpx.Response:
+    return client.post(
+        "/mcp/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": client_id,
+            "code": code,
+            "redirect_uri": CALLBACK,
+            "code_verifier": VERIFIER,
+            "resource": RESOURCE,
+            **overrides,
+        },
+    )
+
+
+def _list(client: TestClient, token: str | None = None, **headers: str) -> httpx.Response:
+    return client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        headers={
+            **MCP_HEADERS,
+            **({"Authorization": f"Bearer {token}"} if token else {}),
+            **headers,
+        },
+    )
+
+
+def test_public_metadata_challenge_and_bearer_boundary(gateway_client: TestClient, signed_headers: Callable) -> None:
+    """External clients can discover OAuth without gaining browser or owner authority."""
+    client = gateway_client
+    metadata = client.get("/.well-known/oauth-authorization-server/mcp/oauth")
+    assert metadata.status_code == 200
+    assert metadata.json()["issuer"] == ORIGIN + "/mcp/oauth"
+    assert metadata.json()["token_endpoint_auth_methods_supported"] == ["none"]
+    resource = client.get("/.well-known/oauth-protected-resource/mcp").json()
+    assert resource["resource"] == RESOURCE
+    for response in [_list(client), _list(client, "owner-key"), _list(client, **signed_headers("alice"))]:
+        assert response.status_code == 401
+        assert 'resource_metadata="' + ORIGIN in response.headers["www-authenticate"]
+
+
+def test_client_login_pkce_token_refresh_revocation(gateway_client: TestClient, signed_headers: Callable) -> None:
+    """A standard public client can consent, use, refresh and revoke its own grant."""
+    client = gateway_client
+    client_id, code = _code(client, signed_headers("alice"))
+    assert _exchange(client, client_id, code, resource="https://other.example.org/mcp").status_code == 400
+    assert _exchange(client, client_id, code, code_verifier="wrong").status_code == 400
+    response = _exchange(client, client_id, code)
+    assert response.status_code == 200, response.text
+    tokens = response.json()
+    tools = _list(client, tokens["access_token"])
+    assert tools.status_code == 200, tools.text
+    assert {tool["name"] for tool in tools.json()["result"]["tools"]} == {"search_tools", "get_tool", "invoke_tool"}
+    assert "mcp-session-id" not in tools.headers
+    assert _exchange(client, client_id, code).status_code == 400
+    assert (
+        client.post(
+            "/mcp/oauth/token",
+            data={"grant_type": "refresh_token", "client_id": client_id, "refresh_token": tokens["refresh_token"]},
+        ).status_code
+        == 400
+    )
+    refreshed = client.post(
+        "/mcp/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "client_id": client_id,
+            "refresh_token": tokens["refresh_token"],
+            "resource": RESOURCE,
+        },
+    )
+    assert refreshed.status_code == 200, refreshed.text
+    assert _list(client, tokens["access_token"]).status_code == 401
+    access = refreshed.json()["access_token"]
+    assert _list(client, access).status_code == 200
+    assert client.post("/mcp/oauth/revoke", data={"client_id": client_id, "token": access}).status_code == 200
+    assert _list(client, access).status_code == 401
+
+
+def test_consent_checks_signed_user_origin_and_csrf(gateway_client: TestClient, signed_headers: Callable) -> None:
+    """Consent cannot be stolen, forged by another site, or accepted twice."""
+    client = gateway_client
+    _, url = _authorize(client)
+    assert client.get(url).status_code in {401, 403}
+    fields = _consent(client, url, signed_headers("alice"))
+    assert client.get(url, headers=signed_headers("bob")).status_code == 400
+    for headers, data in [
+        ({**signed_headers("bob"), "Origin": ORIGIN}, {**fields, "decision": "allow"}),
+        ({**signed_headers("alice"), "Origin": "https://evil.example.org"}, {**fields, "decision": "allow"}),
+        ({**signed_headers("alice"), "Origin": ORIGIN}, {**fields, "csrf_token": "wrong", "decision": "allow"}),
+    ]:
+        assert client.post("/connections/mcp/authorize", data=data, headers=headers).status_code in {400, 403}
+    headers = {**signed_headers("alice"), "Origin": ORIGIN}
+    response = client.post("/connections/mcp/authorize", data={**fields, "decision": "deny"}, headers=headers)
+    assert response.status_code == 303
+    assert response.headers["location"].startswith(CALLBACK + "&")
+    assert "error=access_denied" in response.headers["location"]
+    assert (
+        client.post("/connections/mcp/authorize", data={**fields, "decision": "allow"}, headers=headers).status_code
+        == 400
+    )
+
+
+def test_access_removal_and_alias_reassignment_reject_existing_token(
+    gateway_client: TestClient,
+    signed_headers: Callable,
+    gateway_app: FastAPI,
+) -> None:
+    """Old OAuth authority cannot survive access removal or change credential owner."""
+    client_id, code = _code(gateway_client, signed_headers("alice"))
+    token = _exchange(gateway_client, client_id, code).json()["access_token"]
+    config = config_lifecycle.require_api_state(gateway_app).snapshot.runtime_config
+    assert config is not None
+    config.agents["personal"].access.users = ["@bob:example.org"]
+    assert _list(gateway_client, token).status_code == 401
+    config.authorization.aliases = {"@bob:example.org": ["@alice:example.org"]}
+    assert _list(gateway_client, token).status_code == 401
+
+
+def test_original_signed_alias_must_still_resolve_to_bound_owner(
+    gateway_client: TestClient,
+    signed_headers: Callable,
+    gateway_app: FastAPI,
+) -> None:
+    """Moving an authenticated bridge identity cannot retain its previous owner's credentials."""
+    config = config_lifecycle.require_api_state(gateway_app).snapshot.runtime_config
+    assert config is not None
+    config.authorization.aliases = {"@alice:example.org": ["@bob:example.org"]}
+    client_id, code = _code(gateway_client, signed_headers("bob"))
+    token = _exchange(gateway_client, client_id, code).json()["access_token"]
+    assert _list(gateway_client, token).status_code == 200
+    config.authorization.aliases = {}
+    assert _list(gateway_client, token).status_code == 401
+
+
+def test_consent_cannot_change_signed_identity_even_with_same_canonical_owner(
+    gateway_client: TestClient,
+    signed_headers: Callable,
+    gateway_app: FastAPI,
+) -> None:
+    """Two signed identities sharing an alias cannot take over each other's consent."""
+    config = config_lifecycle.require_api_state(gateway_app).snapshot.runtime_config
+    assert config is not None
+    config.authorization.aliases = {"@alice:example.org": ["@bob:example.org"]}
+    _, url = _authorize(gateway_client)
+    _consent(gateway_client, url, signed_headers("bob"))
+    assert gateway_client.get(url, headers=signed_headers("alice")).status_code == 400
+
+
+def test_public_oauth_preflight_does_not_inherit_dashboard_cookie_cors(gateway_client: TestClient) -> None:
+    """Browser OAuth clients can reach public machine endpoints without dashboard credentials."""
+    for path in ["/mcp/oauth/register", "/mcp/oauth/token", "/mcp/oauth/revoke"]:
+        response = gateway_client.options(
+            path,
+            headers={
+                "Origin": "https://client.example.org",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "*"
+        assert "access-control-allow-credentials" not in response.headers
+
+
+def test_configured_browser_origin_can_complete_bearer_mcp_requests(
+    gateway_app: FastAPI,
+    signed_headers: Callable,
+) -> None:
+    """Gateway browser CORS and transport Origin validation must agree."""
+    snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={
+            **snapshot.runtime_paths.process_env,
+            "MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS": "https://client.example.org",
+        },
+    )
+    with TestClient(gateway_app, base_url=ORIGIN, follow_redirects=False) as client:
+        response = client.options(
+            "/mcp",
+            headers={
+                "Origin": "https://client.example.org",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type,authorization,mcp-protocol-version",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "https://client.example.org"
+        assert "access-control-allow-credentials" not in response.headers
+        client_id, code = _code(client, signed_headers("alice"))
+        token = _exchange(client, client_id, code).json()["access_token"]
+        response = _list(client, token, Origin="https://client.example.org")
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "https://client.example.org"
+        assert "www-authenticate" in response.headers["access-control-expose-headers"].lower()
+        assert _list(client, token, Origin="https://evil.example.org").status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("MINDROOM_MCP_GATEWAY_ENABLED", "false"),
+        ("MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT", "false"),
+        ("MINDROOM_PUBLIC_URL", "https://example.org/unexpected-path"),
+        ("MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS", "*"),
+    ],
+)
+def test_disabled_or_invalid_gateway_does_not_start(gateway_app: FastAPI, setting: str, value: str) -> None:
+    """An opt-in or auth configuration error cannot expose a partial gateway."""
+    snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={**snapshot.runtime_paths.process_env, setting: value},
+    )
+    with TestClient(gateway_app, base_url=ORIGIN) as client:
+        assert _list(client).status_code == 404
+        assert client.get("/.well-known/oauth-authorization-server/mcp/oauth").status_code == 404

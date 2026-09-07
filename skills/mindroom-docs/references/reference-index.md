@@ -73,6 +73,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Google Services OAuth (Admin) | `deployment/google-services-oauth.md` | `deployment/google-services-oauth/index.md` | `page__deployment__google-services-oauth__index.md` |
 | Google Services OAuth (Individual) | `deployment/google-services-user-oauth.md` | `deployment/google-services-user-oauth/index.md` | `page__deployment__google-services-user-oauth__index.md` |
 | Trusted Upstream Browser Auth | `deployment/trusted-upstream-auth.md` | `deployment/trusted-upstream-auth/index.md` | `page__deployment__trusted-upstream-auth__index.md` |
+| Personal MCP Gateway | `deployment/personal-mcp-gateway.md` | `deployment/personal-mcp-gateway/index.md` | `page__deployment__personal-mcp-gateway__index.md` |
 | Docker | `deployment/docker.md` | `deployment/docker/index.md` | `page__deployment__docker__index.md` |
 | Sandbox Proxy | `deployment/sandbox-proxy.md` | `deployment/sandbox-proxy/index.md` | `page__deployment__sandbox-proxy__index.md` |
 | Approved Egress | `deployment/approved-egress.md` | `deployment/approved-egress/index.md` | `page__deployment__approved-egress__index.md` |

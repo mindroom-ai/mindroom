@@ -212,6 +212,7 @@ class MCPServerManager:
         runtime_paths: RuntimePaths,
         *,
         on_catalog_change: Callable[[str], Awaitable[None]] | None = None,
+        validate_agent_function_names: bool = True,
     ) -> None:
         self.runtime_paths = runtime_paths
         self._states: dict[str, MCPServerState] = {}
@@ -223,6 +224,7 @@ class MCPServerManager:
         self._state_lifecycle_lock = asyncio.Lock()
         self._sync_lock = asyncio.Lock()
         self._on_catalog_change = on_catalog_change
+        self._validate_agent_function_names = validate_agent_function_names
         self._config: Config | None = None
         self._last_config_generation = 0
         self._shutdown = False
@@ -254,7 +256,16 @@ class MCPServerManager:
         msg = f"MCP server '{server_id}' is not connected"
         raise MCPConnectionError(server_id, msg)
 
-    async def sync_servers(self, config: Config) -> set[str]:
+    def is_configured_for(self, config: Config) -> bool:
+        """Return whether this manager still owns the request's configuration."""
+        return not self._shutdown and self._config == config
+
+    def _require_expected_config(self, server_id: str, config: Config | None) -> None:
+        if config is not None and not self.is_configured_for(config):
+            msg = "MCP configuration changed; start a new request"
+            raise MCPConnectionError(server_id, msg)
+
+    async def sync_servers(self, config: Config, *, discover: bool = True) -> set[str]:
         """Reconcile live server sessions against the active config."""
         async with self._sync_lock:
             desired_servers = {
@@ -266,6 +277,8 @@ class MCPServerManager:
             if retired_states is None:
                 return set()
             await run_coroutine_until_complete(self._drain_retired_states(tuple(retired_states)))
+            if not discover:
+                return set()
             async with self._state_lifecycle_lock:
                 if self._shutdown:
                     return set()
@@ -441,16 +454,20 @@ class MCPServerManager:
         worker_target: ResolvedWorkerTarget | None = None,
         include_tools: Collection[str] | None = None,
         exclude_tools: Collection[str] | None = None,
+        expected_config: Config | None = None,
     ) -> ToolResult:
         """Call one remote MCP tool through the cached session."""
+        self._require_expected_config(server_id, expected_config)
         state = self._require_state(server_id)
         if state.config.auth is not None:
             for _attempt in range(_MAX_REQUEST_STATE_RETRIES):
+                self._require_expected_config(server_id, expected_config)
                 request_state, authorization_lease = await self._request_state_and_headers(
                     server_id,
                     credentials_manager=credentials_manager,
                     worker_target=worker_target,
                 )
+                self._require_expected_config(server_id, expected_config)
                 try:
                     if (
                         request_state.catalog is None
@@ -465,6 +482,7 @@ class MCPServerManager:
                             auth_headers=authorization_lease.headers,
                             authorization_lease=authorization_lease,
                         )
+                    self._require_expected_config(server_id, expected_config)
                     return await self._call_tool_once_or_reconnect(
                         request_state,
                         remote_tool_name,
@@ -482,6 +500,7 @@ class MCPServerManager:
 
         if state.catalog is None or state.session is None or not state.connected:
             await self._refresh_server_catalog(state, notify=False)
+        self._require_expected_config(server_id, expected_config)
         return await self._call_tool_once_or_reconnect(
             state,
             remote_tool_name,
@@ -497,9 +516,18 @@ class MCPServerManager:
         *,
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
+        expected_config: Config | None = None,
     ) -> MCPServerCatalog:
-        """Return the catalog for one OAuth-backed MCP credential scope."""
+        """Discover only the selected server, retaining OAuth credential scope."""
+        self._require_expected_config(server_id, expected_config)
+        base_state = self._require_state(server_id)
+        if base_state.config.auth is None:
+            if base_state.catalog is None or base_state.stale or not base_state.connected:
+                await self._refresh_server_catalog(base_state, notify=False)
+            self._require_expected_config(server_id, expected_config)
+            return self.get_catalog(server_id)
         for _attempt in range(_MAX_REQUEST_STATE_RETRIES):
+            self._require_expected_config(server_id, expected_config)
             state, authorization_lease = await self._request_state_and_headers(
                 server_id,
                 credentials_manager=credentials_manager,
@@ -513,7 +541,8 @@ class MCPServerManager:
                         auth_headers=authorization_lease.headers,
                         authorization_lease=authorization_lease,
                     )
-                return await self._request_catalog_with_lock(state, authorization_lease)
+                catalog = await self._request_catalog_with_lock(state, authorization_lease)
+                self._require_expected_config(server_id, expected_config)
             except _MCPAuthorizationChangedError:
                 continue
             except MCPError as exc:
@@ -527,6 +556,8 @@ class MCPServerManager:
                     self._disconnect_rejected_oauth_scope_state(authorization_lease.session_key, state),
                 )
                 raise rejection from exc
+            else:
+                return catalog
         msg = f"MCP server '{server_id}' authorization changed repeatedly during catalog resolution"
         raise MCPConnectionError(server_id, msg)
 
@@ -1711,6 +1742,8 @@ class MCPServerManager:
         candidate_catalog: MCPServerCatalog | None = None,
     ) -> dict[int, tuple[MCPServerState, set[str]]]:
         """Collect every state whose provider-visible function surface conflicts."""
+        if not self._validate_agent_function_names:
+            return {}
         context = self._function_surface_context()
         if context is None:
             return {}

@@ -86,6 +86,7 @@ nav = [
     { "Google Services OAuth (Admin)" = "deployment/google-services-oauth.md" },
     { "Google Services OAuth (Individual)" = "deployment/google-services-user-oauth.md" },
     { "Trusted Upstream Browser Auth" = "deployment/trusted-upstream-auth.md" },
+    { "Personal MCP Gateway" = "deployment/personal-mcp-gateway.md" },
     { "Docker" = "deployment/docker.md" },
     { "Sandbox Proxy" = "deployment/sandbox-proxy.md" },
     { "Approved Egress" = "deployment/approved-egress.md" },

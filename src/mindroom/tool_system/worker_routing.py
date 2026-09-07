@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 WorkerScope = Literal["shared", "user", "user_agent"]
 ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
-_ExecutionChannel = Literal["matrix", "openai_compat"]
+_ExecutionChannel = Literal["matrix", "openai_compat", "mcp"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _DEFAULT_WORKER_NAME_PREFIX = "mindroom-worker"
@@ -112,10 +112,10 @@ def parse_tool_execution_identity_payload(
 
     raw_payload = cast("dict[str, object]", payload)
     channel = raw_payload.get("channel")
-    if channel not in ("matrix", "openai_compat"):
+    if channel not in ("matrix", "openai_compat", "mcp"):
         return _invalid_tool_execution_identity_payload(
             strict,
-            f"{error_prefix}.channel must be matrix or openai_compat",
+            f"{error_prefix}.channel must be matrix, openai_compat, or mcp",
         )
 
     agent_name = raw_payload.get("agent_name")

@@ -37,8 +37,9 @@ dependencies = [
   "idna>=3.13",
   "jinja2>=3.1",
   "json5>=0.13",
+  "jsonschema>=4.26",
   "markdown-it-py>=4",
-  "mcp[cli]>=1.12.4,<2",
+  "mcp[cli]>=1.27,<2",
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
@@ -51,6 +52,7 @@ dependencies = [
   "pyjwt>=2.8",
   "python-dotenv>=1",
   "pyyaml>=6",
+  "referencing>=0.37",
   "rich",
   "structlog>=24.1",
   "tenacity>=9.1.2",

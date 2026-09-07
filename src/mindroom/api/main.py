@@ -30,6 +30,7 @@ from mindroom.api.homeassistant_integration import router as homeassistant_route
 from mindroom.api.integrations import router as integrations_router
 from mindroom.api.knowledge import router as knowledge_router
 from mindroom.api.matrix_operations import router as matrix_router
+from mindroom.api.mcp_gateway import gateway_cors_origins, gateway_lifespan, install_gateway_routes
 from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
@@ -89,6 +90,7 @@ class _DashboardCorsSettings:
 
     allow_origins: tuple[str, ...]
     allow_credentials: bool
+    expose_headers: tuple[str, ...] = _DASHBOARD_CORS_EXPOSE_HEADERS
 
 
 class _RuntimeDashboardCorsMiddleware:
@@ -107,11 +109,17 @@ class _RuntimeDashboardCorsMiddleware:
         self._middleware_by_settings: dict[_DashboardCorsSettings, CORSMiddleware] = {}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        middleware = self._middleware_for_current_runtime()
+        middleware = self._middleware_for_current_runtime(scope.get("path", ""))
         await middleware(scope, receive, send)
 
-    def _middleware_for_current_runtime(self) -> CORSMiddleware:
-        settings = _dashboard_cors_settings(self._current_runtime_paths())
+    def _middleware_for_current_runtime(self, path: str) -> CORSMiddleware:
+        paths = self._current_runtime_paths()
+        origins = gateway_cors_origins(paths, path)
+        settings = (
+            _DashboardCorsSettings(origins, allow_credentials=False, expose_headers=("WWW-Authenticate",))
+            if origins is not None
+            else _dashboard_cors_settings(paths)
+        )
         middleware = self._middleware_by_settings.get(settings)
         if middleware is None:
             middleware = CORSMiddleware(
@@ -120,7 +128,7 @@ class _RuntimeDashboardCorsMiddleware:
                 allow_credentials=settings.allow_credentials,
                 allow_methods=["*"],
                 allow_headers=["*"],
-                expose_headers=list(_DASHBOARD_CORS_EXPOSE_HEADERS),
+                expose_headers=list(settings.expose_headers),
             )
             self._middleware_by_settings[settings] = middleware
         return middleware
@@ -514,7 +522,8 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     watch_task = asyncio.create_task(_watch_config(stop_event, _app))
     worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event, _app))
 
-    yield
+    async with gateway_lifespan(_app):
+        yield
 
     stop_event.set()
     watch_task.cancel()
@@ -708,6 +717,7 @@ def _set_config_generation_header(response: Response, generation: int) -> None:
 # Include routers
 app.include_router(auth_router)
 app.include_router(connections_router)
+install_gateway_routes(app)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
 app.include_router(integrations_router, dependencies=[Depends(verify_user)])

@@ -66,6 +66,7 @@
 - [Google Services OAuth (Admin)](https://docs.mindroom.chat/deployment/google-services-oauth/)
 - [Google Services OAuth (Individual)](https://docs.mindroom.chat/deployment/google-services-user-oauth/)
 - [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/)
+- [Personal MCP Gateway](https://docs.mindroom.chat/deployment/personal-mcp-gateway/)
 - [Docker](https://docs.mindroom.chat/deployment/docker/)
 - [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/)
 - [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)

@@ -354,3 +354,11 @@ _.runs_from_rows  # agno SqliteDb calls it on the run-object cache (src/mindroom
 _enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/agent_storage.py)
 
 export_threads  # FastAPI endpoint (src/mindroom/api/thread_exports.py)
+
+# MCP SDK OAuthAuthorizationServerProvider callbacks invoked by SDK HTTP handlers.
+_.register_client
+_.load_authorization_code
+_.load_refresh_token
+_.exchange_authorization_code
+_.exchange_refresh_token
+_.revoke_token
