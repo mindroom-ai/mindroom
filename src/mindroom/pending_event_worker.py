@@ -17,7 +17,9 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.cancellation import request_task_cancel
 from mindroom.logging_config import get_logger
+from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -112,6 +114,7 @@ class PendingEventWorker:
     _retry: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _deferral_scan: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _stopped: bool = field(default=False, init=False, repr=False)
+    _process_shutdown: bool = field(default=False, init=False, repr=False)
     _stop_generation: int = field(default=0, init=False, repr=False)
     _retry_delay_seconds: float = field(default=_INITIAL_RETRY_DELAY_SECONDS, init=False, repr=False)
     _failed_rooms: set[str] = field(default_factory=set, init=False, repr=False)
@@ -133,6 +136,7 @@ class PendingEventWorker:
         if self._pump is not None and not self._pump.done():
             return
         self._stopped = False
+        self._process_shutdown = False
         self._wake.set()
         self._pump = asyncio.create_task(self._run(), name="pending_event_worker")
 
@@ -149,33 +153,54 @@ class PendingEventWorker:
         for event_id in event_ids:
             self._deferred.pop(event_id, None)
 
-    async def stop(self) -> None:
-        """Stop draining, leaving unfinished events pending for the next start."""
+    def _owned_tasks(self) -> tuple[asyncio.Task[None], ...]:
+        return tuple(
+            task for task in (self._pump, self._retry, self._deferral_scan, *self._lanes.values()) if task is not None
+        )
+
+    @property
+    def pending_task_count(self) -> int:
+        """Count callback and pump owners that still require runtime resources."""
+        return sum(not task.done() for task in self._owned_tasks())
+
+    def begin_shutdown(self, *, shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN) -> None:
+        """Close admission and mark every cancellation before teardown can yield."""
+        process_shutdown = shutdown_intent.stop_reason == "shutdown"
+        if self._stopped and (not process_shutdown or self._process_shutdown):
+            return
+        if not self._stopped:
+            self._stop_generation += 1
         self._stopped = True
-        self._stop_generation += 1
-        pump = self._pump
+        self._process_shutdown = process_shutdown
+        for task in self._owned_tasks():
+            if not task.done():
+                request_task_cancel(
+                    task,
+                    cancel_source=shutdown_intent.cancel_source,
+                    process_shutdown=process_shutdown,
+                )
+
+    async def wait_stopped(self, *, timeout_seconds: float | None) -> bool:
+        """Wait within the caller's budget, retaining any unfinished owners."""
+        tasks = self._owned_tasks()
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
+            if pending:
+                return False
+            for task in done:
+                if not task.cancelled():
+                    task.result()
         self._pump = None
-        retry = self._retry
         self._retry = None
-        deferral_scan = self._deferral_scan
         self._deferral_scan = None
-        for task in (pump, retry, deferral_scan):
-            if task is not None:
-                task.cancel()
-                try:  # noqa: SIM105 - the task may already have finished
-                    await task
-                except asyncio.CancelledError:
-                    pass
-        lanes = tuple(self._lanes.values())
-        for lane in lanes:
-            lane.cancel()
-        for lane in lanes:
-            try:  # noqa: SIM105 - cancellation is the expected outcome
-                await lane
-            except asyncio.CancelledError:
-                pass
         self._lanes.clear()
         self._rooms_with_more.clear()
+        return True
+
+    async def stop(self) -> None:
+        """Stop draining, leaving unfinished events pending for the next start."""
+        self.begin_shutdown()
+        await self.wait_stopped(timeout_seconds=None)
 
     async def drain_once(self) -> int:
         """Run every currently pending event to completion and return the count.
@@ -264,6 +289,8 @@ class PendingEventWorker:
 
     async def _dispatch_ready_rooms(self) -> None:
         by_room, more_remains = await self._collect_dispatchable()
+        if self._stopped:
+            return
         started = False
         for room_id, events in by_room.items():
             active = self._lanes.get(room_id)
@@ -314,7 +341,7 @@ class PendingEventWorker:
     def _lane_finished(self, room_id: str, lane: asyncio.Task[None]) -> None:
         if self._lanes.get(room_id) is lane:
             del self._lanes[room_id]
-        if lane.cancelled():
+        if self._stopped or lane.cancelled():
             return
         if room_id in self._failed_rooms:
             self._schedule_retry()
@@ -506,6 +533,8 @@ class PendingEventWorker:
         """
         room_id = events[0].room_id if events else ""
         for event in events:
+            if self._stopped:
+                return
             try:
                 if not await self.store.is_pending(event.event_id):
                     self._deferred.pop(event.event_id, None)

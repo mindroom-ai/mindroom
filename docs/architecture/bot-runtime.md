@@ -58,6 +58,13 @@ Matrix callback
 
 ## Durable Dispatch Boundary
 
+Orderly shutdown closes response and journal callback admission before withdrawing runtime capabilities, and tags both sets of owners before cancelling them.
+The source-quiescence request stays latched across supervisor retries and late startup completion, so transport lifecycle notifications cannot reopen admission.
+Interrupted callbacks remain pending for exact replay, including edited messages whose revision has not reached a final response.
+If process shutdown upgrades an earlier generic cancellation, the response attempt retags and retains its existing child until that child finishes unwinding.
+Callback cleanup and response recovery share bounded preparation and finalization budgets; a timeout retains their owners and keeps the Matrix client and journal open until cleanup finishes.
+Shutdown invalidates membership readiness after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.
+
 Nio's owned ingestion session persists prepared source work, and MindRoom's batch pump validates and commits its sequence advance and semantic effects before acknowledging the batch.
 The pump wakes journal dispatch after batch acknowledgement; a crash between journal commit and Nio acknowledgement replays the batch without duplicating semantic work.
 Room-backed authorization uses authenticated batch provenance: uncertainty revokes grants before admission, and live membership changes update grants after admission.

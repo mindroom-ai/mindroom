@@ -63,6 +63,7 @@ from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
     RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
     SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
     ResponseShutdownTimeoutError,
@@ -1299,6 +1300,8 @@ class AgentBot:
         first ``SyncResponse`` or ``SyncError`` arrives.  The watchdog has its
         own startup timeout for the pre-first-response window.
         """
+        if self._matrix_ingestion_quiesce_requested:
+            return
         self._sync_shutting_down = False
         self._sync_shutdown_budget = None
         self._deferred_stop_required = False
@@ -1846,6 +1849,8 @@ class AgentBot:
 
     def release_pending_turn_journal_replay(self) -> None:
         """Start semantic dispatch after the runtime publishes initial memberships."""
+        if self._sync_shutting_down:
+            return
         self._journal_dispatcher.start()
         self._journal_dispatcher.release_turn_replay()
 
@@ -2020,6 +2025,8 @@ class AgentBot:
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> None:
         """Stop the agent bot."""
+        if shutdown_intent.stop_reason == "shutdown":
+            self.begin_process_shutdown()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -2043,11 +2050,17 @@ class AgentBot:
             defer_expected_response_timeout=shutdown_intent.stop_reason == "shutdown",
         )
         pending_response_count = self._response_runner.pending_inbox_response_count
-        if shutdown_intent.stop_reason != "restart" and pending_response_count > 0:
+        pending_callback_count = (
+            self._journal_dispatcher.pending_task_count if shutdown_intent.stop_reason == "shutdown" else 0
+        )
+        if shutdown_intent.stop_reason != "restart" and (pending_response_count > 0 or pending_callback_count > 0):
             self._deferred_stop_required = True
             if failures:
                 raise failures[0]
-            msg = f"{pending_response_count} response tasks still own runtime resources"
+            msg = (
+                f"{pending_response_count} response tasks and {pending_callback_count} journal tasks "
+                "still own runtime resources"
+            )
             raise ResponseShutdownTimeoutError(msg)
 
         await self._release_stopped_resources(failures, shutdown_intent=shutdown_intent)
@@ -2073,10 +2086,15 @@ class AgentBot:
             raise RuntimeError(msg)
         if not self._deferred_stop_required:
             return
+        shutdown_budget = ShutdownBudget.start(timeout_seconds)
         try:
+            self._deferred_stop_phase = DeferredStopPhase.JOURNAL_DISPATCHER
+            if not await self._journal_dispatcher.wait_stopped(timeout_seconds=shutdown_budget.remaining_seconds()):
+                msg = "journal callback cleanup exceeded bounded finalization"
+                raise ResponseShutdownTimeoutError(msg)
             self._deferred_stop_phase = DeferredStopPhase.RECOVERY_PROOF
             recoverable = await self._response_runner.finish_process_shutdown_recovery(
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=shutdown_budget.remaining_seconds(),
             )
             if not recoverable:
                 msg = "deferred response cleanup lacks durable recovery proof"
@@ -2213,6 +2231,15 @@ class AgentBot:
 
         await asyncio.gather(drain_task, return_exceptions=True)
 
+    def begin_process_shutdown(self) -> None:
+        """Close response and callback admission before any shutdown teardown yields."""
+        self._matrix_ingestion_quiesce_requested = True
+        self._sync_shutting_down = True
+        self._delivery_recovery_wake.set()
+        self._response_runner.refuse_pending_admissions()
+        self._journal_dispatcher.begin_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+        self._response_runner.begin_process_shutdown()
+
     async def prepare_for_sync_shutdown(
         self,
         *,
@@ -2230,7 +2257,7 @@ class AgentBot:
         self._delivery_recovery_wake.set()
         self._response_runner.refuse_pending_admissions()
         if shutdown_intent.stop_reason == "shutdown":
-            self._response_runner.begin_process_shutdown()
+            self.begin_process_shutdown()
         if shutdown_intent.stop_reason == "shutdown" and self.client is not None:
             cast(
                 _ProcessShutdownMatrixClient,  # noqa: TC006 - runtime reference proves the private protocol is live
@@ -2246,6 +2273,9 @@ class AgentBot:
             timeout=shutdown_budget.remaining_seconds(),
             owner=self._runtime_view,
             shutdown_intent=shutdown_intent,
+        )
+        callbacks_drained = shutdown_intent.stop_reason != "shutdown" or await self._journal_dispatcher.wait_stopped(
+            timeout_seconds=shutdown_budget.remaining_seconds(),
         )
         drain_result = await self._coalescing_gate.drain_all(
             shutdown_budget=shutdown_budget,
@@ -2278,6 +2308,7 @@ class AgentBot:
         )
         if (
             not background_tasks_completed
+            or not callbacks_drained
             or not drain_result.completed
             or not responses_drained
             or not post_drain_background_tasks_completed
@@ -2286,6 +2317,7 @@ class AgentBot:
                 "runtime_drain_incomplete_with_durable_dispatch_recovery",
                 agent_name=self.agent_name,
                 background_tasks_completed=background_tasks_completed,
+                callbacks_drained=callbacks_drained,
                 coalescing_drain_completed=drain_result.completed,
                 responses_drained=responses_drained,
                 response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
