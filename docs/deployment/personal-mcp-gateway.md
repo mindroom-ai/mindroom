@@ -95,6 +95,9 @@ MindRoom issues its own client grant; upstream service tokens stay in the existi
 
 This implementation uses the Python MCP SDK 1.x Streamable HTTP protocol, tested with protocol version `2025-11-25`.
 It uses stateless requests and JSON responses; it does not offer resumable SSE sessions, resources, prompts, or newer protocol features outside that SDK version.
+The gateway validates SDK request and notification envelopes before dispatch and returns fixed errors without logging malformed input or unknown tool names.
+Valid unsolicited response/error envelopes are acknowledged with an empty HTTP 202 and dropped: this stateless gateway never sends correlated client-result requests.
+If bidirectional requests or stateful sessions are added later, their client responses must instead reach the owning session.
 Client applications need support for this OAuth registration and discovery flow; a static bearer-only configuration screen cannot perform initial login.
 
 ## Access and lifecycle
@@ -132,10 +135,36 @@ Abandoned registrations expire 24 hours after registration; a live grant or pend
 Anonymous reads and repeat registration do not extend that retention period.
 Pending consent and client metadata without a live grant share a 64-MiB onboarding budget, including an allowance for row and index overhead.
 Set the positive integer `MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES` to adjust this storage budget.
-At capacity, registration returns HTTP 503 with `Retry-After`; authorization returns the OAuth `temporarily_unavailable` error to its validated callback.
+At capacity, registration returns private HTTP 503 with `Retry-After: 60`; authorization returns the OAuth `temporarily_unavailable` error to its validated callback.
 Expired onboarding records and inactive grant families are pruned during store write operations and client-registration lookups.
 Access and refresh token bindings remain available throughout a live grant's lifetime for revocation and refresh replay detection.
-These controls bound anonymous onboarding state; they do not impose a user or device count limit or block existing grants from refreshing or being revoked.
+This onboarding budget is separate from the durable OAuth limits below.
+
+All retained OAuth state shares a 256-MiB logical budget, configured with the positive integer `MINDROOM_MCP_OAUTH_MAX_BYTES`.
+Each requester has a 16-MiB logical budget, configured with the positive integer `MINDROOM_MCP_OAUTH_USER_MAX_BYTES`.
+Accounting includes UTF-8 payloads and identifiers, a 1024-byte allowance per row for fixed fields and indexes, and conservative counter bookkeeping.
+Requester usage includes its grants and capabilities plus registered client metadata charged once per grant; global usage counts the actual client row once.
+Global admission applies atomically when registering clients, creating or binding consent, approving grants, and issuing tokens; requester admission applies to grant approval and token issuance.
+Increasing limits admits more retained state; decreasing limits may prevent existing clients from refreshing until quota is released.
+An existing database above either limit remains readable and revocable.
+
+A grant may issue at most six token pairs in a rolling 60-second window, including its initial code exchange.
+At exactly 60 seconds an issuance leaves the window; restarting does not reset issuance history or storage usage.
+During the one-time schema migration, retained legacy access tokens receive the migration time as their issuance timestamp without changing expiry, so an existing family may wait up to 60 seconds before refreshing.
+Token exchange and browser consent capacity failures return private HTTP 503 with `Retry-After: 60` and `temporarily_unavailable`.
+Rejected issuance leaves the current refresh token or authorization code usable, and rejected consent preserves its prior nonce.
+Quota recovery can take longer than the retry interval: successful revocation or expiry releases family storage, while expired access-token and consumed refresh-token bindings remain until their family ends.
+Refresh replay still revokes the family even when its byte or issuance budget is exhausted.
+
+These are logical retained-state limits, not physical SQLite file or filesystem quotas.
+SQLite schema pages, allocation, journals, and freed pages can make physical disk use exceed the logical budget; use a filesystem or volume quota where a hard disk bound is required.
+Cleanup runs before admission and remains committed when a new write is rejected.
+
+Gateway grants last at most 30 days, with access tokens lasting at most 15 minutes and refresh unable to extend the grant deadline.
+A current access token or any retained, unexpired refresh token can revoke its family.
+Revocation using an already-invalid access token may succeed as a no-op.
+Browser logout or expiry of the browser identity JWT does not automatically revoke these independent gateway grants.
+Removing the user's current access policy blocks MCP use immediately.
 
 ## Execution limits
 
@@ -143,7 +172,7 @@ These controls bound anonymous onboarding state; they do not impose a user or de
 - Tools requiring a live Matrix conversation are unavailable through this transport.
 - MCP generic bridge dispatchers are excluded; only selected, filtered typed functions are exposed.
 - Search returns at most 10 items and 16 KiB. A selected schema is limited to 32 KiB; tool arguments and result payloads to 64 KiB each.
-- HTTP request bodies and MCP tool responses are limited to 128 KiB. JSON-encoded request IDs are limited to 128 bytes. Calls have a 60-second gateway deadline, with at most 128 active calls per process. A cancelled or timed-out call retains its capacity until its local background work and toolkit cleanup finish.
+- HTTP request bodies and MCP tool responses are limited to 128 KiB. JSON-encoded request IDs are limited to 128 bytes; the `MCP-Protocol-Version` header to 64 UTF-8 bytes. Calls have a 60-second gateway deadline, with at most 16 active calls per grant, 32 per authoritative requester across grants, and 128 per process. A cancelled or timed-out call retains its capacity until its local background work and toolkit cleanup finish, including its grant and requester allowances.
 - Explicit MCP cancellation applies only to a matching request ID within the same client grant. Cancellation and timeout stop waiting, but a synchronous or remote action may already have taken effect. Do not automatically retry a potentially mutating call.
 
 Synchronous native tool work shares the API process and cannot be forcibly stopped by request cancellation.

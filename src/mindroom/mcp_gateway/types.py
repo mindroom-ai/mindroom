@@ -1,9 +1,18 @@
-"""Typed dictionary contracts for personal gateway tool responses."""
+"""Typed identity and response contracts for the personal gateway."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, NotRequired, TypedDict
+
+
+@dataclass(frozen=True)
+class GatewayPrincipal:
+    """Validated grant and authoritative requester for admission and cancellation."""
+
+    grant_id: str
+    requester_id: str
 
 
 class GatewayErrorCode(StrEnum):

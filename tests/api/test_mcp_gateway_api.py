@@ -572,6 +572,62 @@ def test_onboarding_storage_capacity_returns_protocol_backpressure(gateway_app: 
             assert "no-store" in response.headers["cache-control"]
 
 
+@pytest.mark.parametrize("operation", ["binding", "approval"])
+def test_consent_storage_capacity_is_private_and_preserves_nonce(
+    gateway_app: FastAPI,
+    gateway_client: TestClient,
+    signed_headers: Callable,
+    operation: str,
+) -> None:
+    """Both browser mutations return bounded backpressure and leave the original consent usable."""
+    _, url = _authorize(gateway_client)
+    headers = signed_headers("alice")
+    fields = _consent(gateway_client, url, headers)
+    runtime = config_lifecycle.app_state(gateway_app).mcp_gateway_runtime
+    assert runtime is not None
+    budget = runtime.provider.store.max_bytes
+    runtime.provider.store.max_bytes = 1
+    if operation == "binding":
+        response = gateway_client.get(url, headers=headers)
+    else:
+        response = gateway_client.post(
+            "/connections/mcp/authorize",
+            data={**fields, "decision": "allow"},
+            headers={**headers, "Origin": ORIGIN},
+        )
+    assert response.status_code == 503
+    assert response.json() == {"error": "temporarily_unavailable"}
+    assert response.headers["retry-after"] == "60"
+    assert "no-store" in response.headers["cache-control"]
+    assert len(response.content) < 100
+    runtime.provider.store.max_bytes = budget
+    approved = gateway_client.post(
+        "/connections/mcp/authorize",
+        data={**fields, "decision": "allow"},
+        headers={**headers, "Origin": ORIGIN},
+    )
+    assert approved.status_code == 303
+
+
+def test_token_storage_capacity_preserves_authorization_code(
+    gateway_app: FastAPI,
+    gateway_client: TestClient,
+    signed_headers: Callable,
+) -> None:
+    """SDK token exchange propagates capacity and can retry the same valid code."""
+    client_id, code = _code(gateway_client, signed_headers("alice"))
+    runtime = config_lifecycle.app_state(gateway_app).mcp_gateway_runtime
+    assert runtime is not None
+    budget = runtime.provider.store.max_bytes
+    runtime.provider.store.max_bytes = 1
+    response = _exchange(gateway_client, client_id, code)
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "60"
+    assert "no-store" in response.headers["cache-control"]
+    runtime.provider.store.max_bytes = budget
+    assert _exchange(gateway_client, client_id, code).status_code == 200
+
+
 @pytest.mark.parametrize(
     ("setting", "value"),
     [
@@ -585,6 +641,10 @@ def test_onboarding_storage_capacity_returns_protocol_backpressure(gateway_app: 
         ("MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT", "invalid"),
         ("MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES", "0"),
         ("MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES", "invalid"),
+        ("MINDROOM_MCP_OAUTH_MAX_BYTES", "0"),
+        ("MINDROOM_MCP_OAUTH_MAX_BYTES", "invalid"),
+        ("MINDROOM_MCP_OAUTH_USER_MAX_BYTES", "0"),
+        ("MINDROOM_MCP_OAUTH_USER_MAX_BYTES", "invalid"),
     ],
 )
 def test_disabled_or_invalid_gateway_does_not_start(gateway_app: FastAPI, setting: str, value: str) -> None:
@@ -597,3 +657,26 @@ def test_disabled_or_invalid_gateway_does_not_start(gateway_app: FastAPI, settin
     with TestClient(gateway_app, base_url=ORIGIN) as client:
         assert _list(client).status_code == 404
         assert client.get("/.well-known/oauth-authorization-server/mcp/oauth").status_code == 404
+
+
+@pytest.mark.parametrize("body", [b'{"client_name":', b'{"client_name":"\xff"}', b"[" * 1100])
+def test_registration_parse_errors_are_private_invalid_requests(gateway_client: TestClient, body: bytes) -> None:
+    """Malformed JSON, UTF-8 and excessive nesting fail at the bounded body boundary."""
+    response = gateway_client.post("/mcp/oauth/register", content=body, headers={"Content-Type": "application/json"})
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_request"}
+    assert "no-store" in response.headers["cache-control"]
+
+
+def test_registration_oversized_integer_is_private_invalid_request(gateway_app: FastAPI) -> None:
+    """Integer conversion limits must produce the same private response as other JSON parse failures."""
+    marker = "harmless-registration-integer-marker"
+    body = b'{"client_name":"' + marker.encode() + b'","value":' + b"1" * 5000 + b"}"
+    assert len(body) < 131072
+    with TestClient(gateway_app, base_url=ORIGIN, raise_server_exceptions=False) as client:
+        response = client.post("/mcp/oauth/register", content=body, headers={"Content-Type": "application/json"})
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_request"}
+    assert "no-store" in response.headers["cache-control"]
+    assert marker not in response.text
+    assert "1" * 5000 not in response.text

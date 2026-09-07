@@ -7,17 +7,18 @@ import os
 import sqlite3
 from typing import TYPE_CHECKING, TypeVar
 
+from mindroom.mcp_gateway.accounting import migrate_accounting
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
 _T = TypeVar("_T")
 _REGISTRATION_TTL = 86_400
-_ONBOARDING_ROW_OVERHEAD = 1024
 
 
 class GatewayOAuthCapacityError(Exception):
-    """Public onboarding state has reached its configured storage budget."""
+    """OAuth state or token issuance has reached its configured capacity."""
 
 
 class GatewayOAuthStore:
@@ -28,10 +29,14 @@ class GatewayOAuthStore:
         storage_root: Path,
         *,
         onboarding_max_bytes: int,
+        max_bytes: int,
+        user_max_bytes: int,
         clock: Callable[[], float],
     ) -> None:
         self.path = storage_root / "mcp_gateway" / "oauth.sqlite3"
         self.onboarding_max_bytes = onboarding_max_bytes
+        self.max_bytes = max_bytes
+        self.user_max_bytes = user_max_bytes
         self._clock = clock
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path.parent.chmod(0o700)
@@ -69,6 +74,7 @@ class GatewayOAuthStore:
                 connection.execute("ALTER TABLE clients ADD COLUMN expires_at REAL NOT NULL DEFAULT 0")
                 connection.execute("UPDATE clients SET expires_at = ?", (self.registration_expires_at(),))
             connection.execute("CREATE INDEX IF NOT EXISTS clients_expiry ON clients(expires_at)")
+            migrate_accounting(connection, self._clock())
             connection.execute("COMMIT")
         finally:
             connection.close()
@@ -89,40 +95,67 @@ class GatewayOAuthStore:
         connection.execute("DELETE FROM pending WHERE expires_at <= ?", (now,))
         # A revocation may have loaded an access token before concurrent rotation.
         # Keep access and refresh bindings until the whole family is removed.
-        connection.execute(
-            """DELETE FROM capabilities
-               WHERE grant_id IN (SELECT grant_id FROM grants WHERE expires_at <= ? OR revoked = 1)
-                  OR (kind = 'code' AND (expires_at <= ? OR consumed = 1))""",
-            (now, now),
-        )
-        connection.execute(
-            """DELETE FROM grants WHERE expires_at <= ? OR revoked = 1
-               OR NOT EXISTS (SELECT 1 FROM capabilities WHERE capabilities.grant_id = grants.grant_id)""",
+        due = connection.execute(
+            "SELECT grant_id FROM grants WHERE expires_at <= ? UNION ALL SELECT grant_id FROM grants WHERE revoked = 1",
             (now,),
-        )
+        ).fetchall()
+        for grant_id in {row["grant_id"] for row in due}:
+            GatewayOAuthStore.delete_family(connection, grant_id)
+        # Separate deletes avoid a UNION merge plan scanning the complete token-hash index.
+        affected = connection.execute(
+            "DELETE FROM capabilities WHERE kind = 'code' AND expires_at <= ? RETURNING grant_id",
+            (now,),
+        ).fetchall()
+        affected += connection.execute(
+            "DELETE FROM capabilities WHERE kind = 'code' AND consumed = 1 RETURNING grant_id",
+        ).fetchall()
+        for grant_id in {row["grant_id"] for row in affected}:
+            connection.execute(
+                """DELETE FROM grants WHERE grant_id = ? AND NOT EXISTS (
+                    SELECT 1 FROM capabilities WHERE grant_id = ?
+                )""",
+                (grant_id, grant_id),
+            )
+        # Unary + removes column affinity so SQLite can seek the JSON expression indexes.
         connection.execute(
             """DELETE FROM clients WHERE expires_at <= ?
-               AND NOT EXISTS (SELECT 1 FROM grants WHERE json_extract(grants.payload, '$.client_id') = clients.client_id)
-               AND NOT EXISTS (SELECT 1 FROM pending WHERE json_extract(pending.payload, '$.client_id') = clients.client_id)""",
+               AND NOT EXISTS (SELECT 1 FROM grants WHERE json_extract(grants.payload, '$.client_id') = +clients.client_id)
+               AND NOT EXISTS (SELECT 1 FROM pending WHERE json_extract(pending.payload, '$.client_id') = +clients.client_id)""",
             (now,),
         )
 
-    def has_onboarding_capacity(self, connection: sqlite3.Connection, *, payload: str, identifier: str) -> bool:
-        """Reserve UTF-8 payload bytes plus row/index allowance within the write transaction."""
-        client_bytes = connection.execute(
-            """SELECT COALESCE(SUM(length(CAST(metadata AS BLOB)) + length(CAST(client_id AS BLOB)) + ?), 0)
-               FROM clients
-               WHERE NOT EXISTS (
-                   SELECT 1 FROM grants WHERE json_extract(grants.payload, '$.client_id') = clients.client_id
-               )""",
-            (_ONBOARDING_ROW_OVERHEAD,),
-        ).fetchone()[0]
-        pending_bytes = connection.execute(
-            "SELECT COALESCE(SUM(length(CAST(payload AS BLOB)) + length(CAST(state_hash AS BLOB)) + ?), 0) FROM pending",
-            (_ONBOARDING_ROW_OVERHEAD,),
-        ).fetchone()[0]
-        additional_bytes = len(payload.encode("utf-8")) + len(identifier.encode("utf-8")) + _ONBOARDING_ROW_OVERHEAD
-        return client_bytes + pending_bytes + additional_bytes <= self.onboarding_max_bytes
+    @staticmethod
+    def delete_family(connection: sqlite3.Connection, grant_id: str) -> None:
+        """Delete children before their owner so accounting and foreign keys remain valid."""
+        connection.execute("DELETE FROM capabilities WHERE grant_id = ?", (grant_id,))
+        connection.execute("DELETE FROM grants WHERE grant_id = ?", (grant_id,))
+
+    def require_capacity(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        requester_id: str | None = None,
+        onboarding: bool = False,
+    ) -> None:
+        """Check only maintained counters after mutation under the writer transaction."""
+        usage = connection.execute(
+            "SELECT bytes_used, onboarding_bytes FROM oauth_usage WHERE singleton = 1",
+        ).fetchone()
+        user = (
+            connection.execute(
+                "SELECT bytes_used FROM requester_usage WHERE requester_id = ?",
+                (requester_id,),
+            ).fetchone()
+            if requester_id is not None
+            else None
+        )
+        if (
+            usage["bytes_used"] > self.max_bytes
+            or (onboarding and usage["onboarding_bytes"] > self.onboarding_max_bytes)
+            or (user is not None and user["bytes_used"] > self.user_max_bytes)
+        ):
+            msg = "MCP OAuth storage is temporarily full"
+            raise GatewayOAuthCapacityError(msg)
 
     def _transaction(self, operation: Callable[[sqlite3.Connection], _T], *, read_only: bool = False) -> _T:
         connection = self._connect(timeout=1 if read_only else 10)
@@ -133,7 +166,14 @@ class GatewayOAuthStore:
             else:
                 connection.execute("BEGIN IMMEDIATE")
                 self._prune(connection, self._clock())
-            result = operation(connection)
+                connection.execute("SAVEPOINT admission")
+            try:
+                result = operation(connection)
+            except GatewayOAuthCapacityError:
+                if not read_only:
+                    connection.execute("ROLLBACK TO admission")
+                    connection.execute("COMMIT")
+                raise
             connection.execute("COMMIT")
         except BaseException:
             if connection.in_transaction:

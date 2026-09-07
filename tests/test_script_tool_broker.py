@@ -476,7 +476,7 @@ async def test_script_broker_separates_process_scope_from_tool_routing(
         tmp_path,
         events=events,
         worker_scope=tool_worker_scope,
-        durable_worker_key=f"v1:default:user_agent:@alice:example.test:{_WORKER_RUN_ID}:watcher",
+        durable_worker_key=f"v1:default:user_agent:~@alice:example.test:{_WORKER_RUN_ID}:watcher",
         durable_worker_id="script-process-worker",
         live_worker_id="script-process-worker",
         resolved_worker_targets=resolved_worker_targets,
@@ -492,7 +492,7 @@ async def test_script_broker_separates_process_scope_from_tool_routing(
     resolved_worker_key = resolved_worker_targets[0].worker_key
     assert resolved_worker_key is not None
     assert resolved_worker_key_scope(resolved_worker_key) == tool_worker_scope
-    assert resolved_worker_key != f"v1:default:user_agent:@alice:example.test:{_WORKER_RUN_ID}:watcher"
+    assert resolved_worker_key != f"v1:default:user_agent:~@alice:example.test:{_WORKER_RUN_ID}:watcher"
 
 
 @pytest.mark.asyncio
@@ -500,7 +500,7 @@ async def test_private_script_tool_call_uses_canonical_private_worker_target(tmp
     """A private script process key must not replace the called tool's canonical state scope."""
     events: list[str] = []
     resolved_worker_targets: list[ResolvedWorkerTarget] = []
-    process_worker_key = f"v1:default:user_agent:@alice:example.test:{_WORKER_RUN_ID}:watcher"
+    process_worker_key = f"v1:default:user_agent:~@alice:example.test:{_WORKER_RUN_ID}:watcher"
     broker, token = _broker(
         tmp_path,
         events=events,
@@ -517,7 +517,7 @@ async def test_private_script_tool_call_uses_canonical_private_worker_target(tmp
     assert receipt.state is ScriptCallState.COMPLETED
     assert len(resolved_worker_targets) == 2
     assert resolved_worker_targets[0] == resolved_worker_targets[1]
-    assert resolved_worker_targets[0].worker_key == "v1:default:user_agent:@alice:example.test:watcher"
+    assert resolved_worker_targets[0].worker_key == "v1:default:user_agent:~@alice:example.test:watcher"
     assert resolved_worker_targets[0].private_agent_names == frozenset({"watcher"})
     assert resolved_worker_targets[0].worker_key != process_worker_key
 

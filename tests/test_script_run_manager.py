@@ -357,7 +357,7 @@ async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: P
             run.worker_key,
             private_agent_names=frozenset(),
             mirrored_credential_services=frozenset(),
-            state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
+            state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
     ]
     assert client.requested_handles == [f"shell:{run.run_id.removeprefix('script-')}"]
@@ -631,7 +631,7 @@ async def test_kubernetes_worker_accepts_scripts_with_an_explicit_isolated_gatew
             run.worker_key or "",
             private_agent_names=frozenset(),
             mirrored_credential_services=frozenset(),
-            state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
+            state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
     ]
     assert len(client.requested_handles) == 1
@@ -670,7 +670,7 @@ async def test_kubernetes_worker_accepts_scripts_when_agent_vault_is_enabled(tmp
             run.worker_key or "",
             private_agent_names=frozenset(),
             mirrored_credential_services=frozenset(),
-            state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
+            state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
     ]
     assert len(client.requested_handles) == 1
@@ -970,10 +970,10 @@ async def test_script_process_target_preserves_private_agent_visibility(tmp_path
             run.worker_key,
             private_agent_names=frozenset({"watcher"}),
             mirrored_credential_services=frozenset(),
-            state_scope_worker_key="v1:default:user_agent:@alice:example.test:watcher",
+            state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
     ]
-    assert client.launch_state_scope_worker_keys == ["v1:default:user_agent:@alice:example.test:watcher"]
+    assert client.launch_state_scope_worker_keys == ["v1:default:user_agent:~@alice:example.test:watcher"]
 
 
 @pytest.mark.asyncio

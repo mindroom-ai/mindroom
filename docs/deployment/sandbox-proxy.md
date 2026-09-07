@@ -646,6 +646,11 @@ The supported values are:
 | `user` | One runtime per user, shared across that user's agents |
 | `user_agent` | One runtime per user+agent pair |
 
+Requester-scoped worker keys place the exact percent-encoded requester ID in a reserved namespace.
+After upgrading, reprovision every existing `user` and `user_agent` worker and reconnect every scoped integration because all requester-scoped keys change.
+The earlier worker keys are not reused, migrated, or used as a fallback because an old key could refer to a different requester.
+Shared and unscoped workers are unaffected, as is exact-identity storage used directly by the primary runtime.
+
 If `worker_scope` is unset, proxied tools still use the sandbox runner and the request stays unscoped.
 With `MINDROOM_WORKER_BACKEND=static_runner`, no worker-specific storage root is selected.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, MindRoom still provisions one unscoped worker per agent and tenant/account.

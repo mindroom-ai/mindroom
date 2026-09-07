@@ -1383,7 +1383,7 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
     assert execution_identity.requester_id == "@owner:localhost"
     assert execution_identity.room_id == "!test:localhost"
     worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="general")
-    assert worker_key == "v1:default:user_agent:@owner:localhost:general"
+    assert worker_key == "v1:default:user_agent:~@owner:localhost:general"
     assert worker_key != resolve_worker_key(
         "user_agent",
         replace(execution_identity, requester_id=bot.matrix_id.full_id),

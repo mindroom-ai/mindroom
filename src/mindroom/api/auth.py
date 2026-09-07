@@ -33,6 +33,7 @@ _PLATFORM_AUTH_COOKIE_NAME = "mindroom_jwt"
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
+_TRUSTED_UPSTREAM_JWT_MAX_BYTES = 16 * 1024
 _REDIRECT_TARGET_DECODE_PASSES = 5
 _STANDALONE_PUBLIC_PATHS = frozenset(
     {
@@ -376,6 +377,8 @@ async def _verified_trusted_upstream_jwt_identity(
     token = _get_configured_header(request, header)
     if token is None:
         raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
+    if len(token.encode("utf-8")) > _TRUSTED_UPSTREAM_JWT_MAX_BYTES:
+        raise HTTPException(status_code=401, detail="Invalid trusted upstream JWT")
 
     try:
         signing_key = await asyncio.to_thread(jwt_client.get_signing_key_from_jwt, token)
@@ -599,7 +602,9 @@ async def request_has_frontend_access(request: Request) -> bool:
     authorization = request.headers.get("authorization")
     snapshot = _bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
-    if _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") and _is_connections_path(request.url.path):
+    if _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") and _is_connections_path(
+        request.scope["path"],
+    ):
         await require_personal_connections_user(request)
         return True
     mindroom_api_key = auth_state.settings.mindroom_api_key
@@ -820,9 +825,10 @@ def _require_connections_route_authorized(
     """Keep trusted personal users outside administrator routes when the portal is enabled."""
     if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
         return
-    if _is_connections_path(request.url.path):
+    path = request.scope["path"]
+    if _is_connections_path(path):
         return
-    parts = request.url.path.split("/")
+    parts = path.split("/")
     if len(parts) == 5 and parts[1:3] == ["api", "oauth"] and parts[3] and parts[4] in {"callback", "success", "reset"}:
         # These handlers independently validate their state or reset capability.
         return
@@ -871,7 +877,7 @@ async def verify_user(
         return trusted_auth_user
 
     if auth_state.supabase_auth is None:
-        if allow_public_paths and _is_standalone_public_path(request.url.path):
+        if allow_public_paths and _is_standalone_public_path(request.scope["path"]):
             auth_user = {"user_id": "standalone", "email": None}
             request.scope["auth_user"] = auth_user
             return auth_user

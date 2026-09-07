@@ -5004,6 +5004,7 @@ depends_on = [
     "mindroom.mcp_gateway.store",
     "mindroom.mcp_gateway.toolkits",
     "mindroom.mcp_gateway.tools",
+    "mindroom.mcp_gateway.types",
 ]
 
 [[modules]]
@@ -5020,6 +5021,10 @@ depends_on = ["mindroom.mcp_gateway.store"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.store"
+depends_on = ["mindroom.mcp_gateway.accounting"]
+
+[[modules]]
+path = "mindroom.mcp_gateway.accounting"
 depends_on = []
 
 [[modules]]

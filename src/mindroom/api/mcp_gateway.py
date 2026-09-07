@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -32,6 +33,7 @@ from mindroom.mcp_gateway.server import GatewayServer, read_gateway_body, replay
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
 from mindroom.mcp_gateway.toolkits import drain_gateway_tool_cleanup
 from mindroom.mcp_gateway.tools import get_tool, invoke_tool, search_tools
+from mindroom.mcp_gateway.types import GatewayPrincipal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -171,10 +173,10 @@ class GatewayRuntime:
             raise HTTPException(401, "Gateway principal changed", headers=headers)
         return token, context
 
-    async def authenticate(self, request: Request) -> str:
+    async def authenticate(self, request: Request) -> GatewayPrincipal:
         """Authenticate every HTTP message, including discovery and cancellation."""
         token, _ = await self.principal(request)
-        return token.grant_id
+        return GatewayPrincipal(grant_id=token.grant_id, requester_id=token.requester_id)
 
     async def dispatch(self, request: Request, name: str, arguments: dict[str, Any]) -> GatewayToolResponse:
         """Recheck access immediately before selecting one tool operation."""
@@ -279,14 +281,19 @@ def _oauth_admission(request: Request, runtime: GatewayRuntime, operation: str) 
 
 async def _oauth(request: Request) -> Response:
     runtime = _runtime(request)
-    operation = request.url.path.rsplit("/", 1)[-1]
+    operation = request.scope["path"].rsplit("/", 1)[-1]
     admission = _oauth_admission(request, runtime, operation)
     if admission is not None:
         return admission
     try:
         if request.method == "POST":
             body = await read_gateway_body(request)
-            if operation != "register":
+            if operation == "register":
+                try:
+                    json.loads(body)
+                except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+                    raise HTTPException(400, "Invalid registration JSON") from exc
+            else:
                 _require_form_content_type(request)
                 fields = _form(body)
                 if operation == "token" and fields.get("resource") != runtime.provider.resource_url:
@@ -319,7 +326,7 @@ async def _oauth(request: Request) -> Response:
 async def _metadata(request: Request) -> Response:
     runtime = _runtime(request)
     provider = runtime.provider
-    if "oauth-protected-resource" in request.url.path:
+    if "oauth-protected-resource" in request.scope["path"]:
         payload = {
             "resource": provider.resource_url,
             "authorization_servers": [provider.issuer_url],
@@ -372,6 +379,12 @@ async def _consent(request: Request) -> Response:
             requester_id=context.requester_id,
             agent_name=context.agent_name,
             authenticated_user_id=user["matrix_user_id"],
+        )
+    except GatewayOAuthCapacityError:
+        return JSONResponse(
+            {"error": "temporarily_unavailable"},
+            status_code=503,
+            headers={**PERSONAL_RESPONSE_HEADERS, "Retry-After": "60"},
         )
     except AuthorizeError as exc:
         raise HTTPException(

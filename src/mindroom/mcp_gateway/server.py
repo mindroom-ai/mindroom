@@ -14,13 +14,15 @@ from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
+from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 from pydantic import ValidationError
+from pydantic_core import PydanticSerializationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from mindroom.logging_config import get_logger
 from mindroom.mcp_gateway.execution import ExecutionLease, execution_scope
-from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayErrorResponse
+from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayErrorResponse, GatewayPrincipal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -30,9 +32,12 @@ if TYPE_CHECKING:
 _MAX_REQUEST_BYTES = 131072
 _MAX_RESPONSE_BYTES = 131072
 _MAX_REQUEST_ID_BYTES = 128
+_MAX_PROTOCOL_VERSION_BYTES = 64
 _RESPONSE_ENVELOPE_BYTES = 256
 _MAX_ACTIVE_CALLS = 128
-_GRANT_SCOPE_KEY = "mcp_gateway_grant_id"
+_MAX_REQUESTER_CALLS = 32
+_MAX_GRANT_CALLS = 16
+_PRINCIPAL_SCOPE_KEY = "mcp_gateway_principal"
 _PRIVATE_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
 logger = get_logger(__name__)
 
@@ -112,7 +117,59 @@ def _request_payload(body: bytes) -> object:
         request_id = payload["id"]
         if type(request_id) not in {str, int} or len(json.dumps(request_id).encode()) > _MAX_REQUEST_ID_BYTES:
             raise HTTPException(400, "MCP request ID is invalid or exceeds the size limit")
+        try:
+            json.dumps(request_id, ensure_ascii=False).encode()
+        except UnicodeEncodeError as exc:
+            raise HTTPException(400, "MCP request ID is not valid UTF-8") from exc
     return payload
+
+
+def _validate_message(payload: object) -> Response | None:
+    """Keep SDK validation diagnostics from reflecting untrusted envelope content."""
+    try:
+        envelope = types.JSONRPCMessage.model_validate(payload).root
+    except (ValidationError, RecursionError, PydanticSerializationError) as exc:
+        raise HTTPException(400, "Invalid MCP envelope") from exc
+    if isinstance(envelope, types.JSONRPCResponse | types.JSONRPCError):
+        # Stateless calls never issue correlated client-result requests.
+        # Future bidirectional sessions must route these to their owning session.
+        return Response(status_code=202)
+    try:
+        normalized = envelope.model_dump(by_alias=True, mode="json", exclude_none=True)
+        if isinstance(envelope, types.JSONRPCRequest):
+            types.ClientRequest.model_validate(normalized)
+        else:
+            types.ClientNotification.model_validate(normalized)
+    except (ValidationError, RecursionError, PydanticSerializationError):
+        if isinstance(envelope, types.JSONRPCNotification):
+            return Response(status_code=202)
+        error = types.JSONRPCError(
+            jsonrpc="2.0",
+            id=envelope.id,
+            error=types.ErrorData(code=-32602, message="Invalid request parameters"),
+        )
+        return JSONResponse(error.model_dump(by_alias=True, mode="json", exclude_none=True))
+    return None
+
+
+def _validate_protocol_header(request: Request) -> None:
+    if len(request.headers.get("mcp-protocol-version", "").encode()) > _MAX_PROTOCOL_VERSION_BYTES:
+        raise HTTPException(400, "MCP protocol version exceeds the size limit")
+
+
+def _validate_early_response_headers(request: Request, payload: object) -> None:
+    """Preserve SDK negotiation for replies that the privacy gate now owns."""
+    accepted = request.headers.get("accept", "").split(",")
+    if not any(value.strip().startswith("application/json") for value in accepted):
+        raise HTTPException(406, "MCP requires application/json responses")
+    content_types = request.headers.get("content-type", "").split(";")[0].split(",")
+    if not any(value.strip() == "application/json" for value in content_types):
+        raise HTTPException(415, "MCP requires application/json requests")
+    if isinstance(payload, dict) and cast("dict[str, object]", payload).get("method") == "initialize":
+        return
+    version = request.headers.get("mcp-protocol-version")
+    if version is not None and version not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise HTTPException(400, "Unsupported MCP protocol version")
 
 
 async def read_gateway_body(request: Request) -> bytes:
@@ -148,7 +205,7 @@ class GatewayServer:
     def __init__(
         self,
         *,
-        authenticate: Callable[[Request], Awaitable[str]],
+        authenticate: Callable[[Request], Awaitable[GatewayPrincipal]],
         dispatch: Callable[[Request, str, dict[str, Any]], Awaitable[Mapping[str, object]]],
         public_url: str,
         allowed_origins: tuple[str, ...] | None = None,
@@ -158,10 +215,10 @@ class GatewayServer:
         self._dispatch = dispatch
         self._timeout = timeout_seconds
         self._closing = False
-        self._active: dict[tuple[str, type, int | str], ExecutionLease] = {}
+        self._active: dict[tuple[GatewayPrincipal, type, int | str], ExecutionLease] = {}
         self._server: Server[None, Request] = Server("MindRoom gateway")
         self._server.list_tools()(self._list_tools)
-        self._server.call_tool(validate_input=False)(self._call_tool)
+        self._server.request_handlers[types.CallToolRequest] = self._handle_call_request
         origin = urlsplit(public_url)
         security = TransportSecuritySettings(
             allowed_hosts=[origin.netloc],
@@ -190,22 +247,25 @@ class GatewayServer:
                     lease.cancel()
                 await asyncio.gather(*(lease.wait() for lease in leases))
 
-    def _release(self, key: tuple[str, type, int | str], lease: ExecutionLease) -> None:
+    def _release(self, key: tuple[GatewayPrincipal, type, int | str], lease: ExecutionLease) -> None:
         if self._active.get(key) is lease:
             del self._active[key]
 
     async def _list_tools(self) -> list[types.Tool]:
         return _meta_tools()
 
-    def _request_identity(self) -> tuple[Request, tuple[str, type, int | str]] | None:
+    def _request_identity(self) -> tuple[Request, tuple[GatewayPrincipal, type, int | str]] | None:
         context = self._server.request_context
         request = context.request
         if not isinstance(request, Request):
             return None
-        grant = request.scope.get(_GRANT_SCOPE_KEY)
-        if not isinstance(grant, str) or type(context.request_id) not in {str, int}:
+        principal = request.scope.get(_PRINCIPAL_SCOPE_KEY)
+        if not isinstance(principal, GatewayPrincipal) or type(context.request_id) not in {str, int}:
             return None
-        return request, (grant, type(context.request_id), context.request_id)
+        return request, (principal, type(context.request_id), context.request_id)
+
+    async def _handle_call_request(self, request: types.CallToolRequest) -> types.ServerResult:
+        return types.ServerResult(await self._call_tool(request.params.name, request.params.arguments or {}))
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:  # noqa: PLR0911
         if name not in {"search_tools", "get_tool", "invoke_tool"}:
@@ -221,7 +281,13 @@ class GatewayServer:
             return _result(
                 _error(GatewayErrorCode.DUPLICATE_REQUEST, "A call with this request ID is already running."),
             )
-        if self._closing or len(self._active) >= _MAX_ACTIVE_CALLS:
+        principal = key[0]
+        if (
+            self._closing
+            or len(self._active) >= _MAX_ACTIVE_CALLS
+            or sum(owner.grant_id == principal.grant_id for owner, _, _ in self._active) >= _MAX_GRANT_CALLS
+            or sum(owner.requester_id == principal.requester_id for owner, _, _ in self._active) >= _MAX_REQUESTER_CALLS
+        ):
             return _result(_error(GatewayErrorCode.BUSY, "Gateway call capacity is currently unavailable."))
         task = asyncio.current_task()
         if task is None:
@@ -252,7 +318,7 @@ class GatewayServer:
                 _error(GatewayErrorCode.TOOL_UNAVAILABLE, "Tool execution failed. Its outcome may be unknown."),
             )
 
-    def _cancel(self, payload: object, grant: str) -> Response | None:
+    def _cancel(self, payload: object, principal: GatewayPrincipal) -> Response | None:
         if not isinstance(payload, dict):
             return None
         notification_payload = cast("dict[str, object]", payload)
@@ -267,7 +333,7 @@ class GatewayServer:
         request_id = notification.params.requestId
         if type(request_id) not in {str, int}:
             return JSONResponse({"error": "invalid_request"}, status_code=400)
-        lease = self._active.get((grant, type(request_id), cast("int | str", request_id)))
+        lease = self._active.get((principal, type(request_id), cast("int | str", request_id)))
         if lease is not None:
             lease.cancel()
         return Response(status_code=202)
@@ -286,19 +352,26 @@ class GatewayServer:
             await send(message)
 
         try:
-            grant = await self._authenticate(request)
-            scope[_GRANT_SCOPE_KEY] = grant
+            principal = await self._authenticate(request)
+            scope[_PRINCIPAL_SCOPE_KEY] = principal
             rejected = await self._security.validate_request(request, is_post=request.method == "POST")
             if rejected is not None:
                 await rejected(scope, receive, private_send)
                 return
+            _validate_protocol_header(request)
             if request.method != "POST":
                 await Response(status_code=405, headers={"Allow": "POST"})(scope, receive, private_send)
                 return
             body = await read_gateway_body(request)
-            cancelled = self._cancel(_request_payload(body), grant)
+            payload = _request_payload(body)
+            cancelled = self._cancel(payload, principal)
             if cancelled is not None:
                 await cancelled(scope, receive, private_send)
+                return
+            rejected = _validate_message(payload)
+            if rejected is not None:
+                _validate_early_response_headers(request, payload)
+                await rejected(scope, receive, private_send)
                 return
         except HTTPException as exc:
             response = JSONResponse(

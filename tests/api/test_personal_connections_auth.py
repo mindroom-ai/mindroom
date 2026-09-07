@@ -112,6 +112,44 @@ def test_signed_nonadmin_cannot_enter_administrator_api(
     assert response.status_code == 403
 
 
+def test_signed_nonadmin_host_cannot_change_administrator_route_policy(
+    connections_auth_client: Callable[..., TestClient],
+    signed_connections_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """Authorization must use the ASGI path instead of attacker-controlled Host parsing."""
+    response = connections_auth_client().get(
+        "/api/config",
+        headers={**signed_connections_headers("alice"), "Host": "example.org/api/connections/"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_oversized_trusted_upstream_jwt_is_rejected_before_key_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    connections_auth_client: Callable[..., TestClient],
+) -> None:
+    """Oversized assertions must be bounded before any remote signing-key lookup."""
+    key_lookups: list[str] = []
+
+    def record_key_lookup(_client: jwt.PyJWKClient, token: str) -> None:
+        key_lookups.append(token)
+        raise jwt.InvalidTokenError
+
+    monkeypatch.setattr(jwt.PyJWKClient, "get_signing_key_from_jwt", record_key_lookup)
+    response = connections_auth_client().get(
+        "/api/connections/identity",
+        headers={
+            "X-Trusted-User": "alice",
+            "X-Trusted-Email": "alice@example.org",
+            "X-Trusted-Jwt": "x" * (16 * 1024 + 1),
+        },
+    )
+
+    assert response.status_code == 401
+    assert key_lookups == []
+
+
 @pytest.mark.parametrize("path", ["/", "/agents", "/connections-admin", "/connections_extra"])
 def test_signed_nonadmin_cannot_load_administrator_html(
     path: str,

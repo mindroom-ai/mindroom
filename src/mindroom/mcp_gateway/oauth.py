@@ -8,7 +8,7 @@ import json
 import secrets
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 from urllib.parse import urlencode, urlsplit
 
 from mcp.server.auth.provider import (
@@ -36,6 +36,19 @@ _CONSENT_TTL = 600
 _CODE_TTL = 300
 _ACCESS_TTL = 900
 _GRANT_TTL = 2_592_000
+
+
+def _budget(runtime_paths: RuntimePaths, name: str, default: int) -> int:
+    value = runtime_paths.env_value(name)
+    try:
+        result = int(value) if value is not None else default
+    except ValueError as exc:
+        msg = f"{name} must be a positive integer"
+        raise ValueError(msg) from exc
+    if result <= 0:
+        msg = f"{name} must be a positive integer"
+        raise ValueError(msg)
+    return result
 
 
 def _digest(value: str) -> str:
@@ -128,15 +141,12 @@ class GatewayOAuthProvider(
         self.resource_url = origin + "/mcp"
         self.issuer_url = origin + "/mcp/oauth"
         self.consent_url = origin + "/connections/mcp/authorize"
-        configured_budget = runtime_paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES")
-        onboarding_max_bytes = int(configured_budget) if configured_budget is not None else 64 * 1024 * 1024
-        if onboarding_max_bytes <= 0:
-            msg = "MCP onboarding storage budget must be a positive integer"
-            raise ValueError(msg)
         self._clock = clock or (lambda: time.time())
         self.store = GatewayOAuthStore(
             runtime_paths.storage_root,
-            onboarding_max_bytes=onboarding_max_bytes,
+            onboarding_max_bytes=_budget(runtime_paths, "MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES", 64 * 1024 * 1024),
+            max_bytes=_budget(runtime_paths, "MINDROOM_MCP_OAUTH_MAX_BYTES", 256 * 1024 * 1024),
+            user_max_bytes=_budget(runtime_paths, "MINDROOM_MCP_OAUTH_USER_MAX_BYTES", 16 * 1024 * 1024),
             clock=self._clock,
         )
 
@@ -171,7 +181,7 @@ class GatewayOAuthProvider(
             raise RegistrationError("invalid_redirect_uri", "Invalid callback URL")  # noqa: EM101
         normalized = client_info.model_copy(update={"scope": "mcp:tools"})
 
-        def save(connection: sqlite3.Connection) -> bool:
+        def save(connection: sqlite3.Connection) -> None:
             existing = connection.execute(
                 "SELECT metadata FROM clients WHERE client_id = ?",
                 (normalized.client_id,),
@@ -179,23 +189,15 @@ class GatewayOAuthProvider(
             if existing and existing["metadata"] != normalized.model_dump_json():
                 raise RegistrationError("invalid_client_metadata", "Client is already registered")  # noqa: EM101
             if existing:
-                return True
+                return
             metadata = normalized.model_dump_json()
-            if not self.store.has_onboarding_capacity(
-                connection,
-                payload=metadata,
-                identifier=client_id,
-            ):
-                return False
             connection.execute(
                 "INSERT INTO clients (client_id, metadata, expires_at) VALUES (?, ?, ?)",
                 (normalized.client_id, metadata, self.store.registration_expires_at()),
             )
-            return True
+            self.store.require_capacity(connection, onboarding=True)
 
-        if not await self.store.transact(save):
-            msg = "MCP onboarding storage is temporarily full"
-            raise GatewayOAuthCapacityError(msg)
+        await self.store.transact(save)
 
     @override
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
@@ -220,18 +222,18 @@ class GatewayOAuthProvider(
             },
         )
 
-        def save(connection: sqlite3.Connection) -> bool:
+        def save(connection: sqlite3.Connection) -> None:
             if not connection.execute("SELECT 1 FROM clients WHERE client_id = ?", (registered.client_id,)).fetchone():
                 raise AuthorizeError("unauthorized_client", "Client registration expired")  # noqa: EM101
-            if not self.store.has_onboarding_capacity(connection, payload=payload, identifier=_digest(state)):
-                return False
             connection.execute(
                 "INSERT INTO pending (state_hash, payload, expires_at) VALUES (?, ?, ?)",
                 (_digest(state), payload, self._clock() + _CONSENT_TTL),
             )
-            return True
+            self.store.require_capacity(connection, onboarding=True)
 
-        if not await self.store.transact(save):
+        try:
+            await self.store.transact(save)
+        except GatewayOAuthCapacityError:
             return _consent_callback(str(params.redirect_uri), error="temporarily_unavailable", state=params.state)
         return self.consent_url + "?" + urlencode({"state": state})
 
@@ -275,6 +277,7 @@ class GatewayOAuthProvider(
                 "UPDATE pending SET requester_id = ?, authenticated_user_id = ?, agent_name = ?, csrf_hash = ? WHERE state_hash = ?",
                 (requester_id, authenticated_user_id, agent_name, _digest(csrf), _digest(state)),
             )
+            self.store.require_capacity(connection, onboarding=True)
             payload = json.loads(row["payload"])
             return _GatewayConsent(payload["client_name"], payload["params"]["redirect_uri"], csrf)
 
@@ -309,7 +312,7 @@ class GatewayOAuthProvider(
                 return _consent_callback(str(params.redirect_uri), error="access_denied", state=params.state)
             now = self._clock()
             grant_id = _secret()
-            grant = {
+            grant: dict[str, Any] = {
                 "client_id": payload["client_id"],
                 "requester_id": requester_id,
                 "authenticated_user_id": authenticated_user_id,
@@ -319,8 +322,8 @@ class GatewayOAuthProvider(
                 "scopes": _SCOPES,
             }
             connection.execute(
-                "INSERT INTO grants (grant_id, payload, expires_at) VALUES (?, ?, ?)",
-                (grant_id, json.dumps(grant), now + _GRANT_TTL),
+                "INSERT INTO grants (grant_id, payload, expires_at, requester_id) VALUES (?, ?, ?, ?)",
+                (grant_id, json.dumps(grant), now + _GRANT_TTL, requester_id),
             )
             code = _GatewayAuthorizationCode(
                 **grant,
@@ -331,6 +334,7 @@ class GatewayOAuthProvider(
                 redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
             )
             self._save_capability(connection, "code", code.code, code)
+            self.store.require_capacity(connection, requester_id=requester_id)
             return _consent_callback(str(params.redirect_uri), code=code.code, state=params.state)
 
         return await self.store.transact(finish)
@@ -341,11 +345,13 @@ class GatewayOAuthProvider(
         kind: str,
         raw: str,
         capability: _GatewayAuthorizationCode | GatewayAccessToken | _GatewayRefreshToken,
+        *,
+        issued_at: float | None = None,
     ) -> None:
         payload = capability.model_dump(mode="json", exclude={"code", "token"})
         connection.execute(
-            "INSERT INTO capabilities (token_hash, kind, grant_id, payload, expires_at) VALUES (?, ?, ?, ?, ?)",
-            (_digest(raw), kind, capability.grant_id, json.dumps(payload), capability.expires_at),
+            "INSERT INTO capabilities (token_hash, kind, grant_id, payload, expires_at, issued_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (_digest(raw), kind, capability.grant_id, json.dumps(payload), capability.expires_at, issued_at),
         )
 
     def _load(
@@ -415,13 +421,22 @@ class GatewayOAuthProvider(
         return await self.store.read(read)
 
     def _issue_tokens(self, connection: sqlite3.Connection, row: sqlite3.Row) -> OAuthToken:
-        now = int(self._clock())
+        issued_at = self._clock()
+        recent = connection.execute(
+            "SELECT COUNT(*) FROM capabilities WHERE kind = 'access' AND grant_id = ? AND issued_at > ?",
+            (row["grant_id"], issued_at - 60),
+        ).fetchone()[0]
+        if recent >= 6:
+            msg = "MCP OAuth token issuance is temporarily limited"
+            raise GatewayOAuthCapacityError(msg)
+        now = int(issued_at)
         expires_at = min(now + _ACCESS_TTL, int(row["grant_expires_at"]))
         grant = json.loads(row["grant_payload"])
         access = GatewayAccessToken(**grant, token=_secret(), expires_at=expires_at)
         refresh = _GatewayRefreshToken(**grant, token=_secret(), expires_at=int(row["grant_expires_at"]))
-        self._save_capability(connection, "access", access.token, access)
+        self._save_capability(connection, "access", access.token, access, issued_at=issued_at)
         self._save_capability(connection, "refresh", refresh.token, refresh)
+        self.store.require_capacity(connection, requester_id=grant["requester_id"])
         return OAuthToken(
             access_token=access.token,
             refresh_token=refresh.token,
@@ -473,10 +488,10 @@ class GatewayOAuthProvider(
             ):
                 raise TokenError("invalid_grant", "Invalid refresh token")  # noqa: EM101
             if row["consumed"]:
-                connection.execute("UPDATE grants SET revoked = 1 WHERE grant_id = ?", (row["grant_id"],))
+                self.store.delete_family(connection, row["grant_id"])
                 return None
             connection.execute(
-                "UPDATE capabilities SET consumed = 1 WHERE grant_id = ? AND kind IN ('access', 'refresh')",
+                "UPDATE capabilities SET consumed = 1 WHERE grant_id = ? AND consumed = 0 AND kind IN ('access', 'refresh')",
                 (row["grant_id"],),
             )
             return self._issue_tokens(connection, row)
@@ -496,6 +511,6 @@ class GatewayOAuthProvider(
                 (_digest(token.token),),
             ).fetchone()
             if row and json.loads(row["payload"]) == token.model_dump(mode="json", exclude={"token"}):
-                connection.execute("UPDATE grants SET revoked = 1 WHERE grant_id = ?", (row["grant_id"],))
+                self.store.delete_family(connection, row["grant_id"])
 
         await self.store.transact(revoke)

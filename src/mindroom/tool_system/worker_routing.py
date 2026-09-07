@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
+from urllib.parse import quote
 
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 
@@ -296,9 +297,8 @@ def _requester_localpart(requester: str) -> str:
     return requester
 
 
-def _normalize_worker_requester_part(value: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9._:@+-]+", "_", value.strip()).strip("_")
-    return normalized or "default"
+def _encode_worker_requester_part(value: str) -> str:
+    return "~" + quote(value, safe="._:@+-")
 
 
 def _normalize_worker_dir_part(value: str) -> str:
@@ -308,7 +308,7 @@ def _normalize_worker_dir_part(value: str) -> str:
 
 def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
-        return _normalize_worker_requester_part(identity.requester_id)
+        return _encode_worker_requester_part(identity.requester_id)
     return None
 
 
