@@ -86,6 +86,7 @@ from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 from mindroom.turn_record import RevisionReplay
+from mindroom.turn_store import TurnStore, TurnStoreDeps
 from scripts.testing.fuzz_live_matrix import (
     ORIGINAL_REVISION,
     ChaosTuning,
@@ -5943,6 +5944,114 @@ def _cleanup_sent_events(runner: LiveFuzzRunner) -> dict[str, dict[str, Any]]:
 
 
 @pytest.mark.asyncio
+async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deletion before revision registration settles the exact edit after an answered source."""
+    runner = _cleanup_qualification_runner(tmp_path)
+    ledger = tmp_path / "tracking/event_journal.db"
+    journal = EventJournalStore.open_sqlite(ledger)
+    store = TurnStore(
+        TurnStoreDeps(
+            agent_name="general",
+            turn_records=journal.turn_records("general"),
+            legacy_responses_file=None,
+            state_writer=Mock(),
+            resolver=Mock(),
+            tool_runtime=Mock(),
+        ),
+    )
+    try:
+        await store.warm()
+        await store.record_responded_turn(
+            TurnRecord.create(source_event_ids=("$root",), response_event_id="$root-reply"),
+        )
+        await store.mark_source_redacted("$edit")
+        # Runtime exact-event invalidation establishes the expectation independently of the harness.
+        assert store.is_revision_redacted("$edit")
+    finally:
+        await journal.close()
+
+    records = live_fuzz.read_ledger_records(ledger, strict=True)
+    assert records["$root"].completed
+    assert records["$root"].response_event_id == "$root-reply"
+    assert "$edit" not in (records["$root"].revision_replay or {})
+    assert not records["$edit"].completed
+    assert records["$edit"].redacted_source_event_ids == ("$edit",)
+    assert not records["$edit"].pending_redaction_cleanup_event_ids
+    runner._pending_source_tombstones.add("$edit")
+    monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
+    await runner._wait_for_pending_mutation_effects(deadline_seconds=0.01, batch_index=29)
+    assert not runner._pending_source_tombstones
+    assert runner._qualified_cleanup_targets(LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 0, "root:0")) == (
+        "$edit",
+    )
+    assert live_fuzz._redaction_target_state("$edit", records, runner.source_revision_markers) == (True, False)
+
+
+@pytest.mark.parametrize(
+    ("physical", "root_revision", "context_revision", "expected"),
+    [
+        (None, None, None, (False, False)),
+        (None, None, "wrong_edit", (False, False)),
+        (None, None, "wrong_source", (False, False)),
+        (None, None, "registered", (False, False)),
+        (None, None, "clean", (True, False)),
+        (None, "clean", "pending", (True, True)),
+        (None, "clean", "registered", (True, True)),
+        ("clean", None, "pending", (True, True)),
+        ("clean", None, "registered", (True, True)),
+        ("clean", "clean", "pending", (True, True)),
+        ("clean", "clean", "clean", (True, False)),
+        ("clean", None, "wrong_source", (True, False)),
+        ("pending", "clean", "clean", (True, True)),
+        ("registered", None, None, (False, False)),
+    ],
+)
+def test_edit_tombstone_checks_every_matching_cleanup_owner(
+    tmp_path: Path,
+    physical: str | None,
+    root_revision: str | None,
+    context_revision: str | None,
+    expected: tuple[bool, bool],
+) -> None:
+    """Exact deletion evidence cannot hide another response owner's unreconciled cleanup."""
+    records = {}
+    for owner, state in (("$root", root_revision), ("$context", context_revision)):
+        replay = (
+            {
+                "$wrong" if state == "wrong_edit" else "$edit": RevisionReplay(
+                    "$wrong" if state == "wrong_source" else "$root",
+                    100,
+                    redacted=state != "registered",
+                    cleanup_pending=state == "pending",
+                ),
+            }
+            if state is not None
+            else None
+        )
+        records[owner] = TurnRecord.create(
+            source_event_ids=(owner,),
+            response_event_id=f"{owner}-reply",
+            revision_replay=replay,
+            # An original source's deletion proves nothing about its physical edit.
+            redacted_source_event_ids=(owner,) if owner == "$root" else (),
+        )
+    if physical is not None:
+        records["$edit"] = TurnRecord.create(
+            source_event_ids=("$edit",),
+            completed=physical == "registered",
+            redacted_source_event_ids=() if physical == "registered" else ("$edit",),
+            pending_redaction_cleanup_event_ids=("$edit",) if physical == "pending" else (),
+        )
+    ledger = tmp_path / "event_journal.db"
+    _write_ledger(ledger, records)
+    persisted = live_fuzz.read_ledger_records(ledger, strict=True)
+    assert live_fuzz._redaction_target_state("$edit", persisted, {"$root": {"$edit": "marker"}}) == expected
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["superseded", "redacted", "missing", "incomplete"])
 @pytest.mark.parametrize("attempt", ["none", "clean", "contaminated", "pending"])
 @pytest.mark.parametrize("dedicated", [False, True])
@@ -7596,6 +7705,7 @@ def _temporal_revision_runner() -> LiveFuzzRunner:
         "missing",
         "registered",
         "selected_only",
+        "physical_tombstone",
         "uncompleted",
         "later_live",
         "newer_live",
@@ -7641,7 +7751,7 @@ async def test_redacted_edit_preserves_completed_historical_answer(tmp_path: Pat
         source_event_ids=("$root", "$sibling"),
         response_event_id="$reply",
         completed=failure != "uncompleted",
-        revision_replay={} if failure in {"missing", "selected_only"} else {"$a": revision},
+        revision_replay={} if failure in {"missing", "selected_only", "physical_tombstone"} else {"$a": revision},
         source_event_revisions={"$root": (100, "$a")} if failure == "selected_only" else {"$root": (0, "$root")},
     )
     events = {
@@ -7653,18 +7763,25 @@ async def test_redacted_edit_preserves_completed_historical_answer(tmp_path: Pat
         events["$b"] = {"event_id": "$b", "origin_server_ts": 50 if failure == "later_live" else 200}
     if failure == "pending":
         auditor.pending_edit_markers = {"$root": {"$b": _source_marker("root:0", "edit:2")}}
+    records = {"$root": record}
+    if failure == "physical_tombstone":
+        records["$a"] = TurnRecord.create(
+            source_event_ids=("$a",),
+            completed=False,
+            redacted_source_event_ids=("$a",),
+        )
     try:
         if failure is None:
             auditor._assert_model_saw_current_sources(
                 events,
-                records={"$root": record},
+                records=records,
                 redacted_targets={"$a": "$redaction"},
             )
         else:
             with pytest.raises(AssertionError, match="model source-revision audit"):
                 auditor._assert_model_saw_current_sources(
                     events,
-                    records={"$root": record},
+                    records=records,
                     redacted_targets={} if failure == "unredacted" else {"$a": "$redaction"},
                 )
     finally:

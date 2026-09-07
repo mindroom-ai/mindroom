@@ -5369,17 +5369,24 @@ def _redaction_target_state(
     records: Mapping[str, TurnRecord],
     source_revision_markers: Mapping[str, Mapping[str, str]],
 ) -> tuple[bool, bool]:
-    """Resolve exact source or physical-edit tombstone and its own cleanup debt."""
+    """Join exact event invalidation and cleanup debt across every response owner."""
     source_id = next((source for source, edits in source_revision_markers.items() if target_id in edits), None)
-    record = records.get(source_id if source_id is not None else target_id)
-    if record is None:
-        return False, False
-    if source_id is None:
-        return target_id in record.redacted_source_event_ids, target_id in record.pending_redaction_cleanup_event_ids
-    revision = (record.revision_replay or {}).get(target_id)
-    if revision is None or revision.source_event_id != source_id:
-        return False, False
-    return revision.redacted, revision.cleanup_pending
+    physical = records.get(target_id)
+    revisions = [
+        revision
+        for record in records.values()
+        if (revision := (record.revision_replay or {}).get(target_id)) is not None
+        and (source_id is None or revision.source_event_id == source_id)
+    ]
+    tombstoned = (physical is not None and target_id in physical.redacted_source_event_ids) or any(
+        revision.redacted for revision in revisions
+    )
+    # Reconciliation joins physical invalidation into every registered owner
+    # before locked cleanup acknowledges that owner's debt independently.
+    pending = (physical is not None and target_id in physical.pending_redaction_cleanup_event_ids) or any(
+        revision.cleanup_pending or (tombstoned and not revision.redacted) for revision in revisions
+    )
+    return tombstoned, pending
 
 
 class FinalStateAuditor:
