@@ -2507,6 +2507,22 @@ def _cleanup_surviving_process_group(process_group_id: int) -> bool:
     return True
 
 
+def _graceful_shutdown_failure(
+    *,
+    return_code: int,
+    required_group_kill: bool,
+    child_shutdown_completed: bool,
+) -> str | None:
+    """Return why a managed graceful stop lacks one of its required proofs."""
+    if return_code not in {0, -int(signal.SIGINT), 128 + int(signal.SIGINT)}:
+        return f"MindRoom graceful shutdown exited with status {return_code}"
+    if required_group_kill:
+        return "MindRoom process group survived graceful SIGINT and required SIGKILL"
+    if not child_shutdown_completed:
+        return "MindRoom graceful shutdown omitted a fresh orderly shutdown marker"
+    return None
+
+
 def _attempt_cleanup(
     errors: list[tuple[str, BaseException]],
     label: str,
@@ -3610,23 +3626,11 @@ class ManagedTuwunelStack:
 
     def stop_mindroom(self, *, timeout: float = MINDROOM_SHUTDOWN_TIMEOUT_SECONDS) -> bool:
         """Stop MindRoom and report whether its shutdown stayed bounded and clean."""
-        process = self._mindroom_process
-        if process is None:
-            return True
-        shutdown_marker_count = self.log_count(ORDERLY_SHUTDOWN_MARKER)
-        stopped_gracefully = process.poll() is None
-        if stopped_gracefully:
-            os.killpg(process.pid, signal.SIGINT)
-            try:
-                process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                stopped_gracefully = False
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=10)
-        self._mindroom_process = None
-        clean_exit = process.returncode in {0, -signal.SIGINT, 128 + signal.SIGINT}
-        child_shutdown_completed = self.log_count(ORDERLY_SHUTDOWN_MARKER) > shutdown_marker_count
-        return stopped_gracefully and clean_exit and child_shutdown_completed
+        try:
+            self._stop_mindroom(timeout=timeout)
+        except (RuntimeError, TimeoutError):
+            return False
+        return True
 
     def start_mindroom(self) -> None:
         """Start MindRoom again after an explicit stop."""
@@ -4000,7 +4004,12 @@ class ManagedTuwunelStack:
             "tuwunel_image_reference": image_reference,
         }
 
-    def _stop_mindroom(self, *, kill: bool = False) -> None:
+    def _stop_mindroom(
+        self,
+        *,
+        kill: bool = False,
+        timeout: float = MINDROOM_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> None:
         process = self._mindroom_process
         if process is None:
             return
@@ -4017,6 +4026,7 @@ class ManagedTuwunelStack:
             finally:
                 self._mindroom_process = None
             return
+        shutdown_marker_count = self.log_count(ORDERLY_SHUTDOWN_MARKER)
         try:
             os.killpg(process.pid, signal.SIGINT)
         except ProcessLookupError as exc:
@@ -4027,7 +4037,7 @@ class ManagedTuwunelStack:
             msg = f"MindRoom exited before managed SIGINT delivery with status {return_code}"
             raise RuntimeError(msg) from exc
         try:
-            return_code = process.wait(timeout=MINDROOM_SHUTDOWN_TIMEOUT_SECONDS)
+            return_code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             try:
                 with suppress(ProcessLookupError):
@@ -4039,13 +4049,13 @@ class ManagedTuwunelStack:
             raise TimeoutError(msg) from exc
         try:
             required_group_kill = _cleanup_surviving_process_group(process.pid)
-            expected_return_codes = {0, -int(signal.SIGINT), 128 + int(signal.SIGINT)}
-            if return_code not in expected_return_codes:
-                msg = f"MindRoom graceful shutdown exited with status {return_code}"
-                raise RuntimeError(msg)
-            if required_group_kill:
-                msg = "MindRoom process group survived graceful SIGINT and required SIGKILL"
-                raise RuntimeError(msg)
+            failure_message = _graceful_shutdown_failure(
+                return_code=return_code,
+                required_group_kill=required_group_kill,
+                child_shutdown_completed=self.log_count(ORDERLY_SHUTDOWN_MARKER) > shutdown_marker_count,
+            )
+            if failure_message is not None:
+                raise RuntimeError(failure_message)
         finally:
             self._mindroom_process = None
 

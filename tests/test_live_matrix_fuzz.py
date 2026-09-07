@@ -2660,10 +2660,16 @@ def test_restart_shutdown_rejects_nonzero_process_exit(monkeypatch: pytest.Monke
     try:
         process = FailedProcess()
         stack._mindroom_process = cast("Any", process)
-        monkeypatch.setattr(os, "killpg", lambda pid, signum: signals.append((pid, signum)))
+
+        def killpg(pid: int, signum: int) -> None:
+            signals.append((pid, signum))
+            if signum == 0:
+                raise ProcessLookupError
+
+        monkeypatch.setattr(os, "killpg", killpg)
 
         assert not stack.stop_mindroom(timeout=1)
-        assert signals == [(10, signal.SIGINT)]
+        assert signals == [(10, signal.SIGINT), (10, 0)]
         assert stack._mindroom_process is None
     finally:
         stack.close()
@@ -2695,10 +2701,16 @@ def test_restart_shutdown_accepts_uv_sigint_after_child_drain(
     signals: list[tuple[int, int]] = []
     try:
         stack._mindroom_process = cast("Any", WrapperProcess())
-        monkeypatch.setattr(os, "killpg", lambda pid, signum: signals.append((pid, signum)))
+
+        def killpg(pid: int, signum: int) -> None:
+            signals.append((pid, signum))
+            if signum == 0:
+                raise ProcessLookupError
+
+        monkeypatch.setattr(os, "killpg", killpg)
 
         assert stack.stop_mindroom(timeout=1)
-        assert signals == [(10, signal.SIGINT)]
+        assert signals == [(10, signal.SIGINT), (10, 0)]
         assert stack._mindroom_process is None
     finally:
         stack.close()
@@ -2725,7 +2737,12 @@ def test_restart_shutdown_rejects_uv_sigint_without_child_drain(
     stack = ManagedTuwunelStack()
     try:
         stack._mindroom_process = cast("Any", WrapperProcess())
-        monkeypatch.setattr(os, "killpg", lambda _pid, _signum: None)
+
+        def killpg(_pid: int, signum: int) -> None:
+            if signum == 0:
+                raise ProcessLookupError
+
+        monkeypatch.setattr(os, "killpg", killpg)
 
         assert not stack.stop_mindroom(timeout=1)
     finally:
@@ -2763,6 +2780,177 @@ def test_restart_shutdown_rejects_forced_process_kill(monkeypatch: pytest.Monkey
         assert not stack.stop_mindroom(timeout=1)
         assert signals == [(10, signal.SIGINT), (10, signal.SIGKILL)]
         assert process.wait_timeouts == [1, 10]
+        assert stack._mindroom_process is None
+    finally:
+        stack.close()
+
+
+class _GracefulShutdownProcess:
+    """Faithful managed-process seam for lifecycle shutdown tests."""
+
+    pid = 10
+
+    def __init__(
+        self,
+        log_path: Path,
+        *,
+        emit_orderly_marker: bool,
+        returncode: int = 128 + signal.SIGINT,
+    ) -> None:
+        self.log_path = log_path
+        self.emit_orderly_marker = emit_orderly_marker
+        self.returncode = returncode
+
+    @staticmethod
+    def poll() -> None:
+        return None
+
+    def wait(self, *, timeout: float) -> int:
+        assert 0 < timeout <= live_fuzz.MINDROOM_SHUTDOWN_TIMEOUT_SECONDS
+        if self.emit_orderly_marker:
+            with self.log_path.open("a", encoding="utf-8") as log:
+                log.write(f"{ORDERLY_SHUTDOWN_MARKER}\n")
+        return self.returncode
+
+
+def _install_graceful_shutdown_process(
+    stack: ManagedTuwunelStack,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    emit_orderly_marker: bool,
+    group_survives_sigint: bool = False,
+) -> list[signal.Signals | int]:
+    """Install a managed leader and a process group with realistic signal state."""
+    stack._mindroom_process = cast(
+        "Any",
+        _GracefulShutdownProcess(
+            stack.log_path,
+            emit_orderly_marker=emit_orderly_marker,
+        ),
+    )
+    group_alive = True
+    signals: list[signal.Signals | int] = []
+
+    def killpg(_pid: int, sent_signal: signal.Signals | int) -> None:
+        nonlocal group_alive
+        signals.append(sent_signal)
+        if sent_signal == 0:
+            if group_alive:
+                return
+            raise ProcessLookupError
+        if (sent_signal == signal.SIGINT and not group_survives_sigint) or sent_signal == signal.SIGKILL:
+            group_alive = False
+
+    monkeypatch.setattr(live_fuzz.os, "killpg", killpg)
+    monkeypatch.setattr(live_fuzz, "_PROCESS_GROUP_GRACE_SECONDS", 0.0)
+    return signals
+
+
+@pytest.mark.parametrize("stale_marker", [False, True])
+def test_cold_restart_requires_fresh_orderly_marker_before_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stale_marker: bool,
+) -> None:
+    """A cold restart cannot erase cursors after an incompletely proven stop."""
+    stack = ManagedTuwunelStack()
+    resets: list[Path] = []
+    starts: list[int] = []
+    try:
+        if stale_marker:
+            stack.log_path.write_text(f"{ORDERLY_SHUTDOWN_MARKER}\n", encoding="utf-8")
+        _install_graceful_shutdown_process(stack, monkeypatch, emit_orderly_marker=False)
+        monkeypatch.setattr(live_fuzz, "_reset_durable_sync_cursors", resets.append)
+        monkeypatch.setattr(stack, "_start_mindroom", lambda: starts.append(1))
+
+        with pytest.raises(RuntimeError, match="fresh orderly shutdown marker"):
+            stack.cold_restart_mindroom()
+
+        assert resets == []
+        assert starts == []
+    finally:
+        stack.close()
+
+
+def test_final_cleanup_rejects_stale_orderly_marker_and_finishes_other_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final cleanup retains a missing-marker failure after removing stack storage."""
+    stack = ManagedTuwunelStack()
+    stack.log_path.write_text(f"{ORDERLY_SHUTDOWN_MARKER}\n", encoding="utf-8")
+    root = stack.root
+    _install_graceful_shutdown_process(stack, monkeypatch, emit_orderly_marker=False)
+
+    with pytest.raises(ExceptionGroup, match="live Matrix fuzz cleanup failed") as raised:
+        stack.close()
+
+    assert "fresh orderly shutdown marker" in str(raised.value.exceptions[0])
+    assert not root.exists()
+
+
+def test_restart_rejects_surviving_group_without_starting_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary restart cleans a surviving group and refuses replacement."""
+    stack = ManagedTuwunelStack()
+    starts: list[int] = []
+    try:
+        signals = _install_graceful_shutdown_process(
+            stack,
+            monkeypatch,
+            emit_orderly_marker=True,
+            group_survives_sigint=True,
+        )
+        monkeypatch.setattr(stack, "_start_mindroom", lambda: starts.append(1))
+
+        with pytest.raises(AssertionError, match="did not shut down cleanly"):
+            stack.restart_mindroom()
+
+        assert signal.SIGKILL in signals
+        assert starts == []
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_planned_outage_rejects_and_cleans_surviving_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A planned outage cannot accept a leader exit while its group survives."""
+    stack = ManagedTuwunelStack()
+    runner = object.__new__(LiveFuzzRunner)
+    runner.stack = stack
+    runner._mindroom_running = True
+    runner.outage_count = 0
+    runner._journal = None
+    try:
+        signals = _install_graceful_shutdown_process(
+            stack,
+            monkeypatch,
+            emit_orderly_marker=True,
+            group_survives_sigint=True,
+        )
+
+        with pytest.raises(AssertionError, match="planned outage"):
+            await runner._apply_lifecycle(LiveOperationKind.STOP_MINDROOM, 0)
+
+        assert signal.SIGKILL in signals
+        assert runner._mindroom_running
+        assert runner.outage_count == 0
+    finally:
+        stack.close()
+
+
+def test_graceful_stop_accepts_fresh_marker_and_gone_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh marker and a drained process group prove graceful shutdown."""
+    stack = ManagedTuwunelStack()
+    try:
+        signals = _install_graceful_shutdown_process(stack, monkeypatch, emit_orderly_marker=True)
+
+        assert stack.stop_mindroom(timeout=1)
+        assert signals == [signal.SIGINT, 0]
         assert stack._mindroom_process is None
     finally:
         stack.close()
@@ -4054,6 +4242,7 @@ def test_lifecycle_command_interrupt_kills_and_drains_process_group(
 )
 def test_stop_mindroom_targets_exact_process_group(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     *,
     hard_kill: bool,
     expected_signal: signal.Signals,
@@ -4073,11 +4262,14 @@ def test_stop_mindroom_targets_exact_process_group(
         def wait(self, *, timeout: float) -> int:
             assert timeout in {10, live_fuzz.MINDROOM_SHUTDOWN_TIMEOUT_SECONDS}
             self.waited = True
+            if not hard_kill:
+                stack.log_path.write_text(f"{ORDERLY_SHUTDOWN_MARKER}\n", encoding="utf-8")
             return return_code
 
     process = FakeProcess()
     stack = object.__new__(ManagedTuwunelStack)
     stack._mindroom_process = process
+    stack.log_path = tmp_path / "mindroom.log"
     signals: list[tuple[int, signal.Signals | int]] = []
 
     def killpg(pid: int, sent_signal: signal.Signals | int) -> None:
@@ -4122,6 +4314,7 @@ def test_stop_mindroom_kills_group_after_leader_already_exited(
 
 def test_stop_mindroom_reports_sigkill_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A hung graceful shutdown is cleanup, never passing health evidence."""
 
@@ -4144,6 +4337,7 @@ def test_stop_mindroom_reports_sigkill_fallback(
     process = FakeProcess()
     stack = object.__new__(ManagedTuwunelStack)
     stack._mindroom_process = process
+    stack.log_path = tmp_path / "mindroom.log"
     signals: list[tuple[int, signal.Signals]] = []
     monkeypatch.setattr(live_fuzz.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
 
@@ -4160,6 +4354,7 @@ def test_stop_mindroom_reports_sigkill_fallback(
 
 def test_stop_mindroom_rejects_nonzero_graceful_exit(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """An unexpected exit after SIGINT still fails managed shutdown."""
 
@@ -4177,6 +4372,7 @@ def test_stop_mindroom_rejects_nonzero_graceful_exit(
 
     stack = object.__new__(ManagedTuwunelStack)
     stack._mindroom_process = FakeProcess()
+    stack.log_path = tmp_path / "mindroom.log"
 
     def killpg(_pid: int, sent_signal: signal.Signals | int) -> None:
         if sent_signal == 0:
@@ -4191,12 +4387,13 @@ def test_stop_mindroom_rejects_nonzero_graceful_exit(
 
 
 @pytest.mark.parametrize("return_code", [-signal.SIGINT, 128 + signal.SIGINT])
-def test_stop_mindroom_accepts_sigint_exit_status(
+def test_stop_mindroom_accepts_sigint_exit_status_with_fresh_marker(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     *,
     return_code: int,
 ) -> None:
-    """Direct and shell-encoded SIGINT statuses prove expected managed shutdown."""
+    """Accepted SIGINT status, a fresh marker, and a gone group prove shutdown."""
 
     class FakeProcess:
         pid = 4242
@@ -4205,13 +4402,14 @@ def test_stop_mindroom_accepts_sigint_exit_status(
         def poll() -> None:
             return None
 
-        @staticmethod
-        def wait(*, timeout: float) -> int:
+        def wait(self, *, timeout: float) -> int:
             assert timeout == live_fuzz.MINDROOM_SHUTDOWN_TIMEOUT_SECONDS
+            stack.log_path.write_text(f"{ORDERLY_SHUTDOWN_MARKER}\n", encoding="utf-8")
             return return_code
 
     stack = object.__new__(ManagedTuwunelStack)
     stack._mindroom_process = FakeProcess()
+    stack.log_path = tmp_path / "mindroom.log"
 
     def killpg(_pid: int, sent_signal: signal.Signals | int) -> None:
         if sent_signal == 0:
@@ -4226,6 +4424,7 @@ def test_stop_mindroom_accepts_sigint_exit_status(
 
 def test_stop_mindroom_rejects_exit_before_sigint_delivery(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """An expected-looking exit cannot pass when managed SIGINT never landed."""
     wait_calls: list[float] = []
@@ -4244,6 +4443,7 @@ def test_stop_mindroom_rejects_exit_before_sigint_delivery(
 
     stack = object.__new__(ManagedTuwunelStack)
     stack._mindroom_process = FakeProcess()
+    stack.log_path = tmp_path / "mindroom.log"
 
     def missing_group(_pid: int, _sig: signal.Signals) -> None:
         raise ProcessLookupError
@@ -4292,11 +4492,11 @@ def test_stop_mindroom_rejects_exit_before_sigkill_delivery(
 
 def test_stop_mindroom_rejects_surviving_group_after_graceful_leader_exit(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A leader's SIGINT status cannot hide a surviving same-group child."""
     group_alive = True
     signals: list[signal.Signals | int] = []
-    monotonic_values = iter((0.0, 1.0, 1.0))
 
     class FakeProcess:
         pid = 4242
@@ -4305,9 +4505,9 @@ def test_stop_mindroom_rejects_surviving_group_after_graceful_leader_exit(
         def poll() -> None:
             return None
 
-        @staticmethod
-        def wait(*, timeout: float) -> int:
+        def wait(self, *, timeout: float) -> int:
             assert timeout == live_fuzz.MINDROOM_SHUTDOWN_TIMEOUT_SECONDS
+            stack.log_path.write_text(f"{ORDERLY_SHUTDOWN_MARKER}\n", encoding="utf-8")
             return 128 + signal.SIGINT
 
     def killpg(_pid: int, sent_signal: signal.Signals | int) -> None:
@@ -4322,8 +4522,9 @@ def test_stop_mindroom_rejects_surviving_group_after_graceful_leader_exit(
 
     stack = object.__new__(ManagedTuwunelStack)
     stack._mindroom_process = FakeProcess()
+    stack.log_path = tmp_path / "mindroom.log"
     monkeypatch.setattr(live_fuzz.os, "killpg", killpg)
-    monkeypatch.setattr(live_fuzz.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(live_fuzz, "_PROCESS_GROUP_GRACE_SECONDS", 0.0)
     monkeypatch.setattr(live_fuzz.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(RuntimeError, match="process group survived graceful SIGINT and required SIGKILL"):
