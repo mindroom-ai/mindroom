@@ -9,6 +9,7 @@ import os
 import shutil
 import sqlite3
 import stat
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
@@ -31,7 +32,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 if TYPE_CHECKING:
     from multiprocessing.synchronize import Barrier, Event
 
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 
 class _Provider:
@@ -296,6 +297,280 @@ async def test_copied_database_is_rejected_by_scope_binding(tmp_path: Path) -> N
     with pytest.raises(OAuthProviderError, match="different credential scope"):
         async with oauth_credential_transaction(bob):
             pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
+@pytest.mark.parametrize(
+    ("tenant_id", "account_id", "legacy_tenant"),
+    [(None, None, "default"), ("tenant", "account", "tenant"), (None, "account", "account")],
+)
+async def test_requester_key_upgrade_preserves_primary_runtime_oauth_credentials(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+    tenant_id: str | None,
+    account_id: str | None,
+    legacy_tenant: str,
+) -> None:
+    """Previously stored credentials remain readable after requester key encoding changes."""
+    context = _context(tmp_path, requester_id="@alice:example.org")
+    assert context.worker_target is not None
+    assert context.worker_target.execution_identity is not None
+    identity = replace(
+        context.worker_target.execution_identity,
+        agent_name="transport",
+        tenant_id=tenant_id,
+        account_id=account_id,
+    )
+    target = resolve_worker_target(worker_scope, "assistant", identity)
+    context = replace(context, worker_target=target)
+    legacy_key = f"v1:{legacy_tenant}:{worker_scope}:@alice:example.org"
+    if worker_scope == "user_agent":
+        legacy_key += ":assistant"
+    legacy_context = replace(context, worker_target=replace(target, worker_key=legacy_key))
+    generations = await _publish(legacy_context, "existing-access")
+    database_path = _oauth_credential_database_path(legacy_context)
+    assert database_path == _oauth_credential_database_path(context)
+    original_bytes = database_path.read_bytes()
+
+    async with oauth_credential_reader(context) as reader:
+        snapshot = reader.snapshot()
+        assert snapshot.credentials == {"token": "existing-access", "refresh_token": "refresh-existing-access"}
+        assert (snapshot.generation, snapshot.connection_generation) == generations
+
+    assert database_path.read_bytes() == original_bytes
+    async with oauth_credential_transaction(context) as transaction:
+        assert transaction.snapshot().credentials == snapshot.credentials
+        await transaction.commit()
+    assert database_path.read_bytes() == original_bytes
+    async with oauth_credential_reader(legacy_context) as reader:
+        assert reader.snapshot().credentials == snapshot.credentials
+    async with oauth_credential_transaction(context) as transaction:
+        refreshed = transaction.publish({"token": "refreshed"}, advance_connection_generation=False)
+        assert refreshed.generation != generations[0]
+        assert refreshed.connection_generation == generations[1]
+        await transaction.commit()
+    async with oauth_credential_reader(legacy_context) as reader:
+        assert reader.snapshot().credentials == {"token": "refreshed"}
+    async with oauth_credential_transaction(context) as transaction:
+        assert transaction.reset("reset-upgraded")
+        await transaction.commit()
+    async with oauth_credential_reader(legacy_context) as reader:
+        assert reader.snapshot().credentials is None
+
+
+async def _assert_scope_rejected(context: OAuthCredentialContext) -> None:
+    for open_store in (oauth_credential_reader, oauth_credential_transaction):
+        with pytest.raises(OAuthProviderError, match="different credential scope"):
+            async with open_store(context):
+                pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("provider_id", "other_provider"),
+        ("credential_service", "other_oauth"),
+        ("routing_agent_name", "other_agent"),
+        ("worker_scope", "user_agent"),
+        ("worker_key", "v1:tenant:user:@bob:example.test"),
+        ("worker_key", "v1:other:user:@alice:example.test"),
+        ("worker_key", "v1:tenant:user_agent:@alice:example.test:code"),
+        ("worker_key", "v2:tenant:user:@alice:example.test"),
+        ("worker_key", "v1:tenant:user:~~@alice:example.test"),
+        ("worker_key", "v1:tenant:user:~%40alice:example.test"),
+        ("worker_key", "v1:tenant:user:~@bob:example.test"),
+    ],
+)
+async def test_legacy_binding_compatibility_rejects_other_scopes(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    """Legacy spelling never exempts other stored scope fields from validation."""
+    context = _context(tmp_path)
+    assert context.worker_target is not None
+    legacy = replace(
+        context,
+        worker_target=replace(context.worker_target, worker_key="v1:tenant:user:@alice:example.test"),
+    )
+    await _publish(legacy, "existing")
+    with sqlite3.connect(_oauth_credential_database_path(context)) as connection:
+        connection.execute(f"UPDATE oauth_credential_state SET {field} = ? WHERE singleton = 1", (value,))  # noqa: S608
+    await _assert_scope_rejected(context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requester", "legacy_requester"),
+    [
+        ("alice/foo", "alice_foo"),
+        (" alice ", "alice"),
+        ("_alice", "alice"),
+        ("alice_", "alice"),
+        ("alice%foo", "alice_foo"),
+        ("~alice", "alice"),
+        ("álîce", "l_ce"),
+    ],
+)
+async def test_legacy_binding_compatibility_rejects_lossy_requesters(
+    tmp_path: Path,
+    requester: str,
+    legacy_requester: str,
+) -> None:
+    """A requester that legacy normalization changed must not use compatibility."""
+    context = _context(tmp_path, requester_id=requester)
+    assert context.worker_target is not None
+    legacy = replace(
+        context,
+        worker_target=replace(context.worker_target, worker_key=f"v1:tenant:user:{legacy_requester}"),
+    )
+    await _publish(legacy, "existing")
+    await _assert_scope_rejected(context)
+
+
+@pytest.mark.asyncio
+async def test_legacy_requester_collision_keeps_distinct_raw_identity_paths(tmp_path: Path) -> None:
+    """Lossless upgrade reads its own raw-identity store without importing a colliding store."""
+    lossy = _context(tmp_path, requester_id="alice/foo")
+    lossless = _context(tmp_path, requester_id="alice_foo")
+    for context, token in ((lossy, "lossy"), (lossless, "lossless")):
+        assert context.worker_target is not None
+        legacy = replace(
+            context,
+            worker_target=replace(context.worker_target, worker_key="v1:tenant:user:alice_foo"),
+        )
+        await _publish(legacy, token)
+    assert _oauth_credential_database_path(lossy) != _oauth_credential_database_path(lossless)
+    await _assert_scope_rejected(lossy)
+    async with oauth_credential_reader(lossless) as reader:
+        assert reader.snapshot().credentials == {"token": "lossless", "refresh_token": "refresh-lossless"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_target", ["worker_key", "tenant_id", "account_id"])
+async def test_legacy_binding_compatibility_requires_canonical_current_target(
+    tmp_path: Path,
+    invalid_target: str,
+) -> None:
+    """Forged current keys and inconsistent identity metadata cannot authorize legacy access."""
+    context = _context(tmp_path)
+    assert context.worker_target is not None
+    legacy = replace(
+        context,
+        worker_target=replace(context.worker_target, worker_key="v1:tenant:user:@alice:example.test"),
+    )
+    await _publish(legacy, "existing")
+    target = replace(context.worker_target, **{invalid_target: "other"})
+    await _assert_scope_rejected(replace(context, worker_target=target))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["worker", "runtime", "database"])
+async def test_legacy_binding_compatibility_requires_primary_runtime_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+) -> None:
+    """Legacy access is limited to the current primary runtime's canonical database path."""
+    context = _context(tmp_path)
+    if location == "worker":
+        context = replace(context, credentials_manager=context.credentials_manager.for_worker("other-worker"))
+    assert context.worker_target is not None
+    legacy = replace(
+        context,
+        worker_target=replace(context.worker_target, worker_key="v1:tenant:user:@alice:example.test"),
+    )
+    await _publish(legacy, "existing")
+    if location == "runtime":
+        context = replace(context, runtime_paths=_runtime_paths(tmp_path / "other-runtime"))
+    elif location == "database":
+        original_path = _oauth_credential_database_path(context)
+        foreign_path = original_path.with_name("foreign.sqlite3")
+        shutil.copyfile(original_path, foreign_path)
+        monkeypatch.setattr(credential_store_module, "_oauth_credential_database_path", lambda _context: foreign_path)
+    await _assert_scope_rejected(context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent_depth", [0, 1, 2])
+@pytest.mark.parametrize("destination", ["external", "same-runtime"])
+async def test_legacy_binding_rejects_redirected_scoped_directory(
+    tmp_path: Path,
+    parent_depth: int,
+    destination: str,
+) -> None:
+    """Symlinked credential directories cannot authorize a legacy store at another location."""
+    context = _context(tmp_path / "runtime")
+    assert context.worker_target is not None
+    legacy = replace(
+        context,
+        worker_target=replace(context.worker_target, worker_key="v1:tenant:user:@alice:example.test"),
+    )
+    await _publish(legacy, "external")
+    database_path = _oauth_credential_database_path(context)
+    redirected_directory = database_path.parents[parent_depth]
+    destination_root = tmp_path if destination == "external" else context.runtime_paths.storage_root
+    moved_directory = destination_root / "redirected-credentials"
+    redirected_directory.rename(moved_directory)
+    redirected_directory.symlink_to(moved_directory, target_is_directory=True)
+    original_bytes = database_path.read_bytes()
+
+    await _assert_scope_rejected(context)
+
+    assert database_path.read_bytes() == original_bytes
+
+
+@pytest.mark.asyncio
+async def test_legacy_binding_supports_configured_runtime_root_symlink(tmp_path: Path) -> None:
+    """Resolving a configured runtime root preserves its legitimate legacy credentials."""
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    runtime_alias = tmp_path / "runtime-alias"
+    runtime_alias.symlink_to(runtime_root, target_is_directory=True)
+    context = _context(runtime_alias)
+    assert context.runtime_paths.storage_root == runtime_root
+    assert context.worker_target is not None
+    legacy = replace(
+        context,
+        worker_target=replace(context.worker_target, worker_key="v1:tenant:user:@alice:example.test"),
+    )
+    await _publish(legacy, "existing")
+    async with oauth_credential_reader(context) as reader:
+        assert reader.snapshot().credentials == {"token": "existing", "refresh_token": "refresh-existing"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsupported", ["shared", "unscoped", "service"])
+async def test_legacy_binding_compatibility_rejects_unsupported_storage(
+    tmp_path: Path,
+    unsupported: str,
+) -> None:
+    """Shared, unscoped, and non-OAuth stores retain strict worker-key equality."""
+    context = _context(tmp_path)
+    assert context.worker_target is not None
+    if unsupported in {"shared", "unscoped"}:
+        target = resolve_worker_target(
+            "shared" if unsupported == "shared" else None,
+            "assistant",
+            context.worker_target.execution_identity,
+        )
+        context = replace(context, worker_target=target)
+    else:
+        provider = _Provider()
+        provider.credential_service = "demo_service"
+        context = replace(context, provider=cast("OAuthProvider", provider))
+    assert context.worker_target is not None
+    legacy = replace(
+        context,
+        worker_target=replace(context.worker_target, worker_key="v1:tenant:user:@alice:example.test"),
+    )
+    await _publish(legacy, "existing")
+    if unsupported == "service":
+        current_path = _oauth_credential_database_path(context)
+        shutil.copyfile(_oauth_credential_database_path(legacy), current_path)
+    await _assert_scope_rejected(context)
 
 
 @pytest.mark.asyncio

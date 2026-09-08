@@ -4,24 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
 import sqlite3
 import stat
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from cryptography.exceptions import InvalidTag
 
+from mindroom.credential_policy import is_oauth_token_service
 from mindroom.credentials import scoped_credentials_path
 from mindroom.durable_write import fsync_directory_durable
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthProviderError
+from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
-    from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -42,6 +46,9 @@ class OAuthCredentialUnreadableError(OAuthProviderError):
 
 class _OAuthCredentialStoreContext(Protocol):
     """Fields the store needs from the lifecycle's canonical scope."""
+
+    @property
+    def runtime_paths(self) -> RuntimePaths: ...
 
     @property
     def provider(self) -> OAuthProvider: ...
@@ -403,7 +410,7 @@ async def _initialize_store(
         if legacy.present:
             legacy_adoption = legacy
     else:
-        _validate_scope_binding(context, row)
+        _validate_scope_binding(context, connection, row)
         legacy_adoption = _adopt_deferred_legacy_payload(context, connection, row)
     legacy_cleanup_deferred = _legacy_cleanup_must_be_deferred(connection)
     await _commit_connection(connection)
@@ -507,15 +514,73 @@ def _validate_initialized_store(
     if stored_row is None:
         msg = "OAuth credential store state is missing"
         raise OAuthProviderError(msg)
-    _validate_scope_binding(context, stored_row)
+    _validate_scope_binding(context, connection, stored_row)
 
 
-def _validate_scope_binding(context: _OAuthCredentialStoreContext, row: sqlite3.Row) -> None:
+def _validate_scope_binding(
+    context: _OAuthCredentialStoreContext,
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> None:
     expected_binding = _scope_binding(context)
     actual_binding = {key: str(row[key]) for key in expected_binding}
+    if actual_binding == expected_binding:
+        return
+    legacy_key = _compatible_legacy_worker_key(context, connection)
+    if legacy_key is not None:
+        expected_binding["worker_key"] = legacy_key
     if actual_binding != expected_binding:
         msg = "OAuth credential store belongs to a different credential scope"
         raise OAuthProviderError(msg)
+
+
+def _compatible_legacy_worker_key(
+    context: _OAuthCredentialStoreContext,
+    connection: sqlite3.Connection,
+) -> str | None:
+    """Read legacy requester bindings at stable raw-identity paths without migrating them.
+
+    The requester encoding upgrade changed worker keys but left these stores in place.
+    Accept only lossless legacy spellings and retain the stored binding for rollback.
+    """
+    target = context.worker_target
+    manager = context.credentials_manager
+    if (
+        target is None
+        or target.worker_scope not in {"user", "user_agent"}
+        or not is_oauth_token_service(context.provider.credential_service)
+        or manager.current_worker_key is not None
+        or manager.storage_root != context.runtime_paths.storage_root
+    ):
+        return None
+    identity = target.execution_identity
+    if identity is None or not identity.requester_id:
+        return None
+    requester = identity.requester_id
+    legacy_requester = re.sub(r"[^a-zA-Z0-9._:@+-]+", "_", requester.strip()).strip("_") or "default"
+    if legacy_requester != requester:
+        return None
+    canonical_target = resolve_worker_target(
+        target.worker_scope,
+        target.routing_agent_name,
+        execution_identity=identity,
+        private_agent_names=target.private_agent_names,
+    )
+    if canonical_target != target:
+        return None
+    # Raw requester/agent hashes own legacy stores; never search or adopt worker directories.
+    # Old bindings cannot distinguish a misfiled database from a colliding legacy identity.
+    credential_path = _legacy_credential_path(context)
+    canonical_path = credential_path.with_name(f"{credential_path.stem}.sqlite3")
+    database_path = next(row[2] for row in connection.execute("PRAGMA database_list") if row[1] == "main")
+    if Path(database_path).absolute() != canonical_path.absolute():
+        return None
+    assert canonical_target.worker_key is not None
+    return canonical_target.worker_key.replace(
+        f":{target.worker_scope}:~{requester}",
+        f":{target.worker_scope}:{requester}",
+        1,
+    )
 
 
 async def _commit_connection(connection: sqlite3.Connection) -> None:
