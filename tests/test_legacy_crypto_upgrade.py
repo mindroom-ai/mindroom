@@ -217,6 +217,19 @@ def test_invalid_crypto_account_keeps_legacy_recovery(tmp_path: Path) -> None:
         assert connection.execute("SELECT account FROM accounts").fetchone() == (b"invalid-pickle",)
 
 
+def test_missing_crypto_account_keeps_legacy_recovery(tmp_path: Path) -> None:
+    """A missing retained identity must block destructive transport cleanup."""
+    _legacy_crypto(tmp_path, "pending")
+    path = tmp_path / f"{ACCOUNT}_{DEVICE}.db"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("DELETE FROM accounts")
+        connection.commit()
+    with pytest.raises(LocalProtocolError, match="account is missing"):
+        retire_legacy_crypto_recovery(path, user_id=ACCOUNT, device_id=DEVICE)
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pendingtimelineevents").fetchone() == (1,)
+
+
 @pytest.mark.parametrize("correct_key", [False, True])
 def test_crypto_retirement_authenticates_the_configured_pickle_key(tmp_path: Path, correct_key: bool) -> None:
     """Only the actual configured key permits retirement; wrong keys retain recovery."""

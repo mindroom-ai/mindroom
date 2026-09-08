@@ -46,6 +46,9 @@ def retire_legacy_crypto_recovery(
             if tables & {"niodurablemeta", "nioingestmeta"} or "accounts" not in tables:
                 return
             accounts = connection.execute("SELECT user_id, device_id, account, shared FROM accounts").fetchall()
+            if not accounts:
+                msg = "Legacy Matrix store account is missing"
+                raise LocalProtocolError(msg)
             if any(account[:2] != (user_id, device_id) for account in accounts):
                 msg = "Legacy Matrix store account/device identity mismatch"
                 raise LocalProtocolError(msg)
