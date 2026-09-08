@@ -1084,7 +1084,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
-    "mindroom.private_storage_upgrade",
+    "mindroom.private_storage_startup",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
     "mindroom.api.thread_exports",
@@ -1780,7 +1780,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
-    "mindroom.private_storage_upgrade",
+    "mindroom.private_storage_startup",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
     "mindroom.event_journal_open",
@@ -5244,6 +5244,25 @@ depends_on = [
 path = "mindroom.cli.storage_upgrade"
 depends_on = [
     "mindroom.private_storage_upgrade",
-    "mindroom.private_instance_identity_store",
     "mindroom.durable_write",
 ]
+
+[[modules]]
+path = "mindroom.private_storage_startup"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.private_storage_upgrade",
+    "mindroom.background_tasks",
+    "mindroom.workers.storage_quiescence",
+]
+visibility = ["mindroom.orchestrator", "mindroom.api.main"]
+
+[[modules]]
+path = "mindroom.workers.storage_quiescence"
+depends_on = [
+    "mindroom.runtime_env_policy",
+    "mindroom.workers.backend",
+    "mindroom.workers.backends.docker",
+    "mindroom.workers.backends.kubernetes",
+]
+visibility = ["mindroom.private_storage_startup"]

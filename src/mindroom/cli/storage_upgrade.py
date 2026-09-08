@@ -1,4 +1,4 @@
-"""Offline owner-verified private-storage upgrade commands."""
+"""Optional inspection and offline recovery of private-storage upgrades."""
 
 from __future__ import annotations
 
@@ -11,19 +11,16 @@ import typer
 if TYPE_CHECKING:
     from mindroom.private_storage_upgrade import StorageUpgradePlan
 
-storage_upgrade_app = typer.Typer(help="Plan and recover offline private-storage upgrades.")
+storage_upgrade_app = typer.Typer(help="Inspect or recover private storage; normal upgrades run at startup.")
 
 
 def _read_plan(manifest: Path) -> StorageUpgradePlan:
-    from mindroom.private_instance_identity_store import load_private_instance_record_payload  # noqa: PLC0415
-    from mindroom.private_storage_upgrade import StorageUpgradeError, StorageUpgradePlan  # noqa: PLC0415
+    from mindroom.private_storage_upgrade import StorageUpgradeError, read_storage_upgrade_plan  # noqa: PLC0415
 
     try:
-        return StorageUpgradePlan.model_validate(
-            load_private_instance_record_payload(manifest, max_bytes=64 * 1024 * 1024),
-        )
+        return read_storage_upgrade_plan(manifest)
     except (OSError, ValueError) as error:
-        message = "Cannot read the protected storage upgrade manifest"
+        message = "Cannot read the protected storage upgrade manifest or receipt"
         raise StorageUpgradeError(message) from error
 
 

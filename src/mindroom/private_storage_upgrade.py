@@ -15,7 +15,7 @@ import os
 import re
 import sqlite3
 import stat
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -35,6 +35,8 @@ from mindroom.private_instance_identity_store import (
 from mindroom.tool_system.worker_routing import normalize_worker_key_part, private_instance_scope_root_path
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from mindroom.constants import RuntimePaths
 
 _RECORD_FILENAME = ".mindroom-private-instance.json"
@@ -100,6 +102,14 @@ class StorageUpgradePlan(_FrozenModel):
 class _Journal(_FrozenModel):
     plan: StorageUpgradePlan
     status: Literal["prepared", "moving", "complete", "reversing", "rolled_back"]
+
+
+def read_storage_upgrade_plan(path: Path) -> StorageUpgradePlan:
+    """Read an inspected manifest or an automatically persisted recovery receipt."""
+    payload = load_private_instance_record_payload(path, max_bytes=64 * 1024 * 1024)
+    if isinstance(payload, dict) and "plan" in payload:
+        return _Journal.model_validate(payload).plan
+    return StorageUpgradePlan.model_validate(payload)
 
 
 def _fail(message: str) -> Never:
@@ -234,6 +244,32 @@ def _validate_volumes(plan: StorageUpgradePlan) -> None:
             _directory(namespace)
 
 
+def _check_secondary_scopes(
+    storage: Path,
+    sessions: Path,
+    operations: tuple[_Operation, ...] = (),
+) -> None:
+    """Pair every secondary entry with a proven owner or validated recovery operation."""
+    if storage == sessions:
+        return
+    namespace = sessions / "private_instances"
+    if not namespace.exists() and not namespace.is_symlink():
+        return
+    _directory(namespace)
+    planned = {name for operation in operations for name in (operation.source, operation.destination)}
+    for scope in namespace.iterdir():
+        _directory(scope)
+        if scope.name in planned:
+            continue
+        owner = storage / "private_instances" / scope.name
+        try:
+            _directory(owner)
+            _legacy_keys(owner)
+        except (OSError, PrivateInstanceIdentityError, StorageUpgradeError) as error:
+            message = "Secondary session scope has no verified primary owner"
+            raise StorageUpgradeError(message) from error
+
+
 def plan_storage_upgrade(
     storage: Path,
     sessions: Path | None = None,
@@ -256,6 +292,7 @@ def _plan_storage_upgrade(  # noqa: C901 - ordered preflight refuses partial own
     volumes = _volumes(storage, sessions)
     control_root = (control_state or storage / "control_state").expanduser().absolute()
     _check_active_scripts(control_root)
+    _check_secondary_scopes(Path(volumes[0].path), Path(volumes[-1].path))
     for volume in volumes:
         if _read_journal(Path(volume.path) / _MARKER) is not None:
             _fail("Existing transaction requires its original plan and recovery command")
@@ -434,6 +471,104 @@ def _runtime_roots(runtime_paths: RuntimePaths) -> tuple[Path, Path]:
     if not sessions.is_absolute():
         sessions = runtime_paths.config_dir / sessions
     return runtime_paths.storage_root, sessions
+
+
+@dataclass(frozen=True)
+class StorageUpgradeDiscovery:
+    """Validated participants and any original transaction awaiting startup."""
+
+    volumes: tuple[_Volume, ...]
+    plan: StorageUpgradePlan | None = None
+    direction: Literal["apply", "rollback", "stopped"] = "apply"
+
+
+def discover_runtime_storage_upgrade(runtime_paths: RuntimePaths) -> StorageUpgradeDiscovery | None:
+    """Inspect owners and receipts without inventorying files or creating roots."""
+    try:
+        return _discover_runtime_storage_upgrade(runtime_paths)
+    except StorageUpgradeError:
+        raise
+    except (OSError, ValueError) as error:
+        message = "Private storage ownership or required participants could not be verified"
+        raise StorageUpgradeError(message) from error
+
+
+def _discover_runtime_storage_upgrade(  # noqa: C901, PLR0912 - validate all participant states before startup
+    runtime_paths: RuntimePaths,
+) -> StorageUpgradeDiscovery | None:
+    roots = tuple(dict.fromkeys(path.expanduser().absolute() for path in _runtime_roots(runtime_paths)))
+    journals = []
+    for root in roots:
+        if root.exists() or root.is_symlink():
+            _root(root)
+            journals.append(_read_journal(root / _MARKER))
+        else:
+            journals.append(None)
+    if any(journals):
+        volumes = _volumes(roots[0], roots[-1])
+        existing = [journal for journal in journals if journal is not None]
+        plan = existing[0].plan
+        if plan.volumes != volumes or Path(plan.control_state) != runtime_paths.control_state_root:
+            _fail("Recorded storage participants do not match the configured runtime")
+        if any(journal.plan != plan for journal in existing):
+            _fail("Different storage transactions claim the configured volumes")
+        if len(existing) != len(journals) and any(journal.status != "prepared" for journal in existing):
+            _fail("Storage transaction has an unsafe missing participation marker")
+        statuses = {journal.status for journal in existing}
+        if statuses == {"complete"}:
+            _check_secondary_scopes(roots[0], roots[-1])
+            check_runtime_storage_upgrade(runtime_paths)
+            return None
+        _check_configured_control_root(runtime_paths)
+        _validate_plan(plan)
+        if statuses == {"rolled_back"}:
+            return StorageUpgradeDiscovery(volumes, plan, "stopped")
+        direction = "rollback" if statuses & {"reversing", "rolled_back"} else "apply"
+        return StorageUpgradeDiscovery(volumes, plan, direction)
+    namespace = roots[0] / "private_instances"
+    needs_upgrade = False
+    if namespace.exists() or namespace.is_symlink():
+        _directory(namespace)
+        for scope in namespace.iterdir():
+            _directory(scope)
+            if any(scope.iterdir()) and _legacy_keys(scope) is not None:
+                needs_upgrade = True
+    if needs_upgrade:
+        _check_configured_control_root(runtime_paths)
+        _check_secondary_scopes(roots[0], roots[-1])
+        return StorageUpgradeDiscovery(_volumes(roots[0], roots[-1]))
+    _check_secondary_scopes(roots[0], roots[-1])
+    check_runtime_storage_upgrade(runtime_paths)
+    return None
+
+
+def _check_configured_control_root(runtime_paths: RuntimePaths) -> None:
+    root = runtime_paths.control_state_root
+    if root is None:
+        _fail("Private storage migration requires a primary control-state root")
+    if root != runtime_paths.storage_root / "control_state":
+        _root(root)
+
+
+@contextmanager
+def storage_upgrade_locks(volumes: tuple[_Volume, ...]) -> Iterator[None]:
+    """Hold sorted migration locks without creating missing participant roots."""
+
+    def validate_roots() -> None:
+        for volume in volumes:
+            info = _root(Path(volume.path)).stat()
+            if (info.st_dev, info.st_ino) != (volume.device, volume.inode):
+                _fail("A required storage volume is missing or changed")
+
+    validate_roots()
+    with ExitStack() as locks:
+        for volume in sorted(volumes, key=lambda volume: volume.path):
+            lock = Path(volume.path) / _LOCK
+            if lock.is_symlink():
+                _fail("Invalid migration lock")
+            locks.enter_context(advisory_file_lock(lock))
+        validate_roots()
+        yield
 
 
 def check_runtime_storage_upgrade(
@@ -642,6 +777,7 @@ def _validate_plan(plan: StorageUpgradePlan) -> None:  # noqa: C901 - validate e
             if private_instance_scope_root_path(Path(plan.volumes[0].path), key).name != dirname:
                 _fail("Invalid transaction scope path")
         identity = parse_private_instance_identity_payload(json.loads(_record_bytes(operation, new=False)))
+        _validate_record_attributes(operation)
         if identity.worker_key != operation.old_key or identity.requester_id != operation.requester_id:
             _fail("Invalid transaction owner mapping")
         if reconstruct_private_instance_worker_key(operation.old_key, operation.requester_id) != operation.new_key:
@@ -653,9 +789,22 @@ def _validate_plan(plan: StorageUpgradePlan) -> None:  # noqa: C901 - validate e
         if any(move.volume < 0 or move.volume >= len(plan.volumes) for move in operation.moves):
             _fail("Invalid transaction volume")
         _validate_unplanned_mirrors(plan, operation)
+    _check_secondary_scopes(Path(plan.volumes[0].path), Path(plan.volumes[-1].path), plan.operations)
 
 
-def apply_storage_upgrade(  # noqa: C901, PLR0912 - keep durable transaction order explicit
+def _validate_record_attributes(operation: _Operation) -> None:
+    """Reject unusable attribute names and encodings before any lock or journal write."""
+    try:
+        for name, encoded in operation.record_xattrs.items():
+            if not name or "\0" in name or len(os.fsencode(name)) > 255:
+                _fail("Invalid owner attribute name")
+            base64.b64decode(encoded, validate=True)
+    except (ValueError, UnicodeError) as error:
+        message = "Invalid owner attribute name or value encoding"
+        raise StorageUpgradeError(message) from error
+
+
+def apply_storage_upgrade(
     plan: StorageUpgradePlan,
     *,
     writers_stopped: bool,
@@ -666,47 +815,51 @@ def apply_storage_upgrade(  # noqa: C901, PLR0912 - keep durable transaction ord
         _fail("Stopped writers and verified volume backups are required")
     _validate_plan(plan)
     _check_active_scripts(Path(plan.control_state))
-    with ExitStack() as locks:
-        for volume in sorted(plan.volumes, key=lambda volume: volume.path):
-            lock = Path(volume.path) / _LOCK
-            if lock.is_symlink():
-                _fail("Invalid migration lock")
-            locks.enter_context(advisory_file_lock(lock))
-        journals = [_read_journal(Path(v.path) / _MARKER) for v in plan.volumes]
-        if any(journal is not None and journal.plan != plan for journal in journals):
-            _fail("A different transaction owns these volumes")
-        if any(journal is not None and journal.status == "reversing" for journal in journals):
-            _fail("Reverse recovery must finish before another upgrade")
-        if any(j is not None and j.status == "rolled_back" for j in journals) and not all(
-            j is not None and j.status == "rolled_back" for j in journals
-        ):
-            _fail("Reverse recovery must finish on every volume")
-        if not any(journals):
-            current = plan_storage_upgrade(
-                Path(plan.volumes[0].path),
-                Path(plan.volumes[-1].path),
-                control_state=Path(plan.control_state),
-            )
-            if current != plan:
-                _fail("Storage changed after planning")
-        for operation in plan.operations:
-            for move in operation.moves:
-                path, _ = _inspect_move(plan, operation, move)
-                # A prior crash may have renamed this entry without syncing it.
-                # Persist the observed namespace before publishing any new receipt.
-                fsync_directory_durable(path.parent)
-        _publish(plan, "prepared")
-        for operation in plan.operations:
-            for move in operation.moves:
-                path, moved = _inspect_move(plan, operation, move)
-                if not moved:
-                    _rename_offline(path, path.with_name(operation.destination), device=move.device, inode=move.inode)
-                _publish(plan, "moving")
-            destination = Path(plan.volumes[0].path) / "private_instances" / operation.destination
-            _write_record(destination, operation, new=True)
+    with storage_upgrade_locks(plan.volumes):
+        apply_storage_upgrade_locked(plan)
+
+
+def apply_storage_upgrade_locked(  # noqa: C901 - preserve durable transaction ordering
+    plan: StorageUpgradePlan,
+) -> None:
+    """Apply or resume while the caller holds all migration locks and writers remain stopped."""
+    _validate_plan(plan)
+    _check_active_scripts(Path(plan.control_state))
+    journals = [_read_journal(Path(v.path) / _MARKER) for v in plan.volumes]
+    if any(journal is not None and journal.plan != plan for journal in journals):
+        _fail("A different transaction owns these volumes")
+    if any(journal is not None and journal.status == "reversing" for journal in journals):
+        _fail("Reverse recovery must finish before another upgrade")
+    if any(j is not None and j.status == "rolled_back" for j in journals) and not all(
+        j is not None and j.status == "rolled_back" for j in journals
+    ):
+        _fail("Reverse recovery must finish on every volume")
+    if not any(journals):
+        current = plan_storage_upgrade(
+            Path(plan.volumes[0].path),
+            Path(plan.volumes[-1].path),
+            control_state=Path(plan.control_state),
+        )
+        if current != plan:
+            _fail("Storage changed after planning")
+    for operation in plan.operations:
+        for move in operation.moves:
+            path, _ = _inspect_move(plan, operation, move)
+            # A prior crash may have renamed this entry without syncing it.
+            # Persist the observed namespace before publishing any new receipt.
+            fsync_directory_durable(path.parent)
+    _publish(plan, "prepared")
+    for operation in plan.operations:
+        for move in operation.moves:
+            path, moved = _inspect_move(plan, operation, move)
+            if not moved:
+                _rename_offline(path, path.with_name(operation.destination), device=move.device, inode=move.inode)
             _publish(plan, "moving")
-        verify_storage_upgrade(plan)
-        _publish(plan, "complete")
+        destination = Path(plan.volumes[0].path) / "private_instances" / operation.destination
+        _write_record(destination, operation, new=True)
+        _publish(plan, "moving")
+    verify_storage_upgrade(plan)
+    _publish(plan, "complete")
 
 
 def rollback_storage_upgrade(
@@ -719,31 +872,33 @@ def rollback_storage_upgrade(
         _fail("Stopped writers are required for reverse recovery")
     _validate_plan(plan)
     _check_active_scripts(Path(plan.control_state))
-    with ExitStack() as locks:
-        for volume in sorted(plan.volumes, key=lambda volume: volume.path):
-            lock = Path(volume.path) / _LOCK
-            if lock.is_symlink():
-                _fail("Invalid migration lock")
-            locks.enter_context(advisory_file_lock(lock))
-        journals = [_read_journal(Path(v.path) / _MARKER) for v in plan.volumes]
-        if not any(journals) or any(j is not None and j.plan != plan for j in journals):
-            _fail("Rollback requires the original transaction receipt")
-        for operation in plan.operations:
-            for move in operation.moves:
-                path, _ = _inspect_move(plan, operation, move)
-                # A prior crash may have renamed this entry without syncing it.
-                # Persist the observed namespace before publishing any new receipt.
-                fsync_directory_durable(path.parent)
-        _publish(plan, "reversing")
-        for operation in reversed(plan.operations):
-            owner, _ = _inspect_move(plan, operation, operation.moves[0])
-            _write_record(owner, operation, new=False)
-            for move in reversed(operation.moves):
-                path, moved = _inspect_move(plan, operation, move)
-                if moved:
-                    _rename_offline(path, path.with_name(operation.source), device=move.device, inode=move.inode)
-                _publish(plan, "reversing")
-        _publish(plan, "rolled_back")
+    with storage_upgrade_locks(plan.volumes):
+        rollback_storage_upgrade_locked(plan)
+
+
+def rollback_storage_upgrade_locked(plan: StorageUpgradePlan) -> None:
+    """Reverse while the caller holds all migration locks and writers remain stopped."""
+    _validate_plan(plan)
+    _check_active_scripts(Path(plan.control_state))
+    journals = [_read_journal(Path(v.path) / _MARKER) for v in plan.volumes]
+    if not any(journals) or any(j is not None and j.plan != plan for j in journals):
+        _fail("Rollback requires the original transaction receipt")
+    for operation in plan.operations:
+        for move in operation.moves:
+            path, _ = _inspect_move(plan, operation, move)
+            # A prior crash may have renamed this entry without syncing it.
+            # Persist the observed namespace before publishing any new receipt.
+            fsync_directory_durable(path.parent)
+    _publish(plan, "reversing")
+    for operation in reversed(plan.operations):
+        owner, _ = _inspect_move(plan, operation, operation.moves[0])
+        _write_record(owner, operation, new=False)
+        for move in reversed(operation.moves):
+            path, moved = _inspect_move(plan, operation, move)
+            if moved:
+                _rename_offline(path, path.with_name(operation.source), device=move.device, inode=move.inode)
+            _publish(plan, "reversing")
+    _publish(plan, "rolled_back")
 
 
 def _check_active_scripts(control_root: Path) -> None:
@@ -782,19 +937,27 @@ def _validate_unplanned_mirrors(plan: StorageUpgradePlan, operation: _Operation)
 
 
 def _session_snapshots(root: Path) -> dict[str, str]:
-    """Read canonical session paths, including relative links contained in the scope."""
+    """Read known session and learning paths, including contained relative links."""
     snapshots = {}
     for agent in sorted(root.iterdir()):
         if not agent.is_dir():
             continue
-        candidates = [agent / "session.db", agent / "sessions.db", *(agent / "sessions").glob("*.db")]
+        candidates = [
+            agent / "session.db",
+            agent / "sessions.db",
+            *(agent / "sessions").glob("*.db"),
+            *(agent / "learning").glob("*.db"),
+        ]
         for database in sorted(candidates):
             if not database.exists() and not database.is_symlink():
                 continue
             target = database.resolve(strict=True)
             if not target.is_relative_to(root):
                 _fail("Session database link leaves the private scope")
-            snapshots[database.relative_to(root).as_posix()] = _session_database_snapshot(target)
+            snapshots[database.relative_to(root).as_posix()] = _session_database_snapshot(
+                target,
+                include_learning=database.parent == agent / "learning",
+            )
     return snapshots
 
 
@@ -808,7 +971,7 @@ def _settled_database(database: Path, *, label: str = "Session") -> None:
             _fail(f"{label} database sidecar must be settled with writers stopped")
 
 
-def _session_database_snapshot(database: Path) -> str:
+def _session_database_snapshot(database: Path, *, include_learning: bool = False) -> str:
     """Validate schema/integrity and fingerprint actual session and run rows."""
     from agno.db.sqlite.schemas import get_table_schema_definition  # noqa: PLC0415
 
@@ -825,13 +988,27 @@ def _session_database_snapshot(database: Path) -> str:
                 "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name",
             ).fetchall()
             sessions = [name for name, _ in tables if name.endswith("sessions")]
-            if not sessions:
+            learning_tables = (
+                {
+                    "agno_learnings": "learnings",
+                    "agno_memories": "memories",
+                }
+                if include_learning
+                else {}
+            )
+            learning_tables = {
+                name: kind
+                for name, kind in learning_tables.items()
+                if connection.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone()
+            }
+            if not sessions and not learning_tables:
                 _fail("Session database has no recognized session schema")
             digest.update(repr(tables).encode())
             expected_tables = dict.fromkeys(sessions, "sessions")
             expected_tables.update(
                 {"agno_runs" if name == "agno_sessions" else f"{name}_runs": "runs" for name in sessions},
             )
+            expected_tables.update(learning_tables)
             table_names = {name for name, _ in tables}
             for name, table_type in sorted(expected_tables.items()):
                 # Agno creates matching run tables lazily, including for named
@@ -845,7 +1022,12 @@ def _session_database_snapshot(database: Path) -> str:
                 if not required <= columns:
                     _fail("Session database has an incompatible session or run schema")
                 identifier = '"' + name.replace('"', '""') + '"'
-                order = "session_id" if name in sessions else "run_id"
+                order = {
+                    "sessions": "session_id",
+                    "runs": "run_id",
+                    "learnings": "learning_id",
+                    "memories": "memory_id",
+                }[table_type]
                 # Identifiers come from SQLite metadata and are quoted; order is a fixed literal.
                 rows = connection.execute(f"SELECT * FROM {identifier} ORDER BY {order}")  # noqa: S608
                 digest.update(name.encode())

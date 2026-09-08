@@ -22,7 +22,7 @@ from agno.session.agent import AgentSession
 from fastapi import FastAPI
 from typer.testing import CliRunner
 
-from mindroom import orchestrator
+from mindroom import orchestrator, private_storage_startup
 from mindroom import private_storage_upgrade as upgrade
 from mindroom.api import main as api_main
 from mindroom.api import sandbox_runner
@@ -62,6 +62,76 @@ def _legacy(root: Path, requester: str = "@alice:example.org", scope: str = "use
         workspace.mkdir(parents=True)
         (workspace / "note.md").write_text("original private note")
     return source
+
+
+def test_secondary_only_scope_cannot_be_omitted(tmp_path: Path) -> None:
+    """A session-side directory name cannot substitute for an absent authoritative owner."""
+    root, sessions = tmp_path / "state", tmp_path / "sessions"
+    root.mkdir()
+    source = _legacy(root)
+    orphan = sessions / "private_instances" / "unpaired"
+    orphan.mkdir(parents=True)
+    (orphan / "retained").write_text("private session history")
+    with pytest.raises(upgrade.StorageUpgradeError, match=r"[Ss]econdary|[Ss]ession"):
+        upgrade.plan_storage_upgrade(root, sessions)
+    assert source.exists()
+    assert (orphan / "retained").read_text() == "private session history"
+
+
+@pytest.mark.parametrize("attributes", [{"user.example": "%%%"}, {"": ""}, {"user.bad\u0000name": ""}, {"x" * 256: ""}])
+def test_invalid_owner_attributes_refused_before_lock_or_marker(tmp_path: Path, attributes: dict[str, str]) -> None:
+    """Malformed recovery attributes fail validation before any transaction mutation."""
+    _legacy(tmp_path)
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    operation = plan.operations[0].model_copy(update={"record_xattrs": attributes})
+    invalid = plan.model_copy(update={"operations": (operation,)})
+    before = set(tmp_path.rglob("*"))
+    with pytest.raises(upgrade.StorageUpgradeError, match=r"[Aa]ttribute"):
+        upgrade.apply_storage_upgrade(invalid, writers_stopped=True, backup_verified=True)
+    assert set(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("kind", ["sessions", "learnings"])
+@pytest.mark.parametrize("sidecar", [None, "-wal", "-journal"])
+def test_learning_database_is_validated_and_preserved(tmp_path: Path, kind: str, sidecar: str | None) -> None:
+    """Real lazy learning stores receive the same immutable database safety checks."""
+    source = _legacy(tmp_path)
+    database = source / "writer/learning/writer.db"
+    database.parent.mkdir()
+    storage = SqliteDb(db_file=str(database), session_table="writer_learning_sessions")
+    if kind == "sessions":
+        storage.upsert_session(AgentSession(session_id="learned", agent_id="writer", session_data={"retained": True}))
+    else:
+        storage.upsert_learning(id="learned", learning_type="user_profile", content={"retained": True})
+    storage.db_engine.dispose()
+    if sidecar:
+        database.with_name(database.name + sidecar).write_bytes(b"unsettled")
+        original = database.read_bytes()
+        with pytest.raises(upgrade.StorageUpgradeError, match="sidecar"):
+            upgrade.plan_storage_upgrade(tmp_path)
+        assert database.read_bytes() == original
+        return
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    assert "writer/learning/writer.db" in plan.operations[0].moves[0].sessions
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    upgraded = source.with_name(plan.operations[0].destination) / database.relative_to(source)
+    moved = SqliteDb(db_file=str(upgraded), session_table="writer_learning_sessions")
+    if kind == "sessions":
+        assert moved.get_session("learned", SessionType.AGENT).session_data["retained"]
+    else:
+        assert moved.get_learning_by_id("learned")["content"]["retained"]
+    moved.db_engine.dispose()
+
+
+def test_malformed_learning_schema_blocks_migration(tmp_path: Path) -> None:
+    """A lookalike learning table cannot bypass schema validation."""
+    source = _legacy(tmp_path)
+    database = source / "writer/learning/writer.db"
+    database.parent.mkdir()
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE agno_learnings (learning_id TEXT, content TEXT)")
+    with pytest.raises(upgrade.StorageUpgradeError, match="schema"):
+        upgrade.plan_storage_upgrade(tmp_path)
 
 
 @pytest.mark.parametrize("scope", ["user", "user_agent"])
@@ -309,9 +379,15 @@ async def test_startup_fence_precedes_storage_side_effects(
     monkeypatch: pytest.MonkeyPatch,
     surface: str,
 ) -> None:
-    """Every independently started runtime refuses old private state before setup."""
+    """Every independently started runtime refuses unsafe private state before setup."""
     _legacy(tmp_path)
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+
+    def unproven_workers(*_args: object, **_kwargs: object) -> None:
+        message = "Managed workers could not be stopped"
+        raise upgrade._StorageUpgradeRequiredError(message)
+
+    monkeypatch.setattr(private_storage_startup, "_quiesce_workers", unproven_workers)
     with pytest.raises(upgrade._StorageUpgradeRequiredError):  # noqa: PT012 - one selected startup surface
         if surface == "orchestrator":
             await orchestrator.main("INFO", paths)
