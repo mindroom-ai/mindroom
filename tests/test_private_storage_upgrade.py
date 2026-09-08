@@ -583,7 +583,13 @@ def test_reverse_os_failure_can_resume(tmp_path: Path, monkeypatch: pytest.Monke
     plan = upgrade.plan_storage_upgrade(tmp_path)
     upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
 
+    original_sync = upgrade.fsync_directory_durable
+
     def fail(*_args: object, **_kwargs: object) -> None:
+        if failure == "fsync_directory_durable" and _args[0] == source.parent:
+            # Allow the observed namespace preflight; fail after reversal begins.
+            original_sync(source.parent)
+            return
         raise OSError(errno.EIO, "reverse I/O failure")
 
     with monkeypatch.context() as fault:
@@ -943,3 +949,155 @@ def test_present_non_table_run_schema_is_not_lazy_absence(tmp_path: Path) -> Non
         connection.execute("CREATE VIEW writer_sessions_runs AS SELECT session_id FROM writer_sessions")
     with pytest.raises(upgrade.StorageUpgradeError, match="schema"):
         upgrade._session_database_snapshot(database)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("volume_index", [0, 1])
+def test_resume_syncs_observed_rename_before_publishing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reverse: bool,
+    volume_index: int,
+) -> None:
+    """Resuming a post-rename crash must make that namespace durable before any receipt."""
+    state, sessions = tmp_path / "state", tmp_path / "sessions"
+    state.mkdir()
+    sessions.mkdir()
+    source = _legacy(state)
+    mirror = sessions / source.relative_to(state)
+    mirror.mkdir(parents=True)
+    (mirror / "retained.txt").write_text("synthetic mirrored state")
+    plan = upgrade.plan_storage_upgrade(state, sessions)
+
+    def action() -> None:
+        if reverse:
+            upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+        else:
+            upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+
+    if reverse:
+        upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    parent = (state, sessions)[volume_index] / "private_instances"
+    original_rename = type(source).rename
+    original_checkpoint = upgrade._checkpoint
+    renamed = False
+
+    def observed_rename(path: Path, target: Path) -> Path:
+        nonlocal renamed
+        result = original_rename(path, target)
+        renamed |= path.parent == parent
+        return result
+
+    def crash_after_rename() -> None:
+        if renamed:
+            message = "simulated post-rename crash"
+            raise OSError(message)
+
+    monkeypatch.setattr(type(source), "rename", observed_rename)
+    monkeypatch.setattr(upgrade, "_checkpoint", crash_after_rename)
+    with pytest.raises(OSError, match="post-rename crash"):
+        action()
+    monkeypatch.setattr(type(source), "rename", original_rename)
+    monkeypatch.setattr(upgrade, "_checkpoint", original_checkpoint)
+    events: list[tuple[str, str]] = []
+    original_sync = upgrade.fsync_directory_durable
+    original_publish = upgrade._publish
+
+    def traced_sync(path: Path) -> None:
+        if path == parent:
+            events.append(("sync", "namespace"))
+        original_sync(path)
+
+    def traced_publish(plan: upgrade.StorageUpgradePlan, status: str) -> None:
+        events.append(("publish", status))
+        original_publish(plan, status)
+
+    monkeypatch.setattr(upgrade, "fsync_directory_durable", traced_sync)
+    monkeypatch.setattr(upgrade, "_publish", traced_publish)
+    action()
+    assert events[0] == ("sync", "namespace")
+    assert events[-1] == ("publish", "rolled_back" if reverse else "complete")
+
+
+@pytest.mark.parametrize("action", ["apply", "verify", "rollback"])
+def test_session_mirror_owner_named_file_remains_fingerprinted(tmp_path: Path, action: str) -> None:
+    """A marker-named file on a session mirror is ordinary data, never owner authority."""
+    state, sessions = tmp_path / "state", tmp_path / "sessions"
+    state.mkdir()
+    sessions.mkdir()
+    source = _legacy(state)
+    mirror = sessions / source.relative_to(state)
+    mirror.mkdir(parents=True)
+    marker = mirror / upgrade._RECORD_FILENAME
+    marker.write_text("original opaque mirror data")
+    plan = upgrade.plan_storage_upgrade(state, sessions)
+    if action != "apply":
+        upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+        marker = mirror.with_name(plan.operations[0].destination) / upgrade._RECORD_FILENAME
+    marker.write_text("changed opaque mirror data")
+
+    def perform_action() -> None:
+        if action == "apply":
+            upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+        elif action == "verify":
+            upgrade.verify_storage_upgrade(plan)
+        else:
+            upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+
+    with pytest.raises(upgrade.StorageUpgradeError):
+        perform_action()
+    assert marker.read_text() == "changed opaque mirror data"
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-journal"])
+@pytest.mark.parametrize("symlink", [False, True])
+def test_script_control_sidecars_are_refused_without_mutation(tmp_path: Path, suffix: str, symlink: bool) -> None:
+    """Control-state immutable reads never ignore pending or symlinked journals."""
+    _legacy(tmp_path)
+    control = tmp_path / "control_state/script_runs"
+    control.mkdir(parents=True)
+    database = control / "script_runs.sqlite3"
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("CREATE TABLE script_runs (state TEXT)")
+        connection.execute("INSERT INTO script_runs VALUES ('completed')")
+    sidecar = database.with_name(database.name + suffix)
+    if symlink:
+        target = control / "empty-target"
+        target.touch()
+        sidecar.symlink_to(target.name)
+    else:
+        sidecar.write_bytes(b"unsettled control journal")
+    original = database.read_bytes()
+    before = {path.name: (path.lstat().st_mode, path.read_bytes()) for path in control.iterdir()}
+    with pytest.raises(upgrade.StorageUpgradeError, match=r"[Ss]idecar|[Cc]heckpointed"):
+        upgrade.plan_storage_upgrade(tmp_path)
+    assert database.read_bytes() == original
+    assert {path.name: (path.lstat().st_mode, path.read_bytes()) for path in control.iterdir()} == before
+
+
+def test_script_control_rechecks_sidecars_after_immutable_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A journal appearing during the read is preserved and blocks the plan."""
+    _legacy(tmp_path)
+    control = tmp_path / "control_state/script_runs"
+    control.mkdir(parents=True)
+    database = control / "script_runs.sqlite3"
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("CREATE TABLE script_runs (state TEXT)")
+        connection.execute("INSERT INTO script_runs VALUES ('completed')")
+    original = database.read_bytes()
+    sidecar = database.with_name(database.name + "-journal")
+    original_connect = sqlite3.connect
+
+    class JournalAppearsConnection(sqlite3.Connection):
+        def close(self) -> None:
+            super().close()
+            sidecar.write_bytes(b"journal appeared during read")
+
+    def connect(database: str, *, uri: bool) -> sqlite3.Connection:
+        return original_connect(database, uri=uri, factory=JournalAppearsConnection)
+
+    monkeypatch.setattr(upgrade.sqlite3, "connect", connect)
+    with pytest.raises(upgrade.StorageUpgradeError, match="sidecar"):
+        upgrade.plan_storage_upgrade(tmp_path)
+    assert database.read_bytes() == original
+    assert sidecar.read_bytes() == b"journal appeared during read"

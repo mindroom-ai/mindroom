@@ -176,12 +176,12 @@ def _check_relative_symlink(root: Path, path: Path, target: str) -> None:
         _fail("Relative symlink leaves the private scope")
 
 
-def _inventory(root: Path, *, owner_temporary: Path | None = None) -> str:
+def _inventory(root: Path, *, owner_temporary: Path | None = None, exclude_owner_record: bool = False) -> str:
     """Hash names, bytes, modes, owners and timestamps without following links."""
     digest = hashlib.sha256()
     for path in sorted((root, *root.rglob("*"))):
         relative = path.relative_to(root).as_posix()
-        if relative == _RECORD_FILENAME or path == owner_temporary:
+        if (exclude_owner_record and relative == _RECORD_FILENAME) or path == owner_temporary:
             continue
         if len(path.relative_to(root).parts) == 1 and path.name.startswith(".mindroom-private-owner-"):
             _fail("Unrecognized owner temporary requires explicit recovery")
@@ -287,7 +287,7 @@ def _plan_storage_upgrade(  # noqa: C901 - ordered preflight refuses partial own
                     moves.append(
                         _Move(
                             volume=index,
-                            inventory=_inventory(source),
+                            inventory=_inventory(source, exclude_owner_record=index == 0),
                             sessions=_session_snapshots(source),
                             device=info.st_dev,
                             inode=info.st_ino,
@@ -595,7 +595,7 @@ def _inspect_move(plan: StorageUpgradePlan, operation: _Operation, move: _Move) 
     if _session_snapshots(path) != move.sessions:
         _fail("Session database schema or rows changed")
     temporary = _check_owner_temporary(path, operation) if move.volume == 0 else None
-    if _inventory(path, owner_temporary=temporary) != move.inventory:
+    if _inventory(path, owner_temporary=temporary, exclude_owner_record=move.volume == 0) != move.inventory:
         _fail("Private data changed; refuse relocation or stale rollback")
     if move.volume == 0:
         record = path / _RECORD_FILENAME
@@ -692,7 +692,10 @@ def apply_storage_upgrade(  # noqa: C901, PLR0912 - keep durable transaction ord
                 _fail("Storage changed after planning")
         for operation in plan.operations:
             for move in operation.moves:
-                _inspect_move(plan, operation, move)
+                path, _ = _inspect_move(plan, operation, move)
+                # A prior crash may have renamed this entry without syncing it.
+                # Persist the observed namespace before publishing any new receipt.
+                fsync_directory_durable(path.parent)
         _publish(plan, "prepared")
         for operation in plan.operations:
             for move in operation.moves:
@@ -728,7 +731,10 @@ def rollback_storage_upgrade(
             _fail("Rollback requires the original transaction receipt")
         for operation in plan.operations:
             for move in operation.moves:
-                _inspect_move(plan, operation, move)
+                path, _ = _inspect_move(plan, operation, move)
+                # A prior crash may have renamed this entry without syncing it.
+                # Persist the observed namespace before publishing any new receipt.
+                fsync_directory_durable(path.parent)
         _publish(plan, "reversing")
         for operation in reversed(plan.operations):
             owner, _ = _inspect_move(plan, operation, operation.moves[0])
@@ -747,11 +753,7 @@ def _check_active_scripts(control_root: Path) -> None:
     if not database.exists() and not database.is_symlink():
         return
     _root(database.parent)
-    if not stat.S_ISREG(database.lstat().st_mode):
-        _fail("Script control database must be a regular file")
-    wal = database.with_name(database.name + "-wal")
-    if wal.exists() and wal.stat().st_size:
-        _fail("Script control database must be checkpointed with writers stopped")
+    _settled_database(database, label="Script control")
     try:
         connection = sqlite3.connect(database.as_uri() + "?mode=ro&immutable=1", uri=True)
         try:
@@ -764,6 +766,7 @@ def _check_active_scripts(control_root: Path) -> None:
     except sqlite3.Error as error:
         message = "Script control state cannot be verified offline"
         raise StorageUpgradeError(message) from error
+    _settled_database(database, label="Script control")
 
 
 def _validate_unplanned_mirrors(plan: StorageUpgradePlan, operation: _Operation) -> None:
@@ -796,14 +799,14 @@ def _session_snapshots(root: Path) -> dict[str, str]:
     return snapshots
 
 
-def _settled_database(database: Path) -> None:
+def _settled_database(database: Path, *, label: str = "Session") -> None:
     """Immutable SQLite reads are safe only when no pending journal is ignored."""
     if not stat.S_ISREG(database.lstat().st_mode):
-        _fail("Session database must be a regular file")
+        _fail(f"{label} database must be a regular file")
     for suffix in ("-wal", "-journal"):
         sidecar = database.with_name(database.name + suffix)
         if sidecar.is_symlink() or (sidecar.exists() and sidecar.stat().st_size):
-            _fail("Session database sidecar must be settled with writers stopped")
+            _fail(f"{label} database sidecar must be settled with writers stopped")
 
 
 def _session_database_snapshot(database: Path) -> str:
