@@ -304,6 +304,23 @@ def parse_journal_event(stored: JournalEvent) -> nio.Event:
     return event
 
 
+def replayable_redaction_target(stored: JournalEvent) -> str | None:
+    """Return the exact target only when retained cleanup can replay as admitted."""
+    if stored.kind is not EventKind.REDACTION:
+        return None
+    try:
+        event = parse_journal_event(stored)
+    except JournalCorruptionError:
+        return None
+    if (
+        not isinstance(event, nio.RedactionEvent)
+        or event.sender != stored.sender
+        or stored.source.get("room_id", stored.room_id) != stored.room_id
+    ):
+        return None
+    return event.redacts
+
+
 def _restore_security_metadata(
     event: nio.Event,
     metadata: object,

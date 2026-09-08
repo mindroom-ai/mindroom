@@ -59,13 +59,15 @@ from .projection import (
     install_refetched_revision,
     is_tombstoned,
     project,
+    tombstoned_event_ids,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
+    from mindroom.turn_record import TurnRecord
 
     from .backend import Backend, Transaction
     from .interactive_questions import InteractiveSelection
@@ -223,12 +225,19 @@ class PrincipalStore:
     async def response_recovery_state(
         self,
         *,
-        source_event_ids: tuple[str, ...],
-        turn_id: str | None,
+        turn_record: TurnRecord,
+        agent_name: str,
+        redaction_target: Callable[[JournalEvent], str | None],
     ) -> ResponseRecoveryState:
         """Read one response's durable handoff through the reserved recovery lane."""
 
         def load(transaction: Transaction) -> ResponseRecoveryState:
+            source_event_ids = turn_record.source_event_ids
+            turn_id = turn_record.anchor_event_id
+            records = {
+                event_id: turn_records.load_record(transaction, agent_name, event_id)
+                for event_id in turn_record.indexed_event_ids
+            }
             pending = tuple(
                 journal.is_pending(transaction, self._principal_id, event_id) for event_id in source_event_ids
             )
@@ -244,6 +253,19 @@ class PrincipalStore:
             )
             return ResponseRecoveryState(
                 pending_sources=pending,
+                redacted_sources=tuple(
+                    not is_pending
+                    and journal.source_has_redaction_handoff(
+                        transaction,
+                        self._principal_id,
+                        event_id,
+                        turn_record,
+                        records.get(event_id),
+                        redaction_target,
+                    )
+                    for event_id, is_pending in zip(source_event_ids, pending, strict=True)
+                ),
+                turn_records=tuple(records.values()),
                 final_delivery=delivery,
                 sources_settled_by_departure=(
                     not any(pending)
@@ -429,6 +451,16 @@ class PrincipalStore:
         """Read exact projection tombstone authority for this principal."""
         return await self._backend.read(
             lambda transaction: is_tombstoned(transaction, self._principal_id, room_id, event_id),
+        )
+
+    async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
+        """Read recorded context tombstones in one transaction and one offload."""
+        return await self._backend.read(
+            lambda transaction: frozenset(
+                event_id
+                for batch in batched(event_ids, 256)
+                for event_id in tombstoned_event_ids(transaction, self._principal_id, room_id, batch)
+            ),
         )
 
     async def read_conversation(

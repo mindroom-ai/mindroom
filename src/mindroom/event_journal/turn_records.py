@@ -316,6 +316,23 @@ def load_all(transaction: Transaction, agent_name: str) -> tuple[tuple[str, str,
     return tuple((str(row["index_event_id"]), str(row["anchor_event_id"]), str(row["record_json"])) for row in rows)
 
 
+def load_record(transaction: Transaction, agent_name: str, event_id: str) -> TurnRecord | None:
+    """Read exact durable turn authority without borrowing the process ledger cache."""
+    row = transaction.fetchone(
+        "SELECT anchor_event_id, record_json FROM turn_records WHERE agent_name = ? AND index_event_id = ?",
+        (agent_name, event_id),
+    )
+    if row is None:
+        return None
+    try:
+        record = TurnRecordCodec._from_ledger_record(event_id, json.loads(str(row["record_json"])))
+    except (TypeError, ValueError):
+        return None
+    if record is None or record.anchor_event_id != row["anchor_event_id"] or event_id not in record.indexed_event_ids:
+        return None
+    return record
+
+
 def forget(transaction: Transaction, agent_name: str, *, index_event_ids: Sequence[str]) -> None:
     """Drop records indexed by these events, as ledger compaction does."""
     if not index_event_ids:
@@ -330,4 +347,4 @@ def forget(transaction: Transaction, agent_name: str, *, index_event_ids: Sequen
     )
 
 
-__all__ = ["adopt_missing", "commit_terminal", "forget", "load_all", "upsert", "write_record"]
+__all__ = ["adopt_missing", "commit_terminal", "forget", "load_all", "load_record", "upsert", "write_record"]

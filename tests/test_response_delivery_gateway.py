@@ -2896,10 +2896,7 @@ async def test_process_shutdown_recovery_bypasses_saturated_ordinary_journal_rea
             },
         ),
     )
-    bot = object.__new__(AgentBot)
-    bot._journal_store = journal_store
-    bot._journal_principal_id = "agent@alice"
-    bot._turn_store = SimpleNamespace(has_live_turn_claim=lambda _event_id: False)
+    bot = _response_recovery_bot(journal_store, await _store(journal_store))
 
     backend = journal_store.backend
     ordinary_capacity = (

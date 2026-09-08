@@ -485,6 +485,7 @@ def _build_harness(
         TurnStoreDeps(
             agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
+            redacted_event_ids=journal_principal.redacted_event_ids,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=resolver,
@@ -2958,6 +2959,8 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
     terminal_mismatch = diagnostic_calls[-1]
     assert terminal_mismatch.kwargs == {
         "reason": "terminal_turn_mismatch",
+        "source_event_ids": ("$outbox-owned:localhost",),
+        "anchor_event_id": "$outbox-owned:localhost",
         "source_count": 1,
         "pending_source_count": 0,
         "missing_completed_turn_count": 0,
@@ -2970,6 +2973,8 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
         set(call.kwargs)
         <= {
             "reason",
+            "source_event_ids",
+            "anchor_event_id",
             "source_count",
             "pending_source_count",
             "missing_completed_turn_count",

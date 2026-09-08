@@ -144,6 +144,26 @@ def is_tombstoned(
     return row is not None
 
 
+def tombstoned_event_ids(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    event_ids: tuple[str, ...],
+) -> frozenset[str]:
+    """Find exact physical tombstones among one bounded batch of recorded context."""
+    if not event_ids:
+        return frozenset()
+    placeholders = ", ".join("?" for _ in event_ids)
+    rows = transaction.fetchall(
+        f"""
+        SELECT redacted_event_id FROM redaction_tombstones
+        WHERE principal_id = ? AND room_id = ? AND redacted_event_id IN ({placeholders})
+        """,  # noqa: S608 - generated placeholders, bound values
+        (principal_id, room_id, *event_ids),
+    )
+    return frozenset(str(row["redacted_event_id"]) for row in rows)
+
+
 def _record_tombstone(
     transaction: Transaction,
     principal_id: str,

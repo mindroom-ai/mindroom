@@ -47,10 +47,12 @@ from .models import (
     RoomMembershipPosition,
     SemanticConsumer,
 )
-from .projection import ProjectedEvent, project
+from .projection import ProjectedEvent, is_tombstoned, project
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
+    from mindroom.turn_record import TurnRecord
+
     from .backend import Row, Transaction
 
 logger = get_logger(__name__)
@@ -1177,6 +1179,64 @@ def is_pending(transaction: Transaction, principal_id: str, event_id: str) -> bo
         (principal_id, event_id),
     )
     return row is not None
+
+
+def source_has_redaction_handoff(
+    transaction: Transaction,
+    principal_id: str,
+    event_id: str,
+    captured: TurnRecord,
+    current: TurnRecord | None,
+    redaction_target: Callable[[JournalEvent], str | None],
+) -> bool:
+    """Prove exact replayable cleanup or its already-durable monotonic result."""
+    source = transaction.fetchone(
+        "SELECT room_id FROM journal_events WHERE principal_id = ? AND event_id = ? AND state = 'settled'",
+        (principal_id, event_id),
+    )
+    if source is None or not is_tombstoned(transaction, principal_id, source["room_id"], event_id):
+        return False
+    if captured.conversation_target is not None and captured.conversation_target.room_id != source["room_id"]:
+        return False
+    # A callback can recover the marker, but cannot recover lost session cleanup context.
+    if any(
+        expected is not None and (current is None or expected != actual)
+        for expected, actual in (
+            (captured.conversation_target, current.conversation_target if current else None),
+            (captured.history_scope, current.history_scope if current else None),
+            (captured.requester_id, current.requester_id if current else None),
+        )
+    ):
+        return False
+    if current is not None and event_id in current.redacted_source_event_ids:
+        if current.conversation_target is not None and current.conversation_target.room_id != source["room_id"]:
+            return False
+        # An absent cleanup marker is the existing acknowledgement after cleanup;
+        # late registration rearms it monotonically. A pending marker needs its scope.
+        return event_id not in current.pending_redaction_cleanup_event_ids or (
+            current.conversation_target is not None
+            and current.history_scope is not None
+            and current.requester_id is not None
+        )
+    return _has_pending_redaction(transaction, principal_id, source["room_id"], event_id, redaction_target)
+
+
+def _has_pending_redaction(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    event_id: str,
+    redaction_target: Callable[[JournalEvent], str | None],
+) -> bool:
+    """Read callback ownership and decode it within the source's recovery transaction."""
+    callbacks = transaction.fetchall(
+        f"""
+        SELECT {_JOURNAL_COLUMNS} FROM journal_events
+        WHERE principal_id = ? AND room_id = ? AND state = 'pending' AND kind = ?
+        """,  # noqa: S608 - fixed columns, bound values
+        (principal_id, room_id, EventKind.REDACTION.value),
+    )
+    return any(redaction_target(callback) == event_id for callback in _decode_rows(callbacks))
 
 
 def sources_settled_by_departure(

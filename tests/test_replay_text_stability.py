@@ -101,6 +101,7 @@ async def _persist_and_reload(journal_store: EventJournalStore, record: TurnReco
         TurnStoreDeps(
             agent_name=_AGENT_NAME,
             turn_records=journal_store.turn_records(_AGENT_NAME),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),

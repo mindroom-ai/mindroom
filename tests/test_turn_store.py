@@ -77,6 +77,7 @@ async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent")
         TurnStoreDeps(
             agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),
@@ -149,6 +150,7 @@ async def _store_with_storage(
         TurnStoreDeps(
             agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -725,6 +727,7 @@ async def test_prepare_redaction_removes_source_from_every_recorded_history_scop
         TurnStoreDeps(
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -792,6 +795,7 @@ async def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
         TurnStoreDeps(
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -1117,6 +1121,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(journal_
         TurnStoreDeps(
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=MagicMock(),
@@ -2480,6 +2485,7 @@ async def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(
             TurnStoreDeps(
                 agent_name="router",
                 turn_records=journal_store.turn_records("router"),
+                redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
                 legacy_responses_file=None,
                 state_writer=ConversationStateWriter(
                     ConversationStateWriterDeps(

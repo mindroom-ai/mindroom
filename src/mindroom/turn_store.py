@@ -37,7 +37,7 @@ from mindroom.turn_record import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
     import nio
@@ -71,6 +71,7 @@ class TurnStoreDeps:
     # principal-scoped: the answer stays true across a re-login, and a bot that
     # lost it would answer every outstanding message a second time.
     turn_records: TurnRecordStore
+    redacted_event_ids: Callable[[str, tuple[str, ...]], Awaitable[frozenset[str]]]
     # The JSON ledger this agent used before its records moved into the
     # database, imported once on first load. An installation that has been
     # answering messages keeps all of its terminal truth there, and a runtime
@@ -677,6 +678,7 @@ class TurnStore:
         source_event_ids: tuple[str, ...],
     ) -> bool:
         """Finish owed cleanup in this locked conversation, then check current sources."""
+        await self._reconcile_journal_redactions(target)
         await self._reconcile_revision_tombstones()
         for owner in self._ledger.turn_records_for_conversation(session_id=target.session_id):
             for revision_id, revision in (owner.revision_replay or {}).items():
@@ -720,6 +722,24 @@ class TurnStore:
             )
             await self._clear_pending_redaction_cleanup(redacted_event_id)
         return self._any_source_redacted(source_event_ids)
+
+    async def _reconcile_journal_redactions(self, target: MessageTarget) -> None:
+        """Recover admitted cleanup before an earlier FIFO source can consume its context."""
+        event_ids = {
+            event_id
+            for record in self._ledger.turn_records_for_conversation(session_id=target.session_id)
+            for event_id in (
+                *record.indexed_event_ids,
+                *(record.revision_replay or {}),
+                *(revision[1] for revision in (record.source_event_revisions or {}).values()),
+            )
+            if not self.is_revision_redacted(event_id)
+        }
+        if not event_ids:
+            return
+        redacted = await self.deps.redacted_event_ids(target.room_id, tuple(sorted(event_ids)))
+        for event_id in sorted(redacted):
+            await self.mark_source_redacted(event_id)
 
     async def _acknowledge_revision_cleanup(self, source_event_id: str, revision_id: str) -> None:
         """Acknowledge only after all affected scopes are durably sanitized."""

@@ -50,6 +50,7 @@ from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
 )
+from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import resolve_room_aliases
@@ -382,7 +383,7 @@ class AgentBot:
     _local_membership_lock: asyncio.Lock
     _ingestion_admission_progress: asyncio.Event
     _sync_continuity_store: SyncContinuityStore
-    _response_recovery_diagnostic_classes: set[str]
+    _response_recovery_diagnostic_classes: set[tuple[str, tuple[str, ...], str | None]]
 
     def __init__(
         self,
@@ -652,6 +653,7 @@ class AgentBot:
             TurnStoreDeps(
                 agent_name=self.agent_name,
                 turn_records=self._journal_store.turn_records(self.agent_name),
+                redacted_event_ids=self._journal_store.principal(self._journal_principal_id).redacted_event_ids,
                 legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
@@ -1869,30 +1871,34 @@ class AgentBot:
         if any(self._turn_store.has_live_turn_claim(event_id) for event_id in turn_record.indexed_event_ids):
             self._record_response_recovery_not_ready(
                 reason="live_turn_claim",
-                source_count=len(turn_record.source_event_ids),
+                turn_record=turn_record,
                 pending_source_count=None,
             )
             return False
         principal = self._journal_store.principal(self._journal_principal_id)
         turn_id = turn_record.anchor_event_id
         recovery_state = await principal.response_recovery_state(
-            source_event_ids=turn_record.source_event_ids,
-            turn_id=turn_id,
+            turn_record=turn_record,
+            agent_name=self._turn_store.deps.agent_name,
+            redaction_target=replayable_redaction_target,
         )
         pending_sources = recovery_state.pending_sources
-        if all(pending_sources) or (turn_id is not None and recovery_state.sources_settled_by_departure):
+        if all(
+            pending or redacted
+            for pending, redacted in zip(pending_sources, recovery_state.redacted_sources, strict=True)
+        ) or (turn_id is not None and recovery_state.sources_settled_by_departure):
             return True
         if any(pending_sources):
             self._record_response_recovery_not_ready(
                 reason="mixed_source_pending",
-                source_count=len(turn_record.source_event_ids),
+                turn_record=turn_record,
                 pending_source_count=sum(pending_sources),
             )
             return False
         if turn_id is None:
             self._record_response_recovery_not_ready(
                 reason="missing_turn_anchor",
-                source_count=len(turn_record.source_event_ids),
+                turn_record=turn_record,
                 pending_source_count=0,
             )
             return False
@@ -1900,7 +1906,7 @@ class AgentBot:
         if final_delivery is None:
             self._record_response_recovery_not_ready(
                 reason="missing_final_delivery",
-                source_count=len(turn_record.source_event_ids),
+                turn_record=turn_record,
                 pending_source_count=0,
             )
             return False
@@ -1912,7 +1918,7 @@ class AgentBot:
             )
             if event_id is not None
         }
-        completed_turns = tuple(map(self._turn_store.get_turn_record, turn_record.indexed_event_ids))
+        completed_turns = recovery_state.turn_records
         missing_completed_turn_count = sum(completed_turn is None for completed_turn in completed_turns)
         incomplete_completed_turn_count = sum(
             completed_turn is not None and not completed_turn.completed for completed_turn in completed_turns
@@ -1941,7 +1947,7 @@ class AgentBot:
         if not ready:
             self._record_response_recovery_not_ready(
                 reason="terminal_turn_mismatch",
-                source_count=len(turn_record.source_event_ids),
+                turn_record=turn_record,
                 pending_source_count=0,
                 missing_completed_turn_count=missing_completed_turn_count,
                 incomplete_completed_turn_count=incomplete_completed_turn_count,
@@ -1955,7 +1961,7 @@ class AgentBot:
         self,
         *,
         reason: str,
-        source_count: int,
+        turn_record: TurnRecord,
         pending_source_count: int | None,
         missing_completed_turn_count: int | None = None,
         incomplete_completed_turn_count: int | None = None,
@@ -1964,9 +1970,10 @@ class AgentBot:
         response_event_mismatch_count: int | None = None,
     ) -> None:
         """Log each non-sensitive recovery boundary once per bot lifetime."""
-        if reason in self._response_recovery_diagnostic_classes:
+        identity = (reason, turn_record.source_event_ids, turn_record.anchor_event_id)
+        if identity in self._response_recovery_diagnostic_classes:
             return
-        self._response_recovery_diagnostic_classes.add(reason)
+        self._response_recovery_diagnostic_classes.add(identity)
         mismatch_counts = {}
         if missing_completed_turn_count is not None:
             assert incomplete_completed_turn_count is not None
@@ -1983,7 +1990,9 @@ class AgentBot:
         self.logger.info(
             "response_recovery_proof_not_ready",
             reason=reason,
-            source_count=source_count,
+            source_count=len(turn_record.source_event_ids),
+            source_event_ids=turn_record.source_event_ids,
+            anchor_event_id=turn_record.anchor_event_id,
             pending_source_count=pending_source_count,
             **mismatch_counts,
         )

@@ -5959,6 +5959,7 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
         TurnStoreDeps(
             agent_name="general",
             turn_records=journal.turn_records("general"),
+            redacted_event_ids=journal.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=Mock(),
             resolver=Mock(),

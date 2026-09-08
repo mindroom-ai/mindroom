@@ -974,6 +974,7 @@ async def test_edit_reloads_canonical_alias_owner_after_concurrent_claim(
         TurnStoreDeps(
             agent_name=AGENT_NAME,
             turn_records=journal_store.turn_records(AGENT_NAME),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=harness.resolver,
@@ -1066,6 +1067,7 @@ async def test_edit_aborts_when_physical_record_loses_discovery_alias(
         TurnStoreDeps(
             agent_name=AGENT_NAME,
             turn_records=journal_store.turn_records(AGENT_NAME),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=state_writer,
             resolver=harness.resolver,
@@ -2085,6 +2087,7 @@ async def test_projection_deletion_unblocks_edit_before_redaction_callback(  # n
         TurnStoreDeps(
             agent_name=AGENT_NAME,
             turn_records=journal_store.turn_records(AGENT_NAME),
+            redacted_event_ids=principal.redacted_event_ids,
             legacy_responses_file=None,
             state_writer=writer,
             resolver=harness.resolver,
@@ -2226,6 +2229,7 @@ async def test_deleted_coalesced_revision_refills_and_rebuilds_without_losing_ed
         TurnStoreDeps(
             agent_name=AGENT_NAME,
             turn_records=journal_store.turn_records(AGENT_NAME),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=writer,
             resolver=harness.resolver,
@@ -2326,6 +2330,7 @@ async def test_redacted_driving_edit_retires_only_its_own_pending_revision(  # n
         TurnStoreDeps(
             agent_name=AGENT_NAME,
             turn_records=journal_store.turn_records(AGENT_NAME),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=writer,
             resolver=harness.resolver,

@@ -1464,6 +1464,7 @@ async def test_runtime_redaction_observer_rejects_recovered_revision_without_phy
         TurnStoreDeps(
             agent_name="general",
             turn_records=journal_store.turn_records("general"),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=Mock(spec=ConversationStateWriter),
             resolver=_redaction_observer_store().deps.resolver,
