@@ -30,7 +30,7 @@ The projection learns about a redaction through journal admission; the Matrix ca
 `TurnController` is the real turn owner now, but it is still too large.
 `TurnPolicy` is pure now, but `ResponseRunner` still owns too much execution detail.
 `IngressHookRunner` is a thin hook adapter with a vague name.
-`TurnStore` gives the runtime one durable turn boundary, but it still has to reconcile ledger state with persisted run metadata under the hood.
+`TurnStore` gives the runtime one durable turn boundary, while saved run metadata remains an import source for requested rows removed by ledger compaction.
 `MessageTarget` still combines conversation identity and delivery placement.
 
 ## Target Runtime Vocabulary
@@ -256,12 +256,12 @@ Same-requester supersession preserves canonical replay when an INITIAL already o
 When every current source is deleted and no FINAL owns the response, its unfinished INITIAL remains durable cleanup debt until Matrix disappearance and visible-response attribution detachment are confirmed.
 Fallback eligibility and edits share the delivery lock with cleanup, and the transactional ledger prevents late completion writes from restoring a deleted INITIAL or inventing an answer.
 Cleanup preserves the INITIAL identity for surviving sources, and stale history for a surviving request retries canonical preparation with a refreshed payload.
-The two physical stores remain intentionally redundant so run metadata can repair a ledger write lost during a crash.
-`TurnStore` applies deterministic field precedence: a present ledger record owns canonical source identity and anchor, while a newer delivered run can repair mutable response and regeneration facts after a crash.
-Recovery never replaces a ledger record that changed while run metadata was loading.
-Older or incomplete run metadata only backfills absent optional facts, and conflicting discovery aliases are pruned instead of claiming another completed turn.
-Run metadata supplies a complete record when the ledger row is absent and otherwise participates only through that precedence rule.
-`TurnStore` immediately writes a recovered or enriched record back to the ledger, so callers never own backfill or repair decisions.
+Saved run metadata remains intentionally redundant so older turns removed by ledger compaction can still be restored for edits.
+`TurnStore` returns any present ledger record unchanged without opening model session storage.
+Run metadata supplies a complete candidate only when the requested ledger identity is absent.
+Import publication waits for conflicting provisional writes, rechecks the requested source or discovery alias, and returns any concurrent owner unchanged.
+The existing ledger resolver prevents an absent-row candidate from taking completed source ownership or crossing revision tombstone fences.
+`TurnStore` immediately writes an imported record into the ledger, so every later load uses journal authority.
 One runtime process owns each ledger's semantic ordering, and nothing defines cross-process turn precedence.
 Terminal records live in the journal database rather than a per-agent JSON file, so the advisory file lock that used to make the file update atomic is gone; the database serializes the write itself.
 One process must own one agent's records; the database merges delivery acknowledgements with ledger writes for that owner, without coordinating independent runtimes against the same storage path.

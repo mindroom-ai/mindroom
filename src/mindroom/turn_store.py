@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import threading
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -19,7 +18,6 @@ from mindroom.handled_turns import (
     HandledTurnLedger,
     TurnRecord,
     TurnRecordCodec,
-    merge_edit_facts,
     same_turn_identity,
     with_user_stop,
 )
@@ -113,14 +111,12 @@ async def record_user_stop_terminal(
 
 @dataclass
 class TurnStore:
-    """Own replication, precedence, backfill, and repair for one entity's turns.
+    """Own durable turn state and absent-record history import for one entity.
 
-    A present handled-turn ledger row owns canonical source identity and anchor.
-    Newer delivered Agno run metadata repairs mutable response and regeneration
-    facts; older or incomplete runs only backfill absent optional facts.
-    Recovery never replaces a ledger record changed while metadata was loading.
-    Any recovered or enriched record is repaired back into the ledger before it
-    is returned to the caller.
+    A present handled-turn ledger row owns the complete record. Agno run
+    metadata supplies a candidate only when the requested identity is absent.
+    Import publication waits for conflicting writes and returns any record that
+    acquired the requested identity while metadata was loading.
     """
 
     deps: TurnStoreDeps
@@ -969,10 +965,12 @@ class TurnStore:
         original_event_id: str,
         requester_user_id: str,
     ) -> TurnRecord | None:
-        """Load, deterministically merge, and repair one durable turn record."""
-        ledger_record_before_recovery = self._ledger.get_turn_record(original_event_id)
+        """Return journal authority, importing saved history only for an absent identity."""
+        existing_record = await self._ledger.get_settled_turn_record(original_event_id)
+        if existing_record is not None:
+            return existing_record
         if not self.deps.state_writer.supports_run_recovery():
-            return ledger_record_before_recovery
+            return None
         recovery_record = self._load_persisted_turn_record(
             _LoadPersistedTurnRequest(
                 room=room,
@@ -982,24 +980,17 @@ class TurnStore:
             ),
         )
         if recovery_record is None:
-            return self._ledger.get_turn_record(original_event_id)
+            return await self._ledger.get_settled_turn_record(original_event_id)
 
-        def repaired_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
-            ledger_record = existing_records.get(original_event_id)
-            candidate = self._sanitize_candidate(recovery_record, ledger_record)
-            return (
-                _reconcile_ledger_and_recovery(
-                    ledger_record,
-                    candidate,
-                    recovery_may_replace=ledger_record == ledger_record_before_recovery,
-                )
-                if ledger_record is not None
-                else candidate
-            )
+        def imported_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            current = existing_records.get(original_event_id)
+            if current is not None:
+                return current
+            return self._sanitize_candidate(recovery_record)
 
         return await self._ledger.update_handled_turn(
             (original_event_id, *recovery_record.indexed_event_ids),
-            repaired_record,
+            imported_record,
         )
 
     def remove_stale_runs_for_edit(
@@ -1332,69 +1323,6 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         command_result_text=authority.command_result_text or recovery.command_result_text,
         history_scope=authority.history_scope or recovery.history_scope,
         conversation_target=authority.conversation_target or recovery.conversation_target,
-    )
-
-
-def _reconcile_ledger_and_recovery(
-    ledger_record: TurnRecord,
-    recovery_record: TurnRecord,
-    *,
-    recovery_may_replace: bool,
-) -> TurnRecord:
-    """Keep ledger identity while accepting a newer delivered run's mutable facts."""
-    recovery_record = sanitize_revision_replay(recovery_record, authority=ledger_record)
-    if (
-        not recovery_may_replace
-        or recovery_record.timestamp < int(ledger_record.timestamp)
-        or recovery_record.response_event_id is None
-        or not same_turn_identity(ledger_record, recovery_record)
-    ):
-        recovery_record = canonicalize_turn_record(recovery_record, source_event_revisions=None)
-        backfilled_record = _backfill_missing_turn_facts(ledger_record, recovery_record)
-        return (
-            canonicalize_turn_record(
-                backfilled_record,
-                timestamp=math.nextafter(ledger_record.timestamp, math.inf),
-            )
-            if backfilled_record != ledger_record
-            else ledger_record
-        )
-    source_event_prompts, source_event_revisions = merge_edit_facts(ledger_record, recovery_record)
-    recovered_record = canonicalize_turn_record(
-        ledger_record,
-        discovery_event_ids=(*ledger_record.discovery_event_ids, *recovery_record.discovery_event_ids),
-        redacted_source_event_ids=(
-            *ledger_record.redacted_source_event_ids,
-            *recovery_record.redacted_source_event_ids,
-        ),
-        response_event_id=recovery_record.response_event_id,
-        completed=recovery_record.completed,
-        source_event_prompts=source_event_prompts,
-        source_event_revisions=source_event_revisions,
-        latest_edit_receipt_order=_latest_edit_receipt_order(ledger_record, recovery_record),
-        user_stop_receipt_order=_latest_user_stop_receipt_order(ledger_record, recovery_record),
-        user_stop_settled_receipt_order=_latest_user_stop_settled_receipt_order(
-            ledger_record,
-            recovery_record,
-        ),
-        source_event_metadata=(
-            recovery_record.source_event_metadata
-            if recovery_record.source_event_metadata is not None
-            else ledger_record.source_event_metadata
-        ),
-        response_owner=recovery_record.response_owner or ledger_record.response_owner,
-        requester_id=recovery_record.requester_id or ledger_record.requester_id,
-        correlation_id=recovery_record.correlation_id or ledger_record.correlation_id,
-        history_scope=recovery_record.history_scope or ledger_record.history_scope,
-        conversation_target=recovery_record.conversation_target or ledger_record.conversation_target,
-    )
-    return (
-        canonicalize_turn_record(
-            recovered_record,
-            timestamp=max(recovery_record.timestamp, math.nextafter(ledger_record.timestamp, math.inf)),
-        )
-        if recovered_record != ledger_record
-        else ledger_record
     )
 
 

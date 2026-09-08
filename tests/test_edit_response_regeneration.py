@@ -2021,10 +2021,10 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
 
 
 @pytest.mark.asyncio
-async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_metadata(
+async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_from_run_metadata(
     tmp_path: Path,
 ) -> None:
-    """Coalesced edit regeneration should fall back to persisted run metadata when the ledger lacks prompts."""
+    """Saved prompts cannot fill a current coalesced journal record."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -2134,7 +2134,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             bot._conversation_state_writer,
             "create_storage",
             return_value=storage,
-        ),
+        ) as mock_create_storage,
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True) as mock_remove_run,
     ):
         mock_context.return_value = MagicMock(
@@ -2153,55 +2153,11 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             requester_user_id=edit_event.sender,
         )
 
-        mock_generate_response.assert_awaited_once()
-        request = mock_generate_response.call_args.args[0]
-        assert request.prompt == _tagged_prompt(
-            ("$first:example.com", "$primary:example.com"),
-            {"$first:example.com": "updated first", "$primary:example.com": "primary"},
-        )
-        response_target = request.response_envelope.target
-        assert response_target.reply_to_event_id == "$primary:example.com"
-        assert response_target == stored_target
-        assert request.matrix_run_metadata == {
-            "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
-            "matrix_source_event_prompts": {
-                "$first:example.com": "updated first",
-                "$primary:example.com": "primary",
-            },
-            MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(
-                "$first:example.com",
-                "$primary:example.com",
-            ),
-            "matrix_source_event_revisions": {
-                "$first:example.com": [1000001, "$edit:example.com"],
-            },
-            **_run_response_context_metadata(
-                response_owner="test_agent",
-                history_scope=_agent_history_scope("test_agent"),
-                conversation_target=stored_target,
-            ),
-        }
+        mock_generate_response.assert_not_awaited()
+        mock_create_storage.assert_not_called()
         assert _response_event_id(bot, "$first:example.com") == "$response:example.com"
         assert _response_event_id(bot, "$primary:example.com") == "$response:example.com"
-        assert mock_remove_run.call_count == 2
-        mock_remove_run.assert_has_calls(
-            [
-                call(
-                    storage,
-                    "!test:example.com",
-                    "$first:example.com",
-                    session_type=SessionType.AGENT,
-                    remove_following_runs=True,
-                ),
-                call(
-                    storage,
-                    "!test:example.com",
-                    "$primary:example.com",
-                    session_type=SessionType.AGENT,
-                    remove_following_runs=True,
-                ),
-            ],
-        )
+        mock_remove_run.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -3762,10 +3718,10 @@ def _persisted_run_metadata(bot: AgentBot, session_id: str) -> dict[str, object]
 
 @pytest.mark.ledger_loads_from_disk
 @pytest.mark.asyncio
-async def test_handle_message_edit_recovers_newer_run_response_event_id_after_restart(
+async def test_handle_message_edit_uses_journal_response_event_id_after_restart(
     tmp_path: Path,
 ) -> None:
-    """A fresh bot should repair stale ledger linkage from a delivered persisted run."""
+    """A newer saved response ID must not replace current journal linkage after restart."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -3955,9 +3911,9 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
 
     mock_generate_response.assert_awaited_once()
     request = mock_generate_response.call_args.args[0]
-    assert request.existing_event_id == "$response-new:example.com"
+    assert request.existing_event_id == "$response-old:example.com"
     assert request.response_envelope.target.session_id == "!test:example.com"
-    assert _response_event_id(restarted_bot, "$original:example.com") == "$response-new:example.com"
+    assert _response_event_id(restarted_bot, "$original:example.com") == "$response-old:example.com"
 
 
 @pytest.mark.asyncio

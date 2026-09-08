@@ -64,6 +64,8 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.event_journal import EventJournalStore
 
 
@@ -102,6 +104,267 @@ async def _load_with_recovery(
             original_event_id=original_event_id,
             requester_user_id="@user:example.org",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "existing_record",
+    [
+        pytest.param(
+            TurnRecord.create(["$event"], completed=False, response_owner="ledger-owner"),
+            id="pending",
+        ),
+        pytest.param(
+            TurnRecord.create(["$event"], response_event_id="$ledger-response", response_owner="ledger-owner"),
+            id="completed",
+        ),
+        pytest.param(
+            TurnRecord.create(
+                ["$event"],
+                response_event_id="$stop-response",
+                response_owner="ledger-owner",
+                user_stop_receipt_order=20,
+                user_stop_settled_receipt_order=20,
+            ),
+            id="user-stop",
+        ),
+        pytest.param(
+            TurnRecord.create(
+                ["$event"],
+                redacted_source_event_ids=["$event"],
+                completed=False,
+            ),
+            id="redacted",
+        ),
+    ],
+)
+async def test_existing_turn_record_bypasses_run_recovery_and_ledger_update(
+    journal_store: EventJournalStore,
+    existing_record: TurnRecord,
+) -> None:
+    """Every current journal state should return without consulting saved model history."""
+    store = await _store(journal_store)
+    await store._ledger.record_handled_turn(existing_record)
+    current = store.get_turn_record("$event")
+    assert current is not None
+
+    with (
+        patch.object(
+            store.deps.state_writer,
+            "supports_run_recovery",
+            side_effect=AssertionError("unexpected recovery capability check"),
+        ),
+        patch.object(
+            store,
+            "_load_persisted_turn_record",
+            side_effect=AssertionError("unexpected history read"),
+        ),
+        patch.object(
+            store._ledger,
+            "update_handled_turn",
+            side_effect=AssertionError("unexpected ledger update"),
+        ),
+    ):
+        loaded = await store.load_turn(
+            room=MagicMock(room_id="!room:example.org"),
+            thread_id=None,
+            original_event_id="$event",
+            requester_user_id="@user:example.org",
+        )
+
+    assert loaded is current
+
+
+@pytest.mark.asyncio
+async def test_load_turn_waits_for_requested_provisional_write_without_blocking_unrelated_turn(
+    journal_store: EventJournalStore,
+) -> None:
+    """A provisional match must settle, while another settled identity remains immediately readable."""
+    store = await _store(journal_store)
+    await store.record_pending_turn(TurnRecord.create(["$other"], completed=False, response_owner="other"))
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    real_upsert = TurnRecordStore.upsert
+
+    async def delay_selected_write(
+        records: TurnRecordStore,
+        *,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> str | None:
+        if "$event" in index_event_ids:
+            write_started.set()
+            await release_write.wait()
+        return await real_upsert(
+            records,
+            index_event_ids=index_event_ids,
+            anchor_event_id=anchor_event_id,
+            record_json=record_json,
+        )
+
+    with (
+        patch.object(TurnRecordStore, "upsert", delay_selected_write),
+        patch.object(
+            store,
+            "_load_persisted_turn_record",
+            side_effect=AssertionError("unexpected history read"),
+        ),
+    ):
+        recording = asyncio.create_task(
+            store.record_pending_turn(TurnRecord.create(["$event"], completed=False, response_owner="owner")),
+        )
+        await write_started.wait()
+        selected_load = asyncio.create_task(
+            store.load_turn(
+                room=MagicMock(room_id="!room:example.org"),
+                thread_id=None,
+                original_event_id="$event",
+                requester_user_id="@user:example.org",
+            ),
+        )
+        unrelated_load = asyncio.create_task(
+            store.load_turn(
+                room=MagicMock(room_id="!room:example.org"),
+                thread_id=None,
+                original_event_id="$other",
+                requester_user_id="@user:example.org",
+            ),
+        )
+        try:
+            unrelated = await asyncio.wait_for(asyncio.shield(unrelated_load), timeout=5)
+            assert unrelated is store.get_turn_record("$other")
+            assert not selected_load.done()
+            release_write.set()
+            recorded, loaded = await asyncio.gather(recording, selected_load)
+        finally:
+            release_write.set()
+            await asyncio.gather(recording, selected_load, unrelated_load, return_exceptions=True)
+
+    assert loaded is recorded
+
+
+@pytest.mark.asyncio
+async def test_load_turn_imports_recovery_after_requested_provisional_write_fails(
+    journal_store: EventJournalStore,
+) -> None:
+    """A failed provisional publication is absent journal state and must fall through to saved history."""
+    store = await _store(journal_store)
+    recovery_record = TurnRecord.create(
+        ["$event"],
+        response_event_id="$recovered-response",
+        response_owner="recovered-owner",
+    )
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    selected_write = True
+    real_upsert = TurnRecordStore.upsert
+
+    async def fail_selected_write(
+        records: TurnRecordStore,
+        *,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> str | None:
+        nonlocal selected_write
+        if selected_write and "$event" in index_event_ids:
+            selected_write = False
+            write_started.set()
+            await release_write.wait()
+            msg = "selected provisional write failed"
+            raise RuntimeError(msg)
+        return await real_upsert(
+            records,
+            index_event_ids=index_event_ids,
+            anchor_event_id=anchor_event_id,
+            record_json=record_json,
+        )
+
+    with (
+        patch.object(TurnRecordStore, "upsert", fail_selected_write),
+        patch.object(store, "_load_persisted_turn_record", return_value=recovery_record),
+    ):
+        recording = asyncio.create_task(
+            store.record_pending_turn(TurnRecord.create(["$event"], completed=False, response_owner="provisional")),
+        )
+        await write_started.wait()
+        loading = asyncio.create_task(
+            store.load_turn(
+                room=MagicMock(room_id="!room:example.org"),
+                thread_id=None,
+                original_event_id="$event",
+                requester_user_id="@user:example.org",
+            ),
+        )
+        await asyncio.sleep(0)
+        assert not loading.done()
+        release_write.set()
+        with pytest.raises(RuntimeError, match="selected provisional write failed"):
+            await recording
+        loaded = await loading
+
+    assert loaded is not None
+    assert loaded.response_event_id == "$recovered-response"
+    assert loaded.response_owner == "recovered-owner"
+    assert store.get_turn_record("$event") == loaded
+
+
+@pytest.mark.asyncio
+async def test_cancelling_provisional_load_does_not_cancel_owning_write(
+    journal_store: EventJournalStore,
+) -> None:
+    """A reader cancellation must leave the requested provisional write owning its settlement."""
+    store = await _store(journal_store)
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    real_upsert = TurnRecordStore.upsert
+
+    async def delay_write(
+        records: TurnRecordStore,
+        *,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> str | None:
+        write_started.set()
+        await release_write.wait()
+        return await real_upsert(
+            records,
+            index_event_ids=index_event_ids,
+            anchor_event_id=anchor_event_id,
+            record_json=record_json,
+        )
+
+    with (
+        patch.object(TurnRecordStore, "upsert", delay_write),
+        patch.object(
+            store,
+            "_load_persisted_turn_record",
+            side_effect=AssertionError("unexpected history read"),
+        ),
+    ):
+        recording = asyncio.create_task(
+            store.record_pending_turn(TurnRecord.create(["$event"], completed=False, response_owner="owner")),
+        )
+        await write_started.wait()
+        loading = asyncio.create_task(
+            store.load_turn(
+                room=MagicMock(room_id="!room:example.org"),
+                thread_id=None,
+                original_event_id="$event",
+                requester_user_id="@user:example.org",
+            ),
+        )
+        await asyncio.sleep(0)
+        loading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await loading
+        assert not recording.done()
+        release_write.set()
+        recorded = await recording
+
+    assert recorded is store.get_turn_record("$event")
 
 
 @dataclass
@@ -1547,8 +1810,8 @@ async def test_build_run_metadata_normalizes_discovery_aliases(journal_store: Ev
 
 
 @pytest.mark.asyncio
-async def test_discovery_alias_recovery_repairs_anchor_and_alias_rows(journal_store: EventJournalStore) -> None:
-    """Missing-ledger recovery should index one non-coalesced turn by its anchor and discovery alias."""
+async def test_discovery_alias_import_indexes_anchor_and_alias_rows(journal_store: EventJournalStore) -> None:
+    """Missing-row import should index one non-coalesced turn by its anchor and discovery alias."""
     metadata = TurnRecordCodec.to_run_metadata(
         TurnRecord.create(
             ["$question"],
@@ -1618,8 +1881,8 @@ async def test_recovery_does_not_replace_a_conflicting_completed_identity(journa
 
 
 @pytest.mark.asyncio
-async def test_newer_delivered_run_recovers_mutable_facts_after_crash(journal_store: EventJournalStore) -> None:
-    """A delivered run newer than the ledger should repair the edit crash window."""
+async def test_existing_delivered_ledger_record_ignores_newer_run_facts(journal_store: EventJournalStore) -> None:
+    """A newer delivered run must not replace any fact on a current journal record."""
     store = await _store(journal_store)
     ledger_record = TurnRecord.create(
         ["$first", "$anchor"],
@@ -1632,6 +1895,8 @@ async def test_newer_delivered_run_recovers_mutable_facts_after_crash(journal_st
         timestamp=10,
     )
     await store._ledger.record_handled_turn(ledger_record)
+    current = store.get_turn_record("$first")
+    assert current is not None
     recovery_record = TurnRecord.create(
         ["$first", "$anchor"],
         response_event_id="$new-response",
@@ -1649,22 +1914,18 @@ async def test_newer_delivered_run_recovers_mutable_facts_after_crash(journal_st
         recovery_record=recovery_record,
     )
 
-    assert loaded is not None
-    assert loaded.source_event_ids == ledger_record.source_event_ids
-    assert loaded.anchor_event_id == ledger_record.anchor_event_id
-    assert loaded.response_event_id == "$new-response"
-    assert loaded.source_event_prompts == {"$first": "edited first", "$anchor": "old anchor"}
-    assert loaded.source_event_revisions == {
-        "$first": (20, "$new-edit"),
-    }
+    assert loaded is current
+    assert loaded.response_event_id == "$old-response"
+    assert loaded.source_event_prompts == {"$first": "old first", "$anchor": "old anchor"}
+    assert loaded.source_event_revisions == {"$first": (10, "$old-edit")}
     assert loaded.visible_echo_event_id == "$echo"
-    assert loaded.response_owner == "agent"
-    assert loaded.timestamp == 20
+    assert loaded.response_owner is None
+    assert loaded.timestamp == 10
 
 
 @pytest.mark.asyncio
-async def test_recovery_preserves_newer_ledger_only_sibling_edit(journal_store: EventJournalStore) -> None:
-    """Recovery must merge edit facts per source instead of replacing the whole map."""
+async def test_existing_ledger_record_does_not_merge_run_only_sibling_edit(journal_store: EventJournalStore) -> None:
+    """Saved history must not add a sibling edit to a current journal record."""
     store = await _store(journal_store)
     ledger_record = TurnRecord.create(
         ["$first", "$anchor"],
@@ -1674,6 +1935,8 @@ async def test_recovery_preserves_newer_ledger_only_sibling_edit(journal_store: 
         timestamp=10,
     )
     await store._ledger.record_handled_turn(ledger_record)
+    current = store.get_turn_record("$first")
+    assert current is not None
     recovery_record = TurnRecord.create(
         ["$first", "$anchor"],
         response_event_id="$new-response",
@@ -1688,21 +1951,15 @@ async def test_recovery_preserves_newer_ledger_only_sibling_edit(journal_store: 
         recovery_record=recovery_record,
     )
 
-    assert loaded is not None
-    assert loaded.source_event_prompts == {
-        "$first": "edited first",
-        "$anchor": "suppressed anchor",
-    }
-    assert loaded.source_event_revisions == {
-        "$first": (20, "$first-edit"),
-        "$anchor": (30, "$anchor-edit"),
-    }
-    assert loaded.response_event_id == "$new-response"
+    assert loaded is current
+    assert loaded.source_event_prompts == {"$first": "old first", "$anchor": "suppressed anchor"}
+    assert loaded.source_event_revisions == {"$anchor": (30, "$anchor-edit")}
+    assert loaded.response_event_id == "$old-response"
 
 
 @pytest.mark.asyncio
-async def test_recovery_preserves_newer_routed_alias_prompt(journal_store: EventJournalStore) -> None:
-    """A newer human-alias revision must carry its owned relay prompt through recovery."""
+async def test_existing_routed_alias_record_ignores_stale_run_prompt(journal_store: EventJournalStore) -> None:
+    """Discovery lookup must return the current relay owner without merging saved history."""
     store = await _store(journal_store)
     source_metadata = {
         "$relay": SourceEventMetadata(sender="@user:example.org", discovery_event_id="$human"),
@@ -1719,6 +1976,8 @@ async def test_recovery_preserves_newer_routed_alias_prompt(journal_store: Event
             timestamp=10,
         ),
     )
+    current = store.get_turn_record("$human")
+    assert current is not None
     recovery_record = TurnRecord.create(
         ["$relay", "$anchor"],
         discovery_event_ids=["$human"],
@@ -1731,14 +1990,15 @@ async def test_recovery_preserves_newer_routed_alias_prompt(journal_store: Event
 
     loaded = await _load_with_recovery(store, original_event_id="$human", recovery_record=recovery_record)
 
-    assert loaded is not None
+    assert loaded is current
+    assert loaded.response_event_id == "$old-response"
     assert loaded.source_event_prompts == {"$relay": "new relay", "$anchor": "anchor"}
     assert loaded.source_event_revisions == {"$human": (30, "$new-edit")}
 
 
 @pytest.mark.asyncio
 async def test_recovery_without_prompts_preserves_durable_prompt_map(journal_store: EventJournalStore) -> None:
-    """A delivered recovery lacking prompt metadata cannot erase durable coalesced bodies."""
+    """A run lacking prompts cannot alter a current journal record."""
     store = await _store(journal_store)
     await store._ledger.record_handled_turn(
         TurnRecord.create(
@@ -1748,6 +2008,8 @@ async def test_recovery_without_prompts_preserves_durable_prompt_map(journal_sto
             timestamp=10,
         ),
     )
+    current = store.get_turn_record("$first")
+    assert current is not None
 
     loaded = await _load_with_recovery(
         store,
@@ -1759,13 +2021,14 @@ async def test_recovery_without_prompts_preserves_durable_prompt_map(journal_sto
         ),
     )
 
-    assert loaded is not None
+    assert loaded is current
+    assert loaded.response_event_id == "$old-response"
     assert loaded.source_event_prompts == {"$first": "first", "$anchor": "anchor"}
 
 
 @pytest.mark.asyncio
-async def test_recovery_preserves_explicit_unknown_source_ownership(journal_store: EventJournalStore) -> None:
-    """A newer explicit unknown-ownership marker must not inherit stale ledger attribution."""
+async def test_existing_source_ownership_ignores_run_unknown_marker(journal_store: EventJournalStore) -> None:
+    """Saved history cannot replace requester attribution on a current journal record."""
     store = await _store(journal_store)
     await store._ledger.record_handled_turn(
         TurnRecord.create(
@@ -1777,6 +2040,8 @@ async def test_recovery_preserves_explicit_unknown_source_ownership(journal_stor
             timestamp=10,
         ),
     )
+    current = store.get_turn_record("$event")
+    assert current is not None
     recovery_record = TurnRecord.create(
         ["$event"],
         response_event_id="$new-response",
@@ -1791,10 +2056,12 @@ async def test_recovery_preserves_explicit_unknown_source_ownership(journal_stor
         recovery_record=recovery_record,
     )
 
-    assert loaded is not None
-    assert loaded.response_event_id == "$new-response"
-    assert loaded.source_event_metadata == {}
-    assert loaded.requester_id_for_source("$event") is None
+    assert loaded is current
+    assert loaded.response_event_id == "$old-response"
+    assert loaded.source_event_metadata == {
+        "$event": SourceEventMetadata(sender="@stale:example.org"),
+    }
+    assert loaded.requester_id_for_source("$event") == "@stale:example.org"
 
 
 @pytest.mark.asyncio
@@ -1822,12 +2089,16 @@ async def test_routed_alias_redaction_marks_owning_relay_under_lock(journal_stor
 
 
 @pytest.mark.asyncio
-async def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(journal_store: EventJournalStore) -> None:
-    """Second-resolution run times should still repair a later run from the same second."""
+async def test_same_second_delivered_run_cannot_replace_fractional_ledger_record(
+    journal_store: EventJournalStore,
+) -> None:
+    """Timestamp rounding cannot grant saved history authority over a journal record."""
     store = await _store(journal_store)
     await store._ledger.record_handled_turn(
         TurnRecord.create(["$event"], response_event_id="$old-response", timestamp=10.9),
     )
+    current = store.get_turn_record("$event")
+    assert current is not None
     recovery_record = TurnRecord.create(["$event"], response_event_id="$new-response", timestamp=10)
 
     loaded = await _load_with_recovery(
@@ -1836,14 +2107,14 @@ async def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(jou
         recovery_record=recovery_record,
     )
 
-    assert loaded is not None
-    assert loaded.response_event_id == "$new-response"
-    assert loaded.timestamp > 10.9
+    assert loaded is current
+    assert loaded.response_event_id == "$old-response"
+    assert loaded.timestamp == 10.9
 
 
 @pytest.mark.asyncio
 async def test_repeated_delivered_run_recovery_keeps_ledger_version_stable(journal_store: EventJournalStore) -> None:
-    """Idempotent recovery should not rewrite the ledger with synthetic timestamp drift."""
+    """Repeated lookup should return the current journal object without timestamp drift."""
     store = await _store(journal_store)
     ledger_record = TurnRecord.create(
         ["$event"],
@@ -1852,6 +2123,8 @@ async def test_repeated_delivered_run_recovery_keeps_ledger_version_stable(journ
         timestamp=10,
     )
     await store._ledger.record_handled_turn(ledger_record)
+    current = store.get_turn_record("$event")
+    assert current is not None
     recovery_record = TurnRecord.create(
         ["$event"],
         response_event_id="$response",
@@ -1865,8 +2138,8 @@ async def test_repeated_delivered_run_recovery_keeps_ledger_version_stable(journ
         recovery_record=recovery_record,
     )
 
-    assert loaded == ledger_record
-    assert store.get_turn_record("$event") == ledger_record
+    assert loaded is current
+    assert store.get_turn_record("$event") is current
 
 
 @pytest.mark.asyncio
@@ -1876,6 +2149,8 @@ async def test_newer_interrupted_run_keeps_delivered_ledger_outcome(journal_stor
     await store._ledger.record_handled_turn(
         TurnRecord.create(["$event"], response_event_id="$response", timestamp=10),
     )
+    current = store.get_turn_record("$event")
+    assert current is not None
     recovery_record = TurnRecord.create(["$event"], completed=False, timestamp=20)
 
     loaded = await _load_with_recovery(
@@ -1884,7 +2159,7 @@ async def test_newer_interrupted_run_keeps_delivered_ledger_outcome(journal_stor
         recovery_record=recovery_record,
     )
 
-    assert loaded is not None
+    assert loaded is current
     assert loaded.response_event_id == "$response"
     assert loaded.completed
     assert loaded.timestamp == 10
@@ -1902,6 +2177,8 @@ async def test_interrupted_recovery_does_not_mix_prompt_and_revision(journal_sto
             timestamp=10,
         ),
     )
+    current = store.get_turn_record("$event")
+    assert current is not None
     recovery_record = TurnRecord.create(
         ["$event"],
         completed=False,
@@ -1916,15 +2193,15 @@ async def test_interrupted_recovery_does_not_mix_prompt_and_revision(journal_sto
         recovery_record=recovery_record,
     )
 
-    assert loaded is not None
+    assert loaded is current
     assert loaded.source_event_prompts == {"$event": "base prompt"}
     assert loaded.source_event_revisions is None
     assert loaded.response_event_id == "$response"
 
 
 @pytest.mark.asyncio
-async def test_recovery_does_not_adopt_revision_without_its_prompt(journal_store: EventJournalStore) -> None:
-    """A ledger edit revision is unusable unless its matching durable prompt survived."""
+async def test_existing_revision_record_does_not_adopt_run_prompt(journal_store: EventJournalStore) -> None:
+    """Saved history cannot fill a missing prompt on a current revision record."""
     store = await _store(journal_store)
     await store._ledger.record_handled_turn(
         TurnRecord.create(
@@ -1934,6 +2211,8 @@ async def test_recovery_does_not_adopt_revision_without_its_prompt(journal_store
             timestamp=10,
         ),
     )
+    current = store.get_turn_record("$event")
+    assert current is not None
     recovery_record = TurnRecord.create(
         ["$event"],
         response_event_id="$new-response",
@@ -1944,9 +2223,10 @@ async def test_recovery_does_not_adopt_revision_without_its_prompt(journal_store
 
     loaded = await _load_with_recovery(store, original_event_id="$event", recovery_record=recovery_record)
 
-    assert loaded is not None
-    assert loaded.source_event_prompts == {"$event": "old prompt"}
-    assert loaded.source_event_revisions == {"$event": (10, "$old-edit")}
+    assert loaded is current
+    assert loaded.response_event_id == "$old-response"
+    assert loaded.source_event_prompts is None
+    assert loaded.source_event_revisions == {"$event": (20, "$new-edit")}
 
 
 @pytest.mark.asyncio
@@ -2126,10 +2406,10 @@ async def test_undelivered_run_repairs_as_incomplete_and_remains_retryable(journ
 
 
 @pytest.mark.asyncio
-async def test_load_turn_uses_ledger_identity_and_outcome_then_backfills_missing_context(
+async def test_load_turn_returns_existing_ledger_without_backfilling_missing_context(
     journal_store: EventJournalStore,
 ) -> None:
-    """Ledger facts should win field-by-field while absent optional context comes from run metadata."""
+    """Optional saved-run context must not mutate a current journal record."""
     store = await _store(journal_store)
     ledger_record = TurnRecord.create(
         ["$first", "$anchor"],
@@ -2157,23 +2437,18 @@ async def test_load_turn_uses_ledger_identity_and_outcome_then_backfills_missing
         recovery_record=recovery_record,
     )
 
-    assert loaded is not None
-    assert loaded.source_event_ids == ("$first", "$anchor")
-    assert loaded.anchor_event_id == "$anchor"
-    assert loaded.response_event_id == "$ledger-response"
-    assert loaded.source_event_prompts == {"$first": "ledger first", "$anchor": "ledger anchor"}
-    assert loaded.requester_id == "@ledger-user:example.org"
-    assert loaded.response_owner == "agent"
-    assert loaded.history_scope == HistoryScope(kind="agent", scope_id="agent")
-    assert loaded.conversation_target == recovery_target
-    assert loaded.timestamp > persisted_ledger_record.timestamp
+    assert loaded is persisted_ledger_record
+    assert loaded.response_owner is None
+    assert loaded.history_scope is None
+    assert loaded.conversation_target is None
+    assert loaded.timestamp == persisted_ledger_record.timestamp
     repaired = store.get_turn_record("$first")
-    assert repaired == loaded
+    assert repaired is loaded
 
 
 @pytest.mark.asyncio
-async def test_load_turn_repairs_missing_ledger_row_from_run_metadata(journal_store: EventJournalStore) -> None:
-    """Run metadata should recover and immediately backfill an absent ledger row."""
+async def test_load_turn_imports_missing_ledger_row_from_run_metadata(journal_store: EventJournalStore) -> None:
+    """Run metadata should import an absent row once and make later loads journal-only."""
     store = await _store(journal_store)
     recovery_record = TurnRecord.create(
         ["$event"],
@@ -2194,6 +2469,27 @@ async def test_load_turn_repairs_missing_ledger_row_from_run_metadata(journal_st
     assert repaired is not None
     assert repaired.response_event_id == "$response"
     assert repaired.response_owner == "agent"
+
+    with (
+        patch.object(
+            store,
+            "_load_persisted_turn_record",
+            side_effect=AssertionError("unexpected second history read"),
+        ),
+        patch.object(
+            store._ledger,
+            "update_handled_turn",
+            side_effect=AssertionError("unexpected second ledger update"),
+        ),
+    ):
+        loaded_again = await store.load_turn(
+            room=MagicMock(room_id="!room:example.org"),
+            thread_id=None,
+            original_event_id="$event",
+            requester_user_id="@user:example.org",
+        )
+
+    assert loaded_again is repaired
 
 
 @pytest.mark.asyncio
@@ -2380,34 +2676,41 @@ async def test_record_responded_turn_rejects_empty_response_event_id(journal_sto
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("recovery_response_event_id", [None, "$stale-response"])
-async def test_recovery_cannot_overwrite_concurrent_terminal_outcome(
+async def test_absent_row_import_returns_concurrent_exact_record_unchanged(
     journal_store: EventJournalStore,
     recovery_response_event_id: str | None,
 ) -> None:
-    """Slow incomplete or delivered recovery must preserve a concurrent terminal write."""
+    """A source created after the history read must win without saved-run backfill."""
     store = await _store(journal_store)
-    await store._ledger.record_handled_turn(
-        TurnRecord.create(["$event"], response_event_id="$old-response", timestamp=9),
-    )
     recovery_record = TurnRecord.create(
         ["$event"],
+        discovery_event_ids=["$run-alias"],
         response_event_id=recovery_response_event_id,
         completed=recovery_response_event_id is not None,
-        response_owner="agent",
+        source_event_prompts={"$event": "stale prompt"},
+        response_owner="run-owner",
+        requester_id="@run-user:example.org",
+        user_stop_receipt_order=20,
         timestamp=10,
+    )
+    concurrent_record = TurnRecord.create(
+        ["$event"],
+        response_event_id="$response",
+        source_event_prompts={"$event": "current prompt"},
+        response_owner="journal-owner",
+        requester_id="@journal-user:example.org",
+        timestamp=30,
     )
     real_update = store._ledger.update_handled_turn
     terminal_recorded = False
+    current: TurnRecord | None = None
 
     async def record_terminal_before_repair(*args: object, **kwargs: object) -> TurnRecord | None:
-        # The recovery read is over by the time this runs, so landing the
-        # terminal write here reproduces exactly what the repair guards
-        # against: the ledger moved on while the run metadata was loading.
-        nonlocal terminal_recorded
+        nonlocal current, terminal_recorded
         if not terminal_recorded:
             terminal_recorded = True
-            with patch("mindroom.handled_turns.time.time", return_value=10.9):
-                await store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
+            await store.record_turn(concurrent_record)
+            current = store.get_turn_record("$event")
         return await real_update(*args, **kwargs)
 
     with (
@@ -2421,13 +2724,109 @@ async def test_recovery_cannot_overwrite_concurrent_terminal_outcome(
             requester_user_id="@user:example.org",
         )
 
-    assert loaded is not None
-    assert loaded.completed
+    assert current is not None
+    assert loaded == current
     assert loaded.response_event_id == "$response"
-    assert loaded.response_owner == "agent"
-    assert loaded.timestamp > 10.9
-    record = store.get_turn_record("$event")
-    assert record == loaded
+    assert loaded.source_event_prompts == {"$event": "current prompt"}
+    assert loaded.response_owner == "journal-owner"
+    assert loaded.requester_id == "@journal-user:example.org"
+    assert loaded.user_stop_receipt_order is None
+    assert store.get_turn_record("$run-alias") is None
+
+
+@pytest.mark.asyncio
+async def test_discovery_alias_import_returns_concurrent_physical_owner_unchanged(
+    journal_store: EventJournalStore,
+) -> None:
+    """An alias lookup cannot backfill its recovered context onto a newly created physical source."""
+    store = await _store(journal_store)
+    recovery_record = TurnRecord.create(
+        ["$question"],
+        discovery_event_ids=["$selection"],
+        response_event_id="$run-response",
+        response_owner="run-owner",
+        history_scope=HistoryScope(kind="agent", scope_id="run-scope"),
+        timestamp=10,
+    )
+    concurrent_record = TurnRecord.create(
+        ["$selection"],
+        response_event_id="$selection-response",
+        response_owner="selection-owner",
+        timestamp=20,
+    )
+    real_update = store._ledger.update_handled_turn
+    concurrent_recorded = False
+    current: TurnRecord | None = None
+
+    async def record_alias_owner_before_import(*args: object, **kwargs: object) -> TurnRecord | None:
+        nonlocal concurrent_recorded, current
+        if not concurrent_recorded:
+            concurrent_recorded = True
+            await store.record_turn(concurrent_record)
+            current = store.get_turn_record("$selection")
+        return await real_update(*args, **kwargs)
+
+    with (
+        patch.object(store, "_load_persisted_turn_record", return_value=recovery_record),
+        patch.object(store._ledger, "update_handled_turn", side_effect=record_alias_owner_before_import),
+    ):
+        loaded = await store.load_turn(
+            room=MagicMock(room_id="!room:example.org"),
+            thread_id=None,
+            original_event_id="$selection",
+            requester_user_id="@user:example.org",
+        )
+
+    assert current is not None
+    assert loaded == current
+    assert loaded.source_event_ids == ("$selection",)
+    assert loaded.history_scope is None
+    assert store.get_turn_record("$question") is None
+
+
+@pytest.mark.asyncio
+async def test_absent_row_import_returns_concurrent_redaction_tombstone_unchanged(
+    journal_store: EventJournalStore,
+) -> None:
+    """A redaction landing after the history read must remain the exact source authority."""
+    store = await _store(journal_store)
+    recovery_record = TurnRecord.create(
+        ["$event"],
+        response_event_id="$stale-response",
+        source_event_prompts={"$event": "deleted prompt"},
+        response_owner="run-owner",
+        timestamp=10,
+    )
+    real_update = store._ledger.update_handled_turn
+    tombstone_recorded = False
+    current: TurnRecord | None = None
+
+    async def record_tombstone_before_import(*args: object, **kwargs: object) -> TurnRecord | None:
+        nonlocal current, tombstone_recorded
+        if not tombstone_recorded:
+            tombstone_recorded = True
+            await store.mark_source_redacted("$event")
+            current = store.get_turn_record("$event")
+        return await real_update(*args, **kwargs)
+
+    with (
+        patch.object(store, "_load_persisted_turn_record", return_value=recovery_record),
+        patch.object(store._ledger, "update_handled_turn", side_effect=record_tombstone_before_import),
+    ):
+        loaded = await store.load_turn(
+            room=MagicMock(room_id="!room:example.org"),
+            thread_id=None,
+            original_event_id="$event",
+            requester_user_id="@user:example.org",
+        )
+
+    assert current is not None
+    assert loaded == current
+    assert loaded.redacted_source_event_ids == ("$event",)
+    assert not loaded.completed
+    assert loaded.response_event_id is None
+    assert loaded.source_event_prompts is None
+    assert loaded.response_owner is None
 
 
 def test_only_turn_store_imports_handled_turn_ledger_in_production() -> None:

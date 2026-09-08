@@ -805,6 +805,16 @@ class HandledTurnLedger:
             self._require_loaded()
             return self._responses.get(source_event_id)
 
+    async def get_settled_turn_record(self, source_event_id: str) -> TurnRecord | None:
+        """Return one record after any write owning this identity settles."""
+        while True:
+            with self._state.lock:
+                self._require_loaded()
+                pending_write = self._state.pending_writes.get(source_event_id)
+                if pending_write is None:
+                    return self._responses.get(source_event_id)
+            await asyncio.shield(pending_write)
+
     def pending_redaction_cleanup_event_ids(self) -> tuple[str, ...]:
         """Return every durable redaction cleanup intent still awaiting completion."""
         with self._state.lock:
