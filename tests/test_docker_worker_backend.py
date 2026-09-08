@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
@@ -46,6 +47,7 @@ from mindroom.workers.backends.docker import (
     _worker_health_compatibility_error,
     _WorkerImageIncompatibleError,
     ensure_docker_dependencies,
+    quiesce_docker_workers_for_storage_upgrade,
 )
 from mindroom.workers.backends.docker_config import (
     _default_docker_user_for_os,
@@ -63,6 +65,9 @@ from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _ROTATED_AUTH_TOKEN = "rotated-token"  # noqa: S105
@@ -112,7 +117,9 @@ class _FakeContainer:
         }
         self.started = 0
         self.stopped = 0
+        self.stop_timeouts: list[int] = []
         self.removed = 0
+        self.remove_forces: list[bool] = []
         self.logs_output: bytes = b""
 
     def reload(self) -> None:
@@ -124,14 +131,15 @@ class _FakeContainer:
         self.reload()
 
     def stop(self, timeout: int = 10) -> None:
-        assert timeout == 10
+        assert timeout > 0
         self.stopped += 1
+        self.stop_timeouts.append(timeout)
         self.status = "exited"
         self.reload()
 
     def remove(self, force: bool = True) -> None:
-        assert force is True
         self.removed += 1
+        self.remove_forces.append(force)
         self.status = "removed"
 
     def logs(self, *, tail: int = 100) -> bytes:
@@ -149,6 +157,7 @@ class _FakeContainersApi:
         self.by_name: dict[str, _FakeContainer] = {}
         self.created_containers: list[_FakeContainer] = []
         self.run_calls: list[dict[str, object]] = []
+        self.list_calls: list[dict[str, object]] = []
         self.next_host_port = 43001
         self.images = images
         self.auto_pull_missing_image = auto_pull_missing_image
@@ -158,6 +167,24 @@ class _FakeContainersApi:
         if container is None or container.status == "removed":
             raise _FakeNotFoundError(name)
         return container
+
+    def list(self, **kwargs: object) -> Sequence[_FakeContainer]:
+        assert kwargs.get("all") is True
+        raw_filters = kwargs.get("filters")
+        applied_filters = dict(raw_filters) if isinstance(raw_filters, dict) else {}
+        self.list_calls.append(applied_filters)
+        label_filters = applied_filters.get("label", [])
+        expected_labels = {
+            item.split("=", 1)[0]: item.split("=", 1)[1]
+            for item in label_filters
+            if isinstance(item, str) and "=" in item
+        }
+        return [
+            container
+            for container in self.by_name.values()
+            if container.status != "removed"
+            and not any(container.attrs["Config"]["Labels"].get(key) != value for key, value in expected_labels.items())
+        ]
 
     def run(self, image: str, **kwargs: object) -> _FakeContainer:
         if self.auto_pull_missing_image and self.images is not None and image not in self.images.by_name:
@@ -230,6 +257,7 @@ class _FakeImagesApi:
 
 class _FakeDockerClient:
     def __init__(self, *, auto_pull_missing_image: bool = False) -> None:
+        self.api = SimpleNamespace(timeout=None)
         self.images = _FakeImagesApi()
         self.containers = _FakeContainersApi(
             images=self.images,
@@ -683,6 +711,187 @@ def _backend(
         lambda container: f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
     )
     return backend, fake_client, sync_calls
+
+
+def _docker_quiescence_runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_DOCKER_WORKER_LABELS_JSON": json.dumps({"mindroom.ai/tenant": "test"}),
+        },
+    )
+
+
+def test_docker_storage_quiescence_removes_only_runtime_and_preserves_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Docker quiescence preserves metadata, worker state, credentials, and foreign containers."""
+    runtime_paths = _docker_quiescence_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+    container = fake_client.containers.get(handle.worker_id)
+    metadata = tmp_path / "workers" / worker_dir_name(_TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    state_sentinel = metadata.parents[1] / "retained.bin"
+    state_sentinel.write_bytes(b"retained worker bytes")
+    credential_sentinel = tmp_path / "credentials" / "sentinel.bin"
+    credential_sentinel.parent.mkdir(exist_ok=True)
+    credential_sentinel.write_bytes(b"retained credential bytes")
+    metadata_bytes = metadata.read_bytes()
+    foreign = _FakeContainer(
+        name="foreign-worker",
+        image="foreign-image",
+        image_identity="sha256:foreign",
+        host_port=43999,
+        environment={},
+        labels={"mindroom.ai/runtime-namespace": "another-runtime"},
+        user=None,
+    )
+    fake_client.containers.by_name[foreign.name] = foreign
+
+    quiesce_docker_workers_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+    assert container.stopped == 1
+    assert len(container.stop_timeouts) == 1
+    assert 1 <= container.stop_timeouts[0] <= 4
+    assert container.removed == 1
+    assert container.remove_forces == [False]
+    assert foreign.removed == 0
+    assert metadata.read_bytes() == metadata_bytes
+    assert state_sentinel.read_bytes() == b"retained worker bytes"
+    assert credential_sentinel.read_bytes() == b"retained credential bytes"
+    assert len(fake_client.containers.list_calls) >= 2
+    assert 0.0 < fake_client.api.timeout <= 5.0
+
+
+def test_docker_storage_quiescence_rejects_orphan_before_any_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A matching live container without exact persisted metadata blocks every removal."""
+    runtime_paths = _docker_quiescence_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+    owned = fake_client.containers.get(handle.worker_id)
+    labels = dict(owned.attrs["Config"]["Labels"])
+    labels["mindroom.ai/worker-id"] = "orphan-worker"
+    orphan = _FakeContainer(
+        name="orphan-worker",
+        image=backend.config.image,
+        image_identity="sha256:orphan",
+        host_port=43998,
+        environment={"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:default:unscoped:orphan"},
+        labels=labels,
+        user=backend.config.user,
+    )
+    fake_client.containers.by_name[orphan.name] = orphan
+
+    with pytest.raises(WorkerBackendError, match="metadata"):
+        quiesce_docker_workers_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+    assert owned.removed == 0
+    assert orphan.removed == 0
+
+
+def test_docker_storage_quiescence_rejects_container_identity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A live replacement with a different container ID cannot inherit stored ownership."""
+    runtime_paths = _docker_quiescence_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+    container = fake_client.containers.get(handle.worker_id)
+    container.id = "replacement-container-id"
+
+    with pytest.raises(WorkerBackendError, match="identity"):
+        quiesce_docker_workers_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+    assert container.removed == 0
+
+
+def test_docker_storage_quiescence_requires_persisted_container_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A live runtime cannot be adopted when metadata lacks its immutable identity."""
+    runtime_paths = _docker_quiescence_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+    container = fake_client.containers.get(handle.worker_id)
+    metadata_path = tmp_path / "workers" / worker_dir_name(_TEST_UNSCOPED_WORKER_KEY) / "metadata" / "worker.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["container_id"] = None
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(WorkerBackendError, match="identity"):
+        quiesce_docker_workers_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+    assert container.stopped == 0
+    assert container.removed == 0
+
+
+def test_docker_storage_quiescence_stops_whole_fleet_before_any_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A later graceful-stop failure leaves every validated runtime file-backed and unremoved."""
+    runtime_paths = _docker_quiescence_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+    second_handle = backend.ensure_worker(WorkerSpec("v1:default:unscoped:second"), now=0.0)
+    first = fake_client.containers.get(first_handle.worker_id)
+    second = fake_client.containers.get(second_handle.worker_id)
+
+    def fail_stop(*, timeout: int) -> None:
+        assert timeout > 0
+        message = "stop failed"
+        raise _FakeDockerError(message)
+
+    monkeypatch.setattr(second, "stop", fail_stop)
+
+    with pytest.raises(WorkerBackendError, match="Failed to stop"):
+        quiesce_docker_workers_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+    assert first.stopped == 1
+    assert first.removed == 0
+    assert second.removed == 0
+
+
+def test_docker_storage_quiescence_rejects_recreated_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A runtime recreated after exact removal keeps migration startup fenced."""
+    runtime_paths = _docker_quiescence_runtime_paths(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=0.0)
+    original = fake_client.containers.get(handle.worker_id)
+    original_remove = original.remove
+
+    def replace_after_remove(*, force: bool = True) -> None:
+        original_remove(force=force)
+        replacement = _FakeContainer(
+            name=original.name,
+            image=backend.config.image,
+            image_identity=str(original.attrs["Image"]),
+            host_port=43997,
+            environment={item.split("=", 1)[0]: item.split("=", 1)[1] for item in original.attrs["Config"]["Env"]},
+            labels=dict(original.attrs["Config"]["Labels"]),
+            user=backend.config.user,
+        )
+        replacement.attrs["Mounts"] = list(original.attrs["Mounts"])
+        fake_client.containers.by_name[replacement.name] = replacement
+
+    monkeypatch.setattr(original, "remove", replace_after_remove)
+
+    with pytest.raises(WorkerBackendError, match="reappeared"):
+        quiesce_docker_workers_for_storage_upgrade(runtime_paths, timeout_seconds=5.0)
+
+    assert original.removed == 1
 
 
 def _use_real_wait_for_ready(monkeypatch: pytest.MonkeyPatch, backend: DockerWorkerBackend) -> None:
@@ -2072,6 +2281,44 @@ def test_load_docker_client_auto_installs_optional_runtime(
     assert captured["runtime_paths"] is None
     assert client is fake_client
     assert errors is fake_errors
+
+
+def test_load_docker_client_applies_migration_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Migration client construction carries the remaining overall deadline."""
+    captured: dict[str, object] = {}
+    fake_client = object()
+    fake_errors = SimpleNamespace(DockerException=_FakeDockerError, NotFound=_FakeNotFoundError)
+    runtime_paths = _docker_quiescence_runtime_paths(tmp_path)
+
+    def from_env(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return fake_client
+
+    def import_module(name: str) -> object:
+        if name == "docker":
+            return SimpleNamespace(from_env=from_env)
+        if name == "docker.errors":
+            return fake_errors
+        msg = f"Unexpected import: {name}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker.ensure_docker_dependencies",
+        lambda _paths: pytest.fail("migration client must not install dependencies"),
+    )
+    monkeypatch.setattr("mindroom.workers.backends.docker.importlib.import_module", import_module)
+
+    client, _errors = _load_docker_client_and_errors(
+        runtime_paths=runtime_paths,
+        timeout_seconds=4.5,
+        ensure_dependencies=False,
+    )
+
+    assert client is fake_client
+    assert captured == {"environment": runtime_paths.process_env, "timeout": 4.5}
 
 
 def test_ensure_docker_dependencies_uses_explicit_runtime_paths(

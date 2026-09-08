@@ -50,6 +50,7 @@ __all__ = [
     "KubernetesWorkerBackend",
     "KubernetesWorkerBackendConfig",
     "kubernetes_backend_config_signature",
+    "quiesce_kubernetes_workers_for_storage_upgrade",
 ]
 
 _COLD_START_GRACE_SECONDS = 1.5
@@ -78,6 +79,25 @@ class _ReadyWorkerCacheEntry:
 
 def _noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> None:
     del _phase, _error
+
+
+def quiesce_kubernetes_workers_for_storage_upgrade(
+    runtime_paths: RuntimePaths,
+    *,
+    timeout_seconds: float,
+) -> None:
+    """Stop owned Kubernetes worker runtimes without constructing a worker backend."""
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    resource_manager = resources.KubernetesResourceManager(
+        runtime_paths=runtime_paths,
+        config=config,
+        auth_token=None,
+        storage_root=runtime_paths.storage_root,
+        tool_validation_snapshot={},
+        config_snapshot={},
+        worker_grantable_credentials=frozenset(),
+    )
+    resource_manager.quiesce_worker_deployments_for_storage_upgrade(timeout_seconds=timeout_seconds)
 
 
 def _progress_event(

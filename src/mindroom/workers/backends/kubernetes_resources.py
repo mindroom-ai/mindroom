@@ -44,6 +44,8 @@ from mindroom.tool_system.worker_routing import (
     descriptive_worker_id_for_key,
     normalize_worker_key_part,
     resolved_worker_key_scope,
+    worker_dir_name,
+    worker_id_for_key,
     worker_key_agent_name,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -212,6 +214,9 @@ class _KubernetesMetadata(Protocol):
     @property
     def uid(self) -> str | None: ...
 
+    @property
+    def owner_references(self) -> tuple[dict[str, object], ...]: ...
+
 
 class _KubernetesDeploymentSpec(Protocol):
     @property
@@ -246,6 +251,7 @@ class _DeploymentMetadataSnapshot:
     labels: dict[str, str]
     generation: int | None
     uid: str | None
+    owner_references: tuple[dict[str, object], ...]
 
 
 @dataclass(slots=True)
@@ -281,7 +287,7 @@ class _KubernetesRawResponse(Protocol):
 
 
 class _AppsApiProtocol(Protocol):
-    def read_namespaced_deployment(self, name: str, namespace: str) -> KubernetesDeployment: ...
+    def read_namespaced_deployment(self, name: str, namespace: str, **kwargs: object) -> KubernetesDeployment: ...
 
     def create_namespaced_deployment(self, namespace: str, body: dict[str, object]) -> KubernetesDeployment: ...
 
@@ -296,7 +302,7 @@ class _AppsApiProtocol(Protocol):
         self,
         name: str,
         namespace: str,
-        **kwargs: str,
+        **kwargs: object,
     ) -> None: ...
 
     def list_namespaced_deployment(
@@ -305,6 +311,7 @@ class _AppsApiProtocol(Protocol):
         *,
         label_selector: str,
         _preload_content: bool = True,
+        _request_timeout: float | None = None,
     ) -> _KubernetesRawResponse: ...
 
 
@@ -563,6 +570,16 @@ def _string_mapping(value: object, *, field_name: str) -> dict[str, str]:
     return dict(cast("Mapping[str, str]", value))
 
 
+def _owner_references(value: object) -> tuple[dict[str, object], ...]:
+    """Read exact Deployment owner references from an untrusted list response."""
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(not isinstance(item, Mapping) for item in value):
+        msg = "Kubernetes Deployment list returned invalid metadata.ownerReferences."
+        raise WorkerBackendError(msg)
+    return tuple(dict(cast("Mapping[str, object]", item)) for item in value)
+
+
 def _deployment_snapshot(payload: object) -> KubernetesDeployment:
     """Project one raw Deployment payload onto fields used by maintenance."""
     if not isinstance(payload, Mapping):
@@ -591,6 +608,7 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
             labels=_string_mapping(metadata.get("labels"), field_name="metadata.labels"),
             generation=_optional_int(metadata.get("generation"), field_name="metadata.generation"),
             uid=uid,
+            owner_references=_owner_references(metadata.get("ownerReferences")),
         ),
         spec=_DeploymentSpecSnapshot(
             replicas=_optional_int(spec.get("replicas"), field_name="spec.replicas"),
@@ -603,6 +621,46 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
             ),
         ),
     )
+
+
+def _storage_quiescence_deployment_identity(
+    deployment: KubernetesDeployment,
+    *,
+    config: KubernetesWorkerBackendConfig,
+    expected_owner: dict[str, object],
+) -> tuple[str, str] | None:
+    configured_labels = {
+        _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
+        _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
+        _LABEL_NAME: _LABEL_NAME_VALUE,
+        **config.extra_labels,
+    }
+    label_candidate = all(deployment.metadata.labels.get(key) == value for key, value in configured_labels.items())
+    owner_candidate = deployment.metadata.owner_references == (expected_owner,)
+    if not label_candidate and not owner_candidate:
+        return None
+    annotations = dict(deployment.metadata.annotations or {})
+    worker_key = annotations.get(ANNOTATION_WORKER_KEY)
+    if worker_key is None or resolved_worker_key_scope(worker_key) is None:
+        msg = "Kubernetes worker Deployment does not match a resolved worker key."
+        raise WorkerBackendError(msg)
+    expected_name = worker_id_for_key(worker_key, prefix=config.name_prefix)
+    prefix = config.storage_subpath_prefix.strip().strip("/")
+    worker_directory = worker_dir_name(worker_key)
+    expected_state = f"{prefix}/{worker_directory}" if prefix else worker_directory
+    expected_labels = _labels(extra_labels=config.extra_labels, worker_id=expected_name)
+    uid = deployment.metadata.uid
+    if (
+        deployment.metadata.name != expected_name
+        or annotations.get(ANNOTATION_STATE_SUBPATH) != expected_state
+        or any(deployment.metadata.labels.get(key) != value for key, value in expected_labels.items())
+        or not owner_candidate
+        or uid is None
+        or not uid.strip()
+    ):
+        msg = f"Kubernetes worker Deployment '{deployment.metadata.name}' does not match exact ownership."
+        raise WorkerBackendError(msg)
+    return expected_name, uid
 
 
 @dataclass(frozen=True, slots=True)
@@ -746,12 +804,21 @@ class KubernetesResourceManager:
         assert self.api_exception_cls is not None
         return self.api_exception_cls
 
-    def list_deployments(self) -> list[KubernetesDeployment]:
+    def list_deployments(
+        self,
+        *,
+        request_timeout_seconds: float | None = None,
+        label_selector: str | None = None,
+    ) -> list[KubernetesDeployment]:
         """List lightweight worker snapshots without Kubernetes model deserialization."""
+        request_kwargs = {} if request_timeout_seconds is None else {"_request_timeout": request_timeout_seconds}
         response = self._apps.list_namespaced_deployment(
             self.config.namespace,
-            label_selector=_list_selector(extra_labels=self.config.extra_labels),
+            label_selector=(
+                _list_selector(extra_labels=self.config.extra_labels) if label_selector is None else label_selector
+            ),
             _preload_content=False,
+            **request_kwargs,
         )
         try:
             payload = json.loads(response.data)
@@ -765,10 +832,20 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
         return [_deployment_snapshot(item) for item in payload["items"]]
 
-    def read_deployment(self, deployment_name: str) -> KubernetesDeployment | None:
+    def read_deployment(
+        self,
+        deployment_name: str,
+        *,
+        request_timeout_seconds: float | None = None,
+    ) -> KubernetesDeployment | None:
         """Read one Deployment, returning ``None`` for 404s."""
+        request_kwargs = {} if request_timeout_seconds is None else {"_request_timeout": request_timeout_seconds}
         try:
-            return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace)
+            return self._apps.read_namespaced_deployment(
+                deployment_name,
+                self.config.namespace,
+                **request_kwargs,
+            )
         except self._api_exception as exc:
             if exc.status == 404:
                 return None
@@ -880,7 +957,10 @@ class KubernetesResourceManager:
             raise
         return True
 
-    def _delete_deployment(self, deployment_name: str) -> None:
+    def _delete_deployment(
+        self,
+        deployment_name: str,
+    ) -> None:
         """Delete one worker Deployment, ignoring 404s."""
         try:
             self._apps.delete_namespaced_deployment(
@@ -892,10 +972,82 @@ class KubernetesResourceManager:
             if exc.status != 404:
                 raise
 
+    def _delete_deployment_for_storage_upgrade(
+        self,
+        deployment_name: str,
+        *,
+        expected_uid: str,
+        request_timeout_seconds: float,
+    ) -> None:
+        """Request migration-only deletion with an exact UID precondition."""
+        try:
+            self._apps.delete_namespaced_deployment(
+                deployment_name,
+                self.config.namespace,
+                propagation_policy="Foreground",
+                body={"preconditions": {"uid": expected_uid}},
+                _request_timeout=request_timeout_seconds,
+            )
+        except self._api_exception as exc:
+            if exc.status != 404:
+                raise
+
     def delete_deployment(self, deployment_name: str, *, timeout_seconds: float) -> None:
         """Delete one worker Deployment after its dependent pods terminate."""
         self._delete_deployment(deployment_name)
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
+
+    def quiesce_worker_deployments_for_storage_upgrade(self, *, timeout_seconds: float) -> None:
+        """Delete exactly owned worker Deployments while preserving durable resources."""
+        deadline = time.monotonic() + timeout_seconds
+
+        def remaining() -> float:
+            value = deadline - time.monotonic()
+            if value <= 0:
+                msg = "Kubernetes worker quiescence timed out before absence was verified."
+                raise WorkerBackendError(msg)
+            return value
+
+        expected_owner = self._owner_reference_or_none(request_timeout_seconds=remaining())
+        if expected_owner is None:
+            msg = "Kubernetes storage quiescence requires a configured owner Deployment."
+            raise WorkerBackendError(msg)
+        deployments = self.list_deployments(request_timeout_seconds=remaining(), label_selector="")
+        configured_labels = {
+            _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
+            _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
+            _LABEL_NAME: _LABEL_NAME_VALUE,
+            **self.config.extra_labels,
+        }
+        validated = [
+            identity
+            for deployment in deployments
+            if (
+                identity := _storage_quiescence_deployment_identity(
+                    deployment,
+                    config=self.config,
+                    expected_owner=expected_owner,
+                )
+            )
+            is not None
+        ]
+
+        for deployment_name, uid in validated:
+            self._delete_deployment_for_storage_upgrade(
+                deployment_name,
+                expected_uid=uid,
+                request_timeout_seconds=remaining(),
+            )
+        for deployment_name, _uid in validated:
+            self._wait_for_deployment_absent_for_storage_upgrade(deployment_name, deadline=deadline)
+        remaining_deployments = self.list_deployments(request_timeout_seconds=remaining(), label_selector="")
+        if any(
+            deployment.metadata.owner_references == (expected_owner,)
+            or all(deployment.metadata.labels.get(key) == value for key, value in configured_labels.items())
+            for deployment in remaining_deployments
+        ):
+            msg = "A Kubernetes worker Deployment reappeared during storage quiescence."
+            raise WorkerBackendError(msg)
 
     def delete_service(self, service_name: str) -> None:
         """Delete one worker Service, ignoring 404s."""
@@ -1049,6 +1201,17 @@ class KubernetesResourceManager:
                 )
                 raise WorkerBackendError(msg)
             time.sleep(_DELETE_POLL_INTERVAL_SECONDS)
+
+    def _wait_for_deployment_absent_for_storage_upgrade(self, deployment_name: str, *, deadline: float) -> None:
+        """Poll one migration deletion under the caller's monotonic deadline."""
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                msg = f"Kubernetes worker deployment '{deployment_name}' did not finish deleting before timeout."
+                raise WorkerBackendError(msg)
+            if self.read_deployment(deployment_name, request_timeout_seconds=remaining) is None:
+                return
+            time.sleep(min(_DELETE_POLL_INTERVAL_SECONDS, remaining))
 
     def wait_for_ready(
         self,
@@ -1730,14 +1893,21 @@ class KubernetesResourceManager:
         self._control_plane_node_name_loaded = True
         return self._control_plane_node_name
 
-    def _owner_reference_or_none(self) -> dict[str, object] | None:
+    def _owner_reference_or_none(
+        self,
+        *,
+        request_timeout_seconds: float | None = None,
+    ) -> dict[str, object] | None:
         if self._owner_reference_loaded:
             return self._owner_reference
         if self.config.owner_deployment_name is None:
             self._owner_reference_loaded = True
             return None
 
-        owner_deployment = self.read_deployment(self.config.owner_deployment_name)
+        owner_deployment = self.read_deployment(
+            self.config.owner_deployment_name,
+            request_timeout_seconds=request_timeout_seconds,
+        )
         if owner_deployment is None:
             msg = f"Configured Kubernetes worker owner deployment '{self.config.owner_deployment_name}' was not found."
             raise WorkerBackendError(msg)

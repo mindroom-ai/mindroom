@@ -184,13 +184,22 @@ class _FakeAppsApi:
         self.patched_bodies: list[tuple[str, dict[str, object]]] = []
         self.deleted_names: list[str] = []
         self.deleted_propagation_policies: list[str | None] = []
+        self.deleted_preconditions: list[dict[str, object] | None] = []
+        self.request_timeouts: list[float | None] = []
         self.list_label_selectors: list[str] = []
         self.raw_list_count = 0
         self.delete_read_lag_by_name: dict[str, int] = {}
         self._active_delete_read_lag_by_name: dict[str, int] = {}
 
-    def read_namespaced_deployment(self, name: str, namespace: str) -> object:
+    def read_namespaced_deployment(
+        self,
+        name: str,
+        namespace: str,
+        *,
+        _request_timeout: float | None = None,
+    ) -> object:
         _ = namespace
+        self.request_timeouts.append(_request_timeout)
         self.read_names.append(name)
         deployment = self.deployments.get(name)
         if deployment is None:
@@ -243,10 +252,18 @@ class _FakeAppsApi:
         namespace: str,
         *,
         propagation_policy: str | None = None,
+        body: dict[str, object] | None = None,
+        _request_timeout: float | None = None,
     ) -> None:
         _ = namespace
         self.deleted_names.append(name)
         self.deleted_propagation_policies.append(propagation_policy)
+        self.deleted_preconditions.append(body)
+        self.request_timeouts.append(_request_timeout)
+        deployment = self.deployments.get(name)
+        expected_uid = None if body is None else body.get("preconditions", {}).get("uid")
+        if deployment is not None and expected_uid is not None and deployment.metadata.uid != expected_uid:
+            raise _FakeApiError(409)
         if self.delete_read_lag_by_name.get(name, 0) > 0:
             self._active_delete_read_lag_by_name[name] = self.delete_read_lag_by_name[name]
             return
@@ -258,9 +275,11 @@ class _FakeAppsApi:
         *,
         label_selector: str,
         _preload_content: bool = True,
+        _request_timeout: float | None = None,
     ) -> object:
         _ = namespace
         self.list_label_selectors.append(label_selector)
+        self.request_timeouts.append(_request_timeout)
         selectors = {}
         for expression in filter(None, (part.strip() for part in label_selector.split(","))):
             key, sep, value = expression.partition("=")
@@ -285,6 +304,9 @@ class _FakeAppsApi:
                         "labels": deployment.metadata.labels,
                         "generation": deployment.metadata.generation,
                         "uid": deployment.metadata.uid,
+                        "ownerReferences": [
+                            vars(reference) for reference in getattr(deployment.metadata, "ownerReferences", [])
+                        ],
                     },
                     "spec": {"replicas": deployment.spec.replicas},
                     "status": {
@@ -3446,6 +3468,137 @@ def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
         "mindroom.ai/component=worker,"
         "mindroom.ai/tenant=test"
     )
+
+
+def test_storage_quiescence_deletes_only_owned_deployments_and_preserves_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Migration quiescence removes runtimes while retaining durable resources and bytes."""
+    backend, apps_api, core_api = _backend(owner_deployment_name="mindroom-primary")
+    first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    legacy_worker_key = "v1:tenant-123:user:@alice:example.org"
+    second = backend.ensure_worker(WorkerSpec(legacy_worker_key), now=0.0)
+    sentinel = backend.storage_root / "credentials" / "sentinel.bin"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_bytes(b"retain exact credential bytes")
+    services = dict(core_api.services)
+    secrets = dict(core_api.secrets)
+    backend._resources._owner_reference = None
+    backend._resources._owner_reference_loaded = False
+    apps_api.request_timeouts.clear()
+    operations: list[str] = []
+    delete_deployment = backend._resources._delete_deployment_for_storage_upgrade
+    wait_for_deployment_absent = backend._resources._wait_for_deployment_absent_for_storage_upgrade
+
+    def recording_delete(
+        deployment_name: str,
+        *,
+        expected_uid: str | None = None,
+        request_timeout_seconds: float | None = None,
+    ) -> None:
+        operations.append(f"delete:{deployment_name}")
+        delete_deployment(
+            deployment_name,
+            expected_uid=expected_uid,
+            request_timeout_seconds=request_timeout_seconds,
+        )
+
+    def recording_wait(deployment_name: str, *, deadline: float) -> None:
+        operations.append(f"wait:{deployment_name}")
+        wait_for_deployment_absent(deployment_name, deadline=deadline)
+
+    monkeypatch.setattr(backend._resources, "_delete_deployment_for_storage_upgrade", recording_delete)
+    monkeypatch.setattr(backend._resources, "_wait_for_deployment_absent_for_storage_upgrade", recording_wait)
+
+    backend._resources.quiesce_worker_deployments_for_storage_upgrade(timeout_seconds=5.0)
+
+    assert operations == [
+        f"delete:{first.worker_id}",
+        f"delete:{second.worker_id}",
+        f"wait:{first.worker_id}",
+        f"wait:{second.worker_id}",
+    ]
+    assert apps_api.deleted_names == [first.worker_id, second.worker_id]
+    assert apps_api.deleted_propagation_policies == ["Foreground", "Foreground"]
+    assert apps_api.deleted_preconditions == [
+        {"preconditions": {"uid": f"{first.worker_id}-uid"}},
+        {"preconditions": {"uid": f"{second.worker_id}-uid"}},
+    ]
+    assert core_api.services == services
+    assert core_api.secrets == secrets
+    assert core_api.deleted_secret_names == []
+    assert sentinel.read_bytes() == b"retain exact credential bytes"
+    assert apps_api.request_timeouts
+    assert all(timeout is not None and 0.0 < timeout <= 5.0 for timeout in apps_api.request_timeouts)
+
+
+def test_storage_quiescence_rejects_missing_configured_owner_before_deletion() -> None:
+    """A runtime without an explicit controlling Deployment cannot be stopped automatically."""
+    backend, apps_api, _core_api = _backend(owner_deployment_name=None)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+
+    with pytest.raises(WorkerBackendError, match="configured owner Deployment"):
+        backend._resources.quiesce_worker_deployments_for_storage_upgrade(timeout_seconds=5.0)
+
+    assert apps_api.deleted_names == []
+
+
+def test_storage_quiescence_issues_all_deletes_before_shared_deadline_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fleet shares one deadline without serializing worker termination windows."""
+    backend, apps_api, _core_api = _backend(owner_deployment_name="mindroom-primary")
+    first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    second = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_B), now=0.0)
+    monotonic_values = iter([0.0, 0.0, 0.0, 0.0, 0.0, 6.0])
+    monkeypatch.setattr(kubernetes_resources_module.time, "monotonic", lambda: next(monotonic_values))
+
+    with pytest.raises(WorkerBackendError, match="did not finish deleting before timeout"):
+        backend._resources.quiesce_worker_deployments_for_storage_upgrade(timeout_seconds=5.0)
+
+    assert apps_api.deleted_names == [first.worker_id, second.worker_id]
+
+
+@pytest.mark.parametrize("mismatch", ["owner", "key", "name", "state"])
+def test_storage_quiescence_rejects_mismatched_deployment_before_deletion(mismatch: str) -> None:
+    """Every matching Deployment must prove its exact owner, key, name, and state path."""
+    backend, apps_api, _core_api = _backend(owner_deployment_name="mindroom-primary")
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    deployment = apps_api.deployments[handle.worker_id]
+    if mismatch == "owner":
+        deployment.metadata.ownerReferences[0].uid = "foreign-owner-uid"
+    elif mismatch == "key":
+        deployment.metadata.annotations[ANNOTATION_WORKER_KEY] = _TEST_SCOPED_WORKER_KEY_B
+    elif mismatch == "name":
+        deployment.metadata.name = "unexpected-worker-name"
+    else:
+        deployment.metadata.annotations[kubernetes_resources_module.ANNOTATION_STATE_SUBPATH] = "workers/other"
+
+    with pytest.raises(WorkerBackendError, match="does not match"):
+        backend._resources.quiesce_worker_deployments_for_storage_upgrade(timeout_seconds=5.0)
+
+    assert apps_api.deleted_names == []
+
+
+def test_storage_quiescence_rejects_recreated_deployment() -> None:
+    """A worker that reappears after deletion keeps the migration fenced."""
+    backend, apps_api, _core_api = _backend(owner_deployment_name="mindroom-primary")
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    snapshot = backend._resources.list_deployments()
+    list_calls = 0
+
+    def stale_relist(**_kwargs: object) -> list[object]:
+        nonlocal list_calls
+        list_calls += 1
+        return snapshot
+
+    backend._resources.list_deployments = stale_relist
+
+    with pytest.raises(WorkerBackendError, match="reappeared"):
+        backend._resources.quiesce_worker_deployments_for_storage_upgrade(timeout_seconds=5.0)
+
+    assert list_calls == 2
+    assert apps_api.deleted_names == [snapshot[0].metadata.name]
 
 
 def test_kubernetes_backend_touch_only_patches_deployment_metadata() -> None:
