@@ -849,15 +849,14 @@ def apply_storage_upgrade_locked(  # noqa: C901 - preserve durable transaction o
             # Persist the observed namespace before publishing any new receipt.
             fsync_directory_durable(path.parent)
     _publish(plan, "prepared")
+    _publish(plan, "moving")
     for operation in plan.operations:
         for move in operation.moves:
             path, moved = _inspect_move(plan, operation, move)
             if not moved:
                 _rename_offline(path, path.with_name(operation.destination), device=move.device, inode=move.inode)
-            _publish(plan, "moving")
         destination = Path(plan.volumes[0].path) / "private_instances" / operation.destination
         _write_record(destination, operation, new=True)
-        _publish(plan, "moving")
     verify_storage_upgrade(plan)
     _publish(plan, "complete")
 
@@ -889,6 +888,12 @@ def rollback_storage_upgrade_locked(plan: StorageUpgradePlan) -> None:
             # A prior crash may have renamed this entry without syncing it.
             # Persist the observed namespace before publishing any new receipt.
             fsync_directory_durable(path.parent)
+    if any(journal is None for journal in journals) and all(
+        journal is None or journal.status == "prepared" for journal in journals
+    ):
+        # Finish initial participation before recording any reversal intent.
+        # Otherwise a crash could leave reversing beside a missing marker.
+        _publish(plan, "prepared")
     _publish(plan, "reversing")
     for operation in reversed(plan.operations):
         owner, _ = _inspect_move(plan, operation, operation.moves[0])
@@ -897,7 +902,6 @@ def rollback_storage_upgrade_locked(plan: StorageUpgradePlan) -> None:
             path, moved = _inspect_move(plan, operation, move)
             if moved:
                 _rename_offline(path, path.with_name(operation.source), device=move.device, inode=move.inode)
-            _publish(plan, "reversing")
     _publish(plan, "rolled_back")
 
 

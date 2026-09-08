@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sqlite3
 import threading
 from contextlib import suppress
@@ -35,6 +36,301 @@ def _paths(root: Path, sessions: Path | None = None) -> RuntimePaths:
         storage_path=root,
         process_env={"MINDROOM_SESSION_STORAGE_PATH": str(sessions)} if sessions else {},
     )
+
+
+def _phase_fixture(base: Path, *, scopes: int = 2, separate: bool = True) -> tuple[RuntimePaths, list[Path]]:
+    root, sessions = base / "state", base / "sessions" if separate else base / "state"
+    root.mkdir(parents=True)
+    sessions.mkdir(exist_ok=True)
+    sources = []
+    for index in range(scopes):
+        source = _legacy(root, requester=f"@owner{index}:example.org", scope="user" if index % 2 else "user_agent")
+        sources.append(source)
+        database = sessions / source.relative_to(root) / "writer/sessions/writer.db"
+        database.parent.mkdir(parents=True, exist_ok=True)
+        storage = SqliteDb(db_file=str(database), session_table="writer_sessions")
+        storage.upsert_session(AgentSession(session_id="retained", agent_id="writer", session_data={"retained": True}))
+        if index % 2:
+            storage.upsert_run(RunOutput(run_id="retained-run", agent_id="writer", content="retained"), "retained")
+        storage.db_engine.dispose()
+    return _paths(root, sessions), sources
+
+
+def _statuses(paths: RuntimePaths) -> list[str | None]:
+    return [
+        None if (receipt := upgrade._read_journal(root / upgrade._MARKER)) is None else receipt.status
+        for root in dict.fromkeys(upgrade._runtime_roots(paths))
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scopes", [1, 4])
+@pytest.mark.parametrize("separate", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_phase_receipt_writes_do_not_grow_with_scope_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scopes: int,
+    separate: bool,
+    reverse: bool,
+) -> None:
+    """Full-plan publication is bounded by participant phases, not move count."""
+    paths, _sources = _phase_fixture(tmp_path, scopes=scopes, separate=separate)
+    monkeypatch.setattr(startup, "_quiesce_workers", lambda *_a, **_k: None)
+    if reverse:
+        await startup.ensure_private_storage_ready(paths)
+    writer = upgrade.write_json_file_durable
+    writes = []
+
+    def record(path: Path, payload: object, *, strict_atomic_replace: bool = False) -> None:
+        assert isinstance(payload, dict)
+        writes.append((path.parent, payload))
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
+
+    monkeypatch.setattr(upgrade, "write_json_file_durable", record)
+    if reverse:
+        plan = upgrade._read_journal(paths.storage_root / upgrade._MARKER).plan
+        upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+    else:
+        await startup.ensure_private_storage_ready(paths)
+    volumes = len(set(upgrade._runtime_roots(paths)))
+    phases = ("reversing", "rolled_back") if reverse else ("prepared", "moving", "complete")
+    assert [payload["status"] for _root, payload in writes] == [phase for phase in phases for _ in range(volumes)]
+    assert all(payload["plan"] == writes[0][1]["plan"] for _root, payload in writes)
+    assert {root for root, _payload in writes} == set(upgrade._runtime_roots(paths))
+
+
+@pytest.mark.asyncio
+async def test_phase_optimization_keeps_five_deep_validation_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reducing receipts does not skip content, integrity, schema, or row validation."""
+    paths, sources = _phase_fixture(tmp_path)
+    inventory, snapshot = upgrade._inventory, upgrade._session_database_snapshot
+    inventories, databases = [], []
+
+    def inspected(root: Path, *, owner_temporary: Path | None = None, exclude_owner_record: bool = False) -> str:
+        inventories.append(root)
+        return inventory(root, owner_temporary=owner_temporary, exclude_owner_record=exclude_owner_record)
+
+    def checked(database: Path, *, include_learning: bool = False) -> str:
+        databases.append(database)
+        return snapshot(database, include_learning=include_learning)
+
+    monkeypatch.setattr(startup, "_quiesce_workers", lambda *_a, **_k: None)
+    monkeypatch.setattr(upgrade, "_inventory", inspected)
+    monkeypatch.setattr(upgrade, "_session_database_snapshot", checked)
+    await startup.ensure_private_storage_ready(paths)
+    plan = upgrade._read_journal(paths.storage_root / upgrade._MARKER).plan
+    assert len(inventories) == 5 * sum(len(operation.moves) for operation in plan.operations)
+    assert len(databases) == 5 * len(sources)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["prepared", "moving", "complete", "reversing", "rolled_back"])
+@pytest.mark.parametrize("participant", [0, 1])
+async def test_each_phase_publication_recovers_on_both_volumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    participant: int,
+) -> None:
+    """Each individual durable participant write may be the last one before a crash."""
+    paths, sources = _phase_fixture(tmp_path)
+    roots = upgrade._runtime_roots(paths)
+    original_owners = [(source / upgrade._RECORD_FILENAME).read_bytes() for source in sources]
+    monkeypatch.setattr(startup, "_quiesce_workers", lambda *_a, **_k: None)
+    reverse = phase in {"reversing", "rolled_back"}
+    if reverse:
+        await startup.ensure_private_storage_ready(paths)
+    writer = upgrade.write_json_file_durable
+    interrupted = False
+
+    def crash(path: Path, payload: object, *, strict_atomic_replace: bool = False) -> None:
+        nonlocal interrupted
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
+        assert isinstance(payload, dict)
+        if payload["status"] == phase and path.parent == roots[participant]:
+            if phase == "moving":
+                assert all(source.exists() for source in sources), "Moving must be durable before the first rename"
+            interrupted = True
+            message = "phase publication interruption"
+            raise OSError(message)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(upgrade, "write_json_file_durable", crash)
+        with pytest.raises(OSError, match="phase publication interruption"):  # noqa: PT012
+            if reverse:
+                plan = upgrade._read_journal(paths.storage_root / upgrade._MARKER).plan
+                upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+            else:
+                await startup.ensure_private_storage_ready(paths)
+    assert interrupted
+    if reverse:
+        with pytest.raises(upgrade.StorageUpgradeError, match=r"[Rr]oll|reversal"):
+            await startup.ensure_private_storage_ready(paths)
+        assert _statuses(paths) == ["rolled_back", "rolled_back"]
+        assert [(source / upgrade._RECORD_FILENAME).read_bytes() for source in sources] == original_owners
+    else:
+        await startup.ensure_private_storage_ready(paths)
+        assert _statuses(paths) == ["complete", "complete"]
+        upgrade.verify_storage_upgrade(upgrade._read_journal(paths.storage_root / upgrade._MARKER).plan)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_every_observed_mutation_checkpoint_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reverse: bool,
+) -> None:
+    """Enumerate the real checkpoint trace, including owner writes and unsynced renames."""
+    monkeypatch.setattr(startup, "_quiesce_workers", lambda *_a, **_k: None)
+    paths, _sources = _phase_fixture(tmp_path / "trace")
+    if reverse:
+        await startup.ensure_private_storage_ready(paths)
+    trace = []
+
+    def recorded() -> None:
+        frame = inspect.currentframe()
+        assert frame is not None
+        assert frame.f_back is not None
+        trace.append(frame.f_back.f_code.co_name)
+
+    with monkeypatch.context() as recorder:
+        recorder.setattr(upgrade, "_checkpoint", recorded)
+        if reverse:
+            upgrade.rollback_storage_upgrade(
+                upgrade._read_journal(paths.storage_root / upgrade._MARKER).plan,
+                writers_stopped=True,
+            )
+        else:
+            await startup.ensure_private_storage_ready(paths)
+    assert set(trace) == {"_publish", "_rename_offline", "_write_record"}
+    plan = upgrade._read_journal(paths.storage_root / upgrade._MARKER).plan
+    assert trace.count("_publish") == (2 if reverse else 3) * len(plan.volumes)
+    assert trace.count("_rename_offline") == 2 * sum(len(operation.moves) for operation in plan.operations)
+    assert trace.count("_write_record") == 4 * len(plan.operations)
+    for boundary in range(1, len(trace) + 1):
+        paths, sources = _phase_fixture(tmp_path / f"fault-{boundary}")
+        originals = [(source / upgrade._RECORD_FILENAME).read_bytes() for source in sources]
+        if reverse:
+            await startup.ensure_private_storage_ready(paths)
+        calls = 0
+
+        def crash(*, stop_at: int = boundary) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == stop_at:
+                message = "observed checkpoint interruption"
+                raise OSError(message)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(upgrade, "_checkpoint", crash)
+            with pytest.raises(OSError, match="observed checkpoint interruption"):  # noqa: PT012
+                if reverse:
+                    upgrade.rollback_storage_upgrade(
+                        upgrade._read_journal(paths.storage_root / upgrade._MARKER).plan,
+                        writers_stopped=True,
+                    )
+                else:
+                    await startup.ensure_private_storage_ready(paths)
+        assert calls == boundary
+        if reverse:
+            with pytest.raises(upgrade.StorageUpgradeError):
+                await startup.ensure_private_storage_ready(paths)
+            assert _statuses(paths) == ["rolled_back", "rolled_back"]
+            assert [(source / upgrade._RECORD_FILENAME).read_bytes() for source in sources] == originals
+        else:
+            await startup.ensure_private_storage_ready(paths)
+            assert _statuses(paths) == ["complete", "complete"]
+            upgrade.verify_storage_upgrade(upgrade._read_journal(paths.storage_root / upgrade._MARKER).plan)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["prepared", "reversing"])
+@pytest.mark.parametrize("participant", [0, 1])
+async def test_partial_preparation_is_completed_before_reversal_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    participant: int,
+) -> None:
+    """An interrupted initial preparation must not become reversing plus a missing marker."""
+    paths, sources = _phase_fixture(tmp_path)
+    roots = upgrade._runtime_roots(paths)
+    originals = [(source / upgrade._RECORD_FILENAME).read_bytes() for source in sources]
+    plan = upgrade.plan_storage_upgrade(*roots)
+    writer = upgrade.write_json_file_durable
+    monkeypatch.setattr(startup, "_quiesce_workers", lambda *_a, **_k: None)
+
+    def first_marker(path: Path, payload: object, *, strict_atomic_replace: bool = False) -> None:
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
+        message = "initial publication interruption"
+        raise OSError(message)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(upgrade, "write_json_file_durable", first_marker)
+        with pytest.raises(OSError, match="initial publication interruption"):
+            upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    assert _statuses(paths) == ["prepared", None]
+    interrupted = False
+
+    def reverse_marker(path: Path, payload: object, *, strict_atomic_replace: bool = False) -> None:
+        nonlocal interrupted
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
+        assert isinstance(payload, dict)
+        if payload["status"] == phase and path.parent == roots[participant]:
+            interrupted = True
+            message = "reversal preparation interruption"
+            raise OSError(message)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(upgrade, "write_json_file_durable", reverse_marker)
+        with pytest.raises(OSError, match="reversal preparation interruption"):
+            upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+    assert interrupted
+    if phase == "reversing":
+        assert None not in _statuses(paths)
+        with pytest.raises(upgrade.StorageUpgradeError, match="reversal completed"):
+            await startup.ensure_private_storage_ready(paths)
+        assert _statuses(paths) == ["rolled_back", "rolled_back"]
+        assert [(source / upgrade._RECORD_FILENAME).read_bytes() for source in sources] == originals
+    else:
+        # No reversing receipt exists yet, so forward intent remains authoritative.
+        await startup.ensure_private_storage_ready(paths)
+        assert _statuses(paths) == ["complete", "complete"]
+
+
+@pytest.mark.parametrize("intent", ["reversing", "rolled_back"])
+def test_missing_participation_never_erases_recorded_reversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    intent: str,
+) -> None:
+    """Prepared seeding must never turn an already recorded reversal into forward intent."""
+    paths, _sources = _phase_fixture(tmp_path)
+    roots = upgrade._runtime_roots(paths)
+    plan = upgrade.plan_storage_upgrade(*roots)
+    for root in roots:
+        upgrade.write_json_file_durable(
+            root / upgrade._MARKER,
+            {"plan": plan.model_dump(mode="json"), "status": intent},
+        )
+    (roots[1] / upgrade._MARKER).unlink()
+    writer = upgrade.write_json_file_durable
+    phases = []
+
+    def written(path: Path, payload: object, *, strict_atomic_replace: bool = False) -> None:
+        assert isinstance(payload, dict)
+        phases.append(payload["status"])
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
+
+    monkeypatch.setattr(upgrade, "write_json_file_durable", written)
+    upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+    assert "prepared" not in phases
+    assert _statuses(paths) == ["rolled_back", "rolled_back"]
 
 
 @pytest.mark.asyncio

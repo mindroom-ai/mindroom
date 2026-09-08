@@ -79,7 +79,10 @@ mindroom storage-upgrade rollback ./private-upgrade.json --writers-stopped
 mindroom storage-upgrade rollback ./state/.mindroom-storage-upgrade.json --writers-stopped
 ```
 
-Receipts record each participating volume and every durable transition; there is no atomic transaction spanning volumes.
+Receipts persist the original owner mapping and transaction phase on every participating volume.
+Recovery validates the exact filesystem state to determine which moves and owner replacements already completed.
+Each rename and owner replacement is flushed before completion; there is no atomic transaction spanning volumes.
+If initial participation was interrupted, rollback completes prepared receipts on all volumes before recording reversal intent.
 A missing volume, conflicting directory, changed owner record, or changed private content blocks recovery rather than overwriting data.
 Rollback is intended for unchanged pre-traffic state and restores original owner-record bytes.
 After new traffic writes data, stop writers and review a coordinated recovery plan instead of restoring stale paths or starting an old image.
