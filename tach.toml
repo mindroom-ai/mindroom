@@ -753,6 +753,8 @@ visibility = [
 [[modules]]
 path = "mindroom.oauth.credential_store"
 depends_on = [
+    "mindroom.credential_policy",
+    "mindroom.tool_system.worker_routing",
     "mindroom.credentials",
     "mindroom.logging_config",
     "mindroom.oauth.providers",
