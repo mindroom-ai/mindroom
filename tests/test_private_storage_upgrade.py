@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
-from contextlib import suppress
+from contextlib import closing, suppress
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -676,6 +677,10 @@ def test_relative_session_directory_is_verified_without_rewriting(tmp_path: Path
     if valid:
         storage = SqliteDb(db_file=str(database))
         storage.upsert_session(AgentSession(session_id="linked", agent_id="writer"))
+        storage.upsert_run(
+            run=RunOutput(run_id="linked-run", session_id="linked", content="retained"),
+            session_id="linked",
+        )
         storage.db_engine.dispose()
     else:
         database.write_bytes(b"unreadable session database")
@@ -690,3 +695,205 @@ def test_relative_session_directory_is_verified_without_rewriting(tmp_path: Path
     moved = source.with_name(plan.operations[0].destination)
     assert (moved / "writer/sessions").readlink() == type(source)("archive")
     assert (moved / "writer/sessions/writer.db").read_bytes() == original
+
+
+@pytest.mark.parametrize("target", ["../../../{scope}/writer/workspace/note.md", "../../../../outside"])
+def test_relative_links_cannot_escape_or_name_the_old_scope(tmp_path: Path, target: str) -> None:
+    """Links that escape the moved tree cannot preserve their logical target."""
+    source = _legacy(tmp_path)
+    link = source / "writer/workspace/link"
+    link.symlink_to(target.format(scope=source.name))
+    with pytest.raises(upgrade.StorageUpgradeError, match="symlink"):
+        upgrade.plan_storage_upgrade(tmp_path)
+
+
+def test_named_session_schema_requires_runtime_columns(tmp_path: Path) -> None:
+    """A SQLite-valid two-column table is incompatible with the actual runtime."""
+    source = _legacy(tmp_path)
+    database = source / "writer/sessions.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE writer_sessions (session_id TEXT, session_type TEXT)")
+        connection.execute("INSERT INTO writer_sessions VALUES ('original', 'agent')")
+    with pytest.raises(upgrade.StorageUpgradeError, match="schema"):
+        upgrade.plan_storage_upgrade(tmp_path)
+
+
+def test_named_run_rows_are_part_of_semantic_snapshot(tmp_path: Path) -> None:
+    """Application-named run tables participate in immutable semantic verification."""
+    database = tmp_path / "writer.db"
+    storage = SqliteDb(db_file=str(database), session_table="writer_sessions")
+    storage.upsert_session(AgentSession(session_id="original", agent_id="writer"))
+    storage.upsert_run(run=RunOutput(run_id="run", session_id="original", content="before"), session_id="original")
+    storage.db_engine.dispose()
+    before = upgrade._session_database_snapshot(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("UPDATE writer_sessions_runs SET run_data = ?", ('{"content": "after"}',))
+    assert upgrade._session_database_snapshot(database) != before
+
+
+def test_completed_receipts_are_parsed_once_per_stable_participant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated hot checks stat every marker but do not repeatedly parse full plans."""
+    state, sessions = tmp_path / "state", tmp_path / "sessions"
+    state.mkdir()
+    sessions.mkdir()
+    _legacy(state)
+    plan = upgrade.plan_storage_upgrade(state, sessions)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    original = upgrade._read_journal
+    calls = 0
+
+    def counted(path: Path) -> upgrade._Journal | None:
+        nonlocal calls
+        calls += 1
+        return original(path)
+
+    monkeypatch.setattr(upgrade, "_read_journal", counted)
+    for _ in range(6):
+        upgrade.check_storage_upgrade(state, sessions, scan_legacy=False)
+    assert calls == 2
+    upgrade.check_storage_upgrade(state, sessions)
+    assert calls == 4  # Exhaustive operation preflight bypasses the hot cache.
+    marker = sessions / upgrade._MARKER
+    marker.write_text(marker.read_text().replace('"complete"', '"prepared"'))
+    with pytest.raises(upgrade.StorageUpgradeError):
+        upgrade.check_storage_upgrade(state, sessions, scan_legacy=False)
+
+
+def test_record_temporary_stays_inside_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner replacement has one parent directory to flush and recover."""
+    source = _legacy(tmp_path)
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    original = type(source).replace
+
+    def checked(path: Path, target: Path) -> Path:
+        if target.name == upgrade._RECORD_FILENAME:
+            assert path.parent == target.parent
+        return original(path, target)
+
+    monkeypatch.setattr(type(source), "replace", checked)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+
+
+@pytest.mark.parametrize("change", ["missing", "replacement", "disagreement", "both_missing"])
+def test_hot_receipt_cache_detects_participant_changes(tmp_path: Path, change: str) -> None:
+    """Stable-identity caching never accepts missing or replaced transaction markers."""
+    state, sessions = tmp_path / "state", tmp_path / "sessions"
+    state.mkdir()
+    sessions.mkdir()
+    _legacy(state)
+    plan = upgrade.plan_storage_upgrade(state, sessions)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    upgrade.check_storage_upgrade(state, sessions, scan_legacy=False)
+    marker = sessions / upgrade._MARKER
+    if change in {"missing", "both_missing"}:
+        marker.unlink()
+        if change == "both_missing":
+            (state / upgrade._MARKER).unlink()
+    elif change == "replacement":
+        original = marker.stat()
+        replacement = sessions / "replacement"
+        replacement.write_bytes(marker.read_bytes().replace(b'"complete"', b'"prepared"'))
+        replacement.replace(marker)
+        os.utime(marker, ns=(original.st_atime_ns, original.st_mtime_ns))
+    else:
+        payload = json.loads(marker.read_text())
+        payload["plan"]["unresolved_worker_files"] += 1
+        marker.write_text(json.dumps(payload))
+    with pytest.raises(upgrade.StorageUpgradeError):
+        upgrade.check_storage_upgrade(state, sessions, scan_legacy=False)
+
+
+@pytest.mark.parametrize("boundary", [1, 2, 3, 4])
+def test_owner_record_crash_resumes_exact_transaction_temporary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: int,
+) -> None:
+    """Crashes before and after owner replacement preserve data and leave recoverable state."""
+    source = _legacy(tmp_path)
+    original_record = (source / upgrade._RECORD_FILENAME).read_bytes()
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    original_write = upgrade._write_record
+    original_checkpoint = upgrade._checkpoint
+
+    def crash_write(scope: Path, operation: upgrade._Operation, *, new: bool) -> None:
+        count = 0
+
+        def checkpoint() -> None:
+            nonlocal count
+            count += 1
+            if count == boundary:
+                message = "simulated owner write crash"
+                raise OSError(message)
+
+        monkeypatch.setattr(upgrade, "_checkpoint", checkpoint)
+        try:
+            original_write(scope, operation, new=new)
+        finally:
+            monkeypatch.setattr(upgrade, "_checkpoint", original_checkpoint)
+
+    monkeypatch.setattr(upgrade, "_write_record", crash_write)
+    with pytest.raises(OSError, match="owner write crash"):
+        upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    monkeypatch.setattr(upgrade, "_write_record", original_write)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    upgrade.verify_storage_upgrade(plan)
+    upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+    assert (source / upgrade._RECORD_FILENAME).read_bytes() == original_record
+    assert not list(source.glob(".mindroom-private-owner-*"))
+
+
+@pytest.mark.parametrize("contents", [b"", b"{", b"unrelated payload"])
+def test_transaction_orphan_is_bounded_and_unrelated_data_is_preserved(tmp_path: Path, contents: bytes) -> None:
+    """Only the receipt-derived name with an expected partial record can be discarded."""
+    source = _legacy(tmp_path)
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    moved = source.with_name(plan.operations[0].destination)
+    temporary = upgrade._owner_temporary(moved, plan.operations[0])
+    temporary.write_bytes(contents)
+    if contents == b"unrelated payload":
+        with pytest.raises(upgrade.StorageUpgradeError, match="unrelated"):
+            upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+        assert temporary.read_bytes() == contents
+    else:
+        upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+        assert not (source / temporary.name).exists()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "DROP TABLE writer_sessions_runs",
+        "ALTER TABLE writer_sessions DROP COLUMN summary",
+        "ALTER TABLE writer_sessions_runs DROP COLUMN run_data",
+    ],
+)
+def test_named_application_tables_require_complete_runtime_schema(tmp_path: Path, statement: str) -> None:
+    """Missing named run tables and incomplete current schemas fail without source writes."""
+    database = tmp_path / "writer.db"
+    storage = SqliteDb(db_file=str(database), session_table="writer_sessions")
+    storage.upsert_session(AgentSession(session_id="original", agent_id="writer"))
+    storage.upsert_run(run=RunOutput(run_id="run", session_id="original", content="retained"), session_id="original")
+    storage.db_engine.dispose()
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute(statement)
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    with pytest.raises(upgrade.StorageUpgradeError, match="schema"):
+        upgrade._session_database_snapshot(database)
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+
+
+def test_unknown_owner_temporary_is_preserved(tmp_path: Path) -> None:
+    """A similarly named file outside the exact transaction is never discarded."""
+    source = _legacy(tmp_path)
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    unknown = source.with_name(plan.operations[0].destination) / ".mindroom-private-owner-unrelated.tmp"
+    unknown.write_text("retain this file")
+    with pytest.raises(upgrade.StorageUpgradeError, match="Unrecognized"):
+        upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+    assert unknown.read_text() == "retain this file"

@@ -17,10 +17,11 @@ import sqlite3
 import stat
 from contextlib import ExitStack, closing
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Never
 
+from agno.db.sqlite.schemas import get_table_schema_definition
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.durable_write import fsync_directory_durable, write_json_file_durable
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 _RECORD_FILENAME = ".mindroom-private-instance.json"
 _MARKER = ".mindroom-storage-upgrade.json"
 _LOCK = ".mindroom-storage-upgrade.lock"
+_KNOWN_RECEIPT_ROOTS: set[Path] = set()
 
 
 class StorageUpgradeError(ValueError):
@@ -101,7 +103,7 @@ class _Journal(_FrozenModel):
     status: Literal["prepared", "moving", "complete", "reversing", "rolled_back"]
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> Never:
     raise StorageUpgradeError(message)
 
 
@@ -154,13 +156,35 @@ def _legacy_keys(scope: Path) -> tuple[str, str, str] | None:
     return old, current, identity.requester_id
 
 
-def _inventory(root: Path) -> str:
+def _check_relative_symlink(root: Path, path: Path, target: str) -> None:
+    """Prove every path component remains inside the relocated tree."""
+    if Path(target).is_absolute():
+        _fail("Absolute symlink requires an explicit relocation repair")
+    # Never traverse above the moved root, even if the old basename later
+    # re-enters it: that route changes meaning after directory relocation.
+    depth = len(path.parent.relative_to(root).parts)
+    for part in Path(target).parts:
+        depth += -1 if part == ".." else 1
+        if depth < 0:
+            _fail("Relative symlink escapes the private scope during relocation")
+    try:
+        contained = path.resolve().is_relative_to(root)
+    except (OSError, RuntimeError) as error:
+        message = "Relative symlink cannot be resolved safely"
+        raise StorageUpgradeError(message) from error
+    if not contained:
+        _fail("Relative symlink leaves the private scope")
+
+
+def _inventory(root: Path, *, owner_temporary: Path | None = None) -> str:
     """Hash names, bytes, modes, owners and timestamps without following links."""
     digest = hashlib.sha256()
     for path in sorted((root, *root.rglob("*"))):
         relative = path.relative_to(root).as_posix()
-        if relative == _RECORD_FILENAME:
+        if relative == _RECORD_FILENAME or path == owner_temporary:
             continue
+        if len(path.relative_to(root).parts) == 1 and path.name.startswith(".mindroom-private-owner-"):
+            _fail("Unrecognized owner temporary requires explicit recovery")
         info = path.lstat()
         # Directory mtime also changes when SQLite creates and removes read-side sidecars.
         # File sizes frame the content stream so adjacent entries cannot be conflated.
@@ -175,8 +199,7 @@ def _inventory(root: Path) -> str:
         digest.update(json.dumps(metadata).encode())
         if stat.S_ISLNK(info.st_mode):
             target = str(path.readlink())
-            if Path(target).is_absolute():
-                _fail("Absolute symlink requires an explicit relocation repair")
+            _check_relative_symlink(root, path, target)
             digest.update(target.encode())
         elif stat.S_ISREG(info.st_mode):
             parts = path.relative_to(root).parts
@@ -303,29 +326,82 @@ def _plan_storage_upgrade(  # noqa: C901 - ordered preflight refuses partial own
     )
 
 
-def check_storage_upgrade(  # noqa: C901, PLR0912 - inspect every participating volume before access
+def _marker_identity(path: Path) -> tuple[int, ...]:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        _fail("Invalid storage upgrade participation marker")
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _load_receipt(path: Path) -> tuple[_Journal, str]:
+    journal = _read_journal(path)
+    if journal is None:
+        _fail("Storage upgrade participation marker disappeared")
+    return journal, hashlib.sha256(journal.model_dump_json().encode()).hexdigest()
+
+
+@lru_cache(maxsize=32)
+def _cached_complete_receipt(path: Path, identity: tuple[int, ...]) -> tuple[_Journal, str]:
+    receipt = _load_receipt(path)
+    if receipt[0].status != "complete" or _marker_identity(path) != identity:
+        _fail("Storage upgrade is incomplete or its marker changed")
+    return receipt
+
+
+def _receipt(path: Path, *, cached: bool) -> tuple[_Journal, str] | None:
+    try:
+        identity = _marker_identity(path)
+    except FileNotFoundError:
+        if path.parent in _KNOWN_RECEIPT_ROOTS:
+            _fail("Previously verified participation marker disappeared")
+        return None
+    receipt = _cached_complete_receipt(path, identity) if cached else _load_receipt(path)
+    if _marker_identity(path) != identity:
+        _fail("Storage upgrade participation marker changed while reading")
+    return receipt
+
+
+def check_storage_upgrade(  # noqa: C901, PLR0912 - inspect every participant before access
     storage: Path,
     sessions: Path | None = None,
     *,
     scan_legacy: bool = True,
 ) -> None:
-    """Check receipts on every call, with exhaustive legacy checks at operation boundaries."""
+    """Stat every receipt on hot calls; fully read and scan at operation boundaries."""
     try:
-        roots = [storage.expanduser().absolute()]
-        if sessions is not None and sessions.expanduser().absolute() not in roots:
-            roots.append(sessions.expanduser().absolute())
+        roots = list(dict.fromkeys(root.expanduser().absolute() for root in (storage, sessions or storage)))
+        receipts: dict[Path, tuple[_Journal, str] | None] = {}
         for root in roots:
             if not root.exists() and not root.is_symlink():
-                continue  # A clean installation may create its main storage root.
+                if root in _KNOWN_RECEIPT_ROOTS:
+                    _fail("Previously verified storage root disappeared")
+                continue
             _root(root)
-            journal = _read_journal(root / _MARKER)
-            if journal is not None:
+            if root not in receipts:
+                receipts[root] = _receipt(root / _MARKER, cached=not scan_legacy)
+            receipt = receipts[root]
+            if receipt is not None:
+                journal, digest = receipt
                 _validate_volumes(journal.plan)
                 if journal.status != "complete":
                     _fail("Storage upgrade is incomplete")
                 for volume in journal.plan.volumes:
-                    if _read_journal(Path(volume.path) / _MARKER) != journal:
+                    participant = Path(volume.path)
+                    if participant not in receipts:
+                        receipts[participant] = _receipt(participant / _MARKER, cached=not scan_legacy)
+                    other = receipts[participant]
+                    if other is None or other[1] != digest:
                         _fail("Storage upgrade participation markers disagree")
+                _KNOWN_RECEIPT_ROOTS.update(Path(volume.path) for volume in journal.plan.volumes)
             namespace = root / "private_instances"
             if not namespace.exists() and not namespace.is_symlink():
                 continue
@@ -338,7 +414,7 @@ def check_storage_upgrade(  # noqa: C901, PLR0912 - inspect every participating 
                 try:
                     legacy = _legacy_keys(scope)
                 except (OSError, PrivateInstanceIdentityError, StorageUpgradeError):
-                    continue  # Preserve existing corrupt/ownerless cleanup semantics.
+                    continue
                 if legacy is not None:
                     _fail("Owner-verified legacy private storage requires offline upgrade")
     except (OSError, ValueError) as exc:
@@ -452,26 +528,58 @@ def _record_bytes(operation: _Operation, *, new: bool) -> bytes:
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
 
 
+def _owner_temporary(scope: Path, operation: _Operation) -> Path:
+    digest = hashlib.sha256(operation.model_dump_json().encode()).hexdigest()
+    return scope / f".mindroom-private-owner-{digest}.tmp"
+
+
+def _check_owner_temporary(scope: Path, operation: _Operation) -> Path | None:
+    """Recognize only this exact operation's partial durable owner write."""
+    temporary = _owner_temporary(scope, operation)
+    if not temporary.exists() and not temporary.is_symlink():
+        return None
+    info = temporary.lstat()
+    expected = (_record_bytes(operation, new=False), _record_bytes(operation, new=True))
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid not in {os.geteuid(), operation.record_uid}
+        or info.st_size > max(map(len, expected))
+    ):
+        _fail("Owner temporary does not match this transaction")
+    data = temporary.read_bytes()
+    if not any(value.startswith(data) for value in expected):
+        _fail("Owner temporary contains unrelated data")
+    return temporary
+
+
 def _write_record(scope: Path, operation: _Operation, *, new: bool) -> None:
     record = scope / _RECORD_FILENAME
-    with NamedTemporaryFile(dir=scope.parent, prefix=".private-owner-", delete=False) as temporary:
-        temp = Path(temporary.name)
-        try:
-            temporary.write(_record_bytes(operation, new=new))
-            temporary.flush()
-            os.fchown(temporary.fileno(), operation.record_uid, operation.record_gid)
-            os.fchmod(temporary.fileno(), stat.S_IMODE(operation.record_mode))
-            for name, value in operation.record_xattrs.items():
-                os.setxattr(temporary.fileno(), name, base64.b64decode(value, validate=True))
-            os.utime(temp, ns=(operation.record_atime, operation.record_mtime))
-            os.fsync(temporary.fileno())
-            temp.replace(record)
-            os.utime(scope, ns=(operation.scope_atime, operation.scope_mtime))
-            _checkpoint()
-            fsync_directory_durable(scope)
-            _checkpoint()
-        finally:
-            temp.unlink(missing_ok=True)
+    orphan = _check_owner_temporary(scope, operation)
+    if orphan is not None:
+        orphan.unlink()
+        fsync_directory_durable(scope)
+    temp = _owner_temporary(scope, operation)
+    # A crash can leave this exact partial write. Recovery validates it against
+    # the protected operation, ignores it only in that scope's fingerprint, and
+    # removes it under the volume locks before retrying the owner replacement.
+    with temp.open("xb") as temporary:
+        os.fchmod(temporary.fileno(), 0o600)
+        _checkpoint()
+        temporary.write(_record_bytes(operation, new=new))
+        temporary.flush()
+        os.fchown(temporary.fileno(), operation.record_uid, operation.record_gid)
+        os.fchmod(temporary.fileno(), stat.S_IMODE(operation.record_mode))
+        for name, value in operation.record_xattrs.items():
+            os.setxattr(temporary.fileno(), name, base64.b64decode(value, validate=True))
+        os.utime(temp, ns=(operation.record_atime, operation.record_mtime))
+        os.fsync(temporary.fileno())
+        _checkpoint()
+        temp.replace(record)
+        os.utime(scope, ns=(operation.scope_atime, operation.scope_mtime))
+        _checkpoint()
+        fsync_directory_durable(scope)
+        _checkpoint()
 
 
 def _inspect_move(plan: StorageUpgradePlan, operation: _Operation, move: _Move) -> tuple[Path, bool]:
@@ -486,7 +594,8 @@ def _inspect_move(plan: StorageUpgradePlan, operation: _Operation, move: _Move) 
         _fail("Transaction directory identity changed")
     if _session_snapshots(path) != move.sessions:
         _fail("Session database schema or rows changed")
-    if _inventory(path) != move.inventory:
+    temporary = _check_owner_temporary(path, operation) if move.volume == 0 else None
+    if _inventory(path, owner_temporary=temporary) != move.inventory:
         _fail("Private data changed; refuse relocation or stale rollback")
     if move.volume == 0:
         record = path / _RECORD_FILENAME
@@ -511,6 +620,8 @@ def verify_storage_upgrade(plan: StorageUpgradePlan) -> None:
             path, moved = _inspect_move(plan, operation, move)
             if not moved:
                 _fail("Private scope has not been relocated")
+            if move.volume == 0 and _check_owner_temporary(path, operation) is not None:
+                _fail("Owner temporary requires recovery before verification")
             if move.volume == 0:
                 identity = load_private_instance_identity(Path(plan.volumes[0].path), path)
                 if identity is None or identity.requester_id != operation.requester_id:
@@ -713,11 +824,15 @@ def _session_database_snapshot(database: Path) -> str:
             if not sessions:
                 _fail("Session database has no recognized session schema")
             digest.update(repr(tables).encode())
-            for name, _ in tables:
-                if name not in sessions and name != "agno_runs":
-                    continue
+            expected_tables = dict.fromkeys(sessions, "sessions")
+            expected_tables.update(
+                {"agno_runs" if name == "agno_sessions" else f"{name}_runs": "runs" for name in sessions},
+            )
+            if not expected_tables.keys() <= {name for name, _ in tables}:
+                _fail("Session database is missing its matching run schema")
+            for name, table_type in sorted(expected_tables.items()):
                 columns = {row[1] for row in connection.execute("SELECT * FROM pragma_table_info(?)", (name,))}
-                required = {"session_id", "session_type"} if name in sessions else {"run_id", "session_id", "run_data"}
+                required = {column for column in get_table_schema_definition(table_type) if not column.startswith("_")}
                 if not required <= columns:
                     _fail("Session database has an incompatible session or run schema")
                 identifier = '"' + name.replace('"', '""') + '"'
