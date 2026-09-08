@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
 from mindroom.private_instance_identity import private_instances_for_agent
-from mindroom.private_storage_upgrade import check_runtime_storage_upgrade
 from mindroom.runtime_shutdown import gather_shutdown_phase
 from mindroom.thread_export.models import ThreadExportRoom, ThreadExportSource, ThreadExportTarget
 from mindroom.thread_export.projected_history import export_conversation_reader
@@ -36,7 +35,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import PrincipalStore
     from mindroom.matrix.identity import MatrixID
-    from mindroom.private_storage_upgrade import StorageUpgradeCheck
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.thread_export.models import ThreadExportGroup, ThreadExportStats
 
@@ -215,18 +213,11 @@ class WorkspaceThreadExportRunner:
     async def _run_pass(self, config: Config, *, full_pass: bool, room_ids: frozenset[str]) -> None:
         """Export each agent's rooms through that agent into its own workspace."""
         runtime_paths = self._deps.runtime_paths
-        storage_check = await asyncio.to_thread(check_runtime_storage_upgrade, runtime_paths)
         enabled = {
             name: agent.thread_exports for name, agent in config.agents.items() if agent.thread_exports is not None
         }
         if full_pass:
-            await asyncio.to_thread(
-                _clear_disabled_agent_exports,
-                config,
-                runtime_paths,
-                frozenset(enabled),
-                checked=storage_check,
-            )
+            await asyncio.to_thread(_clear_disabled_agent_exports, config, runtime_paths, frozenset(enabled))
         active_bots = {
             agent_name: bot
             for agent_name in enabled
@@ -261,7 +252,6 @@ class WorkspaceThreadExportRunner:
             runtime_paths,
             enabled,
             active_bots,
-            checked=storage_check,
         )
         enabled_output_dirs = await asyncio.to_thread(
             _enabled_export_dirs,
@@ -376,11 +366,8 @@ def _build_target_groups(
     runtime_paths: RuntimePaths,
     enabled: dict[str, AgentThreadExportConfig],
     active_bots: dict[str, _ThreadExportBot],
-    *,
-    checked: StorageUpgradeCheck | None = None,
 ) -> dict[str, tuple[ThreadExportTarget, ...]]:
     """Resolve each active agent's shared or private export targets."""
-    check_runtime_storage_upgrade(runtime_paths, checked=checked)
     groups: dict[str, tuple[ThreadExportTarget, ...]] = {}
     for agent_name, options in enabled.items():
         bot = active_bots.get(agent_name)
@@ -514,11 +501,8 @@ def _clear_disabled_agent_exports(
     config: Config,
     runtime_paths: RuntimePaths,
     enabled_agent_names: frozenset[str],
-    *,
-    checked: StorageUpgradeCheck | None = None,
 ) -> None:
     """Remove exports for configured agents that no longer enable them."""
-    check_runtime_storage_upgrade(runtime_paths, checked=checked)
     for agent_name, agent_config in config.agents.items():
         if agent_name in enabled_agent_names:
             continue

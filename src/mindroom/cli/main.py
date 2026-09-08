@@ -27,7 +27,6 @@ from .local_stack import local_stack_setup
 from .migrate import config_migrate
 from .plugins import plugins_app
 from .service import service_app
-from .storage_upgrade import storage_upgrade_app
 from .trigger import trigger_app
 
 if TYPE_CHECKING:
@@ -71,7 +70,6 @@ app.add_typer(threads_app, name="threads")
 app.add_typer(journal_app, name="journal")
 app.add_typer(service_app, name="service")
 app.add_typer(trigger_app, name="trigger")
-app.add_typer(storage_upgrade_app, name="storage-upgrade")
 
 
 def _httpx_post(
