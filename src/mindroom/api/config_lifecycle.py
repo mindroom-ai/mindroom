@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.api.mcp_gateway import GatewayRuntime
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
@@ -122,6 +123,7 @@ class _MindroomAppState:
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
     script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
+    mcp_gateway_runtime: GatewayRuntime | None = None
 
 
 def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:

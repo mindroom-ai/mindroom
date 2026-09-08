@@ -122,8 +122,8 @@ Worker keys are an internal routing identifier rather than a user-facing concept
 The current canonical shape is versioned and string-based so it can evolve without data ambiguity.
 
 - `shared` resolves to `v1:<tenant>:shared:<agent>`.
-- `user` resolves to `v1:<tenant>:user:<requester>`.
-- `user_agent` resolves to `v1:<tenant>:user_agent:<requester>:<agent>`.
+- `user` resolves to `v1:<tenant>:user:~<percent-encoded-requester>`.
+- `user_agent` resolves to `v1:<tenant>:user_agent:~<percent-encoded-requester>:<agent>`.
 
 ## Execution Identity
 

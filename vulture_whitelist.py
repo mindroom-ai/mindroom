@@ -5,6 +5,7 @@
 dashboard_credentials_supported  # unused variable (src/mindroom/agent_policy.py)
 can_connect  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
 account_label  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
+connection_url  # TypedDict field consumed by gateway clients (src/mindroom/mcp_gateway/types.py)
 has_credentials  # unused variable (src/mindroom/api/credentials.py)
 key_names  # unused variable (src/mindroom/api/credentials.py)
 location_name  # unused variable (src/mindroom/api/homeassistant_integration.py)
@@ -354,3 +355,11 @@ _.runs_from_rows  # agno SqliteDb calls it on the run-object cache (src/mindroom
 _enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/agent_storage.py)
 
 export_threads  # FastAPI endpoint (src/mindroom/api/thread_exports.py)
+
+# MCP SDK OAuthAuthorizationServerProvider callbacks invoked by SDK HTTP handlers.
+_.register_client
+_.load_authorization_code
+_.load_refresh_token
+_.exchange_authorization_code
+_.exchange_refresh_token
+_.revoke_token

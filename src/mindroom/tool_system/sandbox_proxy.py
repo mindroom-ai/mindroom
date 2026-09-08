@@ -27,6 +27,7 @@ from mindroom.tool_system.runtime_context import (
     WorkerProgressPump,
     get_tool_runtime_context,
     get_worker_progress_pump,
+    get_worker_runtime_context,
 )
 from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
@@ -416,7 +417,11 @@ def _resolve_user_agent_worker_payload(
 
 def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWorkerManagerContext:
     """Resolve runtime-context-dependent primary worker manager parameters."""
-    context = get_tool_runtime_context()
+    worker_context = get_worker_runtime_context()
+    if worker_context is not None and worker_context.runtime_paths != runtime_paths:
+        msg = "Worker runtime context belongs to a different runtime"
+        raise ValueError(msg)
+    context = worker_context if worker_context is not None else get_tool_runtime_context()
     storage_root = (
         context.storage_path if context is not None and context.storage_path is not None else runtime_paths.storage_root
     )

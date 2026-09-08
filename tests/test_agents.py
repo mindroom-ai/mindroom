@@ -59,7 +59,6 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.matrix.state import MatrixState
 from mindroom.private_instance_identity import (
     PrivateInstanceIdentity,
-    PrivateInstanceIdentityError,
     load_private_instance_identity,
 )
 from mindroom.prompts import (
@@ -1341,32 +1340,34 @@ def test_resolve_agent_runtime_persists_private_instance_identity_before_workspa
         )
 
 
-def test_resolve_agent_runtime_rejects_private_instance_identity_requester_normalization_collision(
+def test_resolve_agent_runtime_separates_previously_colliding_requesters(
     tmp_path: Path,
 ) -> None:
-    """Distinct requesters sharing a normalized private worker key must not share a scope."""
+    """Distinct requester spellings must resolve to separate private instance scopes."""
     bound_config, runtime_paths, first_identity = _private_runtime_resolution_context(
         tmp_path,
         requester_id="requester/a",
     )
-    colliding_identity = replace(first_identity, requester_id="requester?a")
+    second_identity = replace(first_identity, requester_id="requester?a")
 
-    resolve_agent_runtime(
+    first_runtime = resolve_agent_runtime(
         "general",
         bound_config,
         runtime_paths,
         execution_identity=first_identity,
         create=True,
     )
+    second_runtime = resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=second_identity,
+        create=True,
+    )
 
-    with pytest.raises(PrivateInstanceIdentityError, match="conflicts"):
-        resolve_agent_runtime(
-            "general",
-            bound_config,
-            runtime_paths,
-            execution_identity=colliding_identity,
-            create=True,
-        )
+    assert first_runtime.execution.worker_key == "v1:default:user:~requester%2Fa"
+    assert second_runtime.execution.worker_key == "v1:default:user:~requester%3Fa"
+    assert first_runtime.state_root != second_runtime.state_root
 
 
 def test_resolve_agent_execution_rejects_private_instance_identity_without_requester(tmp_path: Path) -> None:
@@ -2602,6 +2603,101 @@ def test_resolve_worker_key_rejects_unknown_scope() -> None:
 
     with pytest.raises(ValueError, match="Unknown worker scope"):
         resolve_worker_key(cast("WorkerScope", "bogus"), execution_identity)
+
+
+@pytest.mark.parametrize(
+    ("worker_scope", "expected_keys"),
+    [
+        (
+            "user",
+            [
+                "v1:default:user:~@alice:example.org",
+                "v1:default:user:~@team%2Fmember:example.org",
+                "v1:default:user:~@team%252Fmember:example.org",
+                "v1:default:user:~@team%3Dmember:example.org",
+                "v1:default:user:~@team_member:example.org",
+                "v1:default:user:~@team%25member:example.org",
+                "v1:default:user:~@%C3%A1l%C3%AE%C3%A7%C3%A9:example.org",
+            ],
+        ),
+        (
+            "user_agent",
+            [
+                "v1:default:user_agent:~@alice:example.org:general",
+                "v1:default:user_agent:~@team%2Fmember:example.org:general",
+                "v1:default:user_agent:~@team%252Fmember:example.org:general",
+                "v1:default:user_agent:~@team%3Dmember:example.org:general",
+                "v1:default:user_agent:~@team_member:example.org:general",
+                "v1:default:user_agent:~@team%25member:example.org:general",
+                "v1:default:user_agent:~@%C3%A1l%C3%AE%C3%A7%C3%A9:example.org:general",
+            ],
+        ),
+    ],
+)
+def test_requester_scoped_worker_keys_preserve_exact_identity(
+    worker_scope: WorkerScope,
+    expected_keys: list[str],
+    tmp_path: Path,
+) -> None:
+    """Requester punctuation and Unicode must not collapse into another principal's namespace."""
+    requester_ids = [
+        "@alice:example.org",
+        "@team/member:example.org",
+        "@team%2Fmember:example.org",
+        "@team=member:example.org",
+        "@team_member:example.org",
+        "@team%member:example.org",
+        "@álîçé:example.org",
+    ]
+    worker_keys = [
+        resolve_worker_key(
+            worker_scope,
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="general",
+                requester_id=requester_id,
+                room_id="!room:example.org",
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id="session-1",
+            ),
+            agent_name="general",
+        )
+        for requester_id in requester_ids
+    ]
+
+    assert worker_keys == expected_keys
+    assert None not in worker_keys
+    storage_roots = [worker_root_path(tmp_path, worker_key) for worker_key in worker_keys if worker_key is not None]
+    assert len(set(storage_roots)) == len(requester_ids)
+    legacy_key = (
+        "v1:default:user:@team_member:example.org"
+        if worker_scope == "user"
+        else "v1:default:user_agent:@team_member:example.org:general"
+    )
+    assert worker_keys[1] != legacy_key
+    assert worker_keys[4] != legacy_key
+
+
+def test_requester_scoped_worker_key_does_not_trim_identity() -> None:
+    """Exact nonempty requester identities must not alias a whitespace-trimmed identity."""
+
+    def worker_key(requester_id: str) -> str | None:
+        return resolve_worker_key(
+            "user",
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="general",
+                requester_id=requester_id,
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
+        )
+
+    assert worker_key(" @alice:example.org ") == "v1:default:user:~%20@alice:example.org%20"
+    assert worker_key(" @alice:example.org ") != worker_key("@alice:example.org")
 
 
 def test_resolve_agent_owned_path_resolves_workspace_relative_path(tmp_path: Path) -> None:

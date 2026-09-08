@@ -115,6 +115,16 @@ wheels = [
 name = "aiohttp"
 version = "3.13.5"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
+    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'emscripten'",
+    "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+]
 dependencies = [
     { name = "aiohappyeyeballs" },
     { name = "aiosignal" },
@@ -197,11 +207,50 @@ wheels = [
 ]
 
 [[package]]
+name = "aiohttp"
+version = "3.14.3"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+]
+dependencies = [
+    { name = "aiohappyeyeballs" },
+    { name = "aiosignal" },
+    { name = "attrs" },
+    { name = "frozenlist" },
+    { name = "multidict" },
+    { name = "propcache" },
+    { name = "yarl" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/58/d9/22ce5786ac0c1653ae8b6c23bded02c1686d11f0dbb45b31ce128e0df985/aiohttp-3.14.3.tar.gz", hash = "sha256:9491196535a88924a60afd5b5f434b5b203b6cc616250878dbdb223a8f7844bc", size = 7971213, upload-time = "2026-07-23T01:57:27.037Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b6/2b/6bb88ddba0fecd9122aa3ebcad25996cf6c083a4a7040dbb3a4f97972af6/aiohttp-3.14.3-cp312-cp312-win32.whl", hash = "sha256:16100ad3ab8d649fdfbee87602d9d2dcdca9df0b9eda8a1b5fdc0d41f96da559", size = 451481, upload-time = "2026-07-23T01:54:42.547Z" },
+    { url = "https://files.pythonhosted.org/packages/76/9b/f2f8f108da17ecef2cc3efc424e8b7ad3782b1a8360f7b8eae8ced84f6ea/aiohttp-3.14.3-cp312-cp312-win_amd64.whl", hash = "sha256:33a2d7c28d33797a2e99923dffa63f83d908a19b6bf26cfe80fa790aa5e1a75a", size = 476845, upload-time = "2026-07-23T01:54:44.853Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/44/28dac80a8941b604f4da10ce21097614ca1bf905ce93dca28d8d7de9c1e7/aiohttp-3.14.3-cp312-cp312-win_arm64.whl", hash = "sha256:362a3fd481769cac1a824514bcd86fda51c65e8fe6e051099e008fddde6db17c", size = 448050, upload-time = "2026-07-23T01:54:47.087Z" },
+    { url = "https://files.pythonhosted.org/packages/28/24/2854869d29ed8a8b19d74f9ec6629515f7e04d02dd329d9d179201e58e47/aiohttp-3.14.3-cp313-cp313-ios_13_0_arm64_iphoneos.whl", hash = "sha256:cc7cb243a68167172f48c1fd43cee91ec4b1d40cefd190edd43369d1a6bc9c82", size = 486263, upload-time = "2026-07-23T01:54:54.223Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/dd/57187c8be2a35aea65eaee3bd2c3dcbbcf0204f5106c89637e3610380cd1/aiohttp-3.14.3-cp313-cp313-ios_13_0_arm64_iphonesimulator.whl", hash = "sha256:78253b573e6ffab5028924fc98bc281aae05445969982a10864bc360dea2016c", size = 492299, upload-time = "2026-07-23T01:54:56.236Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/11/06ae6ed8f0d414edf4068861e233d8fe23ee699bfd4b3ceb8663db948a62/aiohttp-3.14.3-cp313-cp313-ios_13_0_x86_64_iphonesimulator.whl", hash = "sha256:7041d52c3a7fa20c9e8c182b534704abb19502c8bdcbde7ab23bfda6f642394f", size = 502235, upload-time = "2026-07-23T01:54:58.377Z" },
+    { url = "https://files.pythonhosted.org/packages/29/a6/442e18b5afeade534d877a2dc3c3e392aff8d49787890b0cf84790410267/aiohttp-3.14.3-cp313-cp313-win32.whl", hash = "sha256:5f08ec777f35ee70720233b8b9811d3bb5d728137f30ac91b7457709c3261ac0", size = 451069, upload-time = "2026-07-23T01:55:36.121Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/69/3d876ac02659f271cf7f6769f14a8e3de5b6e888ed8b5a7e998086a4cec8/aiohttp-3.14.3-cp313-cp313-win_amd64.whl", hash = "sha256:dff9461ec275f22135650d5ba4b4931a11f3958df7dfbb8db630000d4dee0883", size = 476518, upload-time = "2026-07-23T01:55:38.303Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/0e/50d6e6471cd31edce8b282bdec59375a3a69124d8a989a0b1313355cae52/aiohttp-3.14.3-cp313-cp313-win_arm64.whl", hash = "sha256:ddcac3c6b382e81f1dd0499199d4136b877beb4cb5ef770bbbfba56c4b8f55d2", size = 447676, upload-time = "2026-07-23T01:55:40.451Z" },
+    { url = "https://files.pythonhosted.org/packages/29/ba/2a0c38df3fc557620b6a5acd98364af050053b6285b4dc7ee74100c63c18/aiohttp-3.14.3-cp314-cp314-ios_13_0_arm64_iphoneos.whl", hash = "sha256:614c61d478b83953e261d02bb2df750f17227cd33ef8002945bf5aebbde21919", size = 488134, upload-time = "2026-07-23T01:55:47.135Z" },
+    { url = "https://files.pythonhosted.org/packages/48/d6/d51b7d4bf309af3693940d8ffd2b9ed0b682434ef85959b7c9c137f60cf8/aiohttp-3.14.3-cp314-cp314-ios_13_0_arm64_iphonesimulator.whl", hash = "sha256:1caa7b0d05f3e3a36f87788c59e970a7ee1cefcfcbb924a9f138c4a6551c9cb7", size = 494201, upload-time = "2026-07-23T01:55:49.451Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/5a/8f624384e5f1efabb5229b94157eb966b021e97bdb188c62860c2ae243c2/aiohttp-3.14.3-cp314-cp314-ios_13_0_x86_64_iphonesimulator.whl", hash = "sha256:dfa68deb2a443bdaa3ea5297b0699c1464f08aef3812b486d1348eee61b07dc0", size = 502766, upload-time = "2026-07-23T01:55:51.656Z" },
+    { url = "https://files.pythonhosted.org/packages/81/1b/6893d4bc57e434fc93a6c9217c637d967a0b651d989f6e3265179375754a/aiohttp-3.14.3-cp314-cp314-win32.whl", hash = "sha256:38901a84da3ce22249f6e860bf8f90d141bcab7da090cc398f8bb58c0e44b7da", size = 455872, upload-time = "2026-07-23T01:56:31.031Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/8b/c7baa1ba1eda4db6989baefe5de6d99834921b84ebd7918624febcb9f290/aiohttp-3.14.3-cp314-cp314-win_amd64.whl", hash = "sha256:8b3b60de05f3dcb6f6a00f818bb2ec781cee4de0645f59ccaf99b1d1823b6100", size = 481030, upload-time = "2026-07-23T01:56:33.365Z" },
+    { url = "https://files.pythonhosted.org/packages/22/8c/c29d067df825a2df88ca432db848aa2fe8199598359cc06c12b09320cac9/aiohttp-3.14.3-cp314-cp314-win_arm64.whl", hash = "sha256:1576145bdceeb92382d899751e12743a3a5b8e460a841e3e50543859e54864dc", size = 453669, upload-time = "2026-07-23T01:56:35.731Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/19/08d41839658bdd44a0ed2480f3891705ecb487ce28c0dde62c9040c997e0/aiohttp-3.14.3-cp314-cp314t-win32.whl", hash = "sha256:b304db572b4368edd8dda8a2274f73156fe15558fca4a917cb8a09fc47af5963", size = 474180, upload-time = "2026-07-23T01:57:19.306Z" },
+    { url = "https://files.pythonhosted.org/packages/99/5d/3cd6ef0a2b2851f7ab913b5b079334781bd50ff56a323e4454063377a080/aiohttp-3.14.3-cp314-cp314t-win_amd64.whl", hash = "sha256:b20032766aedf6261c7a566585a40867d092ac03a0d81592d5370ef9b054f99b", size = 500528, upload-time = "2026-07-23T01:57:21.762Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/37/cfd1ed540a4d318da025590d96b728e63713c09e9377950fc655dadeb856/aiohttp-3.14.3-cp314-cp314t-win_arm64.whl", hash = "sha256:2e1161602f45a54de2ce0905243a95f58cb42dcd378402f3697f5e0b21e9d2e7", size = 469280, upload-time = "2026-07-23T01:57:24.241Z" },
+]
+
+[[package]]
 name = "aiohttp-client-cache"
 version = "0.11.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "attrs" },
     { name = "itsdangerous" },
     { name = "url-normalize" },
@@ -216,7 +265,8 @@ name = "aiohttp-retry"
 version = "2.9.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9d/61/ebda4d8e3d8cfa1fd3db0fb428db2dd7461d5742cea35178277ad180b033/aiohttp_retry-2.9.1.tar.gz", hash = "sha256:8eb75e904ed4ee5c2ec242fefe85bf04240f685391c4879d8f541d6028ff01f1", size = 13608, upload-time = "2024-11-06T10:44:54.574Z" }
 wheels = [
@@ -228,7 +278,8 @@ name = "aiohttp-socks"
 version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "python-socks" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1f/cc/e5bbd54f76bd56291522251e47267b645dac76327b2657ade9545e30522c/aiohttp_socks-0.11.0.tar.gz", hash = "sha256:0afe51638527c79077e4bd6e57052c87c4824233d6e20bb061c53766421b10f0", size = 11196, upload-time = "2025-12-09T13:35:52.564Z" }
@@ -241,7 +292,8 @@ name = "aioresponses"
 version = "0.7.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "packaging" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/de/03/532bbc645bdebcf3b6af3b25d46655259d66ce69abba7720b71ebfabbade/aioresponses-0.7.8.tar.gz", hash = "sha256:b861cdfe5dc58f3b8afac7b0a6973d5d7b2cb608dd0f6253d16b8ee8eaf6df11", size = 40253, upload-time = "2025-01-19T18:14:03.222Z" }
@@ -1051,7 +1103,8 @@ name = "composio-core"
 version = "0.7.21"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "click" },
     { name = "fastapi" },
     { name = "importlib-metadata" },
@@ -1246,7 +1299,8 @@ version = "0.8.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "aiosqlite" },
     { name = "alphashape" },
     { name = "anyio" },
@@ -1483,7 +1537,8 @@ dependencies = [
     { name = "opentelemetry-sdk" },
     { name = "pydantic" },
     { name = "python-dotenv" },
-    { name = "python-multipart" },
+    { name = "python-multipart", version = "0.0.27", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "python-multipart", version = "0.0.32", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "toml" },
     { name = "urllib3" },
     { name = "websockets" },
@@ -1513,7 +1568,8 @@ name = "daytona-api-client-async"
 version = "0.169.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "aiohttp-retry" },
     { name = "pydantic" },
     { name = "python-dateutil" },
@@ -1545,7 +1601,8 @@ name = "daytona-toolbox-api-client-async"
 version = "0.169.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "aiohttp-retry" },
     { name = "pydantic" },
     { name = "python-dateutil" },
@@ -1883,7 +1940,7 @@ wheels = [
 
 [[package]]
 name = "fastapi"
-version = "0.128.8"
+version = "0.136.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
@@ -1892,20 +1949,22 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "typing-inspection" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/01/72/0df5c58c954742f31a7054e2dd1143bae0b408b7f36b59b85f928f9b456c/fastapi-0.128.8.tar.gz", hash = "sha256:3171f9f328c4a218f0a8d2ba8310ac3a55d1ee12c28c949650288aee25966007", size = 375523, upload-time = "2026-02-11T15:19:36.69Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/2d/ff8d91d7b564d464629a0fd50a4489c97fcb836ac230bf3a7269232a9b1f/fastapi-0.136.3.tar.gz", hash = "sha256:e487fae93ad408e6f47641ee4dfe389864fd7bec92e547ea8498fc13f43e83ab", size = 396410, upload-time = "2026-05-23T18:53:15.192Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9f/37/37b07e276f8923c69a5df266bfcb5bac4ba8b55dfe4a126720f8c48681d1/fastapi-0.128.8-py3-none-any.whl", hash = "sha256:5618f492d0fe973a778f8fec97723f598aa9deee495040a8d51aaf3cf123ecf1", size = 103630, upload-time = "2026-02-11T15:19:35.209Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/82/45359b62a067409bd929ae8a56b8ed13e5a8c8a61194b3c236920999ab83/fastapi-0.136.3-py3-none-any.whl", hash = "sha256:3d2a69bdf04b7e9f3afa292c3bc7a98816bbfafa10bc9b45f3f3700d2f761620", size = 117481, upload-time = "2026-05-23T18:53:16.924Z" },
 ]
 
 [package.optional-dependencies]
 standard = [
     { name = "email-validator" },
     { name = "fastapi-cli", extra = ["standard"] },
+    { name = "fastar" },
     { name = "httpx" },
     { name = "jinja2" },
     { name = "pydantic-extra-types" },
     { name = "pydantic-settings" },
-    { name = "python-multipart" },
+    { name = "python-multipart", version = "0.0.27", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "python-multipart", version = "0.0.32", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -2096,7 +2155,8 @@ name = "firecrawl-py"
 version = "4.23.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "httpx" },
     { name = "nest-asyncio" },
     { name = "pydantic" },
@@ -3484,7 +3544,8 @@ version = "1.6.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "av" },
     { name = "certifi" },
     { name = "click" },
@@ -3537,7 +3598,8 @@ name = "livekit-api"
 version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "livekit-protocol" },
     { name = "protobuf" },
     { name = "pyjwt" },
@@ -3950,7 +4012,7 @@ wheels = [
 
 [[package]]
 name = "mcp"
-version = "1.27.0"
+version = "1.30.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -3960,7 +4022,8 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyjwt", extra = ["crypto"] },
-    { name = "python-multipart" },
+    { name = "python-multipart", version = "0.0.27", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "python-multipart", version = "0.0.32", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "sse-starlette" },
     { name = "starlette" },
@@ -3968,9 +4031,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uvicorn", marker = "sys_platform != 'emscripten'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8b/eb/c0cfc62075dc6e1ec1c64d352ae09ac051d9334311ed226f1f425312848a/mcp-1.27.0.tar.gz", hash = "sha256:d3dc35a7eec0d458c1da4976a48f982097ddaab87e278c5511d5a4a56e852b83", size = 607509, upload-time = "2026-04-02T14:48:08.88Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/93/0142dc84a666daf8ad51a34268f34c12fd6fda4f3810c4be2504eecc8212/mcp-1.30.0.tar.gz", hash = "sha256:445414625fce5c295faa505bb11bacece661ab6f4028d57c935db57820b7a3e4", size = 680511, upload-time = "2026-09-07T14:34:15.845Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9c/46/f6b4ad632c67ef35209a66127e4bddc95759649dd595f71f13fba11bdf9a/mcp-1.27.0-py3-none-any.whl", hash = "sha256:5ce1fa81614958e267b21fb2aa34e0aea8e2c6ede60d52aba45fd47246b4d741", size = 215967, upload-time = "2026-04-02T14:48:07.24Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/f4/e58bc33317c92a0203664daaf00bf6f41166cc0149e5d6870a03f7cd004a/mcp-1.30.0-py3-none-any.whl", hash = "sha256:666edb5009503e1047c9d60346a756f94b261f05cc2625f23d41c728ffc484d0", size = 234581, upload-time = "2026-09-07T14:34:14.266Z" },
 ]
 
 [package.optional-dependencies]
@@ -4023,7 +4086,8 @@ name = "mindroom"
 source = { editable = "." }
 dependencies = [
     { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "aiosqlite" },
     { name = "anthropic" },
     { name = "anyio" },
@@ -4043,6 +4107,7 @@ dependencies = [
     { name = "idna" },
     { name = "jinja2" },
     { name = "json5" },
+    { name = "jsonschema" },
     { name = "markdown-it-py" },
     { name = "mcp", extra = ["cli"] },
     { name = "mdit-py-plugins" },
@@ -4056,7 +4121,9 @@ dependencies = [
     { name = "pyjwt" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "referencing" },
     { name = "rich" },
+    { name = "starlette" },
     { name = "structlog" },
     { name = "tenacity" },
     { name = "tiktoken" },
@@ -4473,7 +4540,7 @@ requires-dist = [
     { name = "elevenlabs", marker = "extra == 'eleven-labs'" },
     { name = "exa-py", marker = "extra == 'exa'" },
     { name = "fal-client", marker = "extra == 'fal'" },
-    { name = "fastapi", extras = ["standard"], specifier = ">=0.116.1" },
+    { name = "fastapi", extras = ["standard"], specifier = ">=0.136.3" },
     { name = "filetype", specifier = ">=1.2" },
     { name = "firecrawl-py", marker = "extra == 'firecrawl'", specifier = ">=3" },
     { name = "google-api-python-client", marker = "extra == 'gmail'", specifier = ">=2.178" },
@@ -4522,17 +4589,18 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.1" },
     { name = "jira", marker = "extra == 'jira'", specifier = ">=3.10.5" },
     { name = "json5", specifier = ">=0.13" },
+    { name = "jsonschema", specifier = ">=4.26" },
     { name = "linkup-sdk", marker = "extra == 'linkup'", specifier = ">=0.2.8" },
     { name = "livekit-agents", extras = ["openai"], marker = "extra == 'matrix-calls'", specifier = ">=1.6.4" },
     { name = "lumaai", marker = "extra == 'lumalabs'" },
     { name = "lxml-html-clean", marker = "extra == 'newspaper'" },
     { name = "markdown-it-py", specifier = ">=4" },
     { name = "matplotlib", marker = "extra == 'visualization'" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.12.4,<2" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.28.1,<2" },
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], specifier = ">=1.0.0,<2" },
+    { name = "mindroom-nio", extras = ["e2e"], specifier = ">=1,<2" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4560,7 +4628,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.10.1" },
     { name = "pygithub", marker = "extra == 'github'", specifier = ">=2.5,<2.9" },
     { name = "pygments", specifier = ">=2.20" },
-    { name = "pyjwt", specifier = ">=2.8" },
+    { name = "pyjwt", specifier = ">=2.13.0" },
     { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
     { name = "pypdf", marker = "extra == 'arxiv'" },
@@ -4572,6 +4640,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'config-manager'", specifier = ">=6" },
     { name = "pyyaml", marker = "extra == 'self-config'", specifier = ">=6" },
     { name = "redshift-connector", marker = "extra == 'redshift'" },
+    { name = "referencing", specifier = ">=0.37" },
     { name = "replicate", marker = "extra == 'replicate'", specifier = ">=1.0.7" },
     { name = "reportlab", marker = "extra == 'file-generation'" },
     { name = "requests", marker = "extra == 'bitbucket'" },
@@ -4597,6 +4666,7 @@ requires-dist = [
     { name = "spider-client", marker = "extra == 'spider'" },
     { name = "spotipy", marker = "extra == 'spotify'", specifier = ">=2.25.1" },
     { name = "sqlalchemy", marker = "extra == 'sql'" },
+    { name = "starlette", specifier = ">=1.3.1" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "supabase", marker = "extra == 'supabase'", specifier = ">=2.18.1" },
     { name = "tavily-python", marker = "extra == 'tavily'" },
@@ -4648,7 +4718,8 @@ version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "aiohttp-socks" },
     { name = "h11" },
     { name = "h2" },
@@ -5374,7 +5445,8 @@ dependencies = [
     { name = "openbb-cftc" },
     { name = "openbb-commodity" },
     { name = "openbb-congress-gov" },
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "openbb-crypto" },
     { name = "openbb-currency" },
     { name = "openbb-derivatives" },
@@ -5410,7 +5482,8 @@ name = "openbb-benzinga"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d3/01/71ebccf8b59d115d2693fd9842827a21ba56309c11d546c32a126be7b024/openbb_benzinga-1.6.0.tar.gz", hash = "sha256:ea3804697edddee432de7deae0651e639a55ec3db27fb7c03afbccbeaca57f1c", size = 8037, upload-time = "2026-03-05T01:42:05.074Z" }
 wheels = [
@@ -5422,7 +5495,8 @@ name = "openbb-bls"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/33/7a/0508b61acd397e8c0d66a204da9d3242e67c034af1c3d48fd8c45a9aea26/openbb_bls-1.3.0.tar.gz", hash = "sha256:06cdb42ad940547291d8e9b6364b1d44bcfa5ff6147e3975899fb300d8759621", size = 9829091, upload-time = "2026-03-05T01:42:32.982Z" }
 wheels = [
@@ -5434,7 +5508,8 @@ name = "openbb-cftc"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/82/c1/691c594a2543ca832ecc5bc177f06be560399264d0f30ee31165eb7fb0e1/openbb_cftc-1.3.0.tar.gz", hash = "sha256:51c82ff2ac56e91d699f748fcd73edf6831d5b54b2a89e23facffeecb0e3391c", size = 10563, upload-time = "2026-03-05T01:43:01.489Z" }
 wheels = [
@@ -5446,7 +5521,8 @@ name = "openbb-commodity"
 version = "1.5.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cf/76/a966d7060532d3b93d5a17df88c43710e2d59fee3f3d7d7abc50304fbac8/openbb_commodity-1.5.1.tar.gz", hash = "sha256:53f0e542bece0785617fd00a4bfa887fbadb127eaba44a271c3b21eff12c0c78", size = 3748, upload-time = "2026-03-05T01:35:36.488Z" }
 wheels = [
@@ -5458,7 +5534,8 @@ name = "openbb-congress-gov"
 version = "1.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/25/24/f6959d326a9fa02719d953a71b96e95a57cfb7877b390043497ddbf20020/openbb_congress_gov-1.2.2.tar.gz", hash = "sha256:c5e36e2f48f6fefc6ddaf053f4dcbc2c5756eb65fe27d09b240d94c36fa5bfbd", size = 16136, upload-time = "2026-03-09T23:51:01.268Z" }
 wheels = [
@@ -5467,10 +5544,20 @@ wheels = [
 
 [[package]]
 name = "openbb-core"
-version = "1.6.8"
+version = "1.6.11"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
+    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'emscripten'",
+    "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+]
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" } },
     { name = "fastapi" },
     { name = "html5lib" },
     { name = "importlib-metadata" },
@@ -5478,16 +5565,44 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyjwt" },
     { name = "python-dotenv" },
-    { name = "python-multipart" },
+    { name = "python-multipart", version = "0.0.27", source = { registry = "https://pypi.org/simple" } },
     { name = "requests" },
     { name = "ruff" },
     { name = "uuid7" },
     { name = "uvicorn" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1d/0f/5f01766fa3324496e35683a7c19b85b3ce2f9e97ea842ca8ecbce2997e15/openbb_core-1.6.8.tar.gz", hash = "sha256:83dbdc95d72013ab4060a6fae7da08b4ada7ec5dfe691779d149f293e51b1e33", size = 244216, upload-time = "2026-04-18T00:15:03.55Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a0/fe/2a98201ecb56e471c18b0320105383c625d89d62c8eb569b72343c8c4b29/openbb_core-1.6.11.tar.gz", hash = "sha256:198eac4e3af115ddcbf2f845afd3738d3e5a01985e44b188febd2be0c66897c2", size = 245115, upload-time = "2026-06-08T21:56:15.198Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/61/f8/49733a8d4ac7502d6d3a30b92dc275c42861a1ee1292da7dfddff6bc9fdc/openbb_core-1.6.8-py3-none-any.whl", hash = "sha256:3ebf6b9fad505aa5f47e81a4355bd1b2bc8d48c61567b12e2587be662766e75e", size = 379788, upload-time = "2026-04-18T00:15:05.035Z" },
+    { url = "https://files.pythonhosted.org/packages/ac/7d/4c66c120576a3c96de254faf4e39cded8b66fc4bfffa33a4b5fb61bd77db/openbb_core-1.6.11-py3-none-any.whl", hash = "sha256:15696734b186064448b45493816f6774ca17bc008e59e2e692353c40075976a5", size = 380820, upload-time = "2026-06-08T21:56:16.476Z" },
+]
+
+[[package]]
+name = "openbb-core"
+version = "1.6.13"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+]
+dependencies = [
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" } },
+    { name = "fastapi" },
+    { name = "html5lib" },
+    { name = "importlib-metadata" },
+    { name = "pandas" },
+    { name = "pydantic" },
+    { name = "pyjwt" },
+    { name = "python-dotenv" },
+    { name = "python-multipart", version = "0.0.32", source = { registry = "https://pypi.org/simple" } },
+    { name = "requests" },
+    { name = "ruff" },
+    { name = "uuid7" },
+    { name = "uvicorn" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/42/9e/0cbc623a38f7c72cebce47c7c71968dd3276259422f9eb2eb49fca73a219/openbb_core-1.6.13.tar.gz", hash = "sha256:c26cfc2ae37c1700e01db9ca0fd2cd02118715cec2097ea870f47a70186402bb", size = 245113, upload-time = "2026-06-17T20:41:47.785Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9c/3c/51e6f4f292bc79ae85a2ebd2716cb85b88211af7c911b7510e2e608c2b68/openbb_core-1.6.13-py3-none-any.whl", hash = "sha256:58917422a816ab5e5ab8c53d346005e763c48816f03997484e06ddab1109cf06", size = 380814, upload-time = "2026-06-17T20:41:48.954Z" },
 ]
 
 [[package]]
@@ -5495,7 +5610,8 @@ name = "openbb-crypto"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5f/34/de330cfae848fef5de257f907d4afa8d37cc53b3d4786c29dfe80aae88b8/openbb_crypto-1.6.1.tar.gz", hash = "sha256:a3acfe776cdd685de4d7a707c6ba1b2ff1344cf756c6aa071510689032875172", size = 1954, upload-time = "2026-03-05T01:39:13.152Z" }
 wheels = [
@@ -5507,7 +5623,8 @@ name = "openbb-currency"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/56/c9/edeaa9161f6346cbf209948540da92493afdce52a9ea1bede4c9e44c2e1b/openbb_currency-1.6.1.tar.gz", hash = "sha256:50f872c258e7855647450204cd9098cd4ac41cb556fb03a072aaf99336644878", size = 2755, upload-time = "2026-03-05T01:39:22.531Z" }
 wheels = [
@@ -5519,7 +5636,8 @@ name = "openbb-derivatives"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e4/5c/ca3c9dd9ed1f2c85a7eaf2cba99b2ca1b6b7abe2c3e56b99f0bea498fbe7/openbb_derivatives-1.6.1.tar.gz", hash = "sha256:d00ccbb29be3bf200101b9942f0be54fc1306a603419066cdbaf0ed860127c26", size = 7480, upload-time = "2026-03-05T01:39:31.257Z" }
 wheels = [
@@ -5533,7 +5651,8 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp-client-cache" },
     { name = "aiosqlite" },
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/49/d1/0d1ada5d6a81eb4ebca64a0bfda90191234d62fa8d48cd0798e4fb61d22f/openbb_econdb-1.5.0.tar.gz", hash = "sha256:f9753934bec7b1f59d87126e7bbc73d6f5b20b6f26df235ca77c3e0f85d48cef", size = 86016, upload-time = "2026-03-05T01:43:49.973Z" }
 wheels = [
@@ -5545,7 +5664,8 @@ name = "openbb-economy"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0d/c4/8a2d4b42c20888407148bbc22a877103ca878435765893f06de1b6785523/openbb_economy-1.6.1.tar.gz", hash = "sha256:ff69ac293742d4b9d2812f9d58faa5f4e8b3d7cc1e681c598434ff3371310c26", size = 12813, upload-time = "2026-03-05T01:40:01.816Z" }
 wheels = [
@@ -5557,7 +5677,8 @@ name = "openbb-equity"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f1/b7/c3b1aa9acd07876db89222c4c71b18c7911bd2552625690b8501b2763c24/openbb_equity-1.6.1.tar.gz", hash = "sha256:0114e71b5bd3e423f06a71514e6eff3272f5c5d8cce0a7368fe3ac25f2887f54", size = 8409, upload-time = "2026-03-05T01:40:10.81Z" }
 wheels = [
@@ -5569,7 +5690,8 @@ name = "openbb-etf"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/68/09cb2fad6dd30714d6bcd70d30bf842fffc4e4abc7915943dc197d287f4b/openbb_etf-1.6.1.tar.gz", hash = "sha256:1dbf9f750212e67d140a3a4ee8f65784a9172303e96645cd7c08f980a128eb0f", size = 3330, upload-time = "2026-03-05T01:40:19.482Z" }
 wheels = [
@@ -5582,7 +5704,8 @@ version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "openbb-economy" },
     { name = "openbb-fixedincome" },
     { name = "openbb-platform-api" },
@@ -5598,7 +5721,8 @@ name = "openbb-fixedincome"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0f/d0/0d67451bb7a9caf2c2124f67b4ddfc3857f6cdd69a4fd93a23dd96de5f4e/openbb_fixedincome-1.6.1.tar.gz", hash = "sha256:34068e569a104a764542aa4a8f925eadbd71170da85153f3a71989afa199e658", size = 7979, upload-time = "2026-03-05T01:40:28.572Z" }
 wheels = [
@@ -5610,7 +5734,8 @@ name = "openbb-fmp"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/55/72/632b6b83acfa48f8d0ec2a0291f2f3edb966b7165b02c7c42e1fdd22cd94/openbb_fmp-1.6.0.tar.gz", hash = "sha256:6ac2adb0f7d69465324c778198bc1af3703dd4be9f425ae98babf6e681ae352e", size = 60630, upload-time = "2026-03-05T01:44:41.628Z" }
 wheels = [
@@ -5622,7 +5747,8 @@ name = "openbb-fred"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/35/3f/b031f0a8a126fe5cf9a25146b974096314d0b639cf2d4ee45ba0f2313b6c/openbb_fred-1.6.0.tar.gz", hash = "sha256:ae286a6ee84e07366855a102a96a8afa3edf81633615cfd7c0e71e5c2b10b14f", size = 64536, upload-time = "2026-03-05T01:44:50.773Z" }
 wheels = [
@@ -5634,7 +5760,8 @@ name = "openbb-government-us"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "random-user-agent" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3a/d5/e04912855cb37446635ce9682b87ad1f82a2e2cbc9853ca21af87394e6a2/openbb_government_us-1.6.0.tar.gz", hash = "sha256:983aeb7eda58e64e1ab269549c09ccc60e8168f4024c35df9902f8c5f651d180", size = 35844, upload-time = "2026-03-05T01:44:59.741Z" }
@@ -5649,7 +5776,8 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "async-lru" },
     { name = "defusedxml" },
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "openbb-economy" },
     { name = "openbb-platform-api" },
 ]
@@ -5663,7 +5791,8 @@ name = "openbb-index"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/84/cc/9dca91b2653fde7363fb0dbcbcd011c84006b808785ccb6a334cbc48bcbf/openbb_index-1.6.1.tar.gz", hash = "sha256:e5f6f0a72b230bd324064982cc475060d7762079008dee54f925ca6c29bb28e4", size = 2163, upload-time = "2026-03-05T01:40:37.086Z" }
 wheels = [
@@ -5675,7 +5804,8 @@ name = "openbb-intrinio"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "requests-cache" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9c/d6/0f400db31ea61328677018dc46487db8dd22d6f76150cbb981f400aca7b7/openbb_intrinio-1.6.0.tar.gz", hash = "sha256:05554edce55eb0b0230e88698db3302d64238b4e3b85f36d3f7015c3acaddea3", size = 56559, upload-time = "2026-03-05T01:45:09.42Z" }
@@ -5688,7 +5818,8 @@ name = "openbb-news"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b4/4d/ea2e60413877166f787eeed580d015d0bf17c3a784f83401633eca6da676/openbb_news-1.6.1.tar.gz", hash = "sha256:20c702d18fd5b78f117063e553c258242d49fc0414f2a22554ac1a2905e2f420", size = 1709, upload-time = "2026-03-05T01:41:01.147Z" }
 wheels = [
@@ -5701,7 +5832,8 @@ version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "defusedxml" },
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e2/00/8eb3d2a1728527ed93c2ba1a8a6cf9cd10f09cb76d537297c1b0c26d1e39/openbb_oecd-1.6.0.tar.gz", hash = "sha256:d3e6cb09895ed4db2511e5d4c5872b9395b24b1852b1bdb4bc44a45d083531d5", size = 14870, upload-time = "2026-03-05T01:45:29.973Z" }
 wheels = [
@@ -5714,7 +5846,8 @@ version = "1.3.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "deepdiff" },
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b3/6b/e4f2c4cae8d55860090dfd57584d2698acd7a3629c1987ce10f27340fec7/openbb_platform_api-1.3.5.tar.gz", hash = "sha256:40816bb6ffe18481d7e023a5c36304761e5334d18098c72af7bd6d44f4235932", size = 44445, upload-time = "2026-03-18T22:38:49.733Z" }
 wheels = [
@@ -5726,7 +5859,8 @@ name = "openbb-regulators"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1a/44/f409698fbcaa7299c7f0a2ac7163b8734fdd589440943f4a8f1ec35dc827/openbb_regulators-1.6.1.tar.gz", hash = "sha256:f24952ba49bc7299b63d6a69ca94ec92bdb10556595688454d04a729f26a9bca", size = 3026, upload-time = "2026-03-05T01:41:36.553Z" }
 wheels = [
@@ -5744,7 +5878,8 @@ dependencies = [
     { name = "defusedxml" },
     { name = "lxml", version = "5.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
     { name = "lxml", version = "6.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "xmltodict" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/bf/7b/12794b7dc6cdd3f31484eb3ce82d21c3bfa11ea4aa31dd62c02d9db68c78/openbb_sec-1.6.0.tar.gz", hash = "sha256:1ec3e6f9d3e61fd6377b8824e5272fcedd91a5fb7a73a582ce13799aa571c024", size = 172601, upload-time = "2026-03-05T01:45:40.003Z" }
@@ -5757,7 +5892,8 @@ name = "openbb-tiingo"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/96/ed/7623e969afc39012697fc916b4fab94340f202c7c8ecf50656f72b427b2f/openbb_tiingo-1.6.0.tar.gz", hash = "sha256:1c184b7c538a4809799d8ce1fcf099ea7d0c4e8cdb99c3e7457638cdda4b22b6", size = 6190, upload-time = "2026-03-05T01:46:10.253Z" }
 wheels = [
@@ -5769,7 +5905,8 @@ name = "openbb-tradingeconomics"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/76/a9/73b3b5be0d3cf5102e0db409eef44fd128867ec5ea824a84dfaf08cf570f/openbb_tradingeconomics-1.6.0.tar.gz", hash = "sha256:a661ea0ad8cbacdf4fb26fda83b013aab087416c95f277ffa1fc1e841a5e98d2", size = 6130, upload-time = "2026-03-05T01:46:39.821Z" }
 wheels = [
@@ -5782,7 +5919,8 @@ version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "async-lru" },
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "openpyxl" },
     { name = "xlrd" },
 ]
@@ -5796,7 +5934,8 @@ name = "openbb-yfinance"
 version = "1.6.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "openbb-core" },
+    { name = "openbb-core", version = "1.6.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "openbb-core", version = "1.6.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "yfinance" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cf/37/eb9abe8a04b6b5b2d8b6e6bccd96e3e9fc9582d82339e9b895e940ebf70d/openbb_yfinance-1.6.2.tar.gz", hash = "sha256:353690e9d2e4c69e0c63347f5b131c8b124208f5be04fdb04cdd3dc1ddfc1fad", size = 39114, upload-time = "2026-04-18T00:26:48.155Z" }
@@ -6057,7 +6196,8 @@ name = "oxylabs"
 version = "3.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "requests" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fb/c0/3723a60a75324ee907cb99edc560defc55e4cf6a5ad62a82472369b1f393/oxylabs-3.0.0.tar.gz", hash = "sha256:e954dd904cc31a0642dfc85b28c3c000068368ee2aed94f32eece2585819e650", size = 49119, upload-time = "2026-03-09T10:38:16.159Z" }
@@ -7138,11 +7278,11 @@ wheels = [
 
 [[package]]
 name = "pyjwt"
-version = "2.12.1"
+version = "2.13.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c2/27/a3b6e5bf6ff856d2509292e95c8f57f0df7017cf5394921fc4e4ef40308a/pyjwt-2.12.1.tar.gz", hash = "sha256:c74a7a2adf861c04d002db713dd85f84beb242228e671280bf709d765b03672b", size = 102564, upload-time = "2026-03-13T19:27:37.25Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3b/81/58d0ac84e1ef3a3843791d6954d94c0b33d526c75eeb1efbce9d0a4c4077/pyjwt-2.13.0.tar.gz", hash = "sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423", size = 107515, upload-time = "2026-05-21T19:54:36.618Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/7a/8dd906bd22e79e47397a61742927f6747fe93242ef86645ee9092e610244/pyjwt-2.12.1-py3-none-any.whl", hash = "sha256:28ca37c070cad8ba8cd9790cd940535d40274d22f80ab87f3ac6a713e6e8454c", size = 29726, upload-time = "2026-03-13T19:27:35.677Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl", hash = "sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728", size = 31274, upload-time = "2026-05-21T19:54:35.362Z" },
 ]
 
 [package.optional-dependencies]
@@ -7454,7 +7594,8 @@ name = "pytelegrambotapi"
 version = "4.36.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "requests" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b6/61/a342a1e13206e99b4cf9fd7ecf109c589bd2ad4b4d0ea7b8859750a7c3c6/pytelegrambotapi-4.36.1.tar.gz", hash = "sha256:1baa4154452cf93e654e74f3cb2800d5a2e8b11018c2fff45b247b7e6a7fb027", size = 1407140, upload-time = "2026-08-13T17:27:57.99Z" }
@@ -7592,11 +7733,33 @@ wheels = [
 
 [[package]]
 name = "python-multipart"
-version = "0.0.26"
+version = "0.0.27"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/88/71/b145a380824a960ebd60e1014256dbb7d2253f2316ff2d73dfd8928ec2c3/python_multipart-0.0.26.tar.gz", hash = "sha256:08fadc45918cd615e26846437f50c5d6d23304da32c341f289a617127b081f17", size = 43501, upload-time = "2026-04-10T14:09:59.473Z" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
+    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'emscripten'",
+    "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/69/9b/f23807317a113dc36e74e75eb265a02dd1a4d9082abc3c1064acd22997c4/python_multipart-0.0.27.tar.gz", hash = "sha256:9870a6a8c5a20a5bf4f07c017bd1489006ff8836cff097b6933355ee2b49b602", size = 44043, upload-time = "2026-04-27T10:51:26.649Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9a/22/f1925cdda983ab66fc8ec6ec8014b959262747e58bdca26a4e3d1da29d56/python_multipart-0.0.26-py3-none-any.whl", hash = "sha256:c0b169f8c4484c13b0dcf2ef0ec3a4adb255c4b7d18d8e420477d2b1dd03f185", size = 28847, upload-time = "2026-04-10T14:09:58.131Z" },
+    { url = "https://files.pythonhosted.org/packages/99/78/4126abcbdbd3c559d43e0db7f7b9173fc6befe45d39a2856cc0b8ec2a5a6/python_multipart-0.0.27-py3-none-any.whl", hash = "sha256:6fccfad17a27334bd0193681b369f476eda3409f17381a2d65aa7df3f7275645", size = 29254, upload-time = "2026-04-27T10:51:24.997Z" },
+]
+
+[[package]]
+name = "python-multipart"
+version = "0.0.32"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5b/42/55c32bb9b12693c092ad250a0e82edb5b31ddeda6eb772de5f308b3804ad/python_multipart-0.0.32.tar.gz", hash = "sha256:be54b7f3fa167bb83e4fcd936b887b708f4e57fe75911c02aebf53efaf8d938e", size = 46881, upload-time = "2026-06-04T16:18:58.647Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e1/04/e8135ebd1ad02c56ec633277529b2602ff99ff634be76cdba5744cf554fd/python_multipart-0.0.32-py3-none-any.whl", hash = "sha256:ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23", size = 30042, upload-time = "2026-06-04T16:18:57.319Z" },
 ]
 
 [[package]]
@@ -8750,7 +8913,8 @@ name = "spider-client"
 version = "0.1.88"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "ijson" },
     { name = "requests" },
     { name = "tenacity" },
@@ -8835,15 +8999,15 @@ wheels = [
 
 [[package]]
 name = "starlette"
-version = "0.52.1"
+version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c4/68/79977123bb7be889ad680d79a40f339082c1978b5cfcf62c2d8d196873ac/starlette-0.52.1.tar.gz", hash = "sha256:834edd1b0a23167694292e94f597773bc3f89f362be6effee198165a35d62933", size = 2653702, upload-time = "2026-01-18T13:34:11.062Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b5/b4/205b0d5241d934e8add0c38aa924c4f9fb7330834ff11e5444db964ec3f9/starlette-1.6.0.tar.gz", hash = "sha256:d4e3ac5e546444960c710297a3c9fc3f7ebae1b7e963f3d36173b49da535be9b", size = 2716969, upload-time = "2026-08-08T18:27:57.512Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl", hash = "sha256:0029d43eb3d273bc4f83a08720b4912ea4b071087a3b48db01b7c839f7954d74", size = 74272, upload-time = "2026-01-18T13:34:09.188Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/cb/6a6a47d5b464bd08695d254f3da6e7986cc70c9fa5d778eda57538edfe56/starlette-1.6.0-py3-none-any.whl", hash = "sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c", size = 75969, upload-time = "2026-08-08T18:27:56.196Z" },
 ]
 
 [[package]]
@@ -9387,7 +9551,8 @@ name = "twilio"
 version = "9.10.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "aiohttp-retry" },
     { name = "pyjwt" },
     { name = "requests" },
@@ -9492,7 +9657,8 @@ name = "unclecode-litellm"
 version = "1.81.13"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
+    { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
+    { name = "aiohttp", version = "3.14.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'win32'" },
     { name = "click" },
     { name = "fastuuid" },
     { name = "httpx" },

@@ -1,9 +1,12 @@
 # MCP
 
 Model Context Protocol (MCP) is a standard way for AI applications to connect to external tool servers.
-MindRoom's Phase 1 MCP support acts as an MCP client for tools.
+MindRoom acts as an MCP client for tools.
 It connects to configured servers, discovers their tool catalogs, and exposes those tools to agents.
 MindRoom does not yet consume MCP resources or prompts.
+
+To expose a personal agent's tools to external clients through one endpoint, enable the optional [Personal MCP Gateway](https://docs.mindroom.chat/deployment/personal-mcp-gateway/).
+It reuses personal Connections accounts and exposes search, schema lookup, and invocation without placing every tool schema into initial model context.
 
 ## Configuration Overview
 

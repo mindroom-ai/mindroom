@@ -641,7 +641,7 @@ class TestCredentialsManager:
 
         shared_credentials = manager.load_credentials("google")
         worker_credentials = manager.for_worker(
-            "v1:tenant-123:user:@alice:example.org",
+            "v1:tenant-123:user:~@alice:example.org",
         ).load_credentials("google")
 
         assert shared_credentials is None
@@ -792,7 +792,7 @@ class TestCredentialsManager:
             tenant_id="tenant-123",
             account_id="account-456",
         )
-        worker_key = "v1:tenant-123:user:@alice:example.org"
+        worker_key = "v1:tenant-123:user:~@alice:example.org"
         worker_manager = base_manager.for_worker(worker_key)
         base_manager.save_credentials("openweather", {"api_key": "shared-ui-key", "_source": "ui", "base": "yes"})
         sync_shared_credentials_to_worker(
@@ -1575,7 +1575,7 @@ class TestSharedIntegrationCredentialTagging:
         worker_manager = CredentialsManager(
             base_path=worker_root / "credentials",
             shared_base_path=worker_root / ".shared_credentials",
-            current_worker_key="v1:tenant-123:user:@alice:example.org",
+            current_worker_key="v1:tenant-123:user:~@alice:example.org",
             current_worker_root=worker_root,
         )
         execution_identity = ToolExecutionIdentity(

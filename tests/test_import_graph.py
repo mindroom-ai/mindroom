@@ -148,6 +148,7 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
             "fastapi",
             "joserfc",
             "orjson",
+            "pydantic_extra_types",
             "python_multipart",
             "requests",
             "socks",
