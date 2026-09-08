@@ -538,7 +538,11 @@ def _compatible_legacy_worker_key(
     context: _OAuthCredentialStoreContext,
     connection: sqlite3.Connection,
 ) -> str | None:
-    """Accept a lossless old requester spelling only in its canonical primary-runtime store."""
+    """Read legacy requester bindings at stable raw-identity paths without migrating them.
+
+    The requester encoding upgrade changed worker keys but left these stores in place.
+    Accept only lossless legacy spellings and retain the stored binding for rollback.
+    """
     target = context.worker_target
     manager = context.credentials_manager
     if (

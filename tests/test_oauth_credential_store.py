@@ -494,6 +494,54 @@ async def test_legacy_binding_compatibility_requires_primary_runtime_path(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parent_depth", [0, 1, 2])
+@pytest.mark.parametrize("destination", ["external", "same-runtime"])
+async def test_legacy_binding_rejects_redirected_scoped_directory(
+    tmp_path: Path,
+    parent_depth: int,
+    destination: str,
+) -> None:
+    """Symlinked credential directories cannot authorize a legacy store at another location."""
+    context = _context(tmp_path / "runtime")
+    assert context.worker_target is not None
+    legacy = replace(
+        context,
+        worker_target=replace(context.worker_target, worker_key="v1:tenant:user:@alice:example.test"),
+    )
+    await _publish(legacy, "external")
+    database_path = _oauth_credential_database_path(context)
+    redirected_directory = database_path.parents[parent_depth]
+    destination_root = tmp_path if destination == "external" else context.runtime_paths.storage_root
+    moved_directory = destination_root / "redirected-credentials"
+    redirected_directory.rename(moved_directory)
+    redirected_directory.symlink_to(moved_directory, target_is_directory=True)
+    original_bytes = database_path.read_bytes()
+
+    await _assert_scope_rejected(context)
+
+    assert database_path.read_bytes() == original_bytes
+
+
+@pytest.mark.asyncio
+async def test_legacy_binding_supports_configured_runtime_root_symlink(tmp_path: Path) -> None:
+    """Resolving a configured runtime root preserves its legitimate legacy credentials."""
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    runtime_alias = tmp_path / "runtime-alias"
+    runtime_alias.symlink_to(runtime_root, target_is_directory=True)
+    context = _context(runtime_alias)
+    assert context.runtime_paths.storage_root == runtime_root
+    assert context.worker_target is not None
+    legacy = replace(
+        context,
+        worker_target=replace(context.worker_target, worker_key="v1:tenant:user:@alice:example.test"),
+    )
+    await _publish(legacy, "existing")
+    async with oauth_credential_reader(context) as reader:
+        assert reader.snapshot().credentials == {"token": "existing", "refresh_token": "refresh-existing"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("unsupported", ["shared", "unscoped", "service"])
 async def test_legacy_binding_compatibility_rejects_unsupported_storage(
     tmp_path: Path,
