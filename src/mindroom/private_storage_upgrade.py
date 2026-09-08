@@ -21,7 +21,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Never
 
-from agno.db.sqlite.schemas import get_table_schema_definition
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.durable_write import fsync_directory_durable, write_json_file_durable
@@ -811,6 +810,8 @@ def _settled_database(database: Path, *, label: str = "Session") -> None:
 
 def _session_database_snapshot(database: Path) -> str:
     """Validate schema/integrity and fingerprint actual session and run rows."""
+    from agno.db.sqlite.schemas import get_table_schema_definition  # noqa: PLC0415
+
     _settled_database(database)
     digest = hashlib.sha256()
     try:

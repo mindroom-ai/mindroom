@@ -20198,6 +20198,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ journal             Inspect and rebind the durable event journal.                      │
 │ service             Install and manage MindRoom as a background user service.          │
 │ trigger             Send signed external triggers.                                     │
+│ storage-upgrade     Plan and recover offline private-storage upgrades.                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
