@@ -6503,6 +6503,7 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
         assert auditor._assert_ledger_attribution(replies) == {
             "ledger_attributed_sources": 2,
             "ledger_superseded_sources": 0,
+            "ledger_recovered_sources": 0,
         }
 
         # The newest source alone with the older one absent fails: the older
@@ -6528,6 +6529,7 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
         assert auditor._assert_ledger_attribution(replies) == {
             "ledger_attributed_sources": 2,
             "ledger_superseded_sources": 0,
+            "ledger_recovered_sources": 0,
         }
 
         # A visible reply with no durable record attributing it is an orphan.
@@ -6582,6 +6584,7 @@ async def test_ledger_attribution_accepts_cross_requester_coalesced_record(
         assert auditor._assert_ledger_attribution({"$chain-b": {"$one-reply"}}) == {
             "ledger_attributed_sources": 2,
             "ledger_superseded_sources": 0,
+            "ledger_recovered_sources": 0,
         }
 
         stale = replace(coalesced, response_event_id="$stale-reply")
@@ -6788,6 +6791,7 @@ async def test_visible_optional_reply_requires_durable_attribution(tmp_path: Pat
         assert auditor._assert_ledger_attribution(replies) == {
             "ledger_attributed_sources": 1,
             "ledger_superseded_sources": 0,
+            "ledger_recovered_sources": 0,
         }
 
         _write_ledger(
@@ -6834,8 +6838,8 @@ def _interrupted_reply(thread_root: str = "$root") -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_final_body_audit_accepts_exact_resume_relay_chain() -> None:
-    """An interrupted note passes only with the exact ``I <- R <- A`` chain."""
+async def test_final_body_audit_rejects_resume_chain_without_durable_proof() -> None:
+    """Visible recovery relations cannot replace joined durable continuation ownership."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     auditor = _recovery_auditor(client)
     try:
@@ -6859,7 +6863,8 @@ async def test_final_body_audit_accepts_exact_resume_relay_chain() -> None:
             in_reply_to="$relay",
             body="LIVE-FUZZ call=11 END call=11",
         )
-        assert auditor._assert_final_bodies_complete(events, replies) == 1
+        with pytest.raises(AssertionError, match="non-canonical body"):
+            auditor._assert_final_bodies_complete(events, replies)
     finally:
         await client.close()
 

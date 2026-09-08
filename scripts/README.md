@@ -83,6 +83,9 @@ Interruptions alternate between two kinds, because they prove different things:
 
 Supersession requires an exact positive replay-guard log, a matching admitted and settled principal-scoped journal source, and its named newer same-requester/thread source anchored in completed durable generation with a canonical visible response covering its current marker.
 An old visible reply must retain exact durable attribution and terminal restart-interruption metadata; superseded work is counted separately from completed generation and cannot waive delivery, edit, redaction, or source-revision debt.
+Restart continuation requires one exact trusted requester-bound relay, its completed durable response and acknowledged FINAL, joined to the original settled source and terminal interruption in one consistent ownership snapshot.
+Only that continuation's exact model call may supply the original current marker from request history; earlier published output retains its own active-message marker checks.
+`ledger_recovered_sources` and `recovered_interrupted_bodies` count these outcomes separately, while `completed_final_bodies` counts completed responses and the original generation remains unchanged.
 
 A run whose interruptions all found an idle journal fails instead of reporting the count as coverage.
 `restarts`, `crashes`, and `interruptions_with_work_outstanding` are all in the result JSON, and the third must equal the sum of the first two.

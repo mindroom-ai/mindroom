@@ -50,7 +50,7 @@ import nio
 import yaml
 
 import mindroom
-from mindroom.constants import AI_RUN_METADATA_KEY, SOURCE_KIND_KEY, STREAM_STATUS_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, STREAM_STATUS_KEY
 from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.prompts import AGENT_IDENTITY_CONTEXT_TEMPLATE
@@ -4601,6 +4601,22 @@ class SupersessionProof:
 
 
 @dataclass(frozen=True)
+class RecoveryProof:
+    """One original source continued by its exact durably completed trusted relay."""
+
+    source_event_id: str
+    interrupted_response_event_id: str
+    relay_event_id: str
+    response_event_id: str
+    final_event_id: str
+    call_id: int
+    principal_id: str
+    room_id: str
+    thread_id: str
+    requester_user_id: str
+
+
+@dataclass(frozen=True)
 class _SettledJournalSource:
     event_id: str
     room_id: str
@@ -4630,6 +4646,44 @@ class _SupersessionSnapshot:
     records: Mapping[str, TurnRecord]
     sources: Mapping[str, _SettledJournalSource]
     pending_deliveries: tuple[_PendingSupersessionDelivery, ...]
+    acknowledged_finals: Mapping[str, _AcknowledgedRecoveryFinal]
+
+
+@dataclass(frozen=True)
+class _AcknowledgedRecoveryFinal:
+    """The exact successful FINAL facts consumed by restart recovery proof."""
+
+    room_id: str
+    thread_id: str
+    response_event_id: str | None
+    event_id: str
+    payload: Mapping[str, Any]
+
+
+def _read_recovery_finals(database: sqlite3.Connection, principal_id: str) -> dict[str, _AcknowledgedRecoveryFinal]:
+    """Read acknowledged FINAL ownership within the caller's consistent transaction."""
+    rows = database.execute(
+        "SELECT delivery_id, room_id, thread_id, edits_event_id, acknowledged_event_id, payload_json "
+        "FROM matrix_delivery_outbox WHERE principal_id = ? AND stage = 'final' "
+        "AND acknowledged_event_id IS NOT NULL AND event_type = 'm.room.message' "
+        "AND attempted = 1 AND retired = 0 AND edit_target_pending = 0 AND permanent_failure_reason IS NULL",
+        (principal_id,),
+    ).fetchall()
+    finals = {}
+    for delivery_id, room, thread, response, event_id, raw in rows:
+        if any(not isinstance(value, str) for value in (delivery_id, room, thread, event_id, raw)) or (
+            response is not None and not isinstance(response, str)
+        ):
+            msg = "malformed recovery FINAL identity"
+            raise AssertionError(msg)
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            msg = "malformed recovery FINAL payload"
+            raise AssertionError(msg) from exc
+        assert isinstance(payload, dict), "malformed recovery FINAL payload"
+        finals[delivery_id] = _AcknowledgedRecoveryFinal(room, thread, response, event_id, payload)
+    return finals
 
 
 def _read_supersession_snapshot(path: Path, principal_id: str) -> _SupersessionSnapshot:
@@ -4667,7 +4721,12 @@ def _read_supersession_snapshot(path: Path, principal_id: str) -> _SupersessionS
             ):
                 msg = "malformed supersession outbox row"
                 raise AssertionError(msg)
-            return _SupersessionSnapshot(records, sources, tuple(_PendingSupersessionDelivery(*row) for row in pending))
+            return _SupersessionSnapshot(
+                records,
+                sources,
+                tuple(_PendingSupersessionDelivery(*row) for row in pending),
+                _read_recovery_finals(database, principal_id),
+            )
     except sqlite3.Error as exc:
         msg = f"supersession journal snapshot failed: {exc}"
         raise AssertionError(msg) from exc
@@ -4721,6 +4780,9 @@ class _CanonicalResponseView:
     body: str
     stream_status: str | None
     completed: bool
+    event_id: str | None
+    timestamp: int | None
+    payload: Mapping[str, Any]
 
 
 def _response_payload_completed(payload: object) -> bool:
@@ -4771,12 +4833,15 @@ def _canonical_response_view(
                 body,
                 status if isinstance(status, str) else None,
                 _response_payload_completed(payload),
+                event_id,
+                candidate.get("origin_server_ts") if isinstance(candidate.get("origin_server_ts"), int) else None,
+                payload if isinstance(payload, Mapping) else {},
             )
             candidates.append((_replacement_order(event_id, candidate.get("origin_server_ts"), is_edit=edit), view))
     return (
         max(candidates, key=lambda candidate: candidate[0])[1]
         if candidates
-        else _CanonicalResponseView("", None, False)
+        else _CanonicalResponseView("", None, False, None, None, {})
     )
 
 
@@ -4817,8 +4882,10 @@ class ExactReplyOracle:
         self.sent_records: Collection[_SentRecord] = ()
         self.source_current_markers: Mapping[str, str] = {}
         self.observed_markers_for = _ModelHandler.observed_markers_for
+        self.full_request_markers_for = _ModelHandler.full_request_markers_for
         self.pending_edit_markers: Mapping[str, Mapping[str, str]] = {}
         self.supersession_proofs: dict[str, SupersessionProof] = {}
+        self.recovery_proofs: dict[str, RecoveryProof] = {}
         self.canonical_events: dict[str, Mapping[str, Any]] = {}
         self.internal_source_ids: set[str] = set()
         self.next_batch: str | None = None
@@ -4891,6 +4958,7 @@ class ExactReplyOracle:
             return
         self._ledger_read_at = now
         self.supersession_proofs = {}
+        self.recovery_proofs = {}
         if self.log_path is None:
             self._ledger_observations = read_ledger_records(self.ledger_path, include_incomplete=True)
         else:
@@ -4902,6 +4970,7 @@ class ExactReplyOracle:
                 expected_body_for=self.expected_body_for,
                 source_current_markers=self.source_current_markers,
                 observed_markers_for=self.observed_markers_for,
+                full_request_markers_for=self.full_request_markers_for,
                 pending_edit_markers=self.pending_edit_markers,
             )
             try:
@@ -4911,6 +4980,7 @@ class ExactReplyOracle:
             except (AssertionError, OSError):
                 # A concurrent write may invalidate this poll, never final qualification.
                 self.supersession_proofs = {}
+                self.recovery_proofs = {}
                 self._ledger_observations = {}
         self._ledger_records = {
             event_id: record
@@ -4940,7 +5010,11 @@ class ExactReplyOracle:
     def directly_settled(self, event_id: str) -> bool:
         """Return whether one source has its own reply or response-backed record."""
         if self.coalescing_threads and self.log_path is not None:
-            return self.ledger_response(event_id) is not None or self._supersession_proven(event_id)
+            return (
+                self.ledger_response(event_id) is not None
+                or self._supersession_proven(event_id)
+                or event_id in self.recovery_proofs
+            )
         return len(self.response_ids.get(event_id, ())) == 1 or self.ledger_response(event_id) is not None
 
     def settled_sources(self) -> set[str]:
@@ -5766,6 +5840,7 @@ class FinalStateAuditor:
         self.runtime_redaction_path = runtime_redaction_path
         self.pending_edit_markers = {source: dict(edits) for source, edits in (pending_edit_markers or {}).items()}
         self.supersession_proofs: dict[str, SupersessionProof] = {}
+        self.recovery_proofs: dict[str, RecoveryProof] = {}
 
     def _observe_supersession(
         self,
@@ -5782,6 +5857,8 @@ class FinalStateAuditor:
         # with the same retained ancestry before joining durable ownership.
         replies = self._canonical_agent_replies(events, sent_records=sent_records) if replies is None else replies
         authored = {record.event_id: record for record in sent_records}
+        self.recovery_proofs = self._observe_recovery(snapshot, events, replies, authored)
+        self.oracle.recovery_proofs = self.recovery_proofs
         proofs: dict[str, SupersessionProof] = {}
         for chain in self.oracle.chains.values():
             for index in range(len(chain) - 1, -1, -1):
@@ -5822,6 +5899,222 @@ class FinalStateAuditor:
         self.supersession_proofs = proofs
         self.oracle.supersession_proofs = proofs
         return snapshot.records
+
+    def _observe_recovery(
+        self,
+        snapshot: _SupersessionSnapshot,
+        events: Mapping[str, Mapping[str, Any]],
+        replies: Mapping[str, set[str]],
+        sent_records: Mapping[str, _SentRecord],
+    ) -> dict[str, RecoveryProof]:
+        """Join complete recovery chains once for every consumer of interrupted work."""
+        interrupted_targets = {
+            target[0]
+            for event in events.values()
+            if (target := _auto_resume_relay_target(event, relay_senders=self.oracle.internal_relay_senders))
+            is not None
+        }
+        proofs = {
+            source: proof
+            for source in self.oracle.expected_sources
+            if (record := snapshot.records.get(source)) is not None
+            and record.response_event_id in interrupted_targets
+            and (proof := self._prove_recovery(source, snapshot, events, replies, sent_records)) is not None
+        }
+        # Coalesced original ownership remains indivisible even after interruption.
+        return {
+            source: proof
+            for source, proof in proofs.items()
+            if all(owned in proofs for owned in snapshot.records[source].replay_source_event_ids)
+        }
+
+    def _prove_recovery(
+        self,
+        source: str,
+        snapshot: _SupersessionSnapshot,
+        events: Mapping[str, Mapping[str, Any]],
+        replies: Mapping[str, set[str]],
+        sent_records: Mapping[str, _SentRecord],
+    ) -> RecoveryProof | None:
+        """Bind one admitted original interruption to its unique trusted continuation."""
+        old = snapshot.records.get(source)
+        row = snapshot.sources.get(source)
+        root = self._source_thread_root(source, events, sent_records, seen=set())
+        if (
+            old is None
+            or row is None
+            or root is None
+            or row.state != "settled"
+            or source not in old.replay_source_event_ids
+            or old.response_event_id is None
+            or old.requester_id_for_source(source) != row.sender
+            or not self._journal_source_matches(row, events, root)
+            or not self._record_sources_share_thread(old)
+        ):
+            return None
+        interrupted = old.response_event_id
+        old_view = _canonical_response_view(events, interrupted, self.agent_id)
+        relays = [relay_id for relay_id, event in events.items() if self._relay_replies_to(event, root, interrupted)]
+        if len(relays) != 1 or not self._recovery_interruption_valid(source, old, old_view, replies):
+            return None
+        relay = relays[0]
+        continuation = self._completed_recovery_relay(relay, row, root, snapshot, events, replies)
+        if continuation is None:
+            return None
+        answer, view = continuation
+        relay_row = snapshot.sources[relay]
+        if (
+            old_view.timestamp is None
+            or old_view.timestamp < row.timestamp
+            or relay_row.timestamp < old_view.timestamp
+            or self._recovery_has_debt((old, snapshot.records[relay]), snapshot, row.room_id, root)
+        ):
+            return None
+        call = _body_call_id(view.body)
+        marker = self.source_current_markers.get(source)
+        if call is None or marker is None or marker not in self.full_request_markers_for(call):
+            return None
+        assert view.event_id is not None
+        return RecoveryProof(
+            source,
+            interrupted,
+            relay,
+            answer,
+            view.event_id,
+            call,
+            f"{AGENT_NAME}@{self.agent_id}",
+            row.room_id,
+            root,
+            row.sender,
+        )
+
+    def _recovery_interruption_valid(
+        self,
+        source: str,
+        record: TurnRecord,
+        view: _CanonicalResponseView,
+        replies: Mapping[str, set[str]],
+    ) -> bool:
+        """Retain exact original reply and any already-published model obligations."""
+        if (
+            self._visible_record_reply_ids(record, replies) != {record.response_event_id}
+            or view.stream_status != "error"
+            or not view.body.endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
+        ):
+            return False
+        published = view.body.removesuffix(RESTART_INTERRUPTED_RESPONSE_NOTE).rstrip()
+        if not published:
+            return True
+        call = _body_call_id(published)
+        return (
+            call is not None
+            and self.expected_body_for(call).startswith(published)
+            and self.source_current_markers.get(source) in self.observed_markers_for(call)
+        )
+
+    def _completed_recovery_relay(
+        self,
+        relay: str,
+        original: _SettledJournalSource,
+        root: str,
+        snapshot: _SupersessionSnapshot,
+        events: Mapping[str, Mapping[str, Any]],
+        replies: Mapping[str, set[str]],
+    ) -> tuple[str, _CanonicalResponseView] | None:
+        """Require the relay's own settled identity, requester and completed response."""
+        row = snapshot.sources.get(relay)
+        turn = snapshot.records.get(relay)
+        content = events[relay].get("content", {})
+        if (
+            row is None
+            or turn is None
+            or row.state != "settled"
+            or row.room_id != original.room_id
+            or row.timestamp <= original.timestamp
+            or not self._journal_source_matches(row, events, root)
+            or content.get(ORIGINAL_SENDER_KEY) != original.sender
+            or turn.requester_id_for_source(relay) != original.sender
+            or turn.source_event_ids != (relay,)
+            or turn.replay_source_event_ids != (relay,)
+            or not turn.completed
+            or turn.response_event_id is None
+        ):
+            return None
+        answer = turn.response_event_id
+        view = _canonical_response_view(events, answer, self.agent_id)
+        call = _body_call_id(view.body)
+        answer_timestamp = events.get(answer, {}).get("origin_server_ts")
+        if (
+            replies.get(relay) != {answer}
+            or events.get(answer, {}).get("_audit_room_id") != original.room_id
+            or self._thread_root(events.get(answer, {})) != root
+            or not isinstance(answer_timestamp, int)
+            or answer_timestamp < row.timestamp
+            or view.timestamp is None
+            or view.timestamp < answer_timestamp
+            or not view.completed
+            or call is None
+            or view.body != self.expected_body_for(call)
+            or not self._recovery_final_matches(turn, view, snapshot, original.room_id, root)
+        ):
+            return None
+        return answer, view
+
+    @staticmethod
+    def _recovery_final_matches(
+        turn: TurnRecord,
+        view: _CanonicalResponseView,
+        snapshot: _SupersessionSnapshot,
+        room_id: str,
+        root: str,
+    ) -> bool:
+        """The acknowledged FINAL must be the selected canonical completed payload."""
+        final = snapshot.acknowledged_finals.get(turn.anchor_event_id or "")
+        if final is None:
+            return False
+        payload = final.payload.get("m.new_content") if final.response_event_id is not None else final.payload
+        relation = final.payload.get("m.relates_to")
+        target_matches = (
+            (
+                isinstance(relation, Mapping)
+                and relation.get("rel_type") == "m.replace"
+                and relation.get("event_id") == turn.response_event_id
+            )
+            if final.response_event_id is not None
+            else final.event_id == turn.response_event_id
+        )
+        return (
+            final.room_id == room_id
+            and final.thread_id == root
+            and final.response_event_id in {None, turn.response_event_id}
+            and final.event_id == view.event_id
+            and target_matches
+            and payload == view.payload
+        )
+
+    def _recovery_has_debt(
+        self,
+        owners: Collection[TurnRecord],
+        snapshot: _SupersessionSnapshot,
+        room_id: str,
+        root: str,
+    ) -> bool:
+        """Recovery cannot discharge source mutation, cleanup or visible delivery debt."""
+        source_ids = {source for record in owners for source in record.indexed_event_ids}
+        response_ids = {record.response_event_id for record in owners}
+        return (
+            any(self.pending_edit_markers.get(source) for source in source_ids)
+            or any(record.pending_redaction_cleanup_event_ids for record in owners)
+            or any(
+                revision.cleanup_pending for record in owners for revision in (record.revision_replay or {}).values()
+            )
+            or any(
+                (delivery.room_id == room_id and delivery.thread_id in {root, ""})
+                or delivery.delivery_id in source_ids
+                or delivery.edits_event_id in response_ids
+                for delivery in snapshot.pending_deliveries
+            )
+        )
 
     def _prove_supersession(
         self,
@@ -5991,11 +6284,12 @@ class FinalStateAuditor:
             assert records is not None
             for event_id, record in records.items():
                 if not record.completed and any(
-                    source not in self.supersession_proofs for source in record.replay_source_event_ids
+                    source not in self.supersession_proofs and source not in self.recovery_proofs
+                    for source in record.replay_source_event_ids
                 ):
                     _invalid_ledger(
                         self.ledger_path,
-                        f"record {event_id!r} is incomplete without exact supersession proof",
+                        f"record {event_id!r} is incomplete without exact supersession proof or recovery proof",
                         strict=True,
                     )
             redacted_sources = set(redacted) & set(self.oracle.expected_sources)
@@ -6019,6 +6313,9 @@ class FinalStateAuditor:
             "completed_final_bodies": completed,
             "superseded_interrupted_bodies": len(
                 {proof.interrupted_response_event_id for proof in self.supersession_proofs.values()} - {None},
+            ),
+            "recovered_interrupted_bodies": len(
+                {proof.interrupted_response_event_id for proof in self.recovery_proofs.values()},
             ),
             **ledger_metrics,
         }
@@ -6378,7 +6675,11 @@ class FinalStateAuditor:
         if problems:
             msg = f"durable turn attribution audit failed: {problems}"
             raise AssertionError(msg)
-        return {"ledger_attributed_sources": attributed, "ledger_superseded_sources": superseded}
+        return {
+            "ledger_attributed_sources": attributed,
+            "ledger_superseded_sources": superseded,
+            "ledger_recovered_sources": len(self.recovery_proofs),
+        }
 
     def _attribute_required_replies(
         self,
@@ -6409,9 +6710,10 @@ class FinalStateAuditor:
                     )
                     record = None
                 proof = self.supersession_proofs.get(source_event_id)
+                recovery = self.recovery_proofs.get(source_event_id)
                 if (
                     record is not None
-                    and (record.completed or proof is not None)
+                    and (record.completed or proof is not None or recovery is not None)
                     and record.response_event_id is not None
                 ):
                     visible_record_reply_ids = self._visible_record_reply_ids(record, replies)
@@ -6422,7 +6724,7 @@ class FinalStateAuditor:
                         )
                     else:
                         response_ids.add(record.response_event_id)
-                        attributed += int(proof is None)
+                        attributed += int(proof is None and recovery is None)
                         superseded += int(proof is not None)
                         anchored = True
                 elif proof is not None or (
@@ -6585,7 +6887,9 @@ class FinalStateAuditor:
             live_sources = covered_sources - harness_redacted
             body = self._latest_agent_body(events, record.response_event_id)
             call_id = _body_call_id(body)
-            if call_id is None and source_event_id in self.supersession_proofs:
+            if call_id is None and (
+                source_event_id in self.supersession_proofs or source_event_id in self.recovery_proofs
+            ):
                 # A terminal interrupted placeholder never published model output.
                 # Its exact proof closes semantic debt without claiming generation.
                 continue
@@ -6723,12 +7027,12 @@ class FinalStateAuditor:
                 proof = self.supersession_proofs.get(source_event_id)
                 if proof is not None and proof.interrupted_response_event_id == reply_event_id:
                     continue
+                recovery = self.recovery_proofs.get(source_event_id)
+                if recovery is not None and recovery.interrupted_response_event_id == reply_event_id:
+                    continue
                 body = self._latest_agent_body(events, reply_event_id)
                 call_id = _body_call_id(body)
                 if call_id is not None and body == self.expected_body_for(call_id):
-                    checked += 1
-                    continue
-                if self._is_recovered_interruption(events, reply_event_id, body):
                     checked += 1
                     continue
                 problems.append(
@@ -6738,33 +7042,6 @@ class FinalStateAuditor:
             msg = f"final response body audit failed: {problems}"
             raise AssertionError(msg)
         return checked
-
-    def _is_recovered_interruption(
-        self,
-        events: Mapping[str, Mapping[str, Any]],
-        reply_event_id: str,
-        body: str,
-    ) -> bool:
-        """Return whether an interrupted terminal note was covered by auto-resume.
-
-        Recovery is proven only by the exact causal chain ``I <- R <- A``: the
-        interrupted response ``I`` (``reply_event_id``) must be answered by an
-        internal relay ``R`` authored by a configured relay sender in the same
-        thread, and the completed canonical agent response ``A`` must reply to
-        that relay in the same thread. A completed reply to any unrelated relay
-        in the thread never counts.
-        """
-        if not body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)):
-            return False
-        thread_root = self._thread_root(events.get(reply_event_id, {}))
-        if thread_root is None:
-            return False
-        for relay_id, relay in events.items():
-            if not self._relay_replies_to(relay, thread_root, reply_event_id):
-                continue
-            if self._agent_response_completes_relay(events, thread_root, relay_id):
-                return True
-        return False
 
     def _relay_replies_to(
         self,
@@ -6778,34 +7055,6 @@ class FinalStateAuditor:
             relay_senders=self.oracle.internal_relay_senders,
         )
         return target == (interrupted_event_id, thread_root)
-
-    def _agent_response_completes_relay(
-        self,
-        events: Mapping[str, Mapping[str, Any]],
-        thread_root: str,
-        relay_id: str,
-    ) -> bool:
-        """A completed canonical agent reply must reply to ``relay_id`` in-thread."""
-        for event_id, event in events.items():
-            if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
-                continue
-            content = event.get("content")
-            if not isinstance(content, dict):
-                continue
-            relation = content.get("m.relates_to")
-            if not isinstance(relation, dict) or relation.get("event_id") != thread_root:
-                continue
-            if relation.get("rel_type") != "m.thread":
-                continue
-            in_reply_to = relation.get("m.in_reply_to")
-            resumed_source = in_reply_to.get("event_id") if isinstance(in_reply_to, dict) else None
-            if resumed_source != relay_id:
-                continue
-            resumed_body = self._latest_agent_body(events, event_id)
-            call_id = _body_call_id(resumed_body)
-            if call_id is not None and resumed_body == self.expected_body_for(call_id):
-                return True
-        return False
 
     @staticmethod
     def _thread_root(event: Mapping[str, Any]) -> str | None:
@@ -9606,6 +9855,7 @@ def _sanitized_oracle_snapshot(oracle: ExactReplyOracle) -> dict[str, object]:
         "internal_source_ids": sorted(oracle.internal_source_ids),
         "reply_latencies": {source: round(latency, 3) for source, latency in oracle.reply_latencies.items()},
         "supersession_proofs": {source: asdict(proof) for source, proof in oracle.supersession_proofs.items()},
+        "recovery_proofs": {source: asdict(proof) for source, proof in oracle.recovery_proofs.items()},
         "response_views": {
             response: _response_view_diagnostic(tuple(oracle.canonical_events.values()), response)
             for replies in oracle.response_ids.values()
