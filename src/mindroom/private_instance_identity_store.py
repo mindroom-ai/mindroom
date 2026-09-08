@@ -185,7 +185,7 @@ def parse_private_instance_identity_payload(payload: object) -> PrivateInstanceI
     return PrivateInstanceIdentity(worker_key, requester_id)
 
 
-def load_private_instance_record_payload(record_path: Path, *, max_bytes: int = 65536) -> object | None:
+def load_private_instance_record_payload(record_path: Path, *, max_bytes: int = 65536) -> object | None:  # noqa: C901
     """Read a bounded strict record; callers must separately validate owner and location."""
     try:
         record_stat = record_path.lstat()
@@ -193,8 +193,10 @@ def load_private_instance_record_payload(record_path: Path, *, max_bytes: int = 
         return None
     except OSError as error:
         _raise_unreadable_record(error)
-    if not stat.S_ISREG(record_stat.st_mode) or record_stat.st_size > max_bytes:
+    if not stat.S_ISREG(record_stat.st_mode):
         _raise_invalid_record("must be a regular file")
+    if record_stat.st_size > max_bytes:
+        _raise_invalid_record("exceeds the size limit")
     try:
         descriptor = os.open(record_path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as error:

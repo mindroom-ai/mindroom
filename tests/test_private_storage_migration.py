@@ -657,3 +657,118 @@ async def test_current_runtime_export_and_mounts_find_migrated_contents(tmp_path
         private_mounts[0].local_path / "writer/workspace/notes.txt"
     ).read_bytes() == b"private workspace\x00retained"
     assert not source.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_sync_fails", [False, True])
+async def test_retry_durably_publishes_existing_intent_before_any_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_sync_fails: bool,
+) -> None:
+    """A visible intent left by failed directory fsync must become durable before recovery renames."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path)
+    source = _seed(paths, _OLD, _REQUESTER)
+    mirror = resolve_session_state_root(source, paths)
+    inode = source.stat().st_ino
+    fsync, rename = os.fsync, Path.rename
+    events: list[str] = []
+
+    def fail_intent_sync(descriptor: int) -> None:
+        if os.fstat(descriptor).st_ino == inode and (source / _INTENT).exists():
+            message = "intent directory sync failed"
+            raise OSError(message)
+        fsync(descriptor)
+
+    with monkeypatch.context() as first:
+        first.setattr(os, "fsync", fail_intent_sync)
+        with pytest.raises(OSError, match="intent directory sync failed"):
+            await migration.migrate_private_storage(paths)
+    assert (source / _INTENT).is_file()
+    assert mirror.is_dir()
+
+    def retry_sync(descriptor: int) -> None:
+        if os.fstat(descriptor).st_ino == inode:
+            if retry_sync_fails:
+                message = "retry directory sync failed"
+                raise OSError(message)
+            fsync(descriptor)
+            events.append("intent directory synced")
+        else:
+            fsync(descriptor)
+
+    def record_rename(origin: Path, destination: Path) -> Path:
+        events.append("rename")
+        return rename(origin, destination)
+
+    with monkeypatch.context() as retry:
+        retry.setattr(os, "fsync", retry_sync)
+        retry.setattr(Path, "rename", record_rename)
+        if retry_sync_fails:
+            with pytest.raises(OSError, match="retry directory sync failed"):
+                await migration.migrate_private_storage(paths)
+        else:
+            await migration.migrate_private_storage(paths)
+    if retry_sync_fails:
+        assert events == []
+        assert source.is_dir()
+        assert mirror.is_dir()
+    else:
+        assert events.index("intent directory synced") < events.index("rename")
+    await migration.migrate_private_storage(paths)
+    assert not source.exists()
+    target = private_instance_scope_root_path(paths.storage_root, _NEW)
+    assert (target / "writer/workspace/notes.txt").read_bytes() == b"private workspace\x00retained"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("indirect", [False, True])
+async def test_relative_link_chain_escape_blocks_entire_batch(tmp_path: Path, indirect: bool) -> None:
+    """Filesystem traversal through an absolute directory link must not escape then reenter the old scope."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path)
+    source = _seed(paths, _OLD, _REQUESTER)
+    other = _seed(paths, "v1:default:user:@bob:example.org", "@bob:example.org")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (source / "shared").symlink_to(shared, target_is_directory=True)
+    target = f"shared/../state/private_instances/{source.name}/writer/workspace/notes.txt"
+    if indirect:
+        (source / "intermediate").symlink_to(target)
+        target = "intermediate"
+    (source / "link").symlink_to(target)
+    assert (source / "link").read_bytes() == b"private workspace\x00retained"
+    with pytest.raises(ValueError, match="relative symlink"):
+        await migration.migrate_private_storage(paths)
+    for original in (source, other):
+        assert original.is_dir()
+        assert resolve_session_state_root(original, paths).is_dir()
+        assert not (original / _INTENT).exists()
+    assert (source / "link").read_bytes() == b"private workspace\x00retained"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["contained_chain", "dangling", "cycle"])
+async def test_relative_link_chain_policy(tmp_path: Path, kind: str) -> None:
+    """Contained relative chains and dangling targets stay intact; cyclic chains fail closed."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path)
+    source = _seed(paths, _OLD, _REQUESTER)
+    targets = {"contained_chain": "writer/workspace", "dangling": "missing", "cycle": "link"}
+    (source / "intermediate").symlink_to(targets[kind], target_is_directory=True)
+    (source / "link").symlink_to("intermediate" if kind == "cycle" else "intermediate/notes.txt")
+    if kind == "cycle":
+        with pytest.raises(ValueError, match="relative symlink"):
+            await migration.migrate_private_storage(paths)
+        assert source.is_dir()
+        assert not (source / _INTENT).exists()
+    else:
+        await migration.migrate_private_storage(paths)
+        target = private_instance_scope_root_path(paths.storage_root, _NEW)
+        assert str((target / "intermediate").readlink()) == targets[kind]
+        assert str((target / "link").readlink()) == "intermediate/notes.txt"
+        if kind == "contained_chain":
+            assert (target / "link").read_bytes() == b"private workspace\x00retained"
+        else:
+            assert not (target / "link").exists()

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+from collections import deque
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -236,6 +237,25 @@ def _raise_scan_error(error: OSError) -> NoReturn:
     raise error
 
 
+def _check_relative_link(entry: Path, scope: Path, target: Path) -> None:
+    """Follow each relative component without allowing intermediate links to leave the scope."""
+    remaining = deque(target.parts)
+    cursor = entry.parent
+    links = 0
+    while remaining:
+        part = remaining.popleft()
+        cursor = cursor.parent if part == ".." else cursor / part
+        if not cursor.is_relative_to(scope):
+            _reject("relative symlink leaves its relocated scope")
+        if cursor.is_symlink():
+            links += 1
+            target = cursor.readlink()
+            if target.is_absolute() or links > 40:
+                _reject("relative symlink traverses an absolute link or a cyclic chain")
+            remaining.extendleft(reversed(target.parts))
+            cursor = cursor.parent
+
+
 def _check_tree(scope: Path, moving: tuple[Path, ...]) -> None:
     """Inspect directory mounts and links without reading opaque file contents."""
     device = scope.parent.parent.lstat().st_dev
@@ -255,11 +275,7 @@ def _check_tree(scope: Path, moving: tuple[Path, ...]) -> None:
                 if any(target.is_relative_to(old) or entry.resolve().is_relative_to(old) for old in moving):
                     _reject("absolute symlink depends on a relocated scope")
             else:
-                depth = len(entry.parent.relative_to(scope).parts)
-                for part in target.parts:
-                    depth += -1 if part == ".." else part != "."
-                    if depth < 0:
-                        _reject("relative symlink leaves its relocated scope")
+                _check_relative_link(entry, scope, target)
 
 
 def _move(source: Path, destination: Path) -> None:
@@ -276,6 +292,8 @@ def _apply(roots: tuple[Path, Path], intent: _Intent) -> None:
     record = source / _INTENT
     if load_private_instance_record_payload(record) is None:
         write_json_file_durable(record, asdict(intent), strict_atomic_replace=True)
+    # A failed earlier publication may have left a visible but unsynced intent.
+    fsync_directory_durable(source)
     destination = _locations(primary, intent)[1]
     if primary != sessions:
         mirror = _recorded_location(sessions, intent, intent.session_inode)
