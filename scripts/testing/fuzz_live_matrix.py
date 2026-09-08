@@ -50,7 +50,7 @@ import nio
 import yaml
 
 import mindroom
-from mindroom.constants import SOURCE_KIND_KEY, STREAM_STATUS_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, SOURCE_KIND_KEY, STREAM_STATUS_KEY
 from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.prompts import AGENT_IDENTITY_CONTEXT_TEMPLATE
@@ -4720,6 +4720,19 @@ class _CanonicalResponseView:
 
     body: str
     stream_status: str | None
+    completed: bool
+
+
+def _response_payload_completed(payload: object) -> bool:
+    """Recognize successful streaming or blocking delivery without discarding key presence."""
+    if not isinstance(payload, Mapping):
+        return False
+    if STREAM_STATUS_KEY in payload and payload[STREAM_STATUS_KEY] != "completed":
+        return False
+    if AI_RUN_METADATA_KEY in payload:
+        metadata = payload[AI_RUN_METADATA_KEY]
+        return isinstance(metadata, Mapping) and metadata.get("status") == "completed"
+    return payload.get(STREAM_STATUS_KEY) == "completed"
 
 
 def _canonical_response_view(
@@ -4754,9 +4767,17 @@ def _canonical_response_view(
             body = _canonical_message_body(content, is_edit=edit)
             if body is None:
                 continue
-            view = _CanonicalResponseView(body, status if isinstance(status, str) else None)
+            view = _CanonicalResponseView(
+                body,
+                status if isinstance(status, str) else None,
+                _response_payload_completed(payload),
+            )
             candidates.append((_replacement_order(event_id, candidate.get("origin_server_ts"), is_edit=edit), view))
-    return max(candidates, key=lambda candidate: candidate[0])[1] if candidates else _CanonicalResponseView("", None)
+    return (
+        max(candidates, key=lambda candidate: candidate[0])[1]
+        if candidates
+        else _CanonicalResponseView("", None, False)
+    )
 
 
 class ExactReplyOracle:
@@ -5910,13 +5931,19 @@ class FinalStateAuditor:
     ) -> tuple[str, str] | None:
         """Require exact durable completion and visible current-source model consumption."""
         record = records.get(source)
-        if record is None or not record.completed or source not in record.replay_source_event_ids:
+        if (
+            record is None
+            or not record.completed
+            or source not in record.replay_source_event_ids
+            or record.pending_redaction_cleanup_event_ids
+            or any(revision.cleanup_pending for revision in (record.revision_replay or {}).values())
+        ):
             return None
         response = record.response_event_id
         if response is None or response not in self._visible_record_reply_ids(record, replies):
             return None
         view = _canonical_response_view(events, response, self.agent_id)
-        if not self._record_sources_share_thread(record) or view.stream_status != "completed":
+        if not self._record_sources_share_thread(record) or not view.completed:
             return None
         body = view.body
         call = _body_call_id(body)

@@ -17,8 +17,12 @@ from unittest.mock import AsyncMock, Mock, patch
 import nio
 import pytest
 import structlog
+from agno.run.base import RunStatus
 
+from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.cli import main as cli_main
+from mindroom.config.main import Config
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.conversation_state_writer import ConversationStateWriter
 from mindroom.dispatch_handoff import PreparedIngress
@@ -28,6 +32,7 @@ from mindroom.handled_turns import HandledTurnLedger
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_record import RevisionReplay, TurnRecord
 from mindroom.turn_store import TurnStore, TurnStoreDeps
@@ -471,6 +476,324 @@ async def test_supersession_keeps_completed_old_generation(tmp_path: Path) -> No
         metrics = await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
         assert metrics["ledger_superseded_sources"] == 0
         assert metrics["completed_final_bodies"] == 2
+    finally:
+        await case.journal.close()
+
+
+def _blocking_supersession_final(case: _SupersessionCase) -> dict[str, Any]:
+    """Use actual blocking AI metadata and Matrix edit builders after a pending INITIAL."""
+    original = case.events["$new-reply"]
+    final_content = {
+        "msgtype": "m.text",
+        "body": "LIVE-FUZZ call=2 END call=2",
+        **build_ai_run_metadata_content(
+            config=Config(models={}),
+            model_name="default",
+            run_id="run-new",
+            session_id="!room:example_$root",
+            status=RunStatus.completed,
+            model=live_fuzz.MODEL_ID,
+            model_provider="openai",
+        ),
+    }
+    final = {
+        **original,
+        "event_id": "$blocking-final",
+        "origin_server_ts": 50,
+        "content": build_matrix_edit_content("$new-reply", final_content),
+    }
+    original["content"] = {
+        **original["content"],
+        "body": "Thinking...",
+        live_fuzz.STREAM_STATUS_KEY: "pending",
+    }
+    case.oracle.canonical_events["$new-reply"] = dict(original)
+    case.events["$blocking-final"] = final
+    case.oracle._ingest_event(final)
+    return final
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_poll", [False, True])
+@pytest.mark.parametrize("visible_old", [False, True])
+async def test_supersession_accepts_actual_blocking_final(
+    tmp_path: Path,
+    live_poll: bool,
+    visible_old: bool,
+) -> None:
+    """Completed blocking metadata can anchor exact supersession without a streaming-specific key."""
+    case = await _supersession_case(tmp_path, visible_old=visible_old, old_record=visible_old)
+    final = _blocking_supersession_final(case)
+    assert live_fuzz.STREAM_STATUS_KEY not in final["content"]["m.new_content"]
+    assert final["content"]["m.new_content"][AI_RUN_METADATA_KEY]["status"] == "completed"
+    try:
+        if live_poll:
+            case.oracle.refresh_ledger_attributions(min_interval=0)
+            assert case.oracle.unsettled_required_sources() == []
+        else:
+            metrics = await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
+            assert metrics["completed_final_bodies"] == 1
+            assert metrics["ledger_superseded_sources"] == 1
+        assert case.oracle.supersession_proofs["$old"].anchor_response_event_id == "$new-reply"
+    finally:
+        await case.journal.close()
+
+
+async def _assert_terminal_supersession(case: _SupersessionCase, *, live_poll: bool, accepted: bool) -> None:
+    """Exercise proof consumers against the same authoritative transport view."""
+    case.oracle.canonical_events = {event_id: dict(event) for event_id, event in case.events.items()}
+    case.auditor.client.paginate_room = AsyncMock(
+        side_effect=lambda room: [event for event in case.events.values() if event["_audit_room_id"] == room],
+    )
+    if live_poll:
+        case.oracle.refresh_ledger_attributions(min_interval=0)
+        assert ("$old" in case.oracle.supersession_proofs) is accepted
+    elif accepted:
+        result = await case.auditor.audit(
+            room_ids=("!room:example", "!foreign:example"),
+            sent_records=(),
+            redacted_targets={},
+        )
+        assert result["ledger_superseded_sources"] == 1
+    else:
+        with pytest.raises(AssertionError):
+            await case.auditor.audit(
+                room_ids=("!room:example", "!foreign:example"),
+                sent_records=(),
+                redacted_targets={},
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_poll", [False, True])
+@pytest.mark.parametrize(
+    ("signals", "accepted"),
+    [
+        pytest.param({}, False, id="both-absent"),
+        pytest.param({live_fuzz.STREAM_STATUS_KEY: "completed"}, True, id="stream-only"),
+        pytest.param({AI_RUN_METADATA_KEY: {"status": "completed"}}, True, id="blocking"),
+        pytest.param(
+            {live_fuzz.STREAM_STATUS_KEY: "completed", AI_RUN_METADATA_KEY: {"status": "completed"}},
+            True,
+            id="both-completed",
+        ),
+        *[
+            pytest.param(
+                {live_fuzz.STREAM_STATUS_KEY: status, AI_RUN_METADATA_KEY: {"status": "completed"}},
+                False,
+                id=f"stream-{name}",
+            )
+            for name, status in (
+                ("null", None),
+                ("integer", 1),
+                ("boolean", True),
+                ("list", []),
+                ("mapping", {}),
+                ("unknown", "unknown"),
+                ("pending", "pending"),
+                ("streaming", "streaming"),
+                ("approval", "approval_pending"),
+                ("interrupted", "interrupted"),
+                ("cancelled", "cancelled"),
+                ("error", "error"),
+            )
+        ],
+        *[
+            pytest.param({**stream, AI_RUN_METADATA_KEY: metadata}, False, id=f"ai-{name}-{mode}")
+            for mode, stream in (("blocking", {}), ("streaming", {live_fuzz.STREAM_STATUS_KEY: "completed"}))
+            for name, metadata in (
+                ("null", None),
+                ("string", "completed"),
+                ("list", []),
+                ("missing-status", {}),
+                ("null-status", {"status": None}),
+                ("invalid-status", {"status": 1}),
+                ("pending", {"status": "pending"}),
+                ("error", {"status": "error"}),
+                ("cancelled", {"status": "cancelled"}),
+                ("unknown", {"status": "unknown"}),
+            )
+        ],
+    ],
+)
+async def test_supersession_terminal_signals_require_consistent_completion(
+    tmp_path: Path,
+    live_poll: bool,
+    signals: dict[str, Any],
+    accepted: bool,
+) -> None:
+    """Terminal metadata presence and value must agree within the selected completed body payload."""
+    case = await _supersession_case(tmp_path, visible_old=False, old_record=False)
+    final = _blocking_supersession_final(case)
+    final["content"] = build_matrix_edit_content(
+        "$new-reply",
+        {"body": "LIVE-FUZZ call=2 END call=2", "msgtype": "m.text", **signals},
+    )
+    try:
+        await _assert_terminal_supersession(case, live_poll=live_poll, accepted=accepted)
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_poll", [False, True])
+@pytest.mark.parametrize(
+    "location",
+    ["outer_wrapper", "original", "older_edit", "foreign_room", "bundled_outer_wrapper"],
+)
+async def test_supersession_cannot_borrow_blocking_terminal_metadata(
+    tmp_path: Path,
+    live_poll: bool,
+    location: str,
+) -> None:
+    """Completed AI metadata elsewhere cannot terminalize a selected replacement that lacks it."""
+    case = await _supersession_case(tmp_path, visible_old=False, old_record=False)
+    final = _blocking_supersession_final(case)
+    completed = final["content"]["m.new_content"].pop(AI_RUN_METADATA_KEY)
+    if location == "original":
+        case.events["$new-reply"]["content"] = {
+            **case.events["$new-reply"]["content"],
+            live_fuzz.STREAM_STATUS_KEY: "completed",
+            AI_RUN_METADATA_KEY: completed,
+        }
+    elif location in {"older_edit", "foreign_room"}:
+        other = {
+            **final,
+            "event_id": "$other-final",
+            "origin_server_ts": 60 if location == "foreign_room" else 40,
+            "_audit_room_id": "!foreign:example" if location == "foreign_room" else "!room:example",
+            "content": build_matrix_edit_content(
+                "$new-reply",
+                {**final["content"]["m.new_content"], AI_RUN_METADATA_KEY: completed},
+            ),
+        }
+        case.events["$other-final"] = other
+        case.oracle._ingest_event(other)
+    elif location == "bundled_outer_wrapper":
+        case.events.pop("$blocking-final")
+        case.events["$new-reply"]["unsigned"] = {"m.relations": {"m.replace": {"event": final}}}
+    try:
+        await _assert_terminal_supersession(case, live_poll=live_poll, accepted=False)
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_poll", [False, True])
+@pytest.mark.parametrize(
+    "defect",
+    ["unacknowledged_final", "pending_edit", "wrong_marker", "unfinished_turn", "pending_cleanup", "wrong_source"],
+)
+async def test_supersession_blocking_terminal_keeps_independent_ownership_checks(
+    tmp_path: Path,
+    live_poll: bool,
+    defect: str,
+) -> None:
+    """Successful blocking metadata cannot discharge independent generation, source or delivery debt."""
+    case = await _supersession_case(tmp_path, visible_old=False, old_record=False)
+    _blocking_supersession_final(case)
+    if defect == "unacknowledged_final":
+        await case.journal.principal("general@@agent:example").enqueue_matrix_delivery(
+            delivery_id="$new",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:example",
+            thread_id="$root",
+            payload={"body": "still owed"},
+            edits_event_id="$new-reply",
+        )
+    elif defect == "pending_edit":
+        case.oracle.pending_edit_markers = {"$new": {"$edit": "MRK[src=op:2;rev=edit:1]"}}
+        case.auditor.pending_edit_markers = dict(case.oracle.pending_edit_markers)
+    elif defect == "wrong_marker":
+        case.oracle.observed_markers_for = case.auditor.observed_markers_for = lambda _: frozenset(
+            {"MRK[src=wrong;rev=orig]"},
+        )
+    elif defect == "wrong_source":
+        case.events["$new-reply"]["content"]["m.relates_to"]["m.in_reply_to"]["event_id"] = "$old"
+    else:
+        record = TurnRecord.create(
+            ("$new",),
+            response_event_id="$new-reply",
+            completed=defect != "unfinished_turn",
+            revision_replay={"$edit": RevisionReplay("$new", 100, redacted=True, cleanup_pending=True).to_record()}
+            if defect == "pending_cleanup"
+            else None,
+        )
+        await case.journal.turn_records("general").forget(index_event_ids=("$new",))
+        await case.journal.turn_records("general").upsert(
+            index_event_ids=record.indexed_event_ids,
+            anchor_event_id=record.anchor_event_id,
+            record_json=json.dumps(live_fuzz.TurnRecordCodec._to_ledger_record(record)),
+        )
+        stored = live_fuzz.read_ledger_records(tmp_path / "event_journal.db", include_incomplete=True)["$new"]
+        assert stored.completed is (defect != "unfinished_turn")
+        if defect == "pending_cleanup":
+            assert stored.revision_replay is not None
+            assert stored.revision_replay["$edit"].cleanup_pending
+    try:
+        await _assert_terminal_supersession(case, live_poll=live_poll, accepted=False)
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_poll", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("cleanup_kind", ["revision", "source"])
+@pytest.mark.parametrize("pending", [False, True])
+async def test_supersession_completed_anchor_requires_settled_cleanup(
+    tmp_path: Path,
+    live_poll: bool,
+    streaming: bool,
+    cleanup_kind: str,
+    pending: bool,
+) -> None:
+    """Both terminal forms need an anchor free of authoritative revision and source cleanup debt."""
+    case = await _supersession_case(tmp_path, visible_old=False, old_record=False)
+    final = _blocking_supersession_final(case)
+    if streaming:
+        final["content"]["m.new_content"][live_fuzz.STREAM_STATUS_KEY] = "completed"
+    record = TurnRecord.create(
+        ("$new",),
+        response_event_id="$new-reply",
+        completed=True,
+        discovery_event_ids=("$removed",) if cleanup_kind == "source" else (),
+        redacted_source_event_ids=("$removed",) if cleanup_kind == "source" else (),
+        pending_redaction_cleanup_event_ids=("$removed",) if pending and cleanup_kind == "source" else (),
+        revision_replay={"$edit": RevisionReplay("$new", 100, redacted=True, cleanup_pending=pending).to_record()}
+        if cleanup_kind == "revision"
+        else None,
+    )
+    store = case.journal.turn_records("general")
+    await store.forget(index_event_ids=("$new",))
+    await store.upsert(
+        index_event_ids=record.indexed_event_ids,
+        anchor_event_id=record.anchor_event_id,
+        record_json=json.dumps(live_fuzz.TurnRecordCodec._to_ledger_record(record)),
+    )
+    stored = live_fuzz.read_ledger_records(tmp_path / "event_journal.db", include_incomplete=True)["$new"]
+    assert stored.completed
+    if cleanup_kind == "revision":
+        assert stored.revision_replay is not None
+        assert stored.revision_replay["$edit"].cleanup_pending is pending
+    else:
+        assert stored.pending_redaction_cleanup_event_ids == (("$removed",) if pending else ())
+    try:
+        await _assert_terminal_supersession(case, live_poll=live_poll, accepted=not pending)
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_poll", [False, True])
+async def test_supersession_accepts_bundled_blocking_final(tmp_path: Path, live_poll: bool) -> None:
+    """Server-bundled FINAL replacement carries the same successful blocking contract."""
+    case = await _supersession_case(tmp_path, visible_old=False, old_record=False)
+    final = _blocking_supersession_final(case)
+    case.events.pop("$blocking-final")
+    case.events["$new-reply"]["unsigned"] = {"m.relations": {"m.replace": {"event": final}}}
+    try:
+        await _assert_terminal_supersession(case, live_poll=live_poll, accepted=True)
     finally:
         await case.journal.close()
 
