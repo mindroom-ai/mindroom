@@ -130,6 +130,7 @@ async def _supersession_case(
     *,
     visible_old: bool,
     plain_reply: bool = False,
+    plain_reply_parent: str = "$root",
     old_record: bool = True,
     interrupt_settlement: bool = False,
     history_guard: bool = False,
@@ -155,7 +156,7 @@ async def _supersession_case(
         for source, logical, timestamp in (("$old", "op:1", 10), ("$new", "op:2", 20))
     }
     if plain_reply:
-        events["$old"]["content"]["m.relates_to"] = {"m.in_reply_to": {"event_id": "$root"}}
+        events["$old"]["content"]["m.relates_to"] = {"m.in_reply_to": {"event_id": plain_reply_parent}}
         events["$new"]["content"]["m.relates_to"] = {"m.in_reply_to": {"event_id": "$old"}}
     for source, event in events.items():
         await principal.admit(
@@ -233,11 +234,14 @@ async def _supersession_case(
     oracle.log_path = tmp_path / "mindroom.log"
     oracle.log_path.write_text(output.getvalue())
     if plain_reply:
-        events["$root"] = {
+        events[plain_reply_parent] = {
             **events["$old"],
-            "event_id": "$root",
+            "event_id": plain_reply_parent,
             "origin_server_ts": 1,
-            "content": {"msgtype": "m.text", "body": "root"},
+            "content": {"msgtype": "m.text", "body": "root"}
+            | (
+                {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}} if plain_reply_parent != "$root" else {}
+            ),
         }
     for source, logical in (("$old", "op:1"), ("$new", "op:2")):
         oracle.expect(logical, source)
@@ -593,6 +597,244 @@ async def _complete_supersession_source(case: _SupersessionCase, source: str, ca
             "m.relates_to": {"rel_type": "m.thread", "event_id": "$root", "m.in_reply_to": {"event_id": source}},
         },
     }
+
+
+async def _add_redacted_completed_source(
+    case: _SupersessionCase,
+    ancestry: str,
+) -> tuple[list[live_fuzz._SentRecord], dict[str, str]]:
+    """Retain authored ancestry beside actual settled/tombstoned journal ownership and empty Matrix shells."""
+    root = {**case.events["$new"], "event_id": "$ancestor", "content": {"body": "ancestor", "msgtype": "m.text"}}
+    bridge = {
+        **root,
+        "event_id": "$bridge",
+        "content": {
+            "body": "bridge",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$ancestor"},
+        },
+    }
+    relation = (
+        {"rel_type": "m.thread", "event_id": "$ancestor", "m.in_reply_to": {"event_id": "$ancestor"}}
+        if ancestry == "thread"
+        else {"m.in_reply_to": {"event_id": "$bridge" if ancestry == "multi_hop" else "$ancestor"}}
+    )
+    source = {
+        **case.events["$new"],
+        "event_id": "$redacted",
+        "origin_server_ts": 25,
+        "content": {"body": "MRK[src=op:3;rev=orig]", "msgtype": "m.text", "m.relates_to": relation},
+    }
+    authored = [root, bridge, source]
+    sent_records = [
+        live_fuzz._SentRecord(
+            event["event_id"],
+            "!room:example",
+            "m.room.message",
+            sender=event["sender"],
+            content=event["content"],
+        )
+        for event in authored
+    ]
+    case.events.update((event["event_id"], event) for event in authored)
+    await case.journal.principal("general@@agent:example").admit(
+        InboundEvent(
+            "$redacted",
+            "!room:example",
+            "$ancestor" if ancestry == "thread" else None,
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            "@user:example",
+            25,
+            source,
+        ),
+    )
+    case.oracle.expect("op:3", "$redacted", thread=1)
+    await _complete_supersession_source(case, "$redacted", 3)
+    case.events["$redacted-reply"]["content"]["m.relates_to"]["event_id"] = "$ancestor"
+    tombstone = TurnRecord.create(
+        ("$redacted",),
+        redacted_source_event_ids=("$redacted",),
+        response_event_id="$redacted-reply",
+        completed=True,
+    )
+    await case.journal.turn_records("general").upsert(
+        index_event_ids=tombstone.indexed_event_ids,
+        anchor_event_id=tombstone.anchor_event_id,
+        record_json=json.dumps(live_fuzz.TurnRecordCodec._to_ledger_record(tombstone)),
+    )
+    redacted = {"$redacted": "$redaction"}
+    if ancestry == "multi_hop":
+        redacted["$bridge"] = "$bridge-redaction"
+    for event_id, redaction_id in redacted.items():
+        case.events[event_id] = {
+            **case.events[event_id],
+            "content": {},
+            "unsigned": {"redacted_because": {"event_id": redaction_id}},
+        }
+    for event in case.events.values():
+        case.oracle._ingest_event(event)
+    return sent_records, redacted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ancestry", ["thread", "plain", "multi_hop"])
+@pytest.mark.parametrize("live_poll", [False, True])
+async def test_supersession_preserves_redacted_authored_ancestry(
+    tmp_path: Path,
+    ancestry: str,
+    live_poll: bool,
+) -> None:
+    """An unrelated redacted source must not invalidate completed replies or independently proven supersession."""
+    case = await _supersession_case(tmp_path, visible_old=True)
+    sent_records, redacted = await _add_redacted_completed_source(case, ancestry)
+    try:
+        if live_poll:
+            case.oracle.sent_records = sent_records
+            case.oracle.refresh_ledger_attributions(min_interval=0)
+            assert case.oracle.ledger_response("$new") == "$new-reply"
+            assert case.oracle.ledger_response("$redacted") == "$redacted-reply"
+            assert "$old" in case.oracle.supersession_proofs
+        else:
+            metrics = await case.auditor.audit(
+                room_ids=("!room:example",),
+                sent_records=sent_records,
+                redacted_targets=redacted,
+            )
+            assert metrics["completed_final_bodies"] == 2
+            assert metrics["ledger_superseded_sources"] == 1
+        assert all(case.events[event_id]["content"] == {} for event_id in redacted)
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_poll", [False, True])
+async def test_supersession_source_pair_preserves_redacted_predecessor(tmp_path: Path, live_poll: bool) -> None:
+    """Both admitted plain-reply sources resolve through retained ancestry of their redacted predecessor."""
+    case = await _supersession_case(tmp_path, visible_old=True, plain_reply=True, plain_reply_parent="$predecessor")
+    parent = case.events["$predecessor"]
+    sent_records = [
+        live_fuzz._SentRecord(
+            "$predecessor",
+            "!room:example",
+            "m.room.message",
+            sender=parent["sender"],
+            content=parent["content"],
+        ),
+    ]
+    parent["content"] = {}
+    parent["unsigned"] = {"redacted_because": {"event_id": "$redaction"}}
+    case.oracle.canonical_events["$predecessor"] = dict(parent)
+    try:
+        if live_poll:
+            case.oracle.sent_records = sent_records
+            case.oracle.refresh_ledger_attributions(min_interval=0)
+        else:
+            await case.auditor.audit(
+                room_ids=("!room:example",),
+                sent_records=sent_records,
+                redacted_targets={"$predecessor": "$redaction"},
+            )
+        assert case.oracle.supersession_proofs["$old"].thread_id == "$root"
+        assert case.oracle.supersession_proofs["$old"].anchor_source_event_id == "$new"
+        assert parent["content"] == {}
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+async def test_supersession_live_runner_retains_records_added_after_construction(tmp_path: Path) -> None:
+    """Runner's evolving authored-record collection must reach live ledger refresh after source redaction."""
+    case = await _supersession_case(tmp_path, visible_old=True)
+    stack = Mock(spec=live_fuzz.ManagedTuwunelStack)
+    stack.agent_id = "@agent:example"
+    stack.router_id = "@router:example"
+    stack.storage_path = tmp_path
+    stack.log_path = case.oracle.log_path
+    stack.runtime_redaction_path = tmp_path / "runtime-redactions.jsonl"
+    runner = live_fuzz.LiveFuzzRunner(
+        stack,
+        (case.oracle.client,),
+        live_fuzz.LiveFuzzScenario(1, (), profile="chaos"),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    sent_records, redacted = await _add_redacted_completed_source(case, "multi_hop")
+    runner.sent_records.extend(sent_records)
+    runner.oracle.ledger_path = case.oracle.ledger_path
+    runner.oracle.expected_body_for = case.oracle.expected_body_for
+    runner.oracle.observed_markers_for = case.oracle.observed_markers_for
+    runner.source_current_markers.update(case.oracle.source_current_markers)
+    for source, logical in case.oracle.expected_sources.items():
+        runner.oracle.expect(logical, source, thread=case.oracle.source_threads[source])
+    for event in case.events.values():
+        runner.oracle._ingest_event(event)
+    try:
+        runner.oracle.refresh_ledger_attributions(min_interval=0)
+        assert runner.oracle.ledger_response("$new") == "$new-reply"
+        assert runner.oracle.ledger_response("$redacted") == "$redacted-reply"
+        assert "$old" in runner.oracle.supersession_proofs
+        assert all(runner.oracle.canonical_events[source]["content"] == {} for source in redacted)
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_poll", [False, True])
+@pytest.mark.parametrize(
+    "defect",
+    ["reply_room", "reply_root", "missing_ancestry", "contradictory_ancestry", "missing_journal"],
+)
+async def test_supersession_retained_ancestry_keeps_provenance_checks(
+    tmp_path: Path,
+    live_poll: bool,
+    defect: str,
+) -> None:
+    """Retained authored records cannot excuse foreign replies or absent/contradictory proof identity."""
+    case = await _supersession_case(tmp_path, visible_old=True)
+    sent_records, redacted = await _add_redacted_completed_source(case, "multi_hop")
+    if defect == "reply_room":
+        case.events["$redacted-reply"]["_audit_room_id"] = "!foreign:example"
+    elif defect == "reply_root":
+        case.events["$redacted-reply"]["content"]["m.relates_to"]["event_id"] = "$wrong"
+    elif defect == "missing_ancestry":
+        sent_records = [record for record in sent_records if record.event_id != "$bridge"]
+    elif defect == "contradictory_ancestry":
+        sent_records = [
+            live_fuzz._SentRecord(
+                record.event_id,
+                record.room_id,
+                record.event_type,
+                sender=record.sender,
+                content={"body": "wrong", "m.relates_to": {"rel_type": "m.thread", "event_id": "$wrong"}},
+            )
+            if record.event_id == "$bridge"
+            else record
+            for record in sent_records
+        ]
+    else:
+        await case.journal.backend.write(
+            lambda connection: connection.execute("DELETE FROM journal_events WHERE event_id = ?", ("$old",)),
+        )
+    case.oracle.canonical_events = {event_id: dict(event) for event_id, event in case.events.items()}
+    case.auditor.client.paginate_room = AsyncMock(
+        side_effect=lambda room: [event for event in case.events.values() if event["_audit_room_id"] == room],
+    )
+    try:
+        if live_poll:
+            case.oracle.sent_records = sent_records
+            case.oracle.refresh_ledger_attributions(min_interval=0)
+            assert "$old" not in case.oracle.supersession_proofs
+        else:
+            with pytest.raises(AssertionError):
+                await case.auditor.audit(
+                    room_ids=("!room:example", "!foreign:example"),
+                    sent_records=sent_records,
+                    redacted_targets=redacted,
+                )
+    finally:
+        await case.journal.close()
 
 
 @pytest.mark.asyncio

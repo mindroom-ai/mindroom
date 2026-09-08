@@ -4793,6 +4793,7 @@ class ExactReplyOracle:
         self._ledger_observations: dict[str, TurnRecord] = {}
         self._ledger_read_at = 0.0
         self.log_path: Path | None = None
+        self.sent_records: Collection[_SentRecord] = ()
         self.source_current_markers: Mapping[str, str] = {}
         self.observed_markers_for = _ModelHandler.observed_markers_for
         self.pending_edit_markers: Mapping[str, Mapping[str, str]] = {}
@@ -4883,7 +4884,9 @@ class ExactReplyOracle:
                 pending_edit_markers=self.pending_edit_markers,
             )
             try:
-                self._ledger_observations = dict(auditor._observe_supersession(self.canonical_events))
+                self._ledger_observations = dict(
+                    auditor._observe_supersession(self.canonical_events, sent_records=self.sent_records),
+                )
             except (AssertionError, OSError):
                 # A concurrent write may invalidate this poll, never final qualification.
                 self.supersession_proofs = {}
@@ -5365,7 +5368,7 @@ def _latency_summary(latencies: Collection[float]) -> dict[str, float]:
 
 @dataclass(frozen=True, slots=True)
 class _SentRecord:
-    """One event the fuzzer wrote, for final canonical-state auditing."""
+    """One authored event, retaining ancestry for live proofs and final canonical-state auditing."""
 
     event_id: str
     room_id: str
@@ -5743,12 +5746,21 @@ class FinalStateAuditor:
         self.pending_edit_markers = {source: dict(edits) for source, edits in (pending_edit_markers or {}).items()}
         self.supersession_proofs: dict[str, SupersessionProof] = {}
 
-    def _observe_supersession(self, events: Mapping[str, Mapping[str, Any]]) -> Mapping[str, TurnRecord]:
+    def _observe_supersession(
+        self,
+        events: Mapping[str, Mapping[str, Any]],
+        *,
+        sent_records: Collection[_SentRecord] = (),
+        replies: Mapping[str, set[str]] | None = None,
+    ) -> Mapping[str, TurnRecord]:
         """Join current ownership and positive decisions without rewriting generation outcomes."""
         assert self.ledger_path is not None
         snapshot = _read_supersession_snapshot(self.ledger_path, f"{AGENT_NAME}@{self.agent_id}")
         decisions = _supersession_decisions(self.oracle.log_path)
-        replies = self._canonical_agent_replies(events)
+        # Final audit already validated this view; live polling must validate
+        # with the same retained ancestry before joining durable ownership.
+        replies = self._canonical_agent_replies(events, sent_records=sent_records) if replies is None else replies
+        authored = {record.event_id: record for record in sent_records}
         proofs: dict[str, SupersessionProof] = {}
         for chain in self.oracle.chains.values():
             for index in range(len(chain) - 1, -1, -1):
@@ -5758,7 +5770,15 @@ class FinalStateAuditor:
                 for decision in reversed(decisions.get(source, ())):
                     if decision.newer_event_id not in chain[index + 1 :]:
                         continue
-                    proof = self._prove_supersession(source, decision.newer_event_id, snapshot, events, replies, proofs)
+                    proof = self._prove_supersession(
+                        source,
+                        decision.newer_event_id,
+                        snapshot,
+                        events,
+                        replies,
+                        proofs,
+                        sent_records=authored,
+                    )
                     if proof is None or decision.thread_id not in {None, proof.thread_id}:
                         continue
                     proofs[source] = proof
@@ -5790,9 +5810,11 @@ class FinalStateAuditor:
         events: Mapping[str, Mapping[str, Any]],
         replies: Mapping[str, set[str]],
         proofs: Mapping[str, SupersessionProof],
+        *,
+        sent_records: Mapping[str, _SentRecord],
     ) -> SupersessionProof | None:
         """Validate one forward link against identity, debt, visible interruption and completed anchor."""
-        root = self._supersession_source_pair(source, newer, snapshot, events)
+        root = self._supersession_source_pair(source, newer, snapshot, events, sent_records)
         if root is None:
             return None
         old_record = snapshot.records.get(source)
@@ -5836,18 +5858,19 @@ class FinalStateAuditor:
         newer: str,
         snapshot: _SupersessionSnapshot,
         events: Mapping[str, Mapping[str, Any]],
+        sent_records: Mapping[str, _SentRecord],
     ) -> str | None:
         """Require matching admitted requester identities in the same resolved Matrix thread."""
         row, next_row = snapshot.sources.get(source), snapshot.sources.get(newer)
         if row is None or next_row is None or row.state != "settled" or next_row.state != "settled":
             return None
-        root = self._source_thread_root(source, events, {}, seen=set())
+        root = self._source_thread_root(source, events, sent_records, seen=set())
         owners = [snapshot.records[event_id] for event_id in (source, newer) if event_id in snapshot.records]
         delivery_ids = {source, newer, *(record.anchor_event_id for record in owners)}
         response_ids = {record.response_event_id for record in owners} - {None}
         if (
             root is None
-            or root != self._source_thread_root(newer, events, {}, seen=set())
+            or root != self._source_thread_root(newer, events, sent_records, seen=set())
             or row.room_id != next_row.room_id
             or row.sender != next_row.sender
             or row.timestamp >= next_row.timestamp
@@ -5926,7 +5949,11 @@ class FinalStateAuditor:
         self._assert_sent_events_canonical(events, sent_records, redacted)
         replies = self._canonical_agent_replies(events, sent_records=sent_records)
         self._assert_reply_cardinality(replies)
-        records = self._observe_supersession(events) if self.ledger_path is not None else None
+        records = (
+            self._observe_supersession(events, sent_records=sent_records, replies=replies)
+            if self.ledger_path is not None
+            else None
+        )
         completed = self._assert_final_bodies_complete(events, replies)
         self._assert_sync_view_parity(events, sent_records, replies)
         ledger_metrics: dict[str, int] = {}
@@ -6827,6 +6854,8 @@ class LiveFuzzRunner:
         self.event_ids: dict[str, str] = {}
         self.sent_payloads: dict[str, _SentPayload] = {}
         self.sent_records: list[_SentRecord] = []
+        # Share the growing authored history without restoring redacted wire content.
+        self.oracle.sent_records = self.sent_records
         # Maps every redacted event to the redaction event that removed it.
         # The final audit requires both the redacted shell and its exact
         # ``unsigned.redacted_because`` provenance.
