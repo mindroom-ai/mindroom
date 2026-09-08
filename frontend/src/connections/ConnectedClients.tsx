@@ -122,55 +122,38 @@ export function ConnectedClients() {
     };
   }, [reload]);
 
-  const disconnectOne = async (client: ConnectedClient) => {
+  const disconnect = async (client: ConnectedClient | null) => {
+    if (client === null) setConfirmOpen(false);
     operation.current?.abort();
     const controller = new AbortController();
     operation.current = controller;
-    setBusy(client.id);
+    setBusy(client?.id ?? "all");
     setError(null);
     try {
       await requestConnection(
-        `${clientsPath}/${encodeURIComponent(client.id)}/revoke`,
+        client
+          ? `${clientsPath}/${encodeURIComponent(client.id)}/revoke`
+          : `${clientsPath}/revoke-all`,
         controller.signal,
         "POST",
       );
       if (!controller.signal.aborted) {
         setClients((current) =>
-          current.filter((currentClient) => currentClient.id !== client.id),
+          client
+            ? current.filter((currentClient) => currentClient.id !== client.id)
+            : [],
         );
+        if (client === null) setNextCursor(null);
         setHasAuthoritativeState(true);
         await reload();
       }
     } catch {
       if (!controller.signal.aborted)
-        setError("Could not disconnect this client. Try again.");
-    } finally {
-      if (!controller.signal.aborted) setBusy(null);
-    }
-  };
-
-  const disconnectAll = async () => {
-    setConfirmOpen(false);
-    operation.current?.abort();
-    const controller = new AbortController();
-    operation.current = controller;
-    setBusy("all");
-    setError(null);
-    try {
-      await requestConnection(
-        `${clientsPath}/revoke-all`,
-        controller.signal,
-        "POST",
-      );
-      if (!controller.signal.aborted) {
-        setClients([]);
-        setNextCursor(null);
-        setHasAuthoritativeState(true);
-        await reload();
-      }
-    } catch {
-      if (!controller.signal.aborted)
-        setError("Could not disconnect clients. Try again.");
+        setError(
+          client
+            ? "Could not disconnect this client. Try again."
+            : "Could not disconnect clients. Try again.",
+        );
     } finally {
       if (!controller.signal.aborted) setBusy(null);
     }
@@ -287,7 +270,7 @@ export function ConnectedClients() {
                   aria-label={`Disconnect ${client.client_name}${
                     host ? ` from ${host}` : ""
                   }`}
-                  onClick={() => void disconnectOne(client)}
+                  onClick={() => void disconnect(client)}
                 >
                   {busy === client.id ? "Disconnecting…" : "Disconnect"}
                 </Button>
@@ -319,7 +302,7 @@ export function ConnectedClients() {
             <Button variant="outline" onClick={() => setConfirmOpen(false)}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={() => void disconnectAll()}>
+            <Button variant="destructive" onClick={() => void disconnect(null)}>
               Disconnect all clients
             </Button>
           </DialogFooter>

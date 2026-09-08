@@ -16,7 +16,6 @@ from mindroom.mcp_gateway.accounts import (
     AccountConflictError,
     AccountNotFoundError,
     AccountValidationError,
-    GatewayAccounts,
     canonical_fields,
 )
 
@@ -25,7 +24,7 @@ if TYPE_CHECKING:
 
     from starlette.requests import Request
 
-    from mindroom.mcp_gateway.store import GatewayOAuthStore
+    from mindroom.mcp_gateway.accounts import GatewayAccounts
 
 _BASE = "/mcp/scim/v2"
 _CORE = "urn:ietf:params:scim:schemas:core:2.0:"
@@ -34,23 +33,11 @@ _USER_SCHEMA = _CORE + "User"
 _HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
 _MAX_BODY = 65_536
 _FILTER = re.compile(r'\s*(userName|emails\.value|id)\s+eq\s+("(?:[^"\\]|\\.)*")\s*', re.IGNORECASE)
-_FIELDS = {
-    "username": "userName",
-    "active": "active",
-    "displayname": "displayName",
-    "externalid": "externalId",
-    "name": "name",
-    "emails": "emails",
-}
+_FIELDS = {"username", "active", "displayname", "externalid", "name", "emails"}
 
 
 class _ScimProvider(Protocol):
-    """Provisioning only needs the provider's account store and enable flag."""
-
-    @property
-    def store(self) -> GatewayOAuthStore:
-        """OAuth transaction owner."""
-        ...
+    """Provisioning only needs the provider's managed-account enable flag."""
 
     @property
     def accounts_required(self) -> bool:
@@ -64,6 +51,11 @@ class _ScimRuntime(Protocol):
     @property
     def provider(self) -> _ScimProvider:
         """Account-aware authorization provider."""
+        ...
+
+    @property
+    def accounts(self) -> GatewayAccounts:
+        """Provisioned account directory owned by the gateway runtime."""
         ...
 
     @property
@@ -360,10 +352,10 @@ def _authenticate(request: Request, runtime: _ScimRuntime) -> None:
         raise _ScimError(401, "A valid provisioning bearer credential is required.")
 
 
-async def _users(request: Request, runtime: _ScimRuntime, directory: GatewayAccounts) -> Response:
+async def _users(request: Request, runtime: _ScimRuntime) -> Response:
     if request.method == "GET":
         start, count, attribute, value = _pagination(request)
-        total, accounts = await directory.list_accounts(
+        total, accounts = await runtime.accounts.list_accounts(
             start_index=start,
             count=count,
             attribute=attribute,
@@ -371,22 +363,25 @@ async def _users(request: Request, runtime: _ScimRuntime, directory: GatewayAcco
         )
         return _response(_list([_user(account, runtime.origin) for account in accounts], total=total, start=start))
     if request.method == "POST":
-        account = await directory.create(await _body(request, _USER_SCHEMA))
+        account = await runtime.accounts.create(await _body(request, _USER_SCHEMA))
         user = _user(account, runtime.origin)
         return _response(user, 201, location=user["meta"]["location"])
     raise _ScimError(405, "Method not supported.")
 
 
-async def _one_user(request: Request, runtime: _ScimRuntime, directory: GatewayAccounts, account_id: str) -> Response:
+async def _one_user(request: Request, runtime: _ScimRuntime, account_id: str) -> Response:
     if request.method == "GET":
-        account = await directory.get(account_id)
+        account = await runtime.accounts.get(account_id)
     elif request.method == "PUT":
-        account = await directory.replace(account_id, await _body(request, _USER_SCHEMA))
+        account = await runtime.accounts.replace(account_id, await _body(request, _USER_SCHEMA))
     elif request.method == "PATCH":
         operations = _patch_operations(await _body(request, _MESSAGES + "PatchOp"))
-        account = await directory.update(account_id, [partial(_apply_patch, operation) for operation in operations])
+        account = await runtime.accounts.update(
+            account_id,
+            [partial(_apply_patch, operation) for operation in operations],
+        )
     elif request.method == "DELETE":
-        await directory.delete(account_id)
+        await runtime.accounts.delete(account_id)
         return Response(status_code=204, headers=_HEADERS)
     else:
         raise _ScimError(405, "Method not supported.")
@@ -398,7 +393,6 @@ async def _dispatch(request: Request, runtime: _ScimRuntime) -> Response:
     if len(request.scope.get("query_string", b"")) > 4096:
         raise _ScimError(400, "Query exceeds the supported limit.", "invalidFilter")
     path = request.url.path.removeprefix(_BASE).rstrip("/")
-    directory = GatewayAccounts(runtime.provider.store)
     if request.query_params and (path != "/Users" or request.method != "GET"):
         raise _ScimError(400, "Unsupported query parameters.", "invalidFilter")
     if path == "/Groups" or path.startswith("/Groups/"):
@@ -409,9 +403,9 @@ async def _dispatch(request: Request, runtime: _ScimRuntime) -> Response:
             raise _ScimError(405, "Method not supported.")
         return _response(discovery)
     if path == "/Users":
-        return await _users(request, runtime, directory)
+        return await _users(request, runtime)
     if path.startswith("/Users/") and "/" not in path[len("/Users/") :]:
-        return await _one_user(request, runtime, directory, path[len("/Users/") :])
+        return await _one_user(request, runtime, path[len("/Users/") :])
     raise _ScimError(404, "Unknown provisioning resource.")
 
 

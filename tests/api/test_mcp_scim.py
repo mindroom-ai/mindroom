@@ -12,6 +12,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from mindroom.api.mcp_scim import scim_routes
+from mindroom.mcp_gateway.accounts import GatewayAccounts
 from mindroom.mcp_gateway.store import GatewayOAuthStore
 
 if TYPE_CHECKING:
@@ -38,7 +39,8 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         clock=lambda: 2_000_000_000.0,
     )
     runtime = SimpleNamespace(
-        provider=SimpleNamespace(store=store, accounts_required=True),
+        provider=SimpleNamespace(accounts_required=True),
+        accounts=GatewayAccounts(store),
         origin="https://example.org",
         scim_token=TOKEN,
     )
