@@ -796,7 +796,7 @@ class GitKnowledgeSource:
         # Automatic maintenance can detach and outlive the refresh supervisor.
         # Keep repository repacking out of knowledge polling.
         await self._run_git(
-            ["fetch", "--no-auto-maintenance", "origin", f"+refs/heads/{git_config.branch}:refs/remotes/{remote_ref}"],
+            ["fetch", "--no-auto-gc", "origin", f"+refs/heads/{git_config.branch}:refs/remotes/{remote_ref}"],
             env=await _resolved_git_auth_env(
                 git_config.repo_url,
                 git_config.credentials_service,

@@ -1533,7 +1533,7 @@ async def test_sync_git_source_once_unchanged_head_skips_worktree_scan(
     assert updated is False
     assert changed_files == set()
     assert removed_files == set()
-    assert ["fetch", "--no-auto-maintenance", "origin", "+refs/heads/main:refs/remotes/origin/main"] in git_calls
+    assert ["fetch", "--no-auto-gc", "origin", "+refs/heads/main:refs/remotes/origin/main"] in git_calls
     assert ["lfs", "pull", "origin", "main"] in git_calls
     assert not any(call[:3] == ["diff", "--name-only", "--no-renames"] for call in git_calls)
 
