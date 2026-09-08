@@ -7133,7 +7133,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 - [`matrix_room`] - Inspect Matrix room metadata, members, thread roots, and room state.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
-- [`thread_resolution`] - Explicitly resolve or reopen the active Matrix thread.
+- [`thread_resolution`] - Explicitly resolve or reopen Matrix threads in the current room.
 - [`thread_summary`] - Set or update a Matrix thread summary from the current room and thread context.
 - [`thread_model`] - List models or show, switch, and reset the model override for the current Matrix thread.
 - [`matrix_api`] - Use a low-level Matrix event and state API with explicit room and event IDs.
@@ -7348,12 +7348,14 @@ list_thread_tags(exclude_tag="resolved", include_untagged=True)
 
 ## [`thread_resolution`]
 
-`thread_resolution` gives an agent explicit permission to resolve or reopen its active Matrix thread.
+`thread_resolution` gives an agent explicit permission to resolve or reopen Matrix threads in the current room.
 
 ### What It Does
 
-`thread_resolution` exposes `resolve_thread()` and `reopen_thread()`.
-Both functions require an active thread and always target its canonical thread root.
+`thread_resolution` exposes `resolve_thread(thread_id=None)` and `reopen_thread(thread_id=None)`.
+Without `thread_id`, both functions require an active thread and target its canonical thread root.
+Pass a thread root or reply event ID to target another thread in the current room, including when calling from the room timeline.
+Explicit IDs are normalized to their canonical thread root, and unresolved targets return an error without changing any thread.
 `resolve_thread()` adds the `resolved` lifecycle tag, while `reopen_thread()` removes it.
 
 ### Configuration
@@ -7375,7 +7377,12 @@ agents:
 ```python
 resolve_thread()
 reopen_thread()
+resolve_thread(thread_id="$completed-thread:example.org")
+reopen_thread(thread_id="$completed-thread:example.org")
 ```
+
+To clear completed project threads, use `list_thread_tags(exclude_tag="resolved", include_untagged=True)` to find candidates, then call `resolve_thread(thread_id=...)` for each selected thread.
+Check the listing's `truncated` flag before treating it as complete.
 
 ### Notes
 
