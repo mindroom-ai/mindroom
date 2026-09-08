@@ -31,8 +31,13 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.private_instance_identity import private_instances_for_agent
 from mindroom.private_instance_identity_store import load_private_instance_identity
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.thread_export.workspace_sync import _clear_disabled_agent_exports
+from mindroom.thread_export.workspace_sync import (
+    WorkspaceThreadExportDeps,
+    WorkspaceThreadExportRunner,
+    _clear_disabled_agent_exports,
+)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, private_instance_scope_root_path
 
 
@@ -218,18 +223,21 @@ def test_relative_links_modes_and_worker_credentials_preserved(tmp_path: Path) -
     assert credentials.read_text() == '{"synthetic": "value"}'
 
 
-@pytest.mark.parametrize("kind", ["symlink", "document"])
-def test_absolute_references_block_without_rewriting(tmp_path: Path, kind: str) -> None:
-    """Absolute paths need an explicit repair; documents and history remain intact."""
+def test_absolute_symlink_blocks_but_historical_paths_remain_opaque(tmp_path: Path) -> None:
+    """Historical references remain unchanged; interpreted absolute links need repair."""
     source = _legacy(tmp_path)
     reference = source / "writer/workspace/reference"
-    if kind == "symlink":
-        reference.symlink_to(source / "writer/workspace/note.md")
-    else:
-        reference.write_text(str(source / "writer/workspace/note.md"))
-    with pytest.raises(upgrade.StorageUpgradeError, match=r"[Aa]bsolute"):
-        upgrade.plan_storage_upgrade(tmp_path)
-    assert reference.exists()
+    reference.write_text(str(source / "writer/workspace/note.md"))
+    original = reference.read_bytes()
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    moved = source.with_name(plan.operations[0].destination)
+    assert (moved / "writer/workspace/reference").read_bytes() == original
+    upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+    reference.unlink()
+    reference.symlink_to(source / "writer/workspace/note.md")
+    with pytest.raises(upgrade.StorageUpgradeError, match="Absolute symlink"):
+        upgrade._inventory(source)
 
 
 @pytest.mark.parametrize("boundary", range(1, 19))
@@ -323,7 +331,7 @@ def test_os_failures_never_copy_or_overwrite(tmp_path: Path, monkeypatch: pytest
     plan = upgrade.plan_storage_upgrade(tmp_path)
     destination = source.with_name(plan.operations[0].destination)
 
-    def fail(*_args: object) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
         if failure == "EEXIST":
             destination.mkdir()
             (destination / "unrelated").write_text("preserve competing destination")
@@ -331,7 +339,7 @@ def test_os_failures_never_copy_or_overwrite(tmp_path: Path, monkeypatch: pytest
         raise OSError(errno.EXDEV if failure == "EXDEV" else errno.EIO, "simulated OS failure")
 
     with monkeypatch.context() as fault:
-        fault.setattr(upgrade, "fsync_directory_durable" if failure == "fsync" else "_rename_no_replace", fail)
+        fault.setattr(upgrade, "fsync_directory_durable" if failure == "fsync" else "_rename_offline", fail)
         with pytest.raises(OSError, match=r"existing destination|simulated OS failure"):
             upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
     with pytest.raises(upgrade._StorageUpgradeRequiredError):
@@ -439,3 +447,246 @@ def test_cli_manifest_is_private_and_never_overwritten(tmp_path: Path) -> None:
     assert applied.exit_code == 0, applied.output
     verified = runner.invoke(app, ["storage-upgrade", "verify", str(manifest)])
     assert verified.exit_code == 0, verified.output
+
+
+@pytest.mark.parametrize("kind", ["invalid", "wrong_schema", "wal", "journal"])
+def test_unreadable_or_unsettled_session_database_blocks_planning(tmp_path: Path, kind: str) -> None:
+    """Immutable verification must never ignore uncheckpointed or corrupt session state."""
+    source = _legacy(tmp_path)
+    database = source / "writer/sessions.db"
+    if kind == "invalid":
+        database.write_bytes(b"not a SQLite database")
+    else:
+        with sqlite3.connect(database) as connection:
+            connection.execute("CREATE TABLE unrelated (value TEXT)")
+        if kind in {"wal", "journal"}:
+            database.with_name(database.name + "-" + kind).write_bytes(b"unsettled sidecar")
+    before = {path: path.read_bytes() for path in source.rglob("*") if path.is_file()}
+    with pytest.raises(upgrade.StorageUpgradeError, match=r"[Ss]ession|[Ss]idecar"):
+        upgrade.plan_storage_upgrade(tmp_path)
+    assert {path: path.read_bytes() for path in source.rglob("*") if path.is_file()} == before
+
+
+def test_posix_offline_rename_revalidates_source_and_destination(tmp_path: Path) -> None:
+    """The portable transition relies on stopped writers and never replaces observed roots."""
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.mkdir()
+    info = source.stat()
+    destination.mkdir()
+    with pytest.raises(upgrade.StorageUpgradeError, match="Destination"):
+        upgrade._rename_offline(source, destination, device=info.st_dev, inode=info.st_ino)
+    destination.rmdir()
+    with pytest.raises(upgrade.StorageUpgradeError, match="identity"):
+        upgrade._rename_offline(source, destination, device=info.st_dev, inode=info.st_ino + 1)
+    upgrade._rename_offline(source, destination, device=info.st_dev, inode=info.st_ino)
+    assert destination.stat().st_ino == info.st_ino
+    assert not source.exists()
+
+
+@pytest.mark.parametrize("boundary", range(1, 17))
+def test_reverse_interruption_is_resumable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: int) -> None:
+    """Every reverse record/rename/fsync/receipt interruption preserves resumable data."""
+    root, sessions = tmp_path / "state", tmp_path / "sessions"
+    root.mkdir()
+    sessions.mkdir()
+    source = _legacy(root)
+    mirror = sessions / source.relative_to(root)
+    mirror.mkdir(parents=True)
+    (mirror / "session.bin").write_bytes(b"original session")
+    original = (source / upgrade._RECORD_FILENAME).read_bytes()
+    plan = upgrade.plan_storage_upgrade(root, sessions)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    calls = 0
+
+    def interrupt() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == boundary:
+            message = "reverse interruption"
+            raise OSError(message)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(upgrade, "_checkpoint", interrupt)
+        with suppress(OSError):
+            upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+    with pytest.raises(upgrade._StorageUpgradeRequiredError):
+        upgrade.check_storage_upgrade(root, sessions)
+    upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+    assert (source / upgrade._RECORD_FILENAME).read_bytes() == original
+    assert (mirror / "session.bin").read_bytes() == b"original session"
+
+
+def test_runtime_resolution_checks_target_without_global_owner_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hot resolution checks receipts and its exact legacy candidate, not all users."""
+    _legacy(tmp_path)
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    config = Config(agents={"writer": AgentConfig(display_name="Writer", private=AgentPrivateConfig(per="user"))})
+    runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="writer",
+        requester_id="@alice:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    original = upgrade._legacy_keys
+    visited = []
+
+    def record(scope: Path) -> tuple[str, str, str] | None:
+        visited.append(scope)
+        return original(scope)
+
+    monkeypatch.setattr(upgrade, "_legacy_keys", record)
+    for _ in range(3):
+        resolve_agent_storage("writer", config, runtime, identity)
+    assert visited == []
+
+
+def test_historical_sqlite_paths_are_retained_and_verified(tmp_path: Path) -> None:
+    """Paths persisted in completed sessions/runs remain history, not relocation edits."""
+    source = _legacy(tmp_path)
+    database = source / "writer/sessions.db"
+    storage = SqliteDb(db_file=str(database))
+    storage.upsert_session(
+        AgentSession(session_id="history", agent_id="writer", session_data={"old_path": str(source)}),
+    )
+    storage.upsert_run(
+        run=RunOutput(run_id="history-run", agent_id="writer", session_id="history", content=str(source)),
+        session_id="history",
+    )
+    storage.db_engine.dispose()
+    original = database.read_bytes()
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    assert plan.operations[0].moves[0].sessions
+    assert database.read_bytes() == original
+    assert not database.with_name(database.name + "-wal").exists()
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    moved = source.with_name(plan.operations[0].destination) / "writer/sessions.db"
+    assert moved.read_bytes() == original
+    upgrade.verify_storage_upgrade(plan)
+    assert not moved.with_name(moved.name + "-wal").exists()
+    assert not moved.with_name(moved.name + "-shm").exists()
+
+
+@pytest.mark.parametrize("failure", ["_write_record", "_rename_offline", "fsync_directory_durable"])
+def test_reverse_os_failure_can_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    """Reverse I/O errors leave the journal fenced and recoverable without lost bytes."""
+    source = _legacy(tmp_path)
+    original = (source / upgrade._RECORD_FILENAME).read_bytes()
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.EIO, "reverse I/O failure")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(upgrade, failure, fail)
+        with pytest.raises(OSError, match="reverse I/O failure"):
+            upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+    with pytest.raises(upgrade._StorageUpgradeRequiredError):
+        upgrade.check_storage_upgrade(tmp_path)
+    upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+    assert (source / upgrade._RECORD_FILENAME).read_bytes() == original
+
+
+def test_nonempty_concurrent_destination_cannot_be_overwritten(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Even a prerequisite-violating writer cannot make POSIX rename replace a nonempty root."""
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.mkdir()
+    (source / "original").write_text("original")
+    info = source.stat()
+    original = type(source).rename
+
+    def race(path: Path, target: Path) -> Path:
+        target.mkdir()
+        (target / "other").write_text("other writer")
+        return original(path, target)
+
+    monkeypatch.setattr(type(source), "rename", race)
+    with pytest.raises(OSError, match=r"not empty|exists"):
+        upgrade._rename_offline(source, destination, device=info.st_dev, inode=info.st_ino)
+    assert (source / "original").read_text() == "original"
+    assert (destination / "other").read_text() == "other writer"
+
+
+@pytest.mark.asyncio
+async def test_export_pass_shares_one_full_preflight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nested cleanup and discovery share preflight while still checking receipts."""
+    _legacy(tmp_path)
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    config = Config(
+        agents={
+            name: AgentConfig(display_name=name, private=AgentPrivateConfig(per="user"))
+            for name in ("writer", "reader")
+        },
+    )
+    original = upgrade._legacy_keys
+    visited = []
+
+    def record(scope: Path) -> tuple[str, str, str] | None:
+        visited.append(scope)
+        return original(scope)
+
+    monkeypatch.setattr(upgrade, "_legacy_keys", record)
+    runner = WorkspaceThreadExportRunner(
+        WorkspaceThreadExportDeps(
+            runtime_paths=runtime,
+            config_provider=lambda: config,
+            bot_provider=lambda _name: None,
+            response_admission_gate=ResponseAdmissionGate(),
+        ),
+    )
+    await runner._run_pass(config, full_pass=True, room_ids=frozenset())
+    assert len(visited) == 1
+    checked = upgrade.check_runtime_storage_upgrade(runtime)
+    upgrade._publish(plan, "prepared")
+    with pytest.raises(upgrade._StorageUpgradeRequiredError):
+        _clear_disabled_agent_exports(config, runtime, frozenset(), checked=checked)
+
+
+def test_only_recognized_worker_runtime_metadata_blocks_relocation(tmp_path: Path) -> None:
+    """User-authored JSON remains opaque while actual startup metadata needs recovery."""
+    source = _legacy(tmp_path)
+    historical = source / "writer/workspace/metadata/worker.json"
+    historical.parent.mkdir(parents=True)
+    historical.write_text(json.dumps({"old_path": str(source)}))
+    upgrade.plan_storage_upgrade(tmp_path)
+    live = source / "writer/.runtime/startup_manifest.json"
+    live.parent.mkdir()
+    live.write_text(json.dumps({"state_root": str(source)}))
+    with pytest.raises(upgrade.StorageUpgradeError, match="runtime metadata"):
+        upgrade.plan_storage_upgrade(tmp_path)
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_relative_session_directory_is_verified_without_rewriting(tmp_path: Path, valid: bool) -> None:
+    """Canonical session links remain relative while their actual database is checked."""
+    source = _legacy(tmp_path)
+    archive = source / "writer/archive"
+    archive.mkdir()
+    database = archive / "writer.db"
+    if valid:
+        storage = SqliteDb(db_file=str(database))
+        storage.upsert_session(AgentSession(session_id="linked", agent_id="writer"))
+        storage.db_engine.dispose()
+    else:
+        database.write_bytes(b"unreadable session database")
+    (source / "writer/sessions").symlink_to("archive", target_is_directory=True)
+    if not valid:
+        with pytest.raises(upgrade.StorageUpgradeError, match="Session database"):
+            upgrade.plan_storage_upgrade(tmp_path)
+        return
+    original = database.read_bytes()
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    moved = source.with_name(plan.operations[0].destination)
+    assert (moved / "writer/sessions").readlink() == type(source)("archive")
+    assert (moved / "writer/sessions/writer.db").read_bytes() == original

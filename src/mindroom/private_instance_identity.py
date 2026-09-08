@@ -18,7 +18,7 @@ from mindroom.private_instance_identity_store import (
 from mindroom.private_instance_identity_store import (
     private_instances_for_agent as _private_instances_for_agent,
 )
-from mindroom.private_storage_upgrade import check_storage_upgrade
+from mindroom.private_storage_upgrade import check_legacy_private_scope, check_storage_upgrade
 
 
 def private_instances_for_agent(
@@ -27,8 +27,12 @@ def private_instances_for_agent(
     worker_scope: WorkerScope,
 ) -> tuple[PrivateInstance, ...]:
     """Discover private owners only after the storage upgrade fence passes."""
-    check_storage_upgrade(base_storage_path)
-    return _private_instances_for_agent(base_storage_path, agent_name, worker_scope)
+    check_storage_upgrade(base_storage_path, scan_legacy=False)
+    instances = _private_instances_for_agent(base_storage_path, agent_name, worker_scope)
+    for instance in instances:
+        if instance.requester_id is None:
+            check_legacy_private_scope(instance.state_root.parent)
+    return instances
 
 
 __all__ = [

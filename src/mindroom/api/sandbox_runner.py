@@ -293,7 +293,6 @@ def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) 
 def load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
     """Read the sandbox runner runtime context from explicit startup payload."""
     runtime_paths = _startup_runtime_paths_from_env()
-    check_runtime_storage_upgrade(runtime_paths)
     return runtime_paths, _runtime_config_or_empty(runtime_paths)
 
 

@@ -9,15 +9,14 @@ keep them with the protected volumes and retain a verified backup.
 from __future__ import annotations
 
 import base64
-import ctypes
 import hashlib
 import json
 import os
 import re
 import sqlite3
 import stat
-import sys
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Literal
@@ -64,6 +63,7 @@ class _Volume(_FrozenModel):
 class _Move(_FrozenModel):
     volume: int
     inventory: str
+    sessions: dict[str, str]
     device: int
     inode: int
 
@@ -154,7 +154,7 @@ def _legacy_keys(scope: Path) -> tuple[str, str, str] | None:
     return old, current, identity.requester_id
 
 
-def _inventory(root: Path, old_paths: tuple[str, ...]) -> str:
+def _inventory(root: Path) -> str:
     """Hash names, bytes, modes, owners and timestamps without following links."""
     digest = hashlib.sha256()
     for path in sorted((root, *root.rglob("*"))):
@@ -179,15 +179,15 @@ def _inventory(root: Path, old_paths: tuple[str, ...]) -> str:
                 _fail("Absolute symlink requires an explicit relocation repair")
             digest.update(target.encode())
         elif stat.S_ISREG(info.st_mode):
+            parts = path.relative_to(root).parts
+            runtime_metadata = {(".runtime", "startup_manifest.json"), ("metadata", "worker.json")}
+            if parts in runtime_metadata or (len(parts) == 3 and parts[1:] in runtime_metadata):
+                _fail("Persisted worker runtime metadata requires explicit offline recovery")
             if info.st_nlink != 1:
                 _fail("Hard-linked data requires an explicit relocation repair")
             with path.open("rb") as source:
-                tail = b""
                 while chunk := source.read(1024 * 1024):
-                    if any(old.encode() in tail + chunk for old in old_paths):
-                        _fail("Persisted absolute path requires an explicit relocation repair")
                     digest.update(chunk)
-                    tail = (tail + chunk)[-max(map(len, old_paths), default=1) :]
         elif not stat.S_ISDIR(info.st_mode):
             _fail("Special files require offline recovery before relocation")
     return digest.hexdigest()
@@ -251,7 +251,6 @@ def _plan_storage_upgrade(  # noqa: C901 - ordered preflight refuses partial own
             old, new, requester = keys
             destination = private_instance_scope_root_path(namespace.parent, new).name
             moves = []
-            old_paths = tuple(str(Path(volume.path) / "private_instances" / scope.name) for volume in volumes)
             for index, volume in enumerate(volumes):
                 parent = Path(volume.path) / "private_instances"
                 if parent.exists() or parent.is_symlink():
@@ -265,7 +264,8 @@ def _plan_storage_upgrade(  # noqa: C901 - ordered preflight refuses partial own
                     moves.append(
                         _Move(
                             volume=index,
-                            inventory=_inventory(source, old_paths),
+                            inventory=_inventory(source),
+                            sessions=_session_snapshots(source),
                             device=info.st_dev,
                             inode=info.st_ino,
                         ),
@@ -306,8 +306,10 @@ def _plan_storage_upgrade(  # noqa: C901 - ordered preflight refuses partial own
 def check_storage_upgrade(  # noqa: C901, PLR0912 - inspect every participating volume before access
     storage: Path,
     sessions: Path | None = None,
+    *,
+    scan_legacy: bool = True,
 ) -> None:
-    """Fail closed before startup, owner discovery, export, or cleanup."""
+    """Check receipts on every call, with exhaustive legacy checks at operation boundaries."""
     try:
         roots = [storage.expanduser().absolute()]
         if sessions is not None and sessions.expanduser().absolute() not in roots:
@@ -328,6 +330,8 @@ def check_storage_upgrade(  # noqa: C901, PLR0912 - inspect every participating 
             if not namespace.exists() and not namespace.is_symlink():
                 continue
             _directory(namespace)
+            if not scan_legacy:
+                continue
             for scope in namespace.iterdir():
                 if not scope.is_dir() or scope.is_symlink():
                     continue
@@ -342,13 +346,65 @@ def check_storage_upgrade(  # noqa: C901, PLR0912 - inspect every participating 
         raise _StorageUpgradeRequiredError(message) from exc
 
 
-def check_runtime_storage_upgrade(runtime_paths: RuntimePaths) -> None:
-    """Check main and configured session storage before any runtime side effects."""
+@dataclass(frozen=True)
+class StorageUpgradeCheck:
+    """Evidence that one outer operation completed its exhaustive legacy preflight."""
+
+    roots: tuple[Path, Path]
+
+
+def _runtime_roots(runtime_paths: RuntimePaths) -> tuple[Path, Path]:
     configured = runtime_paths.env_value("MINDROOM_SESSION_STORAGE_PATH")
     sessions = Path(configured).expanduser() if configured and configured.strip() else runtime_paths.storage_root
     if not sessions.is_absolute():
         sessions = runtime_paths.config_dir / sessions
-    check_storage_upgrade(runtime_paths.storage_root, sessions)
+    return runtime_paths.storage_root, sessions
+
+
+def check_runtime_storage_upgrade(
+    runtime_paths: RuntimePaths,
+    *,
+    checked: StorageUpgradeCheck | None = None,
+) -> StorageUpgradeCheck:
+    """Preflight one startup/export operation, sharing proof with nested helpers."""
+    roots = _runtime_roots(runtime_paths)
+    check_storage_upgrade(*roots, scan_legacy=checked is None or checked.roots != roots)
+    return StorageUpgradeCheck(roots)
+
+
+def check_runtime_storage_markers(runtime_paths: RuntimePaths) -> None:
+    """Check participation fences without scanning every user's owner record."""
+    check_storage_upgrade(*_runtime_roots(runtime_paths), scan_legacy=False)
+
+
+def check_legacy_private_scope(scope: Path) -> None:
+    """Refuse discovery/cleanup of an exact legacy owner without authorizing it."""
+    try:
+        legacy = _legacy_keys(scope)
+    except (OSError, PrivateInstanceIdentityError, StorageUpgradeError):
+        return
+    if legacy is not None:
+        message = "Owner-verified legacy private storage requires offline upgrade"
+        raise _StorageUpgradeRequiredError(message)
+
+
+def check_private_storage_target(storage: Path, worker_key: str, requester_id: str) -> None:
+    """Check only the legacy candidate derived from this exact requester."""
+    parts = worker_key.split(":")
+    requester = re.sub(r"[^a-zA-Z0-9._:@+-]+", "_", requester_id.strip()).strip("_") or "default"
+    old_key = f"v1:{parts[1]}:{parts[2]}:{requester}"
+    if parts[2] == "user_agent":
+        old_key += ":" + parts[-1]
+    scope = private_instance_scope_root_path(storage, old_key)
+    if not scope.exists() and not scope.is_symlink():
+        return
+    try:
+        legacy = _legacy_keys(scope)
+    except (OSError, PrivateInstanceIdentityError, StorageUpgradeError):
+        return
+    if legacy is not None and legacy[1:] == (worker_key, requester_id):
+        message = "This exact requester has private storage awaiting offline upgrade"
+        raise _StorageUpgradeRequiredError(message)
 
 
 def _checkpoint() -> None:
@@ -369,17 +425,19 @@ def _publish(
         _checkpoint()
 
 
-def _rename_no_replace(source: Path, destination: Path) -> None:
-    """Linux atomic directory rename that cannot overwrite any destination."""
-    if sys.platform != "linux":
-        _fail("Offline directory relocation requires Linux renameat2 support")
-    libc = ctypes.CDLL(None, use_errno=True)
-    rename = libc.renameat2
-    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-    rename.restype = ctypes.c_int
-    if rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1) != 0:
-        code = ctypes.get_errno()
-        raise OSError(code, os.strerror(code))
+def _rename_offline(source: Path, destination: Path, *, device: int, inode: int) -> None:
+    """Move within a locked volume only while every writer is stopped.
+
+    POSIX rename works on filesystems without RENAME_NOREPLACE. The destination
+    absence check is safe only under the explicit offline-writer prerequisite;
+    it is not an atomic exclusion guarantee against uncooperative writers.
+    """
+    info = _directory(source)
+    if (info.st_dev, info.st_ino) != (device, inode):
+        _fail("Transaction directory identity changed before rename")
+    if destination.exists() or destination.is_symlink():
+        _fail("Destination already exists; offline replacement is forbidden")
+    source.rename(destination)
     _checkpoint()
     fsync_directory_durable(source.parent)
     _checkpoint()
@@ -426,8 +484,9 @@ def _inspect_move(plan: StorageUpgradePlan, operation: _Operation, move: _Move) 
     info = _directory(path)
     if (info.st_dev, info.st_ino) != (move.device, move.inode):
         _fail("Transaction directory identity changed")
-    old_paths = tuple(str(Path(v.path) / "private_instances" / operation.source) for v in plan.volumes)
-    if _inventory(path, old_paths) != move.inventory:
+    if _session_snapshots(path) != move.sessions:
+        _fail("Session database schema or rows changed")
+    if _inventory(path) != move.inventory:
         _fail("Private data changed; refuse relocation or stale rollback")
     if move.volume == 0:
         record = path / _RECORD_FILENAME
@@ -495,8 +554,6 @@ def apply_storage_upgrade(  # noqa: C901, PLR0912 - keep durable transaction ord
     """Apply or resume an inspected plan with stopped writers and verified backups."""
     if not writers_stopped or not backup_verified:
         _fail("Stopped writers and verified volume backups are required")
-    if sys.platform != "linux":
-        _fail("Offline directory relocation requires Linux renameat2 support")
     _validate_plan(plan)
     _check_active_scripts(Path(plan.control_state))
     with ExitStack() as locks:
@@ -530,7 +587,7 @@ def apply_storage_upgrade(  # noqa: C901, PLR0912 - keep durable transaction ord
             for move in operation.moves:
                 path, moved = _inspect_move(plan, operation, move)
                 if not moved:
-                    _rename_no_replace(path, path.with_name(operation.destination))
+                    _rename_offline(path, path.with_name(operation.destination), device=move.device, inode=move.inode)
                 _publish(plan, "moving")
             destination = Path(plan.volumes[0].path) / "private_instances" / operation.destination
             _write_record(destination, operation, new=True)
@@ -539,7 +596,7 @@ def apply_storage_upgrade(  # noqa: C901, PLR0912 - keep durable transaction ord
         _publish(plan, "complete")
 
 
-def rollback_storage_upgrade(  # noqa: C901 - reverse the journaled transaction in strict order
+def rollback_storage_upgrade(
     plan: StorageUpgradePlan,
     *,
     writers_stopped: bool,
@@ -547,8 +604,6 @@ def rollback_storage_upgrade(  # noqa: C901 - reverse the journaled transaction 
     """Reverse only unchanged pre-traffic data; resume an interrupted reversal."""
     if not writers_stopped:
         _fail("Stopped writers are required for reverse recovery")
-    if sys.platform != "linux":
-        _fail("Offline directory relocation requires Linux renameat2 support")
     _validate_plan(plan)
     _check_active_scripts(Path(plan.control_state))
     with ExitStack() as locks:
@@ -570,7 +625,7 @@ def rollback_storage_upgrade(  # noqa: C901 - reverse the journaled transaction 
             for move in reversed(operation.moves):
                 path, moved = _inspect_move(plan, operation, move)
                 if moved:
-                    _rename_no_replace(path, path.with_name(operation.source))
+                    _rename_offline(path, path.with_name(operation.source), device=move.device, inode=move.inode)
                 _publish(plan, "reversing")
         _publish(plan, "rolled_back")
 
@@ -611,3 +666,69 @@ def _validate_unplanned_mirrors(plan: StorageUpgradePlan, operation: _Operation)
             path = namespace / name
             if path.exists() or path.is_symlink():
                 _fail("An unplanned session mirror appeared during the transaction")
+
+
+def _session_snapshots(root: Path) -> dict[str, str]:
+    """Read canonical session paths, including relative links contained in the scope."""
+    snapshots = {}
+    for agent in sorted(root.iterdir()):
+        if not agent.is_dir():
+            continue
+        candidates = [agent / "session.db", agent / "sessions.db", *(agent / "sessions").glob("*.db")]
+        for database in sorted(candidates):
+            if not database.exists() and not database.is_symlink():
+                continue
+            target = database.resolve(strict=True)
+            if not target.is_relative_to(root):
+                _fail("Session database link leaves the private scope")
+            snapshots[database.relative_to(root).as_posix()] = _session_database_snapshot(target)
+    return snapshots
+
+
+def _settled_database(database: Path) -> None:
+    """Immutable SQLite reads are safe only when no pending journal is ignored."""
+    if not stat.S_ISREG(database.lstat().st_mode):
+        _fail("Session database must be a regular file")
+    for suffix in ("-wal", "-journal"):
+        sidecar = database.with_name(database.name + suffix)
+        if sidecar.is_symlink() or (sidecar.exists() and sidecar.stat().st_size):
+            _fail("Session database sidecar must be settled with writers stopped")
+
+
+def _session_database_snapshot(database: Path) -> str:
+    """Validate schema/integrity and fingerprint actual session and run rows."""
+    _settled_database(database)
+    digest = hashlib.sha256()
+    try:
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro&immutable=1", uri=True)) as connection:
+            connection.execute("PRAGMA trusted_schema = OFF")
+            if connection.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+                _fail("Session database integrity validation failed")
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                _fail("Session database contains broken row references")
+            tables = connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name",
+            ).fetchall()
+            sessions = [name for name, _ in tables if name.endswith("sessions")]
+            if not sessions:
+                _fail("Session database has no recognized session schema")
+            digest.update(repr(tables).encode())
+            for name, _ in tables:
+                if name not in sessions and name != "agno_runs":
+                    continue
+                columns = {row[1] for row in connection.execute("SELECT * FROM pragma_table_info(?)", (name,))}
+                required = {"session_id", "session_type"} if name in sessions else {"run_id", "session_id", "run_data"}
+                if not required <= columns:
+                    _fail("Session database has an incompatible session or run schema")
+                identifier = '"' + name.replace('"', '""') + '"'
+                order = "session_id" if name in sessions else "run_id"
+                # Identifiers come from SQLite metadata and are quoted; order is a fixed literal.
+                rows = connection.execute(f"SELECT * FROM {identifier} ORDER BY {order}")  # noqa: S608
+                digest.update(name.encode())
+                for row in rows:
+                    digest.update(repr(row).encode())
+    except sqlite3.Error as error:
+        message = "Session database cannot be read safely offline"
+        raise StorageUpgradeError(message) from error
+    _settled_database(database)
+    return digest.hexdigest()
