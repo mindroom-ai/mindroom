@@ -285,7 +285,10 @@ def _load_docker_client_and_errors(
         docker_module = importlib.import_module("docker")
         docker_errors = cast("_DockerErrors", importlib.import_module("docker.errors"))
     except ModuleNotFoundError as exc:
-        msg = "The Docker worker backend could not import the Docker SDK after ensuring the optional 'docker' extra."
+        msg = (
+            "The Docker worker backend could not import the Docker SDK. "
+            "Install the optional 'docker' extra before starting the primary."
+        )
         raise WorkerBackendError(msg) from exc
 
     docker_from_env = cast("Callable[..., _DockerClient]", docker_module.from_env)

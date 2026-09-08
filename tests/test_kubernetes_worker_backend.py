@@ -3470,14 +3470,23 @@ def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "omitted_flags",
+    [(), ("controller",), ("blockOwnerDeletion",), ("controller", "blockOwnerDeletion")],
+)
 def test_storage_quiescence_deletes_only_owned_deployments_and_preserves_state(
     monkeypatch: pytest.MonkeyPatch,
+    omitted_flags: tuple[str, ...],
 ) -> None:
     """Migration quiescence removes runtimes while retaining durable resources and bytes."""
     backend, apps_api, core_api = _backend(owner_deployment_name="mindroom-primary")
     first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
     legacy_worker_key = "v1:tenant-123:user:@alice:example.org"
     second = backend.ensure_worker(WorkerSpec(legacy_worker_key), now=0.0)
+    for handle in (first, second):
+        reference = vars(apps_api.deployments[handle.worker_id].metadata.ownerReferences[0])
+        for flag in omitted_flags:
+            reference.pop(flag)
     sentinel = backend.storage_root / "credentials" / "sentinel.bin"
     sentinel.parent.mkdir(parents=True, exist_ok=True)
     sentinel.write_bytes(b"retain exact credential bytes")
@@ -4587,3 +4596,59 @@ router:
     )
 
     assert backend._resources.resolved_agent_policies["code"].effective_execution_scope == "user"
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["apiVersion", "kind", "name", "uid", "missing_uid", "missing_owner", "extra_owner"],
+)
+def test_storage_quiescence_checks_exact_owner_identity_with_omitted_flags(mismatch: str) -> None:
+    """Ignoring optional flags must preserve all four owner identity fields and single-owner cardinality."""
+    backend, apps_api, _core_api = _backend(owner_deployment_name="mindroom-primary")
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    second = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_B), now=0.0)
+    metadata = apps_api.deployments[second.worker_id].metadata
+    reference = vars(metadata.ownerReferences[0])
+    reference.pop("controller")
+    reference.pop("blockOwnerDeletion")
+    if mismatch == "missing_uid":
+        reference.pop("uid")
+    elif mismatch == "missing_owner":
+        metadata.ownerReferences = []
+    elif mismatch == "extra_owner":
+        metadata.ownerReferences.append(deepcopy(metadata.ownerReferences[0]))
+    else:
+        reference[mismatch] = "foreign-owner"
+
+    with pytest.raises(WorkerBackendError, match="does not match exact ownership"):
+        backend._resources.quiesce_worker_deployments_for_storage_upgrade(timeout_seconds=5.0)
+
+    assert apps_api.deleted_names == []
+
+
+def test_storage_quiescence_blocks_owner_reappearance_without_flags_or_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An exact owner alone fences a reappearing worker even when optional flags and candidate labels are absent."""
+    backend, apps_api, _core_api = _backend(owner_deployment_name="mindroom-primary")
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    reappeared = deepcopy(apps_api.deployments[handle.worker_id])
+    reappeared.metadata.labels = {}
+    reference = vars(reappeared.metadata.ownerReferences[0])
+    reference.pop("controller")
+    reference.pop("blockOwnerDeletion")
+    list_deployments = apps_api.list_namespaced_deployment
+    list_calls = 0
+
+    def reappearing_list(namespace: str, **kwargs: object) -> object:
+        nonlocal list_calls
+        list_calls += 1
+        if list_calls == 2:
+            apps_api.deployments[handle.worker_id] = reappeared
+        return list_deployments(namespace, **kwargs)
+
+    monkeypatch.setattr(apps_api, "list_namespaced_deployment", reappearing_list)
+
+    with pytest.raises(WorkerBackendError, match="reappeared"):
+        backend._resources.quiesce_worker_deployments_for_storage_upgrade(timeout_seconds=5.0)
+
+    assert apps_api.deleted_names == [handle.worker_id]
+    assert apps_api.deployments[handle.worker_id] is reappeared

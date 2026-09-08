@@ -60,7 +60,8 @@ def quiesce_workers_for_storage_upgrade(
         if proxy_url:
             msg = (
                 "Private-storage upgrade cannot stop the configured external runner. "
-                "Stop it through the deployment lifecycle before using offline recovery."
+                "Stop it through the deployment lifecycle, temporarily unset MINDROOM_SANDBOX_PROXY_URL "
+                "for migration startup, then restart the primary."
             )
             raise WorkerBackendError(msg)
         return

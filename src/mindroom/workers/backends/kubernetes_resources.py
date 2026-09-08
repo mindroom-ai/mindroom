@@ -623,6 +623,16 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
     )
 
 
+def _has_exact_owner_reference(
+    references: tuple[dict[str, object], ...],
+    expected_owner: dict[str, object],
+) -> bool:
+    """Match one owner identity without depending on optional serialized control flags."""
+    return len(references) == 1 and all(
+        references[0].get(field) == expected_owner[field] for field in ("apiVersion", "kind", "name", "uid")
+    )
+
+
 def _storage_quiescence_deployment_identity(
     deployment: KubernetesDeployment,
     *,
@@ -636,7 +646,7 @@ def _storage_quiescence_deployment_identity(
         **config.extra_labels,
     }
     label_candidate = all(deployment.metadata.labels.get(key) == value for key, value in configured_labels.items())
-    owner_candidate = deployment.metadata.owner_references == (expected_owner,)
+    owner_candidate = _has_exact_owner_reference(deployment.metadata.owner_references, expected_owner)
     if not label_candidate and not owner_candidate:
         return None
     annotations = dict(deployment.metadata.annotations or {})
@@ -1042,7 +1052,7 @@ class KubernetesResourceManager:
             self._wait_for_deployment_absent_for_storage_upgrade(deployment_name, deadline=deadline)
         remaining_deployments = self.list_deployments(request_timeout_seconds=remaining(), label_selector="")
         if any(
-            deployment.metadata.owner_references == (expected_owner,)
+            _has_exact_owner_reference(deployment.metadata.owner_references, expected_owner)
             or all(deployment.metadata.labels.get(key) == value for key, value in configured_labels.items())
             for deployment in remaining_deployments
         ):
