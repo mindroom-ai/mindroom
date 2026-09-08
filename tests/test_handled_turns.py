@@ -1014,6 +1014,20 @@ class _DelayedFirstWriteStore(TurnRecordStore):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _DelayedForgetStore(TurnRecordStore):
+    """Pause cleanup after durable deletion but before its cache replacement."""
+
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    released: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def forget(self, *, index_event_ids: Sequence[str]) -> None:
+        """Expose the interval where durable rows are gone and the old cache remains."""
+        await TurnRecordStore.forget(self, index_event_ids=index_event_ids)
+        self.started.set()
+        await self.released.wait()
+
+
 @pytest.mark.asyncio
 async def test_unrelated_turn_is_durable_while_another_write_waits(journal_store: EventJournalStore) -> None:
     """An unrelated turn must not inherit another turn's persistence latency."""
@@ -1075,6 +1089,25 @@ async def test_related_update_waits_while_unrelated_turns_persist(
     finally:
         records.released.set()
         await asyncio.gather(slow, dependent, fast, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_declined_update_does_not_publish_or_persist(journal_store: EventJournalStore) -> None:
+    """A callback can decline after inspecting settled conflicting identities."""
+    agent = "declined_update"
+    ledger = await _open_ledger(journal_store, agent)
+    await ledger.record_handled_turn(TurnRecord.create(["$alias"], completed=False))
+    existing = ledger.get_turn_record("$alias")
+    assert existing is not None
+
+    result = await ledger.update_handled_turn(("$source", "$alias"), lambda _current: None)
+
+    assert result is None
+    assert ledger.get_turn_record("$source") is None
+    assert ledger.get_turn_record("$alias") == existing
+    loaded = await _reload_ledger(journal_store, agent)
+    assert loaded.get_turn_record("$source") is None
+    assert loaded.get_turn_record("$alias") == existing
 
 
 @pytest.mark.asyncio
@@ -1267,6 +1300,31 @@ async def test_cleanup_waits_for_active_write_and_excludes_new_reservations(jour
     finally:
         records.released.set()
         await asyncio.gather(slow, cleanup, fast, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_settled_read_waits_for_cleanup_cache_replacement(journal_store: EventJournalStore) -> None:
+    """A settled read cannot return a cache row cleanup already deleted durably."""
+    agent = "settled_read_during_cleanup"
+    records = _DelayedForgetStore(_backend=journal_store.backend, _agent_name=agent)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    await ledger.record_handled_turn(TurnRecord.create(["$event"], response_event_id="$response"))
+    cleanup = asyncio.create_task(ledger._cleanup_old_events(max_events=0, max_age_days=0))
+    await records.started.wait()
+    settled_read = asyncio.create_task(ledger.get_settled_turn_record("$event"))
+    try:
+        await asyncio.sleep(0)
+        assert not settled_read.done()
+        assert await _read_persisted_records(journal_store, agent) == {}
+        records.released.set()
+        await cleanup
+        assert await settled_read is None
+        loaded = await _reload_ledger(journal_store, agent)
+        assert loaded.get_turn_record("$event") is None
+    finally:
+        records.released.set()
+        await asyncio.gather(cleanup, settled_read, return_exceptions=True)
 
 
 @pytest.mark.asyncio

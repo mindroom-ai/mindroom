@@ -982,10 +982,22 @@ class TurnStore:
         if recovery_record is None:
             return await self._ledger.get_settled_turn_record(original_event_id)
 
-        def imported_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+        def imported_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord | None:
             current = existing_records.get(original_event_id)
             if current is not None:
                 return current
+            source_owner = next(
+                (
+                    existing_records[source_event_id]
+                    for source_event_id in recovery_record.source_event_ids
+                    if source_event_id in existing_records
+                ),
+                None,
+            )
+            if source_owner is not None:
+                return source_owner
+            if existing_records:
+                return None
             return self._sanitize_candidate(recovery_record)
 
         return await self._ledger.update_handled_turn(

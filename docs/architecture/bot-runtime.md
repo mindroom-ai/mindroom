@@ -260,7 +260,7 @@ Saved run metadata remains intentionally redundant so older turns removed by led
 `TurnStore` returns any present ledger record unchanged without opening model session storage.
 Run metadata supplies a complete candidate only when the requested ledger identity is absent.
 Import publication waits for conflicting provisional writes, rechecks the requested source or discovery alias, and returns any concurrent owner unchanged.
-The existing ledger resolver prevents an absent-row candidate from taking completed source ownership or crossing revision tombstone fences.
+An occupied recovered physical source remains authoritative, while any collision confined to a recovered discovery alias declines the historical import.
 `TurnStore` immediately writes an imported record into the ledger, so every later load uses journal authority.
 One runtime process owns each ledger's semantic ordering, and nothing defines cross-process turn precedence.
 Terminal records live in the journal database rather than a per-agent JSON file, so the advisory file lock that used to make the file update atomic is gone; the database serializes the write itself.

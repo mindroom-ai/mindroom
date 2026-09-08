@@ -511,7 +511,7 @@ class HandledTurnLedger:
     async def _reserve_update(
         self,
         lookup_event_ids: tuple[str, ...],
-        update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
+        update: Callable[[Mapping[str, TurnRecord]], TurnRecord | None],
     ) -> _PendingLedgerWrite | None:
         """Derive and publish after earlier conflicting writes have settled."""
         while True:
@@ -529,6 +529,8 @@ class HandledTurnLedger:
                             },
                         )
                         updated = update(existing)
+                        if updated is None:
+                            return None
                         candidate = canonicalize_turn_record(
                             updated,
                             timestamp=updated.timestamp if updated.timestamp != 0.0 else time.time(),
@@ -562,14 +564,15 @@ class HandledTurnLedger:
     async def update_handled_turn(
         self,
         lookup_event_ids: Sequence[str],
-        update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
+        update: Callable[[Mapping[str, TurnRecord]], TurnRecord | None],
     ) -> TurnRecord | None:
         """Persist an update, serializing mutations of related identities.
 
         Unrelated turns can wait for their writes independently. The synchronous
         derivation may run again after a conflicting write settles; it must not
-        perform external effects. Provisional claims remain visible until the
-        write commits or its definite failure has been rolled back.
+        perform external effects. Returning ``None`` declines the mutation before
+        provisional publication. Provisional claims remain visible until the write
+        commits or its definite failure has been rolled back.
         """
         normalized = canonical_source_event_ids(lookup_event_ids)
         if not normalized:
@@ -806,13 +809,14 @@ class HandledTurnLedger:
             return self._responses.get(source_event_id)
 
     async def get_settled_turn_record(self, source_event_id: str) -> TurnRecord | None:
-        """Return one record after any write owning this identity settles."""
+        """Return one record after owning writes and cache replacement settle."""
         while True:
-            with self._state.lock:
-                self._require_loaded()
-                pending_write = self._state.pending_writes.get(source_event_id)
-                if pending_write is None:
-                    return self._responses.get(source_event_id)
+            async with self._state.write_lock:
+                with self._state.lock:
+                    self._require_loaded()
+                    pending_write = self._state.pending_writes.get(source_event_id)
+                    if pending_write is None:
+                        return self._responses.get(source_event_id)
             await asyncio.shield(pending_write)
 
     def pending_redaction_cleanup_event_ids(self) -> tuple[str, ...]:
