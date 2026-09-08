@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, cast, overload
@@ -1429,16 +1429,15 @@ class _MultiAgentOrchestrator:
             return
         router_bot = self._router_bot()
 
-        principals = {bot.agent_name: bot.journal_principal() for bot in bots if bot.client is not None}
+        recovery_bots = {bot.agent_name: bot for bot in bots if bot.client is not None}
 
-        async def response_is_owned(agent_name: str, room_id: str, event_id: str) -> bool:
-            principal = principals.get(agent_name)
-            return principal is not None and await principal.owns_matrix_response(room_id=room_id, event_id=event_id)
+        def response_recovery_scope(agent_name: str, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
+            return recovery_bots[agent_name].response_recovery_scope(room_id, event_id)
 
         result = await recover_stale_streaming_messages(
             actors,
             resume_client=router_bot.client if router_bot is not None else None,
-            response_is_owned=response_is_owned,
+            response_recovery_scope=response_recovery_scope,
             config=config,
             runtime_paths=self.runtime_paths,
             startup_cutoff_ms=startup_cutoff_ms,

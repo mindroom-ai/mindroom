@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -64,7 +65,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-type _ResponseIsOwned = Callable[[str, str, str], Awaitable[bool]]
+type _ResponseRecoveryScope = Callable[[str, str, str], AbstractAsyncContextManager[bool]]
 
 _ROOM_HISTORY_PAGE_SIZE = 100
 # Startup cleanup receives a pre-sync cutoff and ignores messages at or after
@@ -221,7 +222,7 @@ async def recover_stale_streaming_messages(
     actors: dict[str, nio.AsyncClient],
     *,
     resume_client: nio.AsyncClient | None,
-    response_is_owned: _ResponseIsOwned,
+    response_recovery_scope: _ResponseRecoveryScope,
     config: Config,
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None,
@@ -262,6 +263,7 @@ async def recover_stale_streaming_messages(
                     runtime_paths=runtime_paths,
                     startup_cutoff_ms=startup_cutoff_ms,
                     terminal_interrupted_only=target_room_ids is not None,
+                    response_recovery_scope=response_recovery_scope,
                 )
             except Exception:
                 scanned_room_ids.discard(room_id)
@@ -293,7 +295,7 @@ async def recover_stale_streaming_messages(
             resumed_count += await _auto_resume_interrupted_threads(
                 resume_client,
                 interrupted_threads,
-                response_is_owned=response_is_owned,
+                response_recovery_scope=response_recovery_scope,
                 config=config,
                 runtime_paths=runtime_paths,
                 delay_before_first=resumed_count > 0,
@@ -356,7 +358,7 @@ async def _auto_resume_interrupted_threads(
     client: nio.AsyncClient,
     interrupted: list[_InterruptedThread],
     *,
-    response_is_owned: _ResponseIsOwned,
+    response_recovery_scope: _ResponseRecoveryScope,
     config: Config,
     runtime_paths: RuntimePaths,
     delay: float = 2.0,
@@ -389,35 +391,36 @@ async def _auto_resume_interrupted_threads(
         ):
             continue
         try:
-            if not await response_is_owned(
+            async with response_recovery_scope(
                 interrupted_thread.agent_name,
                 interrupted_thread.room_id,
                 interrupted_thread.target_event_id,
-            ):
-                continue
-            content = _build_auto_resume_content(
-                interrupted_thread,
-                config=config,
-                runtime_paths=runtime_paths,
-            )
-            delay_due = True
-            delivered = await send_message_result(client, interrupted_thread.room_id, content)
-            if delivered is not None:
-                logger.info(
-                    "Queued auto-resume after restart",
-                    room_id=interrupted_thread.room_id,
-                    thread_id=interrupted_thread.thread_id,
-                    target_event_id=interrupted_thread.target_event_id,
-                    event_id=delivered.event_id,
+            ) as permitted:
+                if not permitted:
+                    continue
+                content = _build_auto_resume_content(
+                    interrupted_thread,
+                    config=config,
+                    runtime_paths=runtime_paths,
                 )
-                resumed_count += 1
-            else:
-                logger.warning(
-                    "Failed to queue auto-resume after restart",
-                    room_id=interrupted_thread.room_id,
-                    thread_id=interrupted_thread.thread_id,
-                    target_event_id=interrupted_thread.target_event_id,
-                )
+                delay_due = True
+                delivered = await send_message_result(client, interrupted_thread.room_id, content)
+                if delivered is not None:
+                    logger.info(
+                        "Queued auto-resume after restart",
+                        room_id=interrupted_thread.room_id,
+                        thread_id=interrupted_thread.thread_id,
+                        target_event_id=interrupted_thread.target_event_id,
+                        event_id=delivered.event_id,
+                    )
+                    resumed_count += 1
+                else:
+                    logger.warning(
+                        "Failed to queue auto-resume after restart",
+                        room_id=interrupted_thread.room_id,
+                        thread_id=interrupted_thread.thread_id,
+                        target_event_id=interrupted_thread.target_event_id,
+                    )
         except Exception as exc:
             logger.warning(
                 "Failed to send auto-resume message",
@@ -549,6 +552,7 @@ async def _cleanup_stale_streaming_room(
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
+    response_recovery_scope: _ResponseRecoveryScope,
 ) -> tuple[int, list[_InterruptedThread]]:
     """Scan one room once and let each bot account repair its own messages."""
     if not actors:
@@ -587,20 +591,26 @@ async def _cleanup_stale_streaming_room(
         actor_client = actors.get(bot_user_id) if bot_user_id is not None else None
         if bot_user_id is None or actor_client is None:
             continue
-        edited, interrupted = await _process_stale_room_candidate(
-            actor_client,
-            bot_user_id=bot_user_id,
-            room_id=room_id,
-            target_event_id=target_event_id,
-            state=state,
-            auto_resume_target_event_ids=scanned_state.auto_resume_target_event_ids,
-            bot_user_ids=bot_user_ids,
-            config=config,
-            runtime_paths=runtime_paths,
-            current_time_ms=current_time_ms,
-            scan_policy=scan_policy,
-            prior_edit_succeeded=bot_user_id in prior_edit_succeeded_by_bot,
-        )
+        agent_name = _agent_name_for_bot_user_id(bot_user_id, config, runtime_paths)
+        if agent_name is None:
+            continue
+        async with response_recovery_scope(agent_name, room_id, target_event_id) as permitted:
+            if not permitted:
+                continue
+            edited, interrupted = await _process_stale_room_candidate(
+                actor_client,
+                bot_user_id=bot_user_id,
+                room_id=room_id,
+                target_event_id=target_event_id,
+                state=state,
+                auto_resume_target_event_ids=scanned_state.auto_resume_target_event_ids,
+                bot_user_ids=bot_user_ids,
+                config=config,
+                runtime_paths=runtime_paths,
+                current_time_ms=current_time_ms,
+                scan_policy=scan_policy,
+                prior_edit_succeeded=bot_user_id in prior_edit_succeeded_by_bot,
+            )
         if edited:
             cleaned_count += 1
             prior_edit_succeeded_by_bot.add(bot_user_id)

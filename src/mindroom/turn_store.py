@@ -816,10 +816,26 @@ class TurnStore:
             target=target,
             source_event_ids=source_event_ids,
         )
+        if suppressed or any(self.is_handled(source_event_id) for source_event_id in terminal_source_event_ids):
+            return True
         if any(self.is_revision_redacted(message.latest_event_id) for message in thread_history):
             msg = "Conversation revision changed before locked response preparation"
             raise RevisionSnapshotChangedError(msg)
-        return suppressed or any(self.is_handled(source_event_id) for source_event_id in terminal_source_event_ids)
+        return False
+
+    async def detach_deleted_response(self, turn_id: str, response_event_id: str | None) -> None:
+        """Forget exact unfinished visible attribution only after Matrix cleanup succeeds."""
+        record = self.get_turn_record(turn_id)
+        if record is None or response_event_id is None:
+            return
+
+        def detached(records: Mapping[str, TurnRecord]) -> TurnRecord:
+            current = records[turn_id]
+            if current.completed or current.response_event_id != response_event_id:
+                return current
+            return replace(current, response_event_id=None, timestamp=0.0)
+
+        await self._ledger.update_handled_turn(record.indexed_event_ids, detached)
 
     async def _prepare_edit_response_source(
         self,

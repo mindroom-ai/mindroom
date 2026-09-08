@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from html import escape as html_escape
@@ -26,6 +27,7 @@ from mindroom.event_journal import (
     replacement_target,
     thread_root,
 )
+from mindroom.event_journal.models import UnreadableMatrixDelivery
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.hooks import (
@@ -109,6 +111,7 @@ if TYPE_CHECKING:
     )
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
+    from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
     from mindroom.streaming import StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
@@ -460,6 +463,7 @@ class DeliveryGatewayDeps:
     # that leaves the row open to a mutation that derived before the commit and
     # lands after it, which erases the event the answer is stored under.
     terminal_turn_committed: Callable[[str, str, TurnRecord | None], Awaitable[None]] | None = None
+    response_recovery: ResponseDeliveryRecovery | None = None
 
 
 _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
@@ -940,7 +944,64 @@ class DeliveryGateway:
             terminal_turn_committed=self._publish_terminal_turn,
             process_shutdown_requested=current_task_is_process_shutdown,
             delivery_locks=self._delivery_turn_locks,
+            cleanup_deleted_initial=(
+                self.deps.response_recovery.cleanup if self.deps.response_recovery is not None else None
+            ),
         )
+
+    @asynccontextmanager
+    async def response_recovery_scope(self, room_id: str, event_id: str) -> AsyncIterator[bool]:
+        """Keep startup decision and visible effect under normal FINAL delivery ownership."""
+        recovery = self.deps.response_recovery
+        if recovery is None:
+            yield False
+            return
+        turn_id = await recovery.principal.response_delivery_id(room_id=room_id, event_id=event_id)
+        if turn_id is None:
+            yield False
+            return
+        worker = self._recovery_worker()
+        async with worker._delivery_lock(turn_id):
+            initial = await recovery.principal.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.INITIAL)
+            if (
+                initial is None
+                or initial.retired
+                or not await recovery.principal.owns_matrix_response(
+                    room_id=room_id,
+                    event_id=event_id,
+                )
+            ):
+                yield False
+                return
+            await recovery.cleanup(worker, turn_id)
+            yield await recovery.permits_continuation(initial)
+
+    def _recovery_worker(self) -> MatrixDeliveryWorker:
+        """Use the same writer and exact locks for recovery and normal delivery."""
+
+        async def send(claimed: MatrixDelivery) -> str:
+            delivered = await self._send_claimed(claimed, retry_sync_recovery=True)
+            return delivered.event_id
+
+        return self._response_delivery(send, handoff=None)
+
+    async def cleanup_deleted_response(self, turn_id: str) -> bool:
+        """Suppress deleted-source notices while retaining retryable INITIAL cleanup debt."""
+        recovery = self.deps.response_recovery
+        if recovery is None:
+            return False
+        worker = self._recovery_worker()
+        async with worker._delivery_lock(turn_id):
+            initial = await recovery.principal.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.INITIAL)
+            if initial is None:
+                return recovery.turn_store().is_revision_redacted(turn_id)
+            if not recovery.deleted(await recovery.state(initial)):
+                return False
+            try:
+                await recovery.cleanup(worker, turn_id)
+            except Exception:
+                self.deps.logger.exception("Deleted response cleanup remains owed", delivery_id=turn_id)
+            return True
 
     async def _publish_terminal_turn(self, turn_id: str, event_id: str, committed: TerminalTurnWrite | None) -> None:
         """Publish the transaction's exact proof through the ledger's conflict owner."""
@@ -1066,12 +1127,30 @@ class DeliveryGateway:
         the returned outcome, which is how the caller knows to come back.
         Nothing escapes here.
         """
-
-        async def send(claimed: MatrixDelivery) -> str:
-            delivered = await self._send_claimed(claimed, retry_sync_recovery=True)
-            return delivered.event_id
-
-        return await self._response_delivery(send, handoff=None).recover()
+        worker = self._recovery_worker()
+        failed: set[tuple[str, DeliveryStage]] = set()
+        recovery = self.deps.response_recovery
+        if recovery is not None:
+            cursor: tuple[int, str] | None = None
+            while batch := await recovery.principal.deleted_initial_deliveries(
+                agent_name=self.deps.agent_name,
+                after=cursor,
+            ):
+                cursor = (batch[-1].created_at_ns, batch[-1].delivery_id)
+                for initial in batch:
+                    if isinstance(initial, UnreadableMatrixDelivery):
+                        failed.add((initial.delivery_id, DeliveryStage.INITIAL))
+                        self.deps.logger.error("Deleted INITIAL is unreadable", delivery_id=initial.delivery_id)
+                        continue
+                    try:
+                        async with worker._delivery_lock(initial.delivery_id):
+                            await recovery.cleanup(worker, initial.delivery_id)
+                    except Exception:
+                        failed.add((initial.delivery_id, DeliveryStage.INITIAL))
+                        self.deps.logger.exception("Deleted INITIAL cleanup failed", delivery_id=initial.delivery_id)
+        outcome = await worker.recover()
+        failed.update(outcome.failed_deliveries)
+        return RecoveryOutcome(recovered=outcome.recovered, failed=len(failed), failed_deliveries=frozenset(failed))
 
     async def _send_content(
         self,

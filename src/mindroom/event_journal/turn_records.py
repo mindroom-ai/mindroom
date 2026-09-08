@@ -121,6 +121,14 @@ def write_record(
         candidate = merge_committed_response(candidate, current)
         if candidate is None:
             return None
+    if not candidate.completed and candidate.response_event_id is not None and candidate.redacted_source_event_ids:
+        cleaned = transaction.fetchone(
+            """SELECT 1 FROM matrix_delivery_outbox
+            WHERE delivery_id = ? AND stage = 'initial' AND retired = 1 AND acknowledged_event_id = ?""",
+            (candidate.anchor_event_id, candidate.response_event_id),
+        )
+        if cleaned is not None:
+            candidate = replace(candidate, response_event_id=None)
     assert candidate.anchor_event_id is not None
     record_json = json.dumps(TurnRecordCodec._to_ledger_record(candidate))
     upsert(

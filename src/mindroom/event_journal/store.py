@@ -243,7 +243,7 @@ class PrincipalStore:
             )
             delivery = (
                 None
-                if any(pending) or turn_id is None
+                if turn_id is None
                 else outbox.load(
                     transaction,
                     self._principal_id,
@@ -270,6 +270,21 @@ class PrincipalStore:
                 sources_settled_by_departure=(
                     not any(pending)
                     and journal.sources_settled_by_departure(transaction, self._principal_id, source_event_ids)
+                ),
+                source_tombstones=tuple(
+                    (
+                        turn_record.conversation_target is not None
+                        and is_tombstoned(
+                            transaction,
+                            self._principal_id,
+                            room_id=turn_record.conversation_target.room_id,
+                            event_id=event_id,
+                        )
+                    )
+                    or (
+                        (current := records.get(event_id)) is not None and event_id in current.redacted_source_event_ids
+                    )
+                    for event_id in source_event_ids
                 ),
             )
 
@@ -989,6 +1004,39 @@ class PrincipalStore:
                 event_type=event_type,
                 after=after,
             ),
+        )
+
+    async def response_delivery_id(self, *, room_id: str, event_id: str) -> str | None:
+        """Resolve a visible response to its current exact delivery owner."""
+        return await self._backend.read(
+            lambda transaction: outbox.response_delivery_id(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                event_id=event_id,
+            ),
+        )
+
+    async def deleted_initial_deliveries(
+        self,
+        *,
+        agent_name: str,
+        after: tuple[int, str] | None = None,
+    ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
+        """Discover exact deleted-source INITIAL debt, including acknowledged sends."""
+        return await self._backend.read(
+            lambda transaction: outbox.deleted_initials(
+                transaction,
+                self._principal_id,
+                agent_name=agent_name,
+                after=after,
+            ),
+        )
+
+    async def retire_deleted_initial(self, *, delivery_id: str) -> None:
+        """Fence an INITIAL whose visible cleanup and record detachment finished."""
+        await self._backend.write(
+            lambda transaction: outbox.retire_deleted_initial(transaction, self._principal_id, delivery_id),
         )
 
     async def reserve_approval_card_deliveries(

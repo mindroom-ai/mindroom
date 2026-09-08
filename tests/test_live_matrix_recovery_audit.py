@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import closing
+from contextlib import AbstractAsyncContextManager, closing
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from io import StringIO
@@ -32,13 +32,16 @@ from mindroom.matrix.stale_stream_cleanup import (
 from mindroom.matrix.stale_stream_cleanup import (
     _cleanup_stale_streaming_room as cleanup_stale_streaming_room,
 )
+from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
 from mindroom.turn_record import RevisionReplay, TurnRecord
 from scripts.testing import fuzz_live_matrix as fuzz
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock
 from tests.conftest import test_runtime_paths as runtime_paths_at
 from tests.identity_helpers import persist_entity_accounts
+from tests.test_response_delivery_gateway import _gateway
 from tests.test_stale_stream_cleanup import _aiter, _room_messages_response
+from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -130,6 +133,8 @@ async def _publish_resume(
     config: Config,
     paths: RuntimePaths,
     principal: PrincipalStore,
+    journal: EventJournalStore,
+    tmp_path: Path,
 ) -> None:
     """Publish the real startup cleanup note and trusted relay over fake Matrix transport."""
     client = make_matrix_client_mock(user_id=AGENT)
@@ -147,6 +152,23 @@ async def _publish_resume(
         return nio.RoomSendResponse(event_id, ROOM)
 
     client.room_send.side_effect = send
+    turn_store = await _store(journal, agent_name="general")
+    gateway = _gateway(tmp_path, principal)
+    gateway = replace(
+        gateway,
+        deps=replace(
+            gateway.deps,
+            response_recovery=ResponseDeliveryRecovery(
+                principal,
+                lambda: turn_store,
+                gateway.deps.redact_message_event,
+            ),
+        ),
+    )
+
+    def recovery_scope(_agent: str, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
+        return gateway.response_recovery_scope(room_id, event_id)
+
     with patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=1_000):
         cleaned, interrupted = await cleanup_stale_streaming_room(
             client,
@@ -156,6 +178,7 @@ async def _publish_resume(
             config=config,
             runtime_paths=paths,
             startup_cutoff_ms=900_000,
+            response_recovery_scope=recovery_scope,
         )
     assert cleaned == 1
     assert len(interrupted) == 1
@@ -165,9 +188,6 @@ async def _publish_resume(
         ResolvedVisibleMessage.synthetic(sender=AGENT, body="interrupted", event_id="$interrupted", timestamp=400_000),
     ]
 
-    async def owns_response(_agent: str, room_id: str, event_id: str) -> bool:
-        return await principal.owns_matrix_response(room_id=room_id, event_id=event_id)
-
     with patch(
         "mindroom.matrix.stale_stream_cleanup.fetch_thread_messages_from_source",
         AsyncMock(return_value=history),
@@ -175,7 +195,7 @@ async def _publish_resume(
         resumed = await auto_resume_interrupted_threads(
             client,
             interrupted,
-            response_is_owned=owns_response,
+            response_recovery_scope=recovery_scope,
             config=config,
             runtime_paths=paths,
         )
@@ -236,7 +256,9 @@ async def _recover_case(tmp_path: Path, *, streaming: bool = False, published: b
         record_json=json.dumps(fuzz.TurnRecordCodec._to_ledger_record(old)),
     )
 
-    await _publish_resume(events, config, paths, principal)
+    # Synthetic continuation belongs only to an orphan; pending originals replay canonically.
+    await principal.settle("$source")
+    await _publish_resume(events, config, paths, principal, journal, tmp_path)
     await _admit(principal, events["$relay"])
     output = StringIO()
     logger = cast(

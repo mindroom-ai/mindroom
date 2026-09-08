@@ -2532,6 +2532,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
     target = _target(thread_id="$thread", reply_to_event_id="$event")
     envelope = _envelope(target, source_event_id="$event")
     delivery_gateway = MagicMock(spec=DeliveryGateway)
+    delivery_gateway.cleanup_deleted_response = AsyncMock(return_value=False)
     delivery_gateway.deliver_cancelled_visible_note = AsyncMock(
         return_value=FinalDeliveryOutcome(terminal_status="cancelled", event_id="$ack"),
     )

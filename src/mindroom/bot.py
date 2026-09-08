@@ -129,6 +129,7 @@ from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .response_admission import admitted_response_decision
+from .response_delivery_recovery import ResponseDeliveryRecovery
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import (
     ResponseRequest,
@@ -155,6 +156,7 @@ from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from contextlib import AbstractAsyncContextManager
     from datetime import datetime
     from pathlib import Path
 
@@ -617,6 +619,11 @@ class AgentBot:
                     hook_context=self._hook_context_support,
                 ),
                 outbox=self._journal_store.principal(self._journal_principal_id),
+                response_recovery=ResponseDeliveryRecovery(
+                    self._journal_store.principal(self._journal_principal_id),
+                    lambda: self._turn_store,
+                    self._redact_message_event,
+                ),
                 turn_handoff=TurnHandoff(
                     sources_for_turn=self._delivered_turn_source_ids,
                     # Resolved late: the dispatcher is built after the gateway.
@@ -1865,6 +1872,10 @@ class AgentBot:
         await self._turn_store.cleanup(
             unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),
         )
+
+    def response_recovery_scope(self, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
+        """Expose the delivery owner's startup operation to fleet discovery."""
+        return self._delivery_gateway.response_recovery_scope(room_id, event_id)
 
     async def _response_recovery_ready(self, turn_record: TurnRecord) -> bool:
         """Prove that a terminal response is complete or still durably owned."""

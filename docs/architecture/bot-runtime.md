@@ -250,6 +250,10 @@ One draining owner folds each source's newest Matrix revision into a complete re
 Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
 A committed service-restart or generic terminal interruption note records its exact source room in `InterruptedTurnRooms`.
 Replacement recovery uses the registered room directly, while next-startup cleanup can rediscover the durable note and an interrupted edit revision remains uncommitted for re-drive.
+Startup scans route repair and relay publication through the same per-delivery owner as normal Matrix delivery.
+Pending journal replay, active generation, and owed or acknowledged FINAL delivery preclude synthetic continuation.
+When every current source is deleted and no FINAL owns the response, its unfinished INITIAL remains durable cleanup debt until Matrix disappearance and visible-response attribution detachment are confirmed.
+Cleanup preserves the INITIAL identity for surviving sources, and stale history for a surviving request retries canonical preparation with a refreshed payload.
 The two physical stores remain intentionally redundant so run metadata can repair a ledger write lost during a crash.
 `TurnStore` applies deterministic field precedence: a present ledger record owns canonical source identity and anchor, while a newer delivered run can repair mutable response and regeneration facts after a crash.
 Recovery never replaces a ledger record that changed while run metadata was loading.

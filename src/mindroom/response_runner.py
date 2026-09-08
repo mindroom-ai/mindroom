@@ -132,7 +132,7 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
 )
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
-from mindroom.turn_record import EditPreparation
+from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
@@ -2414,7 +2414,7 @@ class ResponseRunner:
                     isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
                 )
                 if (
-                    isinstance(error, ReplyMembershipPendingError)
+                    isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError))
                     or early_placeholder.placeholder_event_id is None
                     or early_placeholder.settlement_started
                     or already_linked
@@ -2855,6 +2855,8 @@ class ResponseRunner:
             if request.payload_preparation is None:
                 return request
             return await self.deps.request_preparer.prepare(request)
+        except (ReplyMembershipPendingError, RevisionSnapshotChangedError):
+            raise
         except Exception as exc:
             raise PostLockRequestPreparationError from exc
 
@@ -3088,7 +3090,10 @@ class ResponseRunner:
                 "response_suppressed_for_terminal_source",
                 source_event_id=request.response_envelope.source_event_id,
             )
-            if request.existing_event_id is not None and request.existing_event_is_placeholder:
+            source_deleted = await self.deps.delivery_gateway.cleanup_deleted_response(
+                request.response_envelope.source_event_id,
+            )
+            if not source_deleted and request.existing_event_id is not None and request.existing_event_is_placeholder:
                 await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                     CancelledVisibleNoteRequest(
                         target=resolved_target,
