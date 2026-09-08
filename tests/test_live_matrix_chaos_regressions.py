@@ -6,17 +6,27 @@ import argparse
 import asyncio
 import json
 import signal
+import sqlite3
 import subprocess
-from io import BytesIO
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, Mock
+from contextlib import closing
+from dataclasses import dataclass
+from io import BytesIO, StringIO
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock, Mock, patch
 
+import nio
 import pytest
+import structlog
 
 from mindroom.cli import main as cli_main
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.conversation_state_writer import ConversationStateWriter
+from mindroom.dispatch_handoff import PreparedIngress
+from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread, has_newer_unresponded_journal_thread_event
+from mindroom.event_journal import DeliveryStage, EventClass, EventJournalStore, EventKind, InboundEvent
 from mindroom.handled_turns import HandledTurnLedger
+from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.identity import MatrixID
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_record import RevisionReplay, TurnRecord
@@ -26,7 +36,7 @@ from scripts.testing import fuzz_live_matrix as live_fuzz
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.event_journal import EventJournalStore
+    from mindroom.event_journal import PrincipalStore
 
 
 def _redaction_observer_store() -> TurnStore:
@@ -41,6 +51,747 @@ def _redaction_observer_store() -> TurnStore:
     store._ledger = Mock(spec=HandledTurnLedger)
     store._ledger.all_turn_records.return_value = ()
     return store
+
+
+@dataclass
+class _SupersessionCase:
+    journal: EventJournalStore
+    oracle: live_fuzz.ExactReplyOracle
+    auditor: live_fuzz.FinalStateAuditor
+    events: dict[str, dict[str, Any]]
+
+
+async def _observe_guard_decision(
+    principal: PrincipalStore,
+    event: dict[str, Any],
+    history: list[dict[str, Any]],
+    *,
+    output: StringIO,
+    use_history: bool,
+    handled: frozenset[str] = frozenset(),
+) -> None:
+    """Capture actual replay-guard decisions across initial admission and retries."""
+    logger = cast(
+        "structlog.stdlib.BoundLogger",
+        structlog.wrap_logger(
+            structlog.PrintLogger(file=output),
+            processors=[structlog.dev.ConsoleRenderer(colors=True)],
+        ).bind(agent="general", logger="mindroom.bot"),
+    )
+    prepared = PreparedIngress(
+        event["sender"],
+        event["event_id"],
+        event["content"]["body"],
+        event,
+        server_timestamp=event["origin_server_ts"],
+    )
+    if use_history:
+        skipped = has_newer_unresponded_in_thread(
+            prepared,
+            event["sender"],
+            [
+                ResolvedVisibleMessage(
+                    newer["sender"],
+                    newer["content"]["body"],
+                    newer["origin_server_ts"],
+                    newer["event_id"],
+                    newer["content"],
+                    "$root",
+                    newer["event_id"],
+                )
+                for newer in history
+            ],
+            may_be_superseded_by_newer_requester_turn=True,
+            requester_user_id_for_event=lambda sender, _: sender,
+            is_visible_router_voice_echo=lambda *_: False,
+            sender_is_trusted_for_ingress_metadata=lambda _: False,
+            is_handled=lambda source: source in handled,
+            logger=logger,
+        )
+    else:
+        skipped = await has_newer_unresponded_journal_thread_event(
+            room_id=event["room_id"],
+            event=prepared,
+            requester_user_id=event["sender"],
+            thread_id="$root",
+            may_be_superseded_by_newer_requester_turn=True,
+            pending_turns=principal,
+            requester_user_id_for_event=lambda sender, _: sender,
+            is_visible_router_voice_echo=lambda *_: False,
+            sender_is_trusted_for_ingress_metadata=lambda _: False,
+            is_handled=lambda source: source in handled,
+            logger=logger,
+        )
+    assert skipped
+
+
+async def _supersession_case(
+    tmp_path: Path,
+    *,
+    visible_old: bool,
+    plain_reply: bool = False,
+    old_record: bool = True,
+    interrupt_settlement: bool = False,
+    history_guard: bool = False,
+) -> _SupersessionCase:
+    """Exercise real admission, guard decisions and ignored-source settlement; fake only Matrix transport."""
+    ledger = tmp_path / "event_journal.db"
+    journal = EventJournalStore.open_sqlite(ledger)
+    principal = journal.principal("general@@agent:example")
+    events: dict[str, dict[str, Any]] = {
+        source: {
+            "event_id": source,
+            "room_id": "!room:example",
+            "_audit_room_id": "!room:example",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": timestamp,
+            "content": {
+                "msgtype": "m.text",
+                "body": f"MRK[src={logical};rev=orig]",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root", "m.in_reply_to": {"event_id": "$root"}},
+            },
+        }
+        for source, logical, timestamp in (("$old", "op:1", 10), ("$new", "op:2", 20))
+    }
+    if plain_reply:
+        events["$old"]["content"]["m.relates_to"] = {"m.in_reply_to": {"event_id": "$root"}}
+        events["$new"]["content"]["m.relates_to"] = {"m.in_reply_to": {"event_id": "$old"}}
+    for source, event in events.items():
+        await principal.admit(
+            InboundEvent(
+                source,
+                "!room:example",
+                None if plain_reply else "$root",
+                EventKind.MESSAGE,
+                EventClass.ACTIONABLE,
+                "@user:example",
+                event["origin_server_ts"],
+                event,
+            ),
+        )
+    output = StringIO()
+    await _observe_guard_decision(
+        principal,
+        events["$old"],
+        [events["$new"]],
+        output=output,
+        use_history=plain_reply or history_guard,
+    )
+    dispatcher = JournalDispatcher(
+        principal,
+        Mock(spec=JournalCallbacks),
+        lambda room: nio.MatrixRoom(room, "@agent:example"),
+    )
+    if interrupt_settlement:
+        # Cancel at the commit boundary after the real guard and settlement owners ran.
+        with (
+            patch.object(journal.backend, "write", AsyncMock(side_effect=asyncio.CancelledError)),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await dispatcher.settle_intentionally_ignored_turn_sources(("$old",))
+        assert await principal.unsettled_event_ids() == {"$old", "$new"}
+    else:
+        await dispatcher.settle_intentionally_ignored_turn_sources(("$old",))
+        await principal.settle_many(("$new",))
+    old = TurnRecord.create(("$old",), response_event_id="$old-reply" if visible_old else None, completed=False)
+    new = TurnRecord.create(("$new",), response_event_id="$new-reply", completed=True)
+    records = ([old] if old_record else []) + ([] if interrupt_settlement else [new])
+    for record in records:
+        await journal.turn_records("general").upsert(
+            index_event_ids=record.indexed_event_ids,
+            anchor_event_id=record.anchor_event_id,
+            record_json=json.dumps(live_fuzz.TurnRecordCodec._to_ledger_record(record)),
+        )
+    responses = [] if interrupt_settlement else [("$new", "$new-reply", 2, "completed")]
+    if visible_old:
+        responses.append(("$old", "$old-reply", 1, "error"))
+    for source, response, call, status in responses:
+        events[response] = {
+            **events[source],
+            "event_id": response,
+            "sender": "@agent:example",
+            "origin_server_ts": 30 + call,
+            "content": {
+                "msgtype": "m.text",
+                "body": f"LIVE-FUZZ call={call} END call={call}"
+                + ("\n\n" + live_fuzz.RESTART_INTERRUPTED_RESPONSE_NOTE if status == "error" else ""),
+                live_fuzz.STREAM_STATUS_KEY: status,
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root", "m.in_reply_to": {"event_id": source}},
+            },
+        }
+    client = Mock(spec=live_fuzz.LiveMatrixClient)
+    client.room_id = "!room:example"
+    client.paginate_room = AsyncMock(return_value=list(events.values()))
+    oracle = live_fuzz.ExactReplyOracle(
+        client,
+        "@agent:example",
+        coalescing_threads=True,
+        ledger_path=ledger,
+        expected_body_for=lambda call: f"LIVE-FUZZ call={call} END call={call}",
+    )
+    oracle.log_path = tmp_path / "mindroom.log"
+    oracle.log_path.write_text(output.getvalue())
+    if plain_reply:
+        events["$root"] = {
+            **events["$old"],
+            "event_id": "$root",
+            "origin_server_ts": 1,
+            "content": {"msgtype": "m.text", "body": "root"},
+        }
+    for source, logical in (("$old", "op:1"), ("$new", "op:2")):
+        oracle.expect(logical, source)
+    for event in events.values():
+        oracle._ingest_event(event)
+    auditor = live_fuzz.FinalStateAuditor(
+        client,
+        oracle,
+        agent_id=oracle.agent_id,
+        ledger_path=ledger,
+        expected_body_for=oracle.expected_body_for,
+        observed_markers_for=lambda call: frozenset({f"MRK[src=op:{call};rev=orig]"}),
+    )
+    client.paginate_room = AsyncMock(side_effect=lambda _: list(events.values()))
+    oracle.observed_markers_for = auditor.observed_markers_for
+    oracle.source_current_markers = {"$old": "MRK[src=op:1;rev=orig]", "$new": "MRK[src=op:2;rev=orig]"}
+    return _SupersessionCase(journal, oracle, auditor, events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("visible_old", "old_record"), [(False, False), (False, True), (True, True)])
+@pytest.mark.parametrize("plain_reply", [False, True])
+async def test_supersession_uses_real_settled_journal_owner(
+    tmp_path: Path,
+    visible_old: bool,
+    old_record: bool,
+    plain_reply: bool,
+) -> None:
+    """Ignoring admitted replay must settle harness debt without completing its old generation."""
+    case = await _supersession_case(tmp_path, visible_old=visible_old, old_record=old_record, plain_reply=plain_reply)
+    try:
+        case.oracle.refresh_ledger_attributions(min_interval=0)
+        assert "$old" in case.oracle.supersession_proofs
+        metrics = await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
+        assert metrics["ledger_superseded_sources"] == 1
+        assert metrics["completed_final_bodies"] == 1
+        assert case.oracle.unsettled_required_sources() == []
+        records = live_fuzz.read_ledger_records(tmp_path / "event_journal.db", include_incomplete=True)
+        assert ("$old" in records) is old_record
+        if old_record:
+            assert not records["$old"].completed
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing_journal",
+        "foreign_principal",
+        "pending_journal",
+        "missing_new_journal",
+        "wrong_requester",
+        "wrong_room",
+        "wrong_thread",
+        "wrong_timestamp",
+        "missing_log",
+        "wrong_agent",
+        "wrong_log_source",
+        "wrong_log_newer",
+        "embedded_log",
+        "malformed_log",
+        "no_anchor",
+        "unfinished_anchor",
+        "streaming_anchor",
+        "wrong_anchor_marker",
+        "malformed_ledger",
+        "conflicting_ledger",
+        "partial_journal",
+        "unacknowledged_final",
+        "pending_edit",
+        "streaming_old",
+        "canonical_streaming_old",
+        "missing_old_attribution",
+        "duplicate_reply",
+        "unrelated_recovery",
+        "duplicate_relay",
+        "wrong_old_marker",
+        "pending_cleanup",
+        "wrong_log_thread",
+        "truncated_log",
+        "unproved_owned_source",
+        "misplaced_final",
+    ],
+)
+async def test_supersession_rejects_missing_or_foreign_ownership(tmp_path: Path, defect: str) -> None:  # noqa: C901, PLR0912, PLR0915
+    """Each missing proof fact must leave the old generation or its independent debt failing."""
+    case = await _supersession_case(tmp_path, visible_old=True)
+    ledger = tmp_path / "event_journal.db"
+    assert case.oracle.log_path is not None
+    log = case.oracle.log_path.read_text()
+    if defect in {
+        "missing_log",
+        "wrong_agent",
+        "wrong_log_source",
+        "wrong_log_newer",
+        "embedded_log",
+        "malformed_log",
+        "wrong_log_thread",
+        "truncated_log",
+    }:
+        changed = {
+            "missing_log": "",
+            "wrong_agent": log.replace("general", "router"),
+            "wrong_log_source": log.replace("$old", "$elsewhere"),
+            "wrong_log_newer": log.replace("$new", "$elsewhere"),
+            "embedded_log": "message_body='" + log + "'",
+            "malformed_log": log.replace("skipped_event_id", "skipped_event"),
+            "wrong_log_thread": log.replace("$root", "$elsewhere"),
+            "truncated_log": log.rstrip("\n"),
+        }[defect]
+        case.oracle.log_path.write_text(changed)
+    updates = {
+        "missing_journal": "DELETE FROM journal_events WHERE event_id='$old'",
+        "missing_new_journal": "DELETE FROM journal_events WHERE event_id='$new'",
+        "foreign_principal": "UPDATE journal_events SET principal_id='general@@other:example' WHERE event_id='$old'",
+        "pending_journal": "UPDATE journal_events SET state='pending' WHERE event_id='$old'",
+        "wrong_requester": "UPDATE journal_events SET sender='@other:example' WHERE event_id='$new'",
+        "wrong_room": "UPDATE journal_events SET room_id='!other:example' WHERE event_id='$new'",
+        "wrong_timestamp": "UPDATE journal_events SET origin_server_ts=9 WHERE event_id='$new'",
+        "no_anchor": "DELETE FROM turn_records WHERE index_event_id='$new'",
+        "malformed_ledger": "UPDATE turn_records SET record_json='broken' WHERE index_event_id='$old'",
+        "partial_journal": "DROP TABLE journal_events",
+        "missing_old_attribution": "DELETE FROM turn_records WHERE index_event_id='$old'",
+    }
+    if defect in updates:
+        with closing(sqlite3.connect(ledger)) as database:
+            database.execute(updates[defect])
+            database.commit()
+    if defect in {"unfinished_anchor", "conflicting_ledger", "pending_cleanup", "unproved_owned_source"}:
+        records = live_fuzz.read_ledger_records(ledger, include_incomplete=True)
+        record = records["$old" if defect in {"pending_cleanup", "unproved_owned_source"} else "$new"]
+        raw = live_fuzz.TurnRecordCodec._to_ledger_record(record)
+        if defect == "unfinished_anchor":
+            raw["completed"] = False
+        elif defect == "pending_cleanup":
+            raw["revision_replay"] = {
+                "$edit": RevisionReplay("$old", 100, redacted=True, cleanup_pending=True).to_record(),
+            }
+        elif defect == "unproved_owned_source":
+            raw["source_event_ids"] = ["$old", "$unproved"]
+        else:
+            raw["source_event_ids"] = ["$new", "$old"]
+        with closing(sqlite3.connect(ledger)) as database:
+            database.execute(
+                "UPDATE turn_records SET record_json=? WHERE index_event_id=?",
+                (json.dumps(raw), record.anchor_event_id),
+            )
+            database.commit()
+    if defect in {"unacknowledged_final", "misplaced_final"}:
+        await case.journal.principal("general@@agent:example").enqueue_matrix_delivery(
+            delivery_id="$old",
+            stage=DeliveryStage.FINAL,
+            room_id="!room:example",
+            thread_id="$elsewhere" if defect == "misplaced_final" else "$root",
+            payload={"body": "unfinished final"},
+            edits_event_id="$old-reply",
+        )
+    if defect == "wrong_thread":
+        case.events["$new"]["content"]["m.relates_to"]["event_id"] = "$elsewhere"
+        case.events["$new-reply"]["content"]["m.relates_to"]["event_id"] = "$elsewhere"
+    if defect in {"streaming_old", "canonical_streaming_old", "streaming_anchor"}:
+        content = case.events["$new-reply" if defect == "streaming_anchor" else "$old-reply"]["content"]
+        content[live_fuzz.STREAM_STATUS_KEY] = "streaming"
+        if defect == "canonical_streaming_old":
+            content["body"] = "LIVE-FUZZ call=1 END call=1"
+    if defect in {"wrong_anchor_marker", "wrong_old_marker"}:
+        bad_call = 2 if defect == "wrong_anchor_marker" else 1
+        case.auditor.observed_markers_for = lambda call: frozenset(
+            {"wrong" if call == bad_call else f"MRK[src=op:{call};rev=orig]"},
+        )
+    if defect == "pending_edit":
+        case.auditor.pending_edit_markers = {"$old": {"$edit": "new revision"}}
+    if defect == "duplicate_reply":
+        case.events["$duplicate"] = {**case.events["$old-reply"], "event_id": "$duplicate"}
+    if defect in {"unrelated_recovery", "duplicate_relay"}:
+        case.oracle.internal_relay_senders = frozenset({"@router:example"})
+        for relay in ("$relay", "$duplicate-relay") if defect == "duplicate_relay" else ("$relay",):
+            case.events[relay] = {
+                **case.events["$old-reply"],
+                "event_id": relay,
+                "sender": "@router:example",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": live_fuzz.AUTO_RESUME_MESSAGE,
+                    live_fuzz.SOURCE_KIND_KEY: live_fuzz.TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$root",
+                        "m.in_reply_to": {"event_id": "$old-reply"},
+                    },
+                },
+            }
+        case.events["$unrelated"] = {
+            **case.events["$new-reply"],
+            "event_id": "$unrelated",
+            "content": {
+                **case.events["$new-reply"]["content"],
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$root",
+                    "m.in_reply_to": {"event_id": "$other-relay"},
+                },
+            },
+        }
+    try:
+        with pytest.raises(AssertionError):
+            await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+async def test_supersession_keeps_completed_old_generation(tmp_path: Path) -> None:
+    """A completed old response remains completed generation despite an earlier skip observation."""
+    case = await _supersession_case(tmp_path, visible_old=True)
+    record = TurnRecord.create(("$old",), response_event_id="$old-reply", completed=True)
+    await case.journal.turn_records("general").upsert(
+        index_event_ids=record.indexed_event_ids,
+        anchor_event_id=record.anchor_event_id,
+        record_json=json.dumps(live_fuzz.TurnRecordCodec._to_ledger_record(record)),
+    )
+    case.events["$old-reply"]["content"]["body"] = "LIVE-FUZZ call=1 END call=1"
+    case.events["$old-reply"]["content"][live_fuzz.STREAM_STATUS_KEY] = "completed"
+    try:
+        metrics = await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
+        assert metrics["ledger_superseded_sources"] == 0
+        assert metrics["completed_final_bodies"] == 2
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+async def test_supersession_of_interrupted_placeholder_does_not_claim_generation(tmp_path: Path) -> None:
+    """Cleanup before any visible model output needs no invented old model call."""
+    case = await _supersession_case(tmp_path, visible_old=True)
+    case.events["$old-reply"]["content"]["body"] = "Thinking...\n\n" + live_fuzz.RESTART_INTERRUPTED_RESPONSE_NOTE
+    try:
+        metrics = await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
+        assert metrics["ledger_superseded_sources"] == 1
+        assert metrics["completed_final_bodies"] == 1
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+async def test_supersession_live_wait_keeps_unproved_old_response_pending(tmp_path: Path) -> None:
+    """A visible restart note cannot substitute for exact durable semantic settlement."""
+    case = await _supersession_case(tmp_path, visible_old=True)
+    assert case.oracle.log_path is not None
+    case.oracle.log_path.write_text("")
+    try:
+        case.oracle.refresh_ledger_attributions(min_interval=0)
+        assert case.oracle.unsettled_required_sources() == ["$old"]
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("foreign_room", [False, True])
+async def test_supersession_terminal_edit_must_belong_to_response_room(tmp_path: Path, foreign_room: bool) -> None:
+    """A restart edit can terminalize only the response in its own Matrix room."""
+    case = await _supersession_case(tmp_path, visible_old=True)
+    original = case.events["$old-reply"]
+    case.events["$terminal-edit"] = {
+        **original,
+        "event_id": "$terminal-edit",
+        "origin_server_ts": 50,
+        "_audit_room_id": "!foreign:example" if foreign_room else "!room:example",
+        "content": {
+            "msgtype": "m.text",
+            "body": "* " + original["content"]["body"],
+            "m.new_content": dict(original["content"]),
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$old-reply"},
+        },
+    }
+    original["content"][live_fuzz.STREAM_STATUS_KEY] = "streaming"
+    original["content"]["body"] = "LIVE-FUZZ call=1 END call=1"
+    case.auditor.source_current_markers = dict(case.oracle.source_current_markers)
+    try:
+        case.auditor._observe_supersession(case.events)
+        assert ("$old" in case.auditor.supersession_proofs) is not foreign_room
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["old", "new"])
+@pytest.mark.parametrize("foreign_room", [False, True])
+async def test_supersession_full_audit_uses_one_room_for_body_and_status(
+    tmp_path: Path,
+    target: str,
+    foreign_room: bool,
+) -> None:
+    """Terminal status cannot borrow its required interruption or completed body from another room."""
+    case = await _supersession_case(tmp_path, visible_old=True)
+    response_id = f"${target}-reply"
+    original = case.events[response_id]
+    case.events["$terminal-edit"] = {
+        **original,
+        "event_id": "$terminal-edit",
+        "origin_server_ts": 50,
+        "_audit_room_id": "!foreign:example" if foreign_room else "!room:example",
+        "content": {
+            "msgtype": "m.text",
+            "body": "* " + original["content"]["body"],
+            "m.new_content": dict(original["content"]),
+            "m.relates_to": {"rel_type": "m.replace", "event_id": response_id},
+        },
+    }
+    # Keep terminal metadata in the real room, but remove its qualifying body.
+    original["content"]["body"] = "LIVE-FUZZ call=1 END call=1" if target == "old" else "LIVE-FUZZ call=2 partial"
+    case.oracle._ingest_event(case.events["$terminal-edit"])
+    case.auditor.client.paginate_room = AsyncMock(
+        side_effect=lambda room: [event for event in case.events.values() if event["_audit_room_id"] == room],
+    )
+    try:
+        if foreign_room:
+            with pytest.raises(AssertionError):
+                await case.auditor.audit(
+                    room_ids=("!room:example", "!foreign:example"),
+                    sent_records=(),
+                    redacted_targets={},
+                )
+        else:
+            metrics = await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
+            assert metrics["ledger_superseded_sources"] == 1
+            assert metrics["completed_final_bodies"] == 1
+    finally:
+        await case.journal.close()
+
+
+async def _complete_supersession_source(case: _SupersessionCase, source: str, call: int) -> None:
+    """Complete a fixture source through actual journal/turn owners and simulated Matrix delivery."""
+    response_id = f"{source}-reply"
+    record = TurnRecord.create((source,), response_event_id=response_id, completed=True)
+    await case.journal.turn_records("general").upsert(
+        index_event_ids=record.indexed_event_ids,
+        anchor_event_id=record.anchor_event_id,
+        record_json=json.dumps(live_fuzz.TurnRecordCodec._to_ledger_record(record)),
+    )
+    await case.journal.principal("general@@agent:example").settle_many((source,))
+    case.events[response_id] = {
+        **case.events[source],
+        "event_id": response_id,
+        "sender": "@agent:example",
+        "origin_server_ts": 30 + call,
+        "content": {
+            "msgtype": "m.text",
+            "body": f"LIVE-FUZZ call={call} END call={call}",
+            live_fuzz.STREAM_STATUS_KEY: "completed",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$root", "m.in_reply_to": {"event_id": source}},
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_history", [False, True])
+@pytest.mark.parametrize("retry_history", [False, True])
+@pytest.mark.parametrize("changed_successor", [False, True])
+async def test_supersession_retry_after_interrupted_settlement_validates_each_guard_candidate(
+    tmp_path: Path,
+    first_history: bool,
+    retry_history: bool,
+    changed_successor: bool,
+) -> None:
+    """A positive guard may be logged again with different successor or mode after its settlement is interrupted."""
+    case = await _supersession_case(tmp_path, visible_old=True, interrupt_settlement=True, history_guard=first_history)
+    principal = case.journal.principal("general@@agent:example")
+    assert "$old" in await principal.unsettled_event_ids()
+    successor = "$new"
+    if changed_successor:
+        await _complete_supersession_source(case, "$new", 2)
+        successor = "$retry"
+        case.events[successor] = {
+            **case.events["$new"],
+            "event_id": successor,
+            "origin_server_ts": 25,
+            "content": {**case.events["$new"]["content"], "body": "MRK[src=op:3;rev=orig]"},
+        }
+        await principal.admit(
+            InboundEvent(
+                successor,
+                "!room:example",
+                "$root",
+                EventKind.MESSAGE,
+                EventClass.ACTIONABLE,
+                "@user:example",
+                25,
+                case.events[successor],
+            ),
+        )
+        case.oracle.expect("op:3", successor)
+    records = live_fuzz.read_ledger_records(tmp_path / "event_journal.db")
+    output = StringIO()
+    await _observe_guard_decision(
+        principal,
+        case.events["$old"],
+        [event for source, event in case.events.items() if source in {"$new", "$retry"}],
+        output=output,
+        use_history=retry_history,
+        handled=frozenset(source for source, record in records.items() if record.completed),
+    )
+    assert case.oracle.log_path is not None
+    case.oracle.log_path.write_text(case.oracle.log_path.read_text() + output.getvalue())
+    await JournalDispatcher(
+        principal,
+        Mock(spec=JournalCallbacks),
+        lambda room: nio.MatrixRoom(room, "@agent:example"),
+    ).settle_intentionally_ignored_turn_sources(("$old",))
+    await _complete_supersession_source(case, successor, 3 if changed_successor else 2)
+    assert "$old" not in await principal.unsettled_event_ids()
+    for event in case.events.values():
+        case.oracle._ingest_event(event)
+    try:
+        metrics = await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
+        assert metrics["ledger_superseded_sources"] == 1
+        assert case.oracle.supersession_proofs["$old"].newer_event_id == successor
+        assert not live_fuzz.read_ledger_records(tmp_path / "event_journal.db", include_incomplete=True)[
+            "$old"
+        ].completed
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_candidate", [False, True])
+@pytest.mark.parametrize("invalid", ["unknown_successor", "wrong_thread", "malformed"])
+async def test_supersession_retry_candidates_do_not_promote_invalid_observations(
+    tmp_path: Path,
+    valid_candidate: bool,
+    invalid: str,
+) -> None:
+    """An invalid later observation cannot qualify alone or poison an independently valid earlier one."""
+    case = await _supersession_case(tmp_path, visible_old=True)
+    assert case.oracle.log_path is not None
+    positive = case.oracle.log_path.read_text()
+    invalid_record = {
+        "unknown_successor": positive.replace("$new", "$foreign"),
+        "wrong_thread": positive.replace("$root", "$foreign"),
+        "malformed": positive.replace("skipped_event_id", "skipped_event"),
+    }[invalid]
+    case.oracle.log_path.write_text((positive if valid_candidate else "") + invalid_record)
+    try:
+        if valid_candidate:
+            metrics = await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
+            assert metrics["ledger_superseded_sources"] == 1
+            assert case.oracle.supersession_proofs["$old"].newer_event_id == "$new"
+        else:
+            with pytest.raises(AssertionError):
+                await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broken_link", [False, True])
+async def test_supersession_forward_chain_requires_every_exact_link(tmp_path: Path, broken_link: bool) -> None:
+    """An incomplete named successor needs its own positive guard and terminal anchor."""
+    case = await _supersession_case(tmp_path, visible_old=True)
+    principal = case.journal.principal("general@@agent:example")
+    case.events["$last"] = {
+        **case.events["$new"],
+        "event_id": "$last",
+        "origin_server_ts": 25,
+        "content": {**case.events["$new"]["content"], "body": "MRK[src=op:3;rev=orig]"},
+    }
+    await principal.admit(
+        InboundEvent(
+            "$last",
+            "!room:example",
+            "$root",
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            "@user:example",
+            25,
+            case.events["$last"],
+        ),
+    )
+    middle = TurnRecord.create(("$new",), response_event_id="$new-reply", completed=False)
+    last = TurnRecord.create(("$last",), response_event_id="$last-reply", completed=True)
+    # Replace the fixture's completed successor with the crash-time unfinished owner.
+    # Production correctly refuses to downgrade completion through upsert.
+    with closing(sqlite3.connect(tmp_path / "event_journal.db")) as database:
+        database.execute("DELETE FROM turn_records WHERE index_event_id='$new'")
+        database.commit()
+    for record in (middle, last):
+        await case.journal.turn_records("general").upsert(
+            index_event_ids=record.indexed_event_ids,
+            anchor_event_id=record.anchor_event_id,
+            record_json=json.dumps(live_fuzz.TurnRecordCodec._to_ledger_record(record)),
+        )
+    output = StringIO()
+    logger = structlog.wrap_logger(
+        structlog.PrintLogger(file=output),
+        processors=[structlog.dev.ConsoleRenderer(colors=True)],
+    ).bind(agent="general", logger="mindroom.bot")
+    assert has_newer_unresponded_in_thread(
+        PreparedIngress("@user:example", "$new", "new", case.events["$new"], server_timestamp=20),
+        "@user:example",
+        [
+            ResolvedVisibleMessage(
+                "@user:example",
+                "last",
+                25,
+                "$last",
+                case.events["$last"]["content"],
+                "$root",
+                "$last",
+            ),
+        ],
+        may_be_superseded_by_newer_requester_turn=True,
+        requester_user_id_for_event=lambda sender, _: sender,
+        is_visible_router_voice_echo=lambda *_: False,
+        sender_is_trusted_for_ingress_metadata=lambda _: False,
+        is_handled=lambda _: False,
+        logger=cast("structlog.stdlib.BoundLogger", logger),
+    )
+    await JournalDispatcher(
+        principal,
+        Mock(spec=JournalCallbacks),
+        lambda room: nio.MatrixRoom(room, "@agent:example"),
+    ).settle_intentionally_ignored_turn_sources(("$new",))
+    await principal.settle_many(("$last",))
+    assert case.oracle.log_path is not None
+    if not broken_link:
+        case.oracle.log_path.write_text(case.oracle.log_path.read_text() + output.getvalue())
+    case.events["$last-reply"] = {
+        **case.events["$new-reply"],
+        "event_id": "$last-reply",
+        "origin_server_ts": 40,
+        "content": {
+            **case.events["$new-reply"]["content"],
+            "body": "LIVE-FUZZ call=3 END call=3",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$root", "m.in_reply_to": {"event_id": "$last"}},
+        },
+    }
+    case.events["$new-reply"]["content"]["body"] += "\n\n" + live_fuzz.RESTART_INTERRUPTED_RESPONSE_NOTE
+    case.events["$new-reply"]["content"][live_fuzz.STREAM_STATUS_KEY] = "error"
+    case.oracle.expect("op:3", "$last")
+    for event in case.events.values():
+        case.oracle._ingest_event(event)
+    try:
+        if broken_link:
+            with pytest.raises(AssertionError):
+                await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
+        else:
+            metrics = await case.auditor.audit(room_ids=("!room:example",), sent_records=(), redacted_targets={})
+            assert metrics["ledger_superseded_sources"] == 2
+            assert metrics["completed_final_bodies"] == 1
+            assert case.oracle.supersession_proofs["$old"].anchor_source_event_id == "$last"
+    finally:
+        await case.journal.close()
 
 
 @pytest.mark.asyncio

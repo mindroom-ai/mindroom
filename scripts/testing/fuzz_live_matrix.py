@@ -4481,9 +4481,9 @@ def read_ledger_records(
     """Read every terminal handled-turn record keyed by its source event.
 
     A completed record with a visible ``response_event_id`` proves that source
-    was answered. A completed record with ``response_event_id`` set to ``None``
-    is production's exact durable proof that the source was legitimately
-    skipped as a superseded replay. Missing, malformed, or non-terminal records
+    was answered. Completed no-response records retain their own terminal
+    meaning; deliberate replay supersession requires separate journal proof.
+    Missing, malformed, or non-terminal records
     are omitted during live polling, so the oracle can wait for a terminal
     outcome rather than inferring supersession from chronology alone. Final
     audits use strict mode and reject every unreadable, malformed, or
@@ -4507,17 +4507,24 @@ def _invalid_ledger(ledger_path: Path, reason: str, *, strict: bool) -> None:
         raise AssertionError(msg)
 
 
-def _load_ledger_rows(ledger_path: Path, *, strict: bool) -> dict[str, object] | None:
+def _load_ledger_rows(
+    ledger_path: Path,
+    *,
+    strict: bool,
+    database: sqlite3.Connection | None = None,
+) -> dict[str, object] | None:
     """Read this agent's durable turn projections from the current event journal."""
     if not ledger_path.exists():
         _invalid_ledger(ledger_path, "file is missing", strict=strict)
         return None
     try:
-        with closing(sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)) as database:
-            rows = database.execute(
-                "SELECT index_event_id, anchor_event_id, record_json FROM turn_records WHERE agent_name = ?",
-                (AGENT_NAME,),
-            ).fetchall()
+        if database is None:
+            with closing(sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)) as connection:
+                return _load_ledger_rows(ledger_path, strict=strict, database=connection)
+        rows = database.execute(
+            "SELECT index_event_id, anchor_event_id, record_json FROM turn_records WHERE agent_name = ?",
+            (AGENT_NAME,),
+        ).fetchall()
         records: dict[str, object] = {}
         for index_event_id, anchor_event_id, record_json in rows:
             raw = json.loads(record_json)
@@ -4578,6 +4585,180 @@ def _ledger_projection_conflict(records: Mapping[str, TurnRecord]) -> str | None
     return None
 
 
+@dataclass(frozen=True)
+class SupersessionProof:
+    """Exact settled replay decision with an independently completed forward anchor."""
+
+    source_event_id: str
+    newer_event_id: str
+    anchor_source_event_id: str
+    anchor_response_event_id: str
+    interrupted_response_event_id: str | None
+    principal_id: str
+    room_id: str
+    thread_id: str
+    requester_user_id: str
+
+
+@dataclass(frozen=True)
+class _SettledJournalSource:
+    event_id: str
+    room_id: str
+    thread_id: str
+    sender: str
+    timestamp: int
+    state: str
+    kind: str
+
+
+@dataclass(frozen=True)
+class _SupersessionDecision:
+    newer_event_id: str
+    thread_id: str | None
+
+
+@dataclass(frozen=True)
+class _PendingSupersessionDelivery:
+    room_id: str
+    thread_id: str
+    delivery_id: str
+    edits_event_id: str | None
+
+
+@dataclass(frozen=True)
+class _SupersessionSnapshot:
+    records: Mapping[str, TurnRecord]
+    sources: Mapping[str, _SettledJournalSource]
+    pending_deliveries: tuple[_PendingSupersessionDelivery, ...]
+
+
+def _read_supersession_snapshot(path: Path, principal_id: str) -> _SupersessionSnapshot:
+    """Read full principal debt and strict turn projections in one read-only transaction."""
+    try:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
+            database.execute("BEGIN")
+            raw = _load_ledger_rows(path, strict=True, database=database)
+            assert raw is not None
+            records = _decode_ledger_rows(path, raw, strict=False, include_incomplete=True)
+            conflict = _ledger_projection_conflict(records)
+            if conflict is not None:
+                _invalid_ledger(path, conflict, strict=True)
+            rows = database.execute(
+                "SELECT event_id, room_id, thread_id, sender, origin_server_ts, state, kind "
+                "FROM journal_events WHERE principal_id = ?",
+                (principal_id,),
+            ).fetchall()
+            sources = {}
+            for row in rows:
+                if any(not isinstance(value, str) for value in (*row[:4], *row[5:])) or not isinstance(row[4], int):
+                    msg = "malformed supersession journal row"
+                    raise AssertionError(msg)
+                source = _SettledJournalSource(*row)
+                sources[source.event_id] = source
+            pending = database.execute(
+                "SELECT room_id, thread_id, delivery_id, edits_event_id FROM matrix_delivery_outbox "
+                "WHERE principal_id = ? AND acknowledged_event_id IS NULL",
+                (principal_id,),
+            ).fetchall()
+            if any(
+                any(not isinstance(value, str) for value in row[:3])
+                or (row[3] is not None and not isinstance(row[3], str))
+                for row in pending
+            ):
+                msg = "malformed supersession outbox row"
+                raise AssertionError(msg)
+            return _SupersessionSnapshot(records, sources, tuple(_PendingSupersessionDelivery(*row) for row in pending))
+    except sqlite3.Error as exc:
+        msg = f"supersession journal snapshot failed: {exc}"
+        raise AssertionError(msg) from exc
+
+
+_SUPERSESSION_GUARD_MESSAGES = (
+    "Skipping older message — newer unresponded message from same sender in thread",
+    "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",
+)
+
+
+def _supersession_decisions(log_path: Path | None) -> dict[str, tuple[_SupersessionDecision, ...]]:
+    """Retain distinct positive guard candidates across retries, rejecting malformed log records."""
+    if log_path is None or not log_path.exists():
+        return {}
+    decisions: dict[str, list[_SupersessionDecision]] = defaultdict(list)
+    for line in _ANSI_ESCAPE_PATTERN.sub("", log_path.read_text()).splitlines(keepends=True):
+        if not line.endswith("\n"):
+            continue
+        match = re.fullmatch(
+            r"(?:\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+)?(?:\[info\s*\]\s+)?("
+            + "|".join(map(re.escape, _SUPERSESSION_GUARD_MESSAGES))
+            + r")\s+\[mindroom\.bot\]\s+(.*)",
+            line.rstrip("\r\n"),
+        )
+        if match is None:
+            continue
+        fields = match[2].split()
+        pairs = [field.split("=", 1) for field in fields]
+        if any(len(pair) != 2 for pair in pairs) or len({pair[0] for pair in pairs}) != len(pairs):
+            continue
+        values = dict(pairs)
+        old, newer = values.get("skipped_event_id", ""), values.get("newer_event_id", "")
+        if values.get("agent") != AGENT_NAME or not old.startswith("$") or not newer.startswith("$"):
+            continue
+        thread_id = values.get("thread_id")
+        if (thread_id is not None and not thread_id.startswith("$")) or (
+            match[1] == _SUPERSESSION_GUARD_MESSAGES[1] and thread_id is None
+        ):
+            continue
+        decision = _SupersessionDecision(newer, thread_id)
+        if decision not in decisions[old]:
+            decisions[old].append(decision)
+    return {source: tuple(candidates) for source, candidates in decisions.items()}
+
+
+@dataclass(frozen=True)
+class _CanonicalResponseView:
+    """Body and terminal metadata from the same canonical Matrix replacement."""
+
+    body: str
+    stream_status: str | None
+
+
+def _canonical_response_view(
+    events: Mapping[str, Mapping[str, Any]],
+    response_id: str,
+    agent_id: str,
+) -> _CanonicalResponseView:
+    """Resolve body and metadata together from one authoritative same-room replacement."""
+    candidates: list[tuple[tuple[int, int, str], _CanonicalResponseView]] = []
+    for event in events.values():
+        if (
+            event.get("sender") != agent_id
+            or event.get("type") != "m.room.message"
+            or event.get("_audit_room_id") != events.get(response_id, {}).get("_audit_room_id")
+        ):
+            continue
+        for candidate in (event, *_bundled_replacement_events(event)):
+            content = candidate.get("content")
+            if not isinstance(content, Mapping):
+                continue
+            relation = content.get("m.relates_to")
+            edit = (
+                isinstance(relation, Mapping)
+                and relation.get("rel_type") == "m.replace"
+                and relation.get("event_id") == response_id
+            )
+            event_id = candidate.get("event_id")
+            if not isinstance(event_id, str) or (event_id != response_id and not edit):
+                continue
+            payload = content.get("m.new_content") if edit else content
+            status = payload.get(STREAM_STATUS_KEY) if isinstance(payload, Mapping) else None
+            body = _canonical_message_body(content, is_edit=edit)
+            if body is None:
+                continue
+            view = _CanonicalResponseView(body, status if isinstance(status, str) else None)
+            candidates.append((_replacement_order(event_id, candidate.get("origin_server_ts"), is_edit=edit), view))
+    return max(candidates, key=lambda candidate: candidate[0])[1] if candidates else _CanonicalResponseView("", None)
+
+
 class ExactReplyOracle:
     """Track canonical agent replies from real incremental `/sync` responses.
 
@@ -4611,6 +4792,12 @@ class ExactReplyOracle:
         self._ledger_records: dict[str, TurnRecord] = {}
         self._ledger_observations: dict[str, TurnRecord] = {}
         self._ledger_read_at = 0.0
+        self.log_path: Path | None = None
+        self.source_current_markers: Mapping[str, str] = {}
+        self.observed_markers_for = _ModelHandler.observed_markers_for
+        self.pending_edit_markers: Mapping[str, Mapping[str, str]] = {}
+        self.supersession_proofs: dict[str, SupersessionProof] = {}
+        self.canonical_events: dict[str, Mapping[str, Any]] = {}
         self.internal_source_ids: set[str] = set()
         self.next_batch: str | None = None
         self.expected_sources: dict[str, str] = {}
@@ -4681,7 +4868,26 @@ class ExactReplyOracle:
         if now - self._ledger_read_at < min_interval:
             return
         self._ledger_read_at = now
-        self._ledger_observations = read_ledger_records(self.ledger_path, include_incomplete=True)
+        self.supersession_proofs = {}
+        if self.log_path is None:
+            self._ledger_observations = read_ledger_records(self.ledger_path, include_incomplete=True)
+        else:
+            auditor = FinalStateAuditor(
+                self.client,
+                self,
+                agent_id=self.agent_id,
+                ledger_path=self.ledger_path,
+                expected_body_for=self.expected_body_for,
+                source_current_markers=self.source_current_markers,
+                observed_markers_for=self.observed_markers_for,
+                pending_edit_markers=self.pending_edit_markers,
+            )
+            try:
+                self._ledger_observations = dict(auditor._observe_supersession(self.canonical_events))
+            except (AssertionError, OSError):
+                # A concurrent write may invalidate this poll, never final qualification.
+                self.supersession_proofs = {}
+                self._ledger_observations = {}
         self._ledger_records = {
             event_id: record
             for event_id, record in self._ledger_observations.items()
@@ -4700,21 +4906,17 @@ class ExactReplyOracle:
 
     def source_completed_without_response(self, event_id: str) -> bool:
         """Return whether one source durably settled without a response."""
-        return self._supersession_proven(event_id)
+        record = self._ledger_records.get(event_id)
+        return record is not None and record.completed and record.response_event_id is None
 
     def _supersession_proven(self, event_id: str) -> bool:
-        """Return whether a completed no-response record proves supersession.
-
-        Production's replay guard records a skipped superseded turn as a
-        completed record with ``response_event_id=None``. That exact durable
-        record is the only acceptable supersession proof; chronology alone
-        never counts.
-        """
-        record = self._ledger_records.get(event_id)
-        return record is not None and record.response_event_id is None
+        """Return whether exact settled journal ownership proves deliberate supersession."""
+        return event_id in self.supersession_proofs
 
     def directly_settled(self, event_id: str) -> bool:
         """Return whether one source has its own reply or response-backed record."""
+        if self.coalescing_threads and self.log_path is not None:
+            return self.ledger_response(event_id) is not None or self._supersession_proven(event_id)
         return len(self.response_ids.get(event_id, ())) == 1 or self.ledger_response(event_id) is not None
 
     def settled_sources(self) -> set[str]:
@@ -4724,10 +4926,9 @@ class ExactReplyOracle:
         requester sends a newer one in the same thread. A chain settles from
         its newest required member backwards: the newest must be directly
         replied or response-backed in the ledger, and every older member must
-        then present its own durable terminal record -- either its own
-        response-backed attribution, or the completed no-response record that
-        proves it was legitimately superseded once a later member anchored.
-        A missing, incomplete, or malformed record never settles.
+        then present completed generation or exact settled-journal supersession
+        proof anchored to its named newer source. Missing or malformed debt
+        evidence never settles; an old generation may remain incomplete.
         """
         settled: set[str] = set()
         for chain in self.chains.values():
@@ -4742,7 +4943,11 @@ class ExactReplyOracle:
                         anchored = True
                         settled.add(event_id)
                     continue
-                if self.directly_settled(event_id) or self._supersession_proven(event_id):
+                if (
+                    self.directly_settled(event_id)
+                    or self._supersession_proven(event_id)
+                    or self.source_completed_without_response(event_id)
+                ):
                     settled.add(event_id)
         return settled
 
@@ -4932,27 +5137,15 @@ class ExactReplyOracle:
         """Return the reply covering one coalesced or superseded source.
 
         A source is covered only through proven chain state: its own
-        response-backed record, or -- when its completed record proves it was
-        superseded -- the response-backed reply of a later chain member. An
-        older source with no durable terminal record of its own is never
-        treated as covered.
+        response-backed record, or its exact proven supersession anchor.
+        A completed no-response record does not attribute another reply.
         """
         own_attribution = self.ledger_response(source_event_id)
         if own_attribution is not None:
             return own_attribution
         if not self._supersession_proven(source_event_id):
             return None
-        chain = next((chain for chain in self.chains.values() if source_event_id in chain), None)
-        if chain is None:
-            return None
-        for later_source in chain[chain.index(source_event_id) + 1 :]:
-            attribution = self.ledger_response(later_source)
-            if attribution is not None:
-                return attribution
-            replies = self.response_ids.get(later_source, set())
-            if len(replies) == 1:
-                return next(iter(replies))
-        return None
+        return self.supersession_proofs[source_event_id].anchor_response_event_id
 
     async def _sync_once(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
         async with self._sync_lock:
@@ -4974,13 +5167,14 @@ class ExactReplyOracle:
                     continue
                 for raw_event in events:
                     if isinstance(raw_event, dict):
-                        self._ingest_event(raw_event)
+                        self._ingest_event({**raw_event, "_audit_room_id": room_id})
 
     def _ingest_event(self, event: Mapping[str, Any]) -> None:
         event_id = event.get("event_id")
         if not isinstance(event_id, str) or event_id in self.seen_event_ids:
             return
         self.seen_event_ids.add(event_id)
+        self.canonical_events[event_id] = dict(event)
         self.event_summaries[event_id] = {
             "sender": event.get("sender"),
             "type": event.get("type"),
@@ -5547,6 +5741,171 @@ class FinalStateAuditor:
         self.redacted_edit_evidence = dict(redacted_edit_evidence or {})
         self.runtime_redaction_path = runtime_redaction_path
         self.pending_edit_markers = {source: dict(edits) for source, edits in (pending_edit_markers or {}).items()}
+        self.supersession_proofs: dict[str, SupersessionProof] = {}
+
+    def _observe_supersession(self, events: Mapping[str, Mapping[str, Any]]) -> Mapping[str, TurnRecord]:
+        """Join current ownership and positive decisions without rewriting generation outcomes."""
+        assert self.ledger_path is not None
+        snapshot = _read_supersession_snapshot(self.ledger_path, f"{AGENT_NAME}@{self.agent_id}")
+        decisions = _supersession_decisions(self.oracle.log_path)
+        replies = self._canonical_agent_replies(events)
+        proofs: dict[str, SupersessionProof] = {}
+        for chain in self.oracle.chains.values():
+            for index in range(len(chain) - 1, -1, -1):
+                source = chain[index]
+                # A process may stop after logging its guard but before settlement.
+                # Prefer the latest observation that independently proves a link.
+                for decision in reversed(decisions.get(source, ())):
+                    if decision.newer_event_id not in chain[index + 1 :]:
+                        continue
+                    proof = self._prove_supersession(source, decision.newer_event_id, snapshot, events, replies, proofs)
+                    if proof is None or decision.thread_id not in {None, proof.thread_id}:
+                        continue
+                    proofs[source] = proof
+                    break
+        # A shared unfinished owner is indivisible: one proved source cannot
+        # discharge another live source's generation or mutation debt.
+        for source, proof in tuple(proofs.items()):
+            record = snapshot.records.get(source)
+            if record is not None and (
+                any(owned not in proofs for owned in record.replay_source_event_ids)
+                or record.pending_redaction_cleanup_event_ids
+                or any(revision.cleanup_pending for revision in (record.revision_replay or {}).values())
+            ):
+                proofs.pop(proof.source_event_id, None)
+        # Removing one incomplete owner also invalidates every chain depending on it.
+        for source in tuple(proofs):
+            proof = proofs[source]
+            if proof.newer_event_id != proof.anchor_source_event_id and proof.newer_event_id not in proofs:
+                del proofs[source]
+        self.supersession_proofs = proofs
+        self.oracle.supersession_proofs = proofs
+        return snapshot.records
+
+    def _prove_supersession(
+        self,
+        source: str,
+        newer: str,
+        snapshot: _SupersessionSnapshot,
+        events: Mapping[str, Mapping[str, Any]],
+        replies: Mapping[str, set[str]],
+        proofs: Mapping[str, SupersessionProof],
+    ) -> SupersessionProof | None:
+        """Validate one forward link against identity, debt, visible interruption and completed anchor."""
+        root = self._supersession_source_pair(source, newer, snapshot, events)
+        if root is None:
+            return None
+        old_record = snapshot.records.get(source)
+        if old_record is not None and (old_record.completed or source not in old_record.replay_source_event_ids):
+            return None
+        old_response = old_record.response_event_id if old_record is not None else None
+        old_view = _canonical_response_view(events, old_response, self.agent_id) if old_response is not None else None
+        if old_response is None:
+            if replies.get(source):
+                return None
+        elif (
+            old_record is None
+            or old_response not in self._visible_record_reply_ids(old_record, replies)
+            or old_view is None
+            or old_view.stream_status != "error"
+            or not old_view.body.endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
+            or any(self._relay_replies_to(event, root, old_response) for event in events.values())
+        ):
+            return None
+        anchor = self._completed_supersession_anchor(newer, snapshot.records, events, replies)
+        if anchor is None:
+            forward = proofs.get(newer)
+            if forward is None:
+                return None
+            anchor = (forward.anchor_source_event_id, forward.anchor_response_event_id)
+        row = snapshot.sources[source]
+        return SupersessionProof(
+            source,
+            newer,
+            *anchor,
+            old_response,
+            f"{AGENT_NAME}@{self.agent_id}",
+            row.room_id,
+            root,
+            row.sender,
+        )
+
+    def _supersession_source_pair(
+        self,
+        source: str,
+        newer: str,
+        snapshot: _SupersessionSnapshot,
+        events: Mapping[str, Mapping[str, Any]],
+    ) -> str | None:
+        """Require matching admitted requester identities in the same resolved Matrix thread."""
+        row, next_row = snapshot.sources.get(source), snapshot.sources.get(newer)
+        if row is None or next_row is None or row.state != "settled" or next_row.state != "settled":
+            return None
+        root = self._source_thread_root(source, events, {}, seen=set())
+        owners = [snapshot.records[event_id] for event_id in (source, newer) if event_id in snapshot.records]
+        delivery_ids = {source, newer, *(record.anchor_event_id for record in owners)}
+        response_ids = {record.response_event_id for record in owners} - {None}
+        if (
+            root is None
+            or root != self._source_thread_root(newer, events, {}, seen=set())
+            or row.room_id != next_row.room_id
+            or row.sender != next_row.sender
+            or row.timestamp >= next_row.timestamp
+            or any(
+                (delivery.room_id == row.room_id and delivery.thread_id in {root, ""})
+                or delivery.delivery_id in delivery_ids
+                or delivery.edits_event_id in response_ids
+                for delivery in snapshot.pending_deliveries
+            )
+            or not all(self._journal_source_matches(item, events, root) for item in (row, next_row))
+            or self.pending_edit_markers.get(source)
+            or self.pending_edit_markers.get(newer)
+        ):
+            return None
+        return root
+
+    @staticmethod
+    def _journal_source_matches(row: _SettledJournalSource, events: Mapping[str, Mapping[str, Any]], root: str) -> bool:
+        """Bind an admitted identity to canonical wire facts; plain replies resolve by ancestry."""
+        event = events.get(row.event_id, {})
+        return (
+            event.get("event_id") == row.event_id
+            and event.get("_audit_room_id") == row.room_id
+            and event.get("sender") == row.sender
+            and event.get("origin_server_ts") == row.timestamp
+            and event.get("type") == "m.room.message"
+            and row.kind == "message"
+            and row.thread_id in {"", root}
+        )
+
+    def _completed_supersession_anchor(
+        self,
+        source: str,
+        records: Mapping[str, TurnRecord],
+        events: Mapping[str, Mapping[str, Any]],
+        replies: Mapping[str, set[str]],
+    ) -> tuple[str, str] | None:
+        """Require exact durable completion and visible current-source model consumption."""
+        record = records.get(source)
+        if record is None or not record.completed or source not in record.replay_source_event_ids:
+            return None
+        response = record.response_event_id
+        if response is None or response not in self._visible_record_reply_ids(record, replies):
+            return None
+        view = _canonical_response_view(events, response, self.agent_id)
+        if not self._record_sources_share_thread(record) or view.stream_status != "completed":
+            return None
+        body = view.body
+        call = _body_call_id(body)
+        marker = self.source_current_markers.get(source)
+        if (
+            call is None
+            or body != self.expected_body_for(call)
+            or marker is None
+            or marker not in self.observed_markers_for(call)
+        ):
+            return None
+        return source, response
 
     async def audit(
         self,
@@ -5567,6 +5926,7 @@ class FinalStateAuditor:
         self._assert_sent_events_canonical(events, sent_records, redacted)
         replies = self._canonical_agent_replies(events, sent_records=sent_records)
         self._assert_reply_cardinality(replies)
+        records = self._observe_supersession(events) if self.ledger_path is not None else None
         completed = self._assert_final_bodies_complete(events, replies)
         self._assert_sync_view_parity(events, sent_records, replies)
         ledger_metrics: dict[str, int] = {}
@@ -5574,7 +5934,16 @@ class FinalStateAuditor:
             if not self.ledger_path.exists():
                 msg = f"handled-turn ledger missing at {self.ledger_path}"
                 raise AssertionError(msg)
-            records = read_ledger_records(self.ledger_path, strict=True)
+            assert records is not None
+            for event_id, record in records.items():
+                if not record.completed and any(
+                    source not in self.supersession_proofs for source in record.replay_source_event_ids
+                ):
+                    _invalid_ledger(
+                        self.ledger_path,
+                        f"record {event_id!r} is incomplete without exact supersession proof",
+                        strict=True,
+                    )
             redacted_sources = set(redacted) & set(self.oracle.expected_sources)
             ledger_metrics = self._assert_ledger_attribution(
                 replies,
@@ -5594,6 +5963,9 @@ class FinalStateAuditor:
             "audited_events": len(events),
             "audited_rooms": len(set(room_ids)),
             "completed_final_bodies": completed,
+            "superseded_interrupted_bodies": len(
+                {proof.interrupted_response_event_id for proof in self.supersession_proofs.values()} - {None},
+            ),
             **ledger_metrics,
         }
 
@@ -5901,10 +6273,9 @@ class FinalStateAuditor:
         covered, so exact per-source attribution comes from MindRoom's
         handled-turn ledger, walked per (thread, sender) chain to honor the
         supersede policy, and cross-checked against the `/messages` view in
-        both directions. The same terminal-proof loader backs both live
-        settlement and this final audit so the two can never drift: an older
-        chain source counts as superseded only when its own completed
-        no-response record exists, never from chronology alone.
+        both directions. The same typed supersession proof backs live settlement,
+        final body classification and durable attribution. Completed no-response
+        turns remain completed outcomes; chronology alone proves nothing.
         """
         assert self.ledger_path is not None
         oracle = self.oracle
@@ -5983,7 +6354,12 @@ class FinalStateAuditor:
                         f"{record.source_event_ids}",
                     )
                     record = None
-                if record is not None and record.response_event_id is not None:
+                proof = self.supersession_proofs.get(source_event_id)
+                if (
+                    record is not None
+                    and (record.completed or proof is not None)
+                    and record.response_event_id is not None
+                ):
                     visible_record_reply_ids = self._visible_record_reply_ids(record, replies)
                     if record.response_event_id not in visible_record_reply_ids:
                         problems.append(
@@ -5992,14 +6368,18 @@ class FinalStateAuditor:
                         )
                     else:
                         response_ids.add(record.response_event_id)
-                        attributed += 1
+                        attributed += int(proof is None)
+                        superseded += int(proof is not None)
                         anchored = True
-                elif anchored and record is not None and record.response_event_id is None:
-                    superseded += 1
+                elif proof is not None or (
+                    anchored and record is not None and record.completed and record.response_event_id is None
+                ):
+                    attributed += int(proof is None)
+                    superseded += int(proof is not None)
                 elif anchored:
                     problems.append(
                         f"superseded chain source {logical_ref} ({source_event_id}) "
-                        "has no completed no-response supersession record",
+                        "has no completed record or exact journal supersession proof",
                     )
                 else:
                     problems.append(
@@ -6119,7 +6499,7 @@ class FinalStateAuditor:
         call that produced its visible reply must have observed the current
         marker of every one of those sources. A wrong-source body, a pre-edit
         body, or a coalesced body missing one source's current marker fails
-        here. A completed no-response supersession record requires no marker.
+        here. A completed no-response turn requires no marker.
 
         Only *replayable* sources carry a required marker. A source that was
         durably redacted is tombstoned: production deliberately refuses to
@@ -6151,6 +6531,10 @@ class FinalStateAuditor:
             live_sources = covered_sources - harness_redacted
             body = self._latest_agent_body(events, record.response_event_id)
             call_id = _body_call_id(body)
+            if call_id is None and source_event_id in self.supersession_proofs:
+                # A terminal interrupted placeholder never published model output.
+                # Its exact proof closes semantic debt without claiming generation.
+                continue
             observed = self.observed_markers_for(call_id) if call_id is not None else frozenset()
             required_live = {
                 (
@@ -6266,9 +6650,9 @@ class FinalStateAuditor:
         """Every required reply ends as one exact completed stream or a recovered interruption.
 
         A restart may terminate a stream into a visible interrupted note by
-        design, but only when a completed auto-resume answer exists in the
-        same thread; an interrupted or partial final body without recovery is
-        a failure.
+        design, with exact auto-resume recovery or independently proven deliberate
+        supersession. Superseded interruptions are counted separately from
+        completed generation; unfinished partial streams still fail.
         """
         problems: list[str] = []
         checked = 0
@@ -6282,6 +6666,9 @@ class FinalStateAuditor:
         audited_sources.extend((relay_id, f"relay:{relay_id}") for relay_id in self.oracle.internal_source_ids)
         for source_event_id, logical_ref in audited_sources:
             for reply_event_id in replies.get(source_event_id, ()):
+                proof = self.supersession_proofs.get(source_event_id)
+                if proof is not None and proof.interrupted_response_event_id == reply_event_id:
+                    continue
                 body = self._latest_agent_body(events, reply_event_id)
                 call_id = _body_call_id(body)
                 if call_id is not None and body == self.expected_body_for(call_id):
@@ -6380,7 +6767,7 @@ class FinalStateAuditor:
 
     def _latest_agent_body(self, events: Mapping[str, Mapping[str, Any]], reply_event_id: str) -> str:
         """Return the newest visible body for one agent reply."""
-        return _latest_response_body(events.values(), reply_event_id, sender_id=self.agent_id)
+        return _canonical_response_view(events, reply_event_id, self.agent_id).body
 
     def _assert_sync_view_parity(
         self,
@@ -6467,6 +6854,9 @@ class LiveFuzzRunner:
         # and redaction cleanup. Keep every unresolved physical edit until
         # exact terminal consumption supersedes it, or its own redaction lands.
         self._pending_edit_markers: dict[str, dict[str, str]] = {}
+        self.oracle.log_path = stack.log_path
+        self.oracle.source_current_markers = self.source_current_markers
+        self.oracle.pending_edit_markers = self._pending_edit_markers
         self._pending_source_tombstones: set[str] = set()
         self.operation_count = 0
         # Monotonic sequence for the realized journal, spanning both mutations
@@ -9151,6 +9541,7 @@ def _sanitized_oracle_snapshot(oracle: ExactReplyOracle) -> dict[str, object]:
     references, and settlement counters are retained for diagnosis.
     """
     return {
+        "principal_id": f"{AGENT_NAME}@{oracle.agent_id}",
         "expected_sources": dict(oracle.expected_sources),
         "optional_sources": sorted(oracle.optional_sources),
         "observed_sources": sorted(oracle.observed_sources),
@@ -9158,6 +9549,12 @@ def _sanitized_oracle_snapshot(oracle: ExactReplyOracle) -> dict[str, object]:
         "response_ids": {source: sorted(ids) for source, ids in oracle.response_ids.items()},
         "internal_source_ids": sorted(oracle.internal_source_ids),
         "reply_latencies": {source: round(latency, 3) for source, latency in oracle.reply_latencies.items()},
+        "supersession_proofs": {source: asdict(proof) for source, proof in oracle.supersession_proofs.items()},
+        "response_views": {
+            response: _response_view_diagnostic(tuple(oracle.canonical_events.values()), response)
+            for replies in oracle.response_ids.values()
+            for response in replies
+        },
     }
 
 
@@ -9330,7 +9727,9 @@ class FailureBundle:
         self._write_isolated("mindroom.log", copy_text(log_path))
         self._write_isolated(
             "handled_turns.json",
-            lambda destination: write_json(_ledger_evidence_snapshot(ledger_path))(destination),
+            lambda destination: write_json(
+                _ledger_evidence_snapshot(ledger_path, principal_id=oracle_snapshot.get("principal_id")),
+            )(destination),
         )
         self._write_isolated("nio_recovery.json", write_json(dict(nio_recovery_snapshot)))
         self._write_isolated("oracle_snapshot.json", write_json(dict(oracle_snapshot)))
@@ -9358,17 +9757,39 @@ class FailureBundle:
         return self.directory
 
 
-def _ledger_evidence_snapshot(ledger_path: Path) -> dict[str, object]:
+def _ledger_evidence_snapshot(ledger_path: Path, *, principal_id: object = None) -> dict[str, object]:
     """Preserve every stored projection verbatim, including unfinished or malformed rows."""
     if not ledger_path.is_file():
         return {"exists": False, "agent_name": AGENT_NAME, "rows": []}
     with closing(sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)) as database:
+        database.execute("BEGIN")
         database.row_factory = sqlite3.Row
         rows = database.execute(
             "SELECT index_event_id, anchor_event_id, record_json FROM turn_records WHERE agent_name = ? ORDER BY index_event_id",
             (AGENT_NAME,),
         ).fetchall()
-    return {"exists": True, "agent_name": AGENT_NAME, "rows": [dict(row) for row in rows]}
+        snapshot: dict[str, object] = {"exists": True, "agent_name": AGENT_NAME, "rows": [dict(row) for row in rows]}
+        if isinstance(principal_id, str):
+            snapshot["principal_id"] = principal_id
+            snapshot["journal_sources"] = [
+                dict(row)
+                for row in database.execute(
+                    "SELECT event_id, room_id, thread_id, kind, sender, origin_server_ts, state "
+                    "FROM journal_events WHERE principal_id = ? ORDER BY receipt_order",
+                    (principal_id,),
+                ).fetchall()
+            ]
+            snapshot["delivery_ownership"] = [
+                dict(row)
+                for row in database.execute(
+                    "SELECT delivery_id, stage, room_id, thread_id, event_type, edits_event_id, "
+                    "acknowledged_event_id, edit_target_pending, attempted, retired, permanent_failure_reason, "
+                    "payload_json, result_json FROM matrix_delivery_outbox WHERE principal_id = ? "
+                    "ORDER BY created_at_ns, delivery_id, stage",
+                    (principal_id,),
+                ).fetchall()
+            ]
+    return snapshot
 
 
 def _capture_bundle_collector(

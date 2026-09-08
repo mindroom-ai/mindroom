@@ -5905,6 +5905,7 @@ def _cleanup_qualification_runner(tmp_path: Path) -> LiveFuzzRunner:
     client.room_id = "!room:example"
     client.send_event = AsyncMock(side_effect=["$ordinary", "$anchor"])
     stack = Mock(spec=ManagedTuwunelStack)
+    stack.log_path = tmp_path / "mindroom.log"
     stack.runtime_redaction_path = tmp_path / "runtime-redactions.jsonl"
     stack.agent_id = "@agent:example"
     stack.router_id = "@router:example"
@@ -6054,7 +6055,7 @@ def test_edit_tombstone_checks_every_matching_cleanup_owner(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["superseded", "redacted", "missing", "incomplete"])
+@pytest.mark.parametrize("outcome", ["no_response", "redacted", "missing", "incomplete"])
 @pytest.mark.parametrize("attempt", ["none", "clean", "contaminated", "pending"])
 @pytest.mark.parametrize("dedicated", [False, True])
 async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
@@ -6123,7 +6124,7 @@ async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
     if outcome != "missing":
         records["$ordinary"] = TurnRecord.create(
             source_event_ids=("$ordinary",),
-            completed=outcome == "superseded",
+            completed=outcome == "no_response",
             redacted_source_event_ids=("$ordinary",) if outcome == "redacted" else (),
         )
     if outcome == "redacted":
@@ -6142,7 +6143,7 @@ async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
     monkeypatch.setattr(_ModelHandler, "_observed_markers", observed)
     monkeypatch.setattr(_ModelHandler, "_full_request_markers", full_requests)
     monkeypatch.setattr(_ModelHandler, "response_text_for", _short_body_for)
-    failure = {"missing": "supersession record", "incomplete": "incomplete"}.get(outcome)
+    failure = {"missing": "supersession proof", "incomplete": "incomplete"}.get(outcome)
     if dedicated and failure is None:
         failure = "has no completed response"
     failure = failure or {"pending": "pending or missing tombstone cleanup", "contaminated": "redacted history"}.get(
@@ -6239,9 +6240,9 @@ async def test_cleanup_admission_reads_incomplete_owner_edit_tombstone(
 async def test_coalescing_oracle_settles_via_ledger_attribution(tmp_path: Path) -> None:
     """Sources swallowed into a combined follow-up turn settle via the durable ledger.
 
-    A newer source anchors on its own visible combined reply, but an older
-    superseded source only settles once its own completed no-response record
-    proves supersession. A direct visible reply is never enough on its own.
+    A newer source anchors on its own visible combined reply, but an
+    older source can settle through its own completed no-response outcome,
+    which does not prove supersession or attribute the newer reply.
     """
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     ledger_path = tmp_path / "event_journal.db"
@@ -6266,8 +6267,8 @@ async def test_coalescing_oracle_settles_via_ledger_attribution(tmp_path: Path) 
         with pytest.raises(KeyError, match="response event not observed"):
             oracle.resolve_response_ref("response:op:1")
 
-        # A completed no-response supersession record proves the older source was
-        # legitimately skipped; it now settles and its cover is the combined reply.
+        # A separately completed no-response turn settles without attributing the
+        # combined reply or pretending a replay-guard decision occurred.
         second_record = TurnRecord.create(
             source_event_ids=("$second",),
             response_event_id="$combined-reply",
@@ -6277,7 +6278,9 @@ async def test_coalescing_oracle_settles_via_ledger_attribution(tmp_path: Path) 
         _write_ledger(ledger_path, {"$first": superseded_record, "$second": second_record})
         oracle.refresh_ledger_attributions(min_interval=0.0)
         assert oracle.unsettled_required_sources() == []
-        assert oracle.resolve_response_ref("response:op:1") == "$combined-reply"
+        assert not oracle._supersession_proven("$first")
+        with pytest.raises(KeyError, match="response event not observed"):
+            oracle.resolve_response_ref("response:op:1")
 
         # A dedicated response-backed record instead attributes the older source
         # directly to its own reply.
@@ -6471,7 +6474,7 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
     """Durable attribution must cover every required source and every visible reply.
 
     An older source with no completed record of its own can never be inferred
-    superseded from chronology; only production's own completed no-response
+    completed from chronology; only production's own completed no-response
     record settles it.
     """
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
@@ -6518,12 +6521,12 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
         with pytest.raises(AssertionError, match=r"\$first.*incomplete"):
             auditor._assert_ledger_attribution(replies)
 
-        # A completed no-response record for the older source proves supersession.
+        # A completed no-response turn remains completed generation, not supersession.
         superseded_first = TurnRecord.create(source_event_ids=("$first",), response_event_id=None, completed=True)
         _write_ledger(ledger_path, {"$first": superseded_first, "$second": anchor_second})
         assert auditor._assert_ledger_attribution(replies) == {
-            "ledger_attributed_sources": 1,
-            "ledger_superseded_sources": 1,
+            "ledger_attributed_sources": 2,
+            "ledger_superseded_sources": 0,
         }
 
         # A visible reply with no durable record attributing it is an orphan.
@@ -6703,14 +6706,14 @@ async def test_final_audit_reuses_one_ledger_snapshot(
         ledger_path=ledger_path,
     )
     reads = 0
-    original_read = live_fuzz.read_ledger_records
+    original_read = live_fuzz._read_supersession_snapshot
 
-    def count_reads(path: Path, *, strict: bool = False) -> dict[str, TurnRecord]:
+    def count_reads(path: Path, principal_id: str) -> live_fuzz._SupersessionSnapshot:
         nonlocal reads
         reads += 1
-        return original_read(path, strict=strict)
+        return original_read(path, principal_id)
 
-    monkeypatch.setattr(live_fuzz, "read_ledger_records", count_reads)
+    monkeypatch.setattr(live_fuzz, "_read_supersession_snapshot", count_reads)
     try:
         await auditor.audit(
             room_ids={"!room:example"},
@@ -7508,7 +7511,7 @@ async def test_model_source_audit_rejects_coalesced_missing_one_source(tmp_path:
 
 @pytest.mark.asyncio
 async def test_model_source_audit_ignores_no_response_supersession(tmp_path: Path) -> None:
-    """A completed no-response supersession record requires no marker."""
+    """A completed no-response turn requires no marker."""
     ledger_path = tmp_path / "event_journal.db"
     marker_a = _source_marker("op:1", ORIGINAL_REVISION)
     auditor = _model_source_auditor(
@@ -9479,6 +9482,7 @@ async def test_new_runner_owes_initial_startup_maintenance(tmp_path: Path) -> No
         router_id="@router:example",
         storage_path=tmp_path,
         runtime_redaction_path=tmp_path / "runtime-redactions.jsonl",
+        log_path=tmp_path / "mindroom.log",
     )
     try:
         runner = LiveFuzzRunner(

@@ -78,7 +78,11 @@ That is what makes it land inside a turn instead of against an idle runtime, whi
 Interruptions alternate between two kinds, because they prove different things:
 
 - `restart_mindroom` sends SIGINT, so MindRoom drains. The run fails if the child ignores the signal until the harness has to kill it, exits with an unexpected status, or never logs an orderly bot shutdown.
-- `crash_mindroom` sends SIGKILL, so nothing drains and every committed, unsettled obligation is owed to durable recovery. There is no shutdown verdict to check here; the oracle is that each interrupted turn still produces exactly one reply.
+- `crash_mindroom` sends SIGKILL, so nothing drains and every committed, unsettled obligation is owed to durable recovery.
+  There is no shutdown verdict to check here; each interrupted source must have exact response attribution or independently proven deliberate supersession.
+
+Supersession requires an exact positive replay-guard log, a matching admitted and settled principal-scoped journal source, and its named newer same-requester/thread source anchored in completed durable generation with a canonical visible response covering its current marker.
+An old visible reply must retain exact durable attribution and terminal restart-interruption metadata; superseded work is counted separately from completed generation and cannot waive delivery, edit, redaction, or source-revision debt.
 
 A run whose interruptions all found an idle journal fails instead of reporting the count as coverage.
 `restarts`, `crashes`, and `interruptions_with_work_outstanding` are all in the result JSON, and the third must equal the sum of the first two.
