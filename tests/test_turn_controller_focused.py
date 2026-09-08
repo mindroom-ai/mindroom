@@ -4513,3 +4513,113 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
     assert harness.turn_store.is_handled("$second")
     assert not await dispatcher.store.is_pending("$first")
     assert not await dispatcher.store.is_pending("$second")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("race", ["stable", "pending", "denied", "explicit_grant"])
+async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    race: str,
+) -> None:
+    """Late uncertainty retains the admitted obligation; real denial still settles it."""
+    config = _membership_single_agent_config(tmp_path)
+    if race == "explicit_grant":
+        config.agents["general"].access.users = [_SENDER]
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event(
+        f"{_entity_user_id(config, 'general')} answer once",
+        event_id="$late-membership:localhost",
+    )
+    client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(_SENDER, None, None)],
+        room_id=room.room_id,
+    )
+    memberships = harness.controller.deps.runtime.agent_reply_memberships
+    await memberships.refresh(config, runtime_paths_for(config), client)
+    dispatcher = _obligation_runner(
+        harness,
+        tracking_path=tmp_path / "dispatch-tracking",
+        principal_id=_entity_user_id(config, "general"),
+        entity_name="general",
+        room=room,
+    )
+    visible = harness.controller.deps.visible_responses
+    # Replace recording-only settlement seam with actual production journal owner.
+    visible.deps = replace(
+        visible.deps,
+        settle_ignored_sources=dispatcher.settle_intentionally_ignored_turn_sources,
+    )
+    harness.controller.deps = replace(
+        harness.controller.deps,
+        dispatch_source_is_terminal=dispatcher.source_is_terminal,
+    )
+    reached, release = asyncio.Event(), asyncio.Event()
+    first = True
+
+    async def hold_after_strict_authorization(_client: nio.AsyncClient, _room_id: str) -> bool:
+        nonlocal first
+        if first:
+            first = False
+            assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
+            reached.set()
+            await release.wait()
+        return False
+
+    monkeypatch.setattr("mindroom.text_ingress_dispatch.is_dm_room", hold_after_strict_authorization)
+    await admit_dispatch_event(dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
+    try:
+        await dispatcher.drain_once()
+        await asyncio.wait_for(reached.wait(), timeout=3)
+        if race in {"pending", "explicit_grant"}:
+            memberships.invalidate(config, reason="uncertain_sync_response")
+            if race == "pending":
+                with pytest.raises(ReplyMembershipPendingError):
+                    harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
+            else:
+                assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
+        elif race == "denied":
+            client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
+            await memberships.refresh(config, runtime_paths_for(config), client)
+            assert not harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
+        release.set()
+        await harness.gate.drain_all()
+        await harness.runner.settle_inbox_responses()
+        before = {
+            "pending": await dispatcher.store.is_pending(event.event_id),
+            "response_count": len(harness.runner.requests),
+            "ledger_exists": harness.turn_store.get_turn_record(event.event_id) is not None,
+            "retry_requests": list(harness.retried_dispatch_sources),
+        }
+        if race == "pending":
+            assert before["pending"] is True
+            assert before["response_count"] == 0
+            assert before["ledger_exists"] is False
+            assert before["retry_requests"] == [(event.event_id,)]
+            await memberships.refresh(config, runtime_paths_for(config), client)
+        await dispatcher.drain_once()
+        await harness.gate.drain_all()
+        await harness.runner.settle_inbox_responses()
+        after_count = len(harness.runner.requests)
+        await dispatcher.drain_once()
+        await harness.gate.drain_all()
+        await harness.runner.settle_inbox_responses()
+        assert len(harness.runner.requests) == after_count
+        if race == "pending":
+            assert (before["pending"], before["response_count"], after_count) == (True, 0, 1), (
+                "Accepted source must remain pending through uncertainty, then answer exactly once after refresh",
+                before,
+                after_count,
+            )
+        elif race == "denied":
+            assert (before["pending"], before["response_count"], after_count) == (False, 0, 0)
+        else:
+            assert (before["response_count"], after_count) == (1, 1)
+    finally:
+        release.set()
+        await dispatcher.stop()
+        await harness.gate.drain_all()

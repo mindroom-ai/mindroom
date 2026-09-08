@@ -229,18 +229,17 @@ def filter_thread_agents_for_sender(
     available_responders_in_room: Sequence[MatrixID] | None = None,
 ) -> list[MatrixID]:
     """Return participating agents that may reply within the sender and room responder boundary."""
-    sender_visible_agents = authorization.filter_responders_by_sender_permissions(
+    if available_responders_in_room is not None:
+        # This pool already includes the current room's authorization decision.
+        available_responder_ids = {responder.full_id for responder in available_responders_in_room}
+        return [agent for agent in agents_in_thread if agent.full_id in available_responder_ids]
+    return authorization.filter_responders_by_sender_permissions(
         agents_in_thread,
         sender_id,
         config,
         runtime_paths,
         membership_index,
     )
-    if available_responders_in_room is None:
-        return sender_visible_agents
-
-    available_responder_ids = {responder.full_id for responder in available_responders_in_room}
-    return [agent for agent in sender_visible_agents if agent.full_id in available_responder_ids]
 
 
 def get_all_mentioned_agents_in_thread(
@@ -329,6 +328,7 @@ def decide_agent_response(
     sender_id: str,
     available_responders_in_room: list[MatrixID] | None = None,
     agents_in_thread: Sequence[MatrixID] | None = None,
+    require_resolved_membership: bool = False,
 ) -> AgentResponseDecision:
     """Decide if an agent should respond to a message individually.
 
@@ -348,6 +348,7 @@ def decide_agent_response(
         sender_id: Sender Matrix ID used for per-agent reply permissions
         available_responders_in_room: Optional precomputed sender-visible responders for the room
         agents_in_thread: Optional precomputed agents that have participated in the thread
+        require_resolved_membership: Retain durable work when this responder has an unresolved grant
 
     """
     if not authorization.is_sender_allowed_for_agent_reply_in_room(
@@ -357,6 +358,7 @@ def decide_agent_response(
         room.room_id,
         runtime_paths,
         membership_index,
+        require_resolved_membership=require_resolved_membership,
     ):
         return AgentResponseDecision(False, "sender_not_allowed")
 

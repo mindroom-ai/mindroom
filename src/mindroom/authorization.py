@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
@@ -333,6 +334,47 @@ async def _get_available_responders_for_sender_authoritative(
     return _get_available_responders_for_sender(room, sender_id, config, runtime_paths, membership_index)
 
 
+@dataclass(frozen=True)
+class ResponderCandidatePermissions:
+    """Separate proven candidates from unresolved grants at durable planning."""
+
+    allowed: list[MatrixID]
+    pending: list[MatrixID]
+
+
+def classify_responder_candidates_from_cached_room(
+    room: nio.MatrixRoom,
+    sender_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+) -> ResponderCandidatePermissions:
+    """Preserve membership uncertainty without deciding which candidates matter."""
+    responders = _configured_responder_entities_for_room(room, config, runtime_paths)
+    if responders is None:
+        responders = get_available_responders_in_room(room, config, runtime_paths)
+    registry = entity_identity_registry(config, runtime_paths)
+    allowed: list[MatrixID] = []
+    pending: list[MatrixID] = []
+    for responder in responders:
+        name = registry.current_entity_name_for_user_id(responder.full_id, include_router=False)
+        if name is None:
+            continue
+        decision = _responder_reply_authorization(
+            sender_id,
+            name,
+            room.room_id,
+            config,
+            runtime_paths,
+            membership_index,
+        )
+        if decision is _ReplyAuthorizationDecision.ALLOWED:
+            allowed.append(responder)
+        elif decision is _ReplyAuthorizationDecision.PENDING:
+            pending.append(responder)
+    return ResponderCandidatePermissions(allowed, pending)
+
+
 def responder_candidate_entities_from_cached_room(
     room: nio.MatrixRoom,
     sender_id: str,
@@ -341,43 +383,31 @@ def responder_candidate_entities_from_cached_room(
     membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
     """Return sender-visible responder candidates without refreshing Matrix membership."""
-    configured_entities = _configured_responder_candidates_for_room(
+    return classify_responder_candidates_from_cached_room(
         room,
         sender_id,
         config,
         runtime_paths,
         membership_index,
-    )
-    if configured_entities is not None:
-        return configured_entities
-    return _get_available_responders_for_sender(room, sender_id, config, runtime_paths, membership_index)
+    ).allowed
 
 
-def _configured_responder_candidates_for_room(
+def _configured_responder_entities_for_room(
     room: nio.MatrixRoom,
-    sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID] | None:
-    """Return configured-room responder candidates, or None for ad-hoc rooms."""
+    """Return configured-room responders before permissions, or None for ad-hoc rooms."""
     room_alias = room.canonical_alias
     room_aliases = (room_alias,) if isinstance(room_alias, str) and room_alias else ()
-    configured_entities = configured_routable_entity_ids_for_room(
-        config,
-        room.room_id,
-        runtime_paths,
-        room_aliases=room_aliases,
-    )
-    if not configured_entities:
-        return None
-    return filter_responders_by_sender_permissions(
-        configured_entities,
-        sender_id,
-        config,
-        runtime_paths,
-        membership_index,
-        room.room_id,
+    return (
+        configured_routable_entity_ids_for_room(
+            config,
+            room.room_id,
+            runtime_paths,
+            room_aliases=room_aliases,
+        )
+        or None
     )
 
 
@@ -390,15 +420,16 @@ async def responder_candidate_entities_with_membership_refresh(
     membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
     """Return candidates, refreshing unsynced ad-hoc room membership when possible."""
-    configured_entities = _configured_responder_candidates_for_room(
-        room,
-        sender_id,
-        config,
-        runtime_paths,
-        membership_index,
-    )
+    configured_entities = _configured_responder_entities_for_room(room, config, runtime_paths)
     if configured_entities is not None:
-        return configured_entities
+        return filter_responders_by_sender_permissions(
+            configured_entities,
+            sender_id,
+            config,
+            runtime_paths,
+            membership_index,
+            room.room_id,
+        )
     return await _get_available_responders_for_sender_authoritative(
         client,
         room,

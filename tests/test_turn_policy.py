@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 import nio
 import pytest
 
+from mindroom.authorization import ReplyMembershipPendingError
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -29,6 +31,7 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import (
     bind_runtime_paths,
+    make_matrix_client_mock,
     make_visible_message,
     request_envelope,
     runtime_paths_for,
@@ -524,3 +527,126 @@ def test_prepared_dispatch_rejects_mismatched_envelope_target() -> None:
             correlation_id="corr-test",
             envelope=envelope,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("scenario", ["explicit", "unmentioned", "router", "thread", "members", "configured_team"])
+async def test_planning_preserves_relevant_pending_candidates(config: Config, scenario: str) -> None:
+    """Unknown target or competing membership cannot become a completed plan."""
+    config.agents["general"].access = ResponderAccessConfig(users=[_SENDER])
+    config.agents["research"].access = ResponderAccessConfig(current_room_members=True, members_of_rooms=[])
+    config.router.access = ResponderAccessConfig(users=[_SENDER])
+    if scenario == "configured_team":
+        config = bind_runtime_paths(
+            Config.model_validate(
+                {
+                    **config.model_dump(),
+                    "teams": {
+                        "crew": {
+                            "display_name": "Crew",
+                            "role": "Help together",
+                            "agents": ["general", "research"],
+                            "access": {"current_room_members": True},
+                        },
+                    },
+                },
+            ),
+            runtime_paths_for(config),
+        )
+    agent_name = "research" if scenario == "explicit" else "general"
+    if scenario == "router":
+        agent_name = ROUTER_AGENT_NAME
+    elif scenario == "configured_team":
+        agent_name = "crew"
+    policy = _policy_for(config, agent_name)
+    ids = [_entity_id(config, name) for name in [*config.agents, *config.teams]]
+    room = _room_with_members(_SENDER, *(value.full_id for value in ids))
+    mentioned = []
+    if scenario in {"explicit", "configured_team"}:
+        mentioned = [_entity_id(config, agent_name)]
+    elif scenario == "members":
+        mentioned = ids
+    history = [make_visible_message(sender=_entity_id(config, "research").full_id, body="Earlier answer")]
+    context = _context(
+        mentioned=mentioned,
+        am_i_mentioned=bool(mentioned),
+        thread_id="$root" if scenario == "thread" else None,
+        thread_history=history if scenario == "thread" else [],
+    )
+    with pytest.raises(ReplyMembershipPendingError):
+        await _plan(policy, room, _dispatch(context, agent_name=agent_name))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_explicit_allowed_target_ignores_unrelated_pending_responder(config: Config) -> None:
+    """An independent explicit grant needs no unrelated responder's membership."""
+    config.agents["general"].access = ResponderAccessConfig(users=[_SENDER])
+    config.agents["research"].access = ResponderAccessConfig(current_room_members=True, members_of_rooms=[])
+    room = _room_with_members(_SENDER, *(_entity_id(config, name).full_id for name in config.agents))
+    context = _context(mentioned=[_entity_id(config, "general")], am_i_mentioned=True)
+    plan = await _plan(_policy_for(config, "general"), room, _dispatch(context, agent_name="general"))
+    assert plan.kind == "respond"
+    assert plan.response_action.kind == "individual"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("stable_owner", [True, False])
+async def test_proven_member_denial_requires_stable_rejection_owner(config: Config, stable_owner: bool) -> None:
+    """A real denial rejects despite pending membership only when its owner cannot change."""
+    allowed_name, pending_name = ("general", "research") if stable_owner else ("research", "general")
+    config.agents[allowed_name].access = ResponderAccessConfig(users=[_SENDER])
+    config.agents[pending_name].access = ResponderAccessConfig(current_room_members=True, members_of_rooms=[])
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                **config.model_dump(),
+                "agents": {
+                    **{name: agent.model_dump() for name, agent in config.agents.items()},
+                    "secret": {
+                        "display_name": "Secret",
+                        "access": {"users": [], "current_room_members": False, "members_of_rooms": []},
+                    },
+                },
+            },
+        ),
+        runtime_paths_for(config),
+    )
+    ids = [_entity_id(config, name) for name in config.agents]
+    room = _room_with_members(_SENDER, *(value.full_id for value in ids))
+    context = _context(mentioned=ids, am_i_mentioned=True)
+    policy = _policy_for(config, allowed_name)
+    if not stable_owner:
+        with pytest.raises(ReplyMembershipPendingError):
+            await _plan(policy, room, _dispatch(context, agent_name=allowed_name))
+        return
+    plan = await _plan(policy, room, _dispatch(context, agent_name=allowed_name))
+    assert plan.kind == "respond"
+    assert plan.response_action.kind == "reject"
+    assert "secret" in plan.response_action.rejection_message
+    assert pending_name not in plan.response_action.rejection_message
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("agent_name", ["general", ROUTER_AGENT_NAME])
+async def test_current_room_grant_preserves_existing_thread_owner(config: Config, agent_name: str) -> None:
+    """Room-authorized thread participation must survive a later thread visibility filter."""
+    config.agents["general"].access = ResponderAccessConfig(current_room_members=True, members_of_rooms=[])
+    config.agents["research"].access = ResponderAccessConfig(users=[_SENDER])
+    config.router.access = ResponderAccessConfig(users=[_SENDER])
+    policy = _policy_for(config, agent_name)
+    room = _room_with_members(_SENDER, *(_entity_id(config, name).full_id for name in config.agents))
+    client = make_matrix_client_mock(user_id=_entity_id(config, agent_name).full_id)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(_SENDER, None, None)],
+        room_id=room.room_id,
+    )
+    await policy.deps.agent_reply_memberships.refresh(config, runtime_paths_for(config), client)
+    history = [make_visible_message(sender=_entity_id(config, "general").full_id, body="Earlier answer")]
+    context = _context(thread_id="$root", thread_history=history)
+    plan = await _plan(policy, room, _dispatch(context, agent_name=agent_name))
+    assert plan.kind == ("respond" if agent_name == "general" else "ignore")
