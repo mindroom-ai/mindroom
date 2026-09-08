@@ -98,7 +98,10 @@ depends_on = ["mindroom.durable_write"]
 
 [[modules]]
 path = "mindroom.private_instance_identity"
-depends_on = ["mindroom.private_instance_identity_store"]
+depends_on = [
+    "mindroom.private_storage_upgrade",
+    "mindroom.private_instance_identity_store",
+]
 
 [[modules]]
 path = "mindroom.private_instance_identity_store"
@@ -108,6 +111,8 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
+    "mindroom.private_storage_upgrade",
+    "mindroom.cli.storage_upgrade",
     "mindroom.private_instance_identity",
     "mindroom.runtime_resolution",
 ]
@@ -811,6 +816,7 @@ visibility = ["mindroom.api.oauth"]
 [[modules]]
 path = "mindroom.runtime_resolution"
 depends_on = [
+    "mindroom.private_storage_upgrade",
     "mindroom.agent_policy",
     "mindroom.constants",
     "mindroom.private_instance_identity_store",
@@ -1078,6 +1084,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
+    "mindroom.private_storage_upgrade",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
     "mindroom.api.thread_exports",
@@ -1219,6 +1226,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.private_storage_upgrade",
     "mindroom.api.sandbox_env_assembly",
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_forkserver",
@@ -1772,6 +1780,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
+    "mindroom.private_storage_upgrade",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
     "mindroom.event_journal_open",
@@ -2815,6 +2824,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.thread_export.workspace_sync"
 depends_on = [
+    "mindroom.private_storage_upgrade",
     "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.private_instance_identity",
@@ -3227,6 +3237,7 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.main"
 depends_on = [
+    "mindroom.cli.storage_upgrade",
     "mindroom.cli.thread_export",
     "mindroom",
     "mindroom.avatar_generation",
@@ -4781,6 +4792,7 @@ from = ["mindroom.thread_export"]
 
 [[interfaces]]
 expose = [
+    "normalize_worker_key_part",
     "ResolvedWorkerTarget",
     "ResolvedWorkerKeyScope",
     "SerializedToolExecutionIdentity",
@@ -5218,3 +5230,20 @@ visibility = ["mindroom.api.main"]
 path = "mindroom.cli.thread_export"
 depends_on = ["mindroom.constants", "mindroom.thread_export.models"]
 visibility = ["mindroom.cli.main"]
+
+[[modules]]
+path = "mindroom.private_storage_upgrade"
+depends_on = [
+    "mindroom.private_instance_identity_store",
+    "mindroom.durable_write",
+    "mindroom.file_locks",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.cli.storage_upgrade"
+depends_on = [
+    "mindroom.private_storage_upgrade",
+    "mindroom.private_instance_identity_store",
+    "mindroom.durable_write",
+]

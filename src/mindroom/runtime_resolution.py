@@ -18,6 +18,7 @@ from mindroom.constants import (
     resolve_session_state_root,
 )
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.private_storage_upgrade import check_private_storage_target, check_runtime_storage_markers
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
@@ -272,6 +273,7 @@ def resolve_agent_storage(
     execution_identity: ToolExecutionIdentity | None,
 ) -> ResolvedAgentStorage:
     """Resolve canonical state roots without creating or reconciling workspace content."""
+    check_runtime_storage_markers(runtime_paths)
     resolved_execution = resolve_agent_execution(
         agent_name,
         config,
@@ -282,6 +284,9 @@ def resolve_agent_storage(
         if worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key"
             raise ValueError(msg)
+        identity = resolved_execution.execution_identity
+        if identity is not None and identity.requester_id is not None:
+            check_private_storage_target(runtime_paths.storage_root, worker_key, identity.requester_id)
         state_root = _resolved_private_state_root(
             runtime_paths=runtime_paths,
             worker_key=worker_key,
