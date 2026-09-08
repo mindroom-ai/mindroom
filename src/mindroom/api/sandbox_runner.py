@@ -34,6 +34,7 @@ from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.private_storage_upgrade import check_runtime_storage_upgrade
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     SANDBOX_RUNTIME_ENV_BY_KEY,
@@ -292,6 +293,7 @@ def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) 
 def load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
     """Read the sandbox runner runtime context from explicit startup payload."""
     runtime_paths = _startup_runtime_paths_from_env()
+    check_runtime_storage_upgrade(runtime_paths)
     return runtime_paths, _runtime_config_or_empty(runtime_paths)
 
 
@@ -303,6 +305,7 @@ def initialize_sandbox_runner_app(
     runner_token: str | None = None,
 ) -> None:
     """Attach one explicit runtime context to a sandbox-runner app instance."""
+    check_runtime_storage_upgrade(runtime_paths)
     committed_config = config or _runtime_config_or_empty(runtime_paths)
     _ensure_registry_loaded_with_config(runtime_paths, committed_config)
     api_app.state.sandbox_runner_context = _SandboxRunnerContext(

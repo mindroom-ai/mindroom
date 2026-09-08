@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
 from mindroom.private_instance_identity import private_instances_for_agent
+from mindroom.private_storage_upgrade import check_runtime_storage_upgrade
 from mindroom.runtime_shutdown import gather_shutdown_phase
 from mindroom.thread_export.models import ThreadExportRoom, ThreadExportSource, ThreadExportTarget
 from mindroom.thread_export.projected_history import export_conversation_reader
@@ -213,6 +214,7 @@ class WorkspaceThreadExportRunner:
     async def _run_pass(self, config: Config, *, full_pass: bool, room_ids: frozenset[str]) -> None:
         """Export each agent's rooms through that agent into its own workspace."""
         runtime_paths = self._deps.runtime_paths
+        await asyncio.to_thread(check_runtime_storage_upgrade, runtime_paths)
         enabled = {
             name: agent.thread_exports for name, agent in config.agents.items() if agent.thread_exports is not None
         }
@@ -368,6 +370,7 @@ def _build_target_groups(
     active_bots: dict[str, _ThreadExportBot],
 ) -> dict[str, tuple[ThreadExportTarget, ...]]:
     """Resolve each active agent's shared or private export targets."""
+    check_runtime_storage_upgrade(runtime_paths)
     groups: dict[str, tuple[ThreadExportTarget, ...]] = {}
     for agent_name, options in enabled.items():
         bot = active_bots.get(agent_name)
@@ -503,6 +506,7 @@ def _clear_disabled_agent_exports(
     enabled_agent_names: frozenset[str],
 ) -> None:
     """Remove exports for configured agents that no longer enable them."""
+    check_runtime_storage_upgrade(runtime_paths)
     for agent_name, agent_config in config.agents.items():
         if agent_name in enabled_agent_names:
             continue
