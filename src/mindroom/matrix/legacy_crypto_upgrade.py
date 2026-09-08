@@ -45,18 +45,23 @@ def retire_legacy_crypto_recovery(
             }
             if tables & {"niodurablemeta", "nioingestmeta"} or "accounts" not in tables:
                 return
+            transport_tables = tuple(table for table in _LEGACY_TRANSPORT_TABLES if table in tables)
             accounts = connection.execute("SELECT user_id, device_id, account, shared FROM accounts").fetchall()
             if not accounts:
-                msg = "Legacy Matrix store account is missing"
-                raise LocalProtocolError(msg)
+                if any(
+                    connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None  # noqa: S608
+                    for table in transport_tables
+                ):
+                    msg = "Legacy Matrix store account is missing"
+                    raise LocalProtocolError(msg)
+                return
             if any(account[:2] != (user_id, device_id) for account in accounts):
                 msg = "Legacy Matrix store account/device identity mismatch"
                 raise LocalProtocolError(msg)
             for _, _, pickle, shared in accounts:
                 OlmAccount.from_pickle(pickle, pickle_key, bool(shared))
             retired = 0
-            for table in _LEGACY_TRANSPORT_TABLES:
-                if table in tables:
-                    retired += connection.execute(f"DELETE FROM {table}").rowcount  # noqa: S608 - fixed legacy tables
+            for table in transport_tables:
+                retired += connection.execute(f"DELETE FROM {table}").rowcount  # noqa: S608 - fixed legacy tables
         if retired:
             logger.warning("matrix_legacy_recovery_retired", row_count=retired)

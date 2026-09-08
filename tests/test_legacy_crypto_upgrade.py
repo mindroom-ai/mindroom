@@ -217,6 +217,18 @@ def test_invalid_crypto_account_keeps_legacy_recovery(tmp_path: Path) -> None:
         assert connection.execute("SELECT account FROM accounts").fetchone() == (b"invalid-pickle",)
 
 
+def test_empty_crypto_store_without_transport_state_needs_no_preflight(tmp_path: Path) -> None:
+    """A schema-only store remains adoptable when no legacy transport rows exist."""
+    store = DefaultStore(ACCOUNT, DEVICE, str(tmp_path), pickle_key="DEFAULT_KEY")
+    store.database.close()
+
+    retire_legacy_crypto_recovery(
+        tmp_path / f"{ACCOUNT}_{DEVICE}.db",
+        user_id=ACCOUNT,
+        device_id=DEVICE,
+    )
+
+
 def test_missing_crypto_account_keeps_legacy_recovery(tmp_path: Path) -> None:
     """A missing retained identity must block destructive transport cleanup."""
     _legacy_crypto(tmp_path, "pending")
