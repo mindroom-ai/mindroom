@@ -793,8 +793,10 @@ class GitKnowledgeSource:
         before_head = await self._rev_parse("HEAD")
 
         remote_ref = f"origin/{git_config.branch}"
+        # Automatic maintenance can detach and outlive the refresh supervisor.
+        # Keep repository repacking out of knowledge polling.
         await self._run_git(
-            ["fetch", "origin", f"+refs/heads/{git_config.branch}:refs/remotes/{remote_ref}"],
+            ["fetch", "--no-auto-gc", "origin", f"+refs/heads/{git_config.branch}:refs/remotes/{remote_ref}"],
             env=await _resolved_git_auth_env(
                 git_config.repo_url,
                 git_config.credentials_service,
