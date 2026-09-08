@@ -220,7 +220,7 @@ async def test_current_and_fresh_startup_skip_workers_and_contents(
 ) -> None:
     """Legitimate new traffic never causes a completed scope to be migrated again."""
     migration = importlib.import_module("mindroom.private_storage_migration")
-    quiescence = importlib.import_module("mindroom.workers.storage_quiescence")
+    preflight = importlib.import_module("mindroom.workers.storage_preflight")
     paths = _paths(tmp_path)
     _seed(paths, _OLD, _REQUESTER)
     await migration.migrate_private_storage(paths)
@@ -228,8 +228,8 @@ async def test_current_and_fresh_startup_skip_workers_and_contents(
     (target / "new-traffic.txt").write_text("legitimate new traffic")
     inode = target.stat().st_ino
     monkeypatch.setattr(
-        quiescence,
-        "quiesce_workers_for_storage_upgrade",
+        preflight,
+        "check_workers_absent_for_storage_upgrade",
         Mock(side_effect=AssertionError("unexpected stop")),
     )
     monkeypatch.setattr(os, "walk", Mock(side_effect=AssertionError("unexpected contents traversal")))
@@ -362,7 +362,7 @@ async def test_cancellation_keeps_locks_until_blocking_migration_drains(
 ) -> None:
     """Cancelled admission cannot release volume locks while the worker thread still moves state."""
     migration = importlib.import_module("mindroom.private_storage_migration")
-    quiescence = importlib.import_module("mindroom.workers.storage_quiescence")
+    preflight = importlib.import_module("mindroom.workers.storage_preflight")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     stopped, release = threading.Event(), threading.Event()
@@ -371,7 +371,7 @@ async def test_cancellation_keeps_locks_until_blocking_migration_drains(
         stopped.set()
         assert release.wait(10)
 
-    monkeypatch.setattr(quiescence, "quiesce_workers_for_storage_upgrade", pause)
+    monkeypatch.setattr(preflight, "check_workers_absent_for_storage_upgrade", pause)
     task = asyncio.create_task(migration.migrate_private_storage(paths))
     assert await asyncio.to_thread(stopped.wait, 10)
     task.cancel()
@@ -503,21 +503,27 @@ async def test_absent_optional_mirror_stays_absent_on_resume(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
-async def test_worker_stop_failure_preserves_original_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Storage is untouched when managed workers cannot be proven stopped."""
+async def test_worker_preflight_failure_preserves_original_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Storage is untouched when managed workers cannot be proven absent."""
     migration = importlib.import_module("mindroom.private_storage_migration")
-    quiescence = importlib.import_module("mindroom.workers.storage_quiescence")
+    preflight = importlib.import_module("mindroom.workers.storage_preflight")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     before = _files(source)
     monkeypatch.setattr(
-        quiescence,
-        "quiesce_workers_for_storage_upgrade",
-        Mock(side_effect=RuntimeError("stop failed")),
+        preflight,
+        "check_workers_absent_for_storage_upgrade",
+        Mock(side_effect=RuntimeError("preflight failed")),
     )
-    with pytest.raises(RuntimeError, match="stop failed"):
+    with pytest.raises(RuntimeError, match="preflight failed"):
         await migration.migrate_private_storage(paths)
     assert _files(source) == before
+    assert not (source / _INTENT).exists()
+    assert not private_instance_scope_root_path(paths.storage_root, _NEW).exists()
+    assert resolve_session_state_root(source, paths).exists()
 
 
 @pytest.mark.asyncio

@@ -5232,12 +5232,12 @@ depends_on = [
     "mindroom.file_locks",
     "mindroom.private_instance_identity_store",
     "mindroom.tool_system.worker_routing",
-    "mindroom.workers.storage_quiescence",
+    "mindroom.workers.storage_preflight",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.api.main"]
 
 [[modules]]
-path = "mindroom.workers.storage_quiescence"
+path = "mindroom.workers.storage_preflight"
 depends_on = [
     "mindroom.runtime_env_policy",
     "mindroom.workers.backend",

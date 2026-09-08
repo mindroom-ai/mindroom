@@ -89,7 +89,6 @@ if TYPE_CHECKING:
         attrs: dict[str, object]
         status: str
         id: str
-        name: str
 
         def reload(self) -> None: ...
 
@@ -159,9 +158,9 @@ _DOCKER_EXTRA = "docker"
 
 __all__ = [
     "DockerWorkerBackend",
+    "check_docker_workers_absent_for_storage_upgrade",
     "docker_backend_config_signature",
     "ensure_docker_dependencies",
-    "quiesce_docker_workers_for_storage_upgrade",
 ]
 
 
@@ -335,338 +334,47 @@ def _set_docker_request_timeout(client: _DockerClient, timeout_seconds: float) -
         raise WorkerBackendError(msg) from exc
 
 
-def _load_docker_quiescence_metadata(worker_root: Path) -> _DockerWorkerMetadata | None:
-    metadata_file = worker_root / "metadata" / "worker.json"
-    if not metadata_file.exists() and not metadata_file.is_symlink():
-        return None
-    if (
-        worker_root.is_symlink()
-        or not worker_root.is_dir()
-        or metadata_file.parent.is_symlink()
-        or metadata_file.is_symlink()
-        or not metadata_file.is_file()
-    ):
-        msg = "Docker worker metadata path is unsafe for storage quiescence."
-        raise WorkerBackendError(msg)
-    try:
-        payload = json.loads(metadata_file.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError, TypeError) as exc:
-        msg = "Docker worker metadata is invalid for storage quiescence."
-        raise WorkerBackendError(msg) from exc
-    if not isinstance(payload, dict):
-        msg = "Docker worker metadata is invalid for storage quiescence."
-        raise WorkerBackendError(msg)
-    try:
-        metadata = _DockerWorkerMetadata(**payload)
-    except TypeError as exc:
-        msg = "Docker worker metadata is invalid for storage quiescence."
-        raise WorkerBackendError(msg) from exc
-    if not isinstance(metadata.worker_key, str) or not isinstance(metadata.container_name, str):
-        msg = "Docker worker metadata does not contain a valid runtime identity."
-        raise WorkerBackendError(msg)
-    return metadata
-
-
-def _docker_quiescence_metadata(
-    workers_root: Path,
-    *,
-    config: DockerWorkerBackendConfig,
-) -> dict[str, _DockerWorkerMetadata]:
-    if not workers_root.exists():
-        return {}
-    if workers_root.is_symlink() or not workers_root.is_dir():
-        msg = "Docker workers root must be a real directory for storage quiescence."
-        raise WorkerBackendError(msg)
-    metadata_by_name: dict[str, _DockerWorkerMetadata] = {}
-    for worker_root in sorted(workers_root.iterdir()):
-        metadata = _load_docker_quiescence_metadata(worker_root)
-        if metadata is None:
-            continue
-        expected_name = _container_name_for_worker(
-            metadata.worker_key,
-            prefix=config.name_prefix,
-            runtime_namespace=_runtime_namespace_for_workers_root(workers_root),
-        )
-        if (
-            metadata.backend_name != "docker"
-            or resolved_worker_key_scope(metadata.worker_key) is None
-            or worker_root.name != worker_dir_name(metadata.worker_key)
-            or metadata.worker_id != expected_name
-            or metadata.container_name != expected_name
-            or expected_name in metadata_by_name
-        ):
-            msg = "Docker worker metadata does not match exact runtime ownership."
-            raise WorkerBackendError(msg)
-        metadata_by_name[expected_name] = metadata
-    return metadata_by_name
-
-
-def _docker_container_labels(container: _DockerContainer) -> dict[str, object]:
-    config = container.attrs.get("Config")
-    labels = cast("dict[str, object]", config).get("Labels") if isinstance(config, dict) else None
-    return cast("dict[str, object]", labels).copy() if isinstance(labels, dict) else {}
-
-
-def _docker_container_worker_key(container: _DockerContainer) -> str | None:
-    config = container.attrs.get("Config")
-    raw_env = cast("dict[str, object]", config).get("Env") if isinstance(config, dict) else None
-    if not isinstance(raw_env, list):
-        return None
-    values: dict[str, str] = {}
-    for item in raw_env:
-        if not isinstance(item, str) or "=" not in item:
-            continue
-        name, value = item.split("=", 1)
-        if name in values:
-            return None
-        values[name] = value
-    return values.get(_DEDICATED_WORKER_KEY_ENV)
-
-
-def _docker_container_has_state_mount(
-    container: _DockerContainer,
-    *,
-    state_root: Path,
-    storage_mount_path: str,
-) -> bool:
-    mounts = container.attrs.get("Mounts")
-    if not isinstance(mounts, list):
-        return False
-    matches = []
-    for mount in mounts:
-        if not isinstance(mount, dict):
-            continue
-        mount_data = cast("dict[str, object]", mount)
-        if (
-            mount_data.get("Type") == "bind"
-            and mount_data.get("Source") == str(state_root)
-            and mount_data.get("Destination") == storage_mount_path
-            and mount_data.get("RW") is True
-        ):
-            matches.append(mount_data)
-    return len(matches) == 1
-
-
-def _list_docker_quiescence_containers(
-    client: _DockerClient,
-    docker_errors: _DockerErrors,
-    *,
-    selector_labels: dict[str, str],
-    remaining: Callable[[], float],
-) -> list[_DockerContainer]:
-    _set_docker_request_timeout(client, remaining())
-    try:
-        return list(
-            client.containers.list(
-                all=True,
-                filters={"label": [f"{key}={value}" for key, value in sorted(selector_labels.items())]},
-            ),
-        )
-    except docker_errors.DockerException as exc:
-        msg = f"Failed to list Docker workers for storage quiescence: {exc}"
-        raise WorkerBackendError(msg) from exc
-
-
-def _read_docker_quiescence_container(
-    client: _DockerClient,
-    docker_errors: _DockerErrors,
-    container_name: str,
-    *,
-    remaining: Callable[[], float],
-) -> _DockerContainer | None:
-    _set_docker_request_timeout(client, remaining())
-    try:
-        return client.containers.get(container_name)
-    except docker_errors.NotFound:
-        return None
-    except docker_errors.DockerException as exc:
-        msg = f"Failed to inspect Docker worker '{container_name}' for storage quiescence: {exc}"
-        raise WorkerBackendError(msg) from exc
-
-
-def _validate_docker_quiescence_container(
-    container: _DockerContainer,
-    listed: _DockerContainer | None,
-    metadata: _DockerWorkerMetadata,
-    *,
-    selector_labels: dict[str, str],
-    workers_root: Path,
-    config: DockerWorkerBackendConfig,
-) -> None:
-    labels = _docker_container_labels(container)
-    required_labels = {
-        _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
-        _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
-        _LABEL_NAME: _LABEL_NAME_VALUE,
-        **selector_labels,
-        **config.extra_labels,
-        _LABEL_WORKER_ID: container.name,
-    }
-    state_root = workers_root / worker_dir_name(metadata.worker_key)
-    if (
-        listed is None
-        or listed.id != container.id
-        or not isinstance(container.id, str)
-        or not container.id
-        or not isinstance(metadata.container_id, str)
-        or not metadata.container_id
-        or metadata.container_id != container.id
-        or any(labels.get(key) != value for key, value in required_labels.items())
-        or _docker_container_worker_key(container) != metadata.worker_key
-        or not _docker_container_has_state_mount(
-            container,
-            state_root=state_root,
-            storage_mount_path=config.storage_mount_path,
-        )
-    ):
-        msg = f"Docker worker container '{container.name}' does not match exact runtime identity."
-        raise WorkerBackendError(msg)
-
-
-def _validated_docker_quiescence_containers(
-    client: _DockerClient,
-    docker_errors: _DockerErrors,
-    metadata_by_name: dict[str, _DockerWorkerMetadata],
-    *,
-    selector_labels: dict[str, str],
-    workers_root: Path,
-    config: DockerWorkerBackendConfig,
-    remaining: Callable[[], float],
-) -> list[_DockerContainer]:
-    candidates = _list_docker_quiescence_containers(
-        client,
-        docker_errors,
-        selector_labels=selector_labels,
-        remaining=remaining,
-    )
-    candidates_by_name: dict[str, _DockerContainer] = {}
-    for container in candidates:
-        if not isinstance(container.name, str) or not container.name or container.name in candidates_by_name:
-            msg = "Docker worker namespace contains an ambiguous container identity."
-            raise WorkerBackendError(msg)
-        candidates_by_name[container.name] = container
-        if container.name not in metadata_by_name:
-            msg = f"Docker worker container '{container.name}' has no exact persisted metadata."
-            raise WorkerBackendError(msg)
-
-    validated = []
-    for container_name, metadata in metadata_by_name.items():
-        container = _read_docker_quiescence_container(
-            client,
-            docker_errors,
-            container_name,
-            remaining=remaining,
-        )
-        if container is None:
-            continue
-        _validate_docker_quiescence_container(
-            container,
-            candidates_by_name.get(container_name),
-            metadata,
-            selector_labels=selector_labels,
-            workers_root=workers_root,
-            config=config,
-        )
-        validated.append(container)
-    return validated
-
-
-def _stop_and_remove_docker_quiescence_containers(
-    containers: list[_DockerContainer],
-    *,
-    client: _DockerClient,
-    docker_errors: _DockerErrors,
-    remaining: Callable[[], float],
-) -> None:
-    """Gracefully stop every validated runtime before removing any of them."""
-    for container in containers:
-        request_timeout = remaining()
-        _set_docker_request_timeout(client, request_timeout)
-        grace_seconds = max(1, min(10, int(request_timeout) - 1))
-        try:
-            container.stop(timeout=grace_seconds)
-        except docker_errors.NotFound:
-            continue
-        except docker_errors.DockerException as exc:
-            msg = f"Failed to stop Docker worker during storage quiescence: {exc}"
-            raise WorkerBackendError(msg) from exc
-
-    for container in containers:
-        _set_docker_request_timeout(client, remaining())
-        try:
-            container.remove(force=False)
-        except docker_errors.NotFound:
-            continue
-        except docker_errors.DockerException as exc:
-            msg = f"Failed to remove stopped Docker worker during storage quiescence: {exc}"
-            raise WorkerBackendError(msg) from exc
-
-
-def quiesce_docker_workers_for_storage_upgrade(
+def check_docker_workers_absent_for_storage_upgrade(
     runtime_paths: RuntimePaths,
     *,
     timeout_seconds: float,
 ) -> None:
-    """Remove exactly owned Docker runtimes without changing worker state."""
+    """Verify no containers remain in this runtime namespace, without changing state."""
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
-        msg = "Docker worker quiescence timeout must be a positive finite number."
+        msg = "Docker worker preflight timeout must be a positive finite number."
         raise WorkerBackendError(msg)
     deadline = time.monotonic() + timeout_seconds
 
     def remaining() -> float:
         value = deadline - time.monotonic()
         if value <= 0:
-            msg = "Docker worker quiescence timed out before absence was verified."
+            msg = "Docker worker preflight timed out before absence was verified."
             raise WorkerBackendError(msg)
         return value
 
-    config = DockerWorkerBackendConfig.from_runtime(runtime_paths)
-    storage_path = resolve_docker_storage_path(runtime_paths=runtime_paths)
-    workers_root = docker_workers_root(storage_path)
+    workers_root = docker_workers_root(resolve_docker_storage_path(runtime_paths=runtime_paths))
     runtime_namespace = _runtime_namespace_for_workers_root(workers_root)
-    metadata_by_name = _docker_quiescence_metadata(workers_root, config=config)
-    client, docker_errors = _load_docker_client_and_errors(
+    client, _docker_errors = _load_docker_client_and_errors(
         runtime_paths=runtime_paths,
         timeout_seconds=remaining(),
         ensure_dependencies=False,
     )
-    selector_labels = {_LABEL_RUNTIME_NAMESPACE: runtime_namespace}
-
-    validated = _validated_docker_quiescence_containers(
-        client,
-        docker_errors,
-        metadata_by_name,
-        selector_labels=selector_labels,
-        workers_root=workers_root,
-        config=config,
-        remaining=remaining,
-    )
-
-    _stop_and_remove_docker_quiescence_containers(
-        validated,
-        client=client,
-        docker_errors=docker_errors,
-        remaining=remaining,
-    )
-
-    if _list_docker_quiescence_containers(
-        client,
-        docker_errors,
-        selector_labels=selector_labels,
-        remaining=remaining,
-    ):
-        msg = "A Docker worker runtime reappeared during storage quiescence."
-        raise WorkerBackendError(msg)
-    for container_name in metadata_by_name:
-        container = _read_docker_quiescence_container(
-            client,
-            docker_errors,
-            container_name,
-            remaining=remaining,
+    _set_docker_request_timeout(client, remaining())
+    try:
+        containers = client.containers.list(
+            all=True,
+            sparse=True,
+            filters={"label": [f"{_LABEL_RUNTIME_NAMESPACE}={runtime_namespace}"]},
         )
-        if container is None:
-            continue
-        msg = f"Docker worker runtime '{container_name}' reappeared during storage quiescence."
+    except Exception as exc:
+        msg = f"Failed to verify Docker worker absence: {exc}"
+        raise WorkerBackendError(msg) from exc
+    remaining()
+    if not isinstance(containers, list):
+        msg = "Docker worker preflight returned an invalid container inventory."
+        raise WorkerBackendError(msg)
+    if containers:
+        msg = "Remove all Docker worker containers in this runtime namespace before the private-storage upgrade."
         raise WorkerBackendError(msg)
 
 

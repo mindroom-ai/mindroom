@@ -1,4 +1,4 @@
-"""State-preserving managed-worker shutdown for private-storage upgrades."""
+"""Read-only managed-worker absence preflight for private-storage upgrades."""
 
 from __future__ import annotations
 
@@ -18,39 +18,39 @@ _WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backen
 def _remaining_seconds(deadline: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        msg = "Managed-worker quiescence timed out before the backend stop completed."
+        msg = "Managed-worker preflight timed out before absence was verified."
         raise WorkerBackendError(msg)
     return remaining
 
 
-def quiesce_workers_for_storage_upgrade(
+def check_workers_absent_for_storage_upgrade(
     runtime_paths: RuntimePaths,
     *,
     timeout_seconds: float,
 ) -> None:
-    """Stop exactly owned managed runtimes without deleting their durable state."""
+    """Verify managed runtimes are absent without modifying containers or durable state."""
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
-        msg = "Managed-worker quiescence timeout must be a positive finite number."
+        msg = "Managed-worker preflight timeout must be a positive finite number."
         raise WorkerBackendError(msg)
     deadline = time.monotonic() + timeout_seconds
     backend_name = (runtime_paths.env_value(_WORKER_BACKEND_ENV) or "").strip().lower()
 
     if backend_name == "docker":
         from mindroom.workers.backends.docker import (  # noqa: PLC0415
-            quiesce_docker_workers_for_storage_upgrade,
+            check_docker_workers_absent_for_storage_upgrade,
         )
 
-        quiesce_docker_workers_for_storage_upgrade(
+        check_docker_workers_absent_for_storage_upgrade(
             runtime_paths,
             timeout_seconds=_remaining_seconds(deadline),
         )
         return
     if backend_name in {"k8s", "kubernetes"}:
         from mindroom.workers.backends.kubernetes import (  # noqa: PLC0415
-            quiesce_kubernetes_workers_for_storage_upgrade,
+            check_kubernetes_workers_absent_for_storage_upgrade,
         )
 
-        quiesce_kubernetes_workers_for_storage_upgrade(
+        check_kubernetes_workers_absent_for_storage_upgrade(
             runtime_paths,
             timeout_seconds=_remaining_seconds(deadline),
         )
@@ -59,7 +59,7 @@ def quiesce_workers_for_storage_upgrade(
         proxy_url = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_url"]) or "").strip()
         if proxy_url:
             msg = (
-                "Private-storage upgrade cannot stop the configured external runner. "
+                "Private-storage upgrade cannot verify absence of the configured external runner. "
                 "Stop it through the deployment lifecycle, temporarily unset MINDROOM_SANDBOX_PROXY_URL "
                 "for migration startup, then restart the primary."
             )

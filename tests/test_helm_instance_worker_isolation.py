@@ -2583,3 +2583,18 @@ def test_runtime_chart_does_not_copy_shared_proxy_token_to_worker_namespace() ->
     ]
 
     assert worker_namespace_secrets == []
+
+
+@pytest.mark.parametrize("chart", ["runtime", "instance"])
+def test_worker_manager_can_verify_absence_without_controller_write_access(chart: str) -> None:
+    """Migration can list lingering Pods and ReplicaSets without granting ReplicaSet mutation."""
+    docs = _render_runtime_chart() if chart == "runtime" else _render_instance_chart()
+    name = "mindroom-runtime-worker-manager" if chart == "runtime" else "mindroom-worker-manager-demo"
+    role = _resource(docs, "Role", name)
+    for group, resource in (("", "pods"), ("apps", "deployments"), ("apps", "replicasets")):
+        rules = [rule for rule in role["rules"] if group in rule["apiGroups"] and resource in rule["resources"]]
+        verbs = {verb for rule in rules for verb in rule["verbs"]}
+        assert "list" in verbs
+        if resource == "replicasets":
+            assert verbs <= {"get", "list", "watch"}
+        assert all("resourceNames" not in rule for rule in rules)

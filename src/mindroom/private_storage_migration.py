@@ -1,7 +1,7 @@
 """Startup-only relocation of verified private scopes, with per-scope recovery.
 
 Deployment must stop previous primaries and independent controllers first.
-Managed workers are stopped before inspecting or moving any scope contents.
+Managed workers must be absent before inspecting or moving any scope contents.
 """
 
 from __future__ import annotations
@@ -328,9 +328,9 @@ def _migrate(runtime_paths: RuntimePaths) -> None:
         if not pending:
             return
         # Keep Docker and Kubernetes dependencies off primary module import paths.
-        from mindroom.workers.storage_quiescence import quiesce_workers_for_storage_upgrade  # noqa: PLC0415
+        from mindroom.workers.storage_preflight import check_workers_absent_for_storage_upgrade  # noqa: PLC0415
 
-        quiesce_workers_for_storage_upgrade(runtime_paths, timeout_seconds=120.0)
+        check_workers_absent_for_storage_upgrade(runtime_paths, timeout_seconds=120.0)
         pending = _discover(_roots(runtime_paths))
         moving = tuple(path for root in set(roots) for intent in pending for path in _locations(root, intent))
         for intent in pending:
