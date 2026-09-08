@@ -96,10 +96,10 @@ def load_private_instance_identity(base_storage_path: Path, scope_root: Path) ->
     """Load and validate the identity record for one private scope, if it exists."""
     trusted_base_path = shared_storage_root(base_storage_path)
     trusted_scope_root = _trusted_scope_root(trusted_base_path, scope_root, create=False)
-    payload = _load_record_payload(trusted_scope_root / _RECORD_FILENAME)
+    payload = load_private_instance_record_payload(trusted_scope_root / _RECORD_FILENAME)
     if payload is None:
         return None
-    identity = _parse_identity(payload)
+    identity = parse_private_instance_identity_payload(payload)
     _validate_identity(identity, trusted_base_path, trusted_scope_root)
     return identity
 
@@ -111,7 +111,7 @@ def ensure_private_instance_identity(
     requester_id: str,
 ) -> PrivateInstanceIdentity | None:
     """Create, validate, or deliberately leave undiscoverable one private scope record."""
-    requested_identity = _parse_identity(
+    requested_identity = parse_private_instance_identity_payload(
         {"format": _RECORD_FORMAT, "version": _RECORD_VERSION, "worker_key": worker_key, "requester_id": requester_id},
     )
     trusted_base_path = shared_storage_root(base_storage_path)
@@ -169,7 +169,8 @@ def _identity_payload(identity: PrivateInstanceIdentity) -> dict[str, object]:
     }
 
 
-def _parse_identity(payload: object) -> PrivateInstanceIdentity:
+def parse_private_instance_identity_payload(payload: object) -> PrivateInstanceIdentity:
+    """Parse exact owner-record schema without authorizing its storage location."""
     if not isinstance(payload, dict):
         _raise_invalid_record("must use the exact schema")
     record = cast("dict[str, object]", payload)
@@ -184,7 +185,8 @@ def _parse_identity(payload: object) -> PrivateInstanceIdentity:
     return PrivateInstanceIdentity(worker_key, requester_id)
 
 
-def _load_record_payload(record_path: Path) -> object | None:
+def load_private_instance_record_payload(record_path: Path, *, max_bytes: int = 65536) -> object | None:  # noqa: C901
+    """Read a bounded strict record; callers must separately validate owner and location."""
     try:
         record_stat = record_path.lstat()
     except FileNotFoundError:
@@ -193,6 +195,8 @@ def _load_record_payload(record_path: Path) -> object | None:
         _raise_unreadable_record(error)
     if not stat.S_ISREG(record_stat.st_mode):
         _raise_invalid_record("must be a regular file")
+    if record_stat.st_size > max_bytes:
+        _raise_invalid_record("exceeds the size limit")
     try:
         descriptor = os.open(record_path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as error:
@@ -206,7 +210,9 @@ def _load_record_payload(record_path: Path) -> object | None:
             _raise_invalid_record("changed while being opened")
         with os.fdopen(descriptor, encoding="utf-8") as record_file:
             descriptor = -1
-            raw_payload = record_file.read()
+            raw_payload = record_file.read(max_bytes + 1)
+            if len(raw_payload.encode("utf-8")) > max_bytes:
+                _raise_invalid_record("exceeds the size limit")
     except (OSError, UnicodeDecodeError) as error:
         _raise_unreadable_record(error)
     finally:
@@ -256,13 +262,14 @@ def _validate_directory_entry(path: Path, name: str) -> bool:
 
 
 def _validate_identity(identity: PrivateInstanceIdentity, base_storage_path: Path, scope_root: Path) -> None:
-    if _reconstruct_worker_key(identity.worker_key, identity.requester_id) != identity.worker_key:
+    if reconstruct_private_instance_worker_key(identity.worker_key, identity.requester_id) != identity.worker_key:
         _raise_invalid_record("does not match its requester")
     if scope_root.expanduser().absolute() != private_instance_scope_root_path(base_storage_path, identity.worker_key):
         _raise_invalid_record("does not match its scope location")
 
 
-def _reconstruct_worker_key(worker_key: str, requester_id: str) -> str:
+def reconstruct_private_instance_worker_key(worker_key: str, requester_id: str) -> str:
+    """Derive the current key for an exact requester and recorded private scope."""
     parts = worker_key.split(":")
     if len(parts) < 4 or parts[0] != "v1" or not parts[1]:
         _raise_invalid_record("has an invalid worker key")

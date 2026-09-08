@@ -1451,6 +1451,54 @@ async def test_refresh_recovers_orphaned_index_lock_in_linked_worktree(tmp_path:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("advance_remote", [False, True])
+async def test_git_sync_does_not_run_automatic_maintenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    advance_remote: bool,
+) -> None:
+    """Real Git polling must not launch automatic maintenance beside knowledge refresh."""
+    remote = tmp_path / "remote"
+    remote.mkdir()
+
+    async def git(cwd: Path, *args: str) -> None:
+        await asyncio.to_thread(subprocess.run, ["git", *args], cwd=cwd, check=True, capture_output=True)
+
+    await git(remote, "init", "-b", "main")
+    await git(remote, "config", "user.email", "tests@example.com")
+    await git(remote, "config", "user.name", "MindRoom Tests")
+    await git(remote, "config", "commit.gpgsign", "false")
+
+    async def commit(content: str) -> None:
+        (remote / "doc.md").write_text(content, encoding="utf-8")
+        await git(remote, "add", "doc.md")
+        await git(remote, "commit", "-m", content)
+
+    await commit("initial")
+    docs = tmp_path / "docs"
+    git_config = KnowledgeGitConfig(repo_url=str(remote), branch="main")
+    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"], git_configs={"docs": git_config})
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+    await manager.git_source.sync()
+    await git(docs, "config", "maintenance.auto", "true")
+    if advance_remote:
+        await commit("updated")
+    trace = tmp_path / "git-trace.jsonl"
+    monkeypatch.setenv("GIT_TRACE2_EVENT", str(trace))
+    result = await manager.git_source.sync()
+
+    events = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    maintenance = [
+        event
+        for event in events
+        if event.get("event") == "child_start" and event.get("argv", [])[:3] == ["git", "maintenance", "run"]
+    ]
+    assert not maintenance, "Knowledge polling launched automatic maintenance"
+    assert result.updated is advance_remote
+    assert (docs / "doc.md").read_text(encoding="utf-8") == ("updated" if advance_remote else "initial")
+
+
+@pytest.mark.asyncio
 async def test_sync_git_source_once_unchanged_head_skips_worktree_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1485,7 +1533,7 @@ async def test_sync_git_source_once_unchanged_head_skips_worktree_scan(
     assert updated is False
     assert changed_files == set()
     assert removed_files == set()
-    assert ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"] in git_calls
+    assert ["fetch", "--no-auto-gc", "origin", "+refs/heads/main:refs/remotes/origin/main"] in git_calls
     assert ["lfs", "pull", "origin", "main"] in git_calls
     assert not any(call[:3] == ["diff", "--name-only", "--no-renames"] for call in git_calls)
 

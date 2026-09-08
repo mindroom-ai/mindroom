@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 __all__ = [
     "KubernetesWorkerBackend",
     "KubernetesWorkerBackendConfig",
+    "check_kubernetes_workers_absent_for_storage_upgrade",
     "kubernetes_backend_config_signature",
 ]
 
@@ -78,6 +79,25 @@ class _ReadyWorkerCacheEntry:
 
 def _noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> None:
     del _phase, _error
+
+
+def check_kubernetes_workers_absent_for_storage_upgrade(
+    runtime_paths: RuntimePaths,
+    *,
+    timeout_seconds: float,
+) -> None:
+    """Verify Kubernetes worker absence without constructing a worker backend."""
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    resource_manager = resources.KubernetesResourceManager(
+        runtime_paths=runtime_paths,
+        config=config,
+        auth_token=None,
+        storage_root=runtime_paths.storage_root,
+        tool_validation_snapshot={},
+        config_snapshot={},
+        worker_grantable_credentials=frozenset(),
+    )
+    resource_manager.check_workers_absent_for_storage_upgrade(timeout_seconds=timeout_seconds)
 
 
 def _progress_event(

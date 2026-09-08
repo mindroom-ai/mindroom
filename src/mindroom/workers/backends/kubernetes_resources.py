@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import importlib
 import json
+import math
 import os
 import posixpath
 import time
@@ -305,7 +306,11 @@ class _AppsApiProtocol(Protocol):
         *,
         label_selector: str,
         _preload_content: bool = True,
+        _request_timeout: float | None = None,
+        limit: int | None = None,
     ) -> _KubernetesRawResponse: ...
+
+    def list_namespaced_replica_set(self, namespace: str, **kwargs: object) -> _KubernetesRawResponse: ...
 
 
 class _KubernetesApiClientProtocol(Protocol):
@@ -347,6 +352,8 @@ class _CoreApiProtocol(Protocol):
     def create_namespaced_secret(self, namespace: str, body: dict[str, object]) -> object: ...
 
     def delete_namespaced_secret(self, name: str, namespace: str) -> None: ...
+
+    def list_namespaced_pod(self, namespace: str, **kwargs: object) -> _KubernetesRawResponse: ...
 
     def read_namespaced_pod(self, name: str, namespace: str) -> _KubernetesPod: ...
 
@@ -880,7 +887,10 @@ class KubernetesResourceManager:
             raise
         return True
 
-    def _delete_deployment(self, deployment_name: str) -> None:
+    def _delete_deployment(
+        self,
+        deployment_name: str,
+    ) -> None:
         """Delete one worker Deployment, ignoring 404s."""
         try:
             self._apps.delete_namespaced_deployment(
@@ -896,6 +906,62 @@ class KubernetesResourceManager:
         """Delete one worker Deployment after its dependent pods terminate."""
         self._delete_deployment(deployment_name)
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
+
+    def check_workers_absent_for_storage_upgrade(self, *, timeout_seconds: float) -> None:
+        """Require all worker controllers and Pods absent throughout this namespace."""
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            msg = "Kubernetes worker preflight timeout must be a positive finite number."
+            raise WorkerBackendError(msg)
+        deadline = time.monotonic() + timeout_seconds
+
+        def remaining() -> float:
+            value = deadline - time.monotonic()
+            if value <= 0:
+                msg = "Kubernetes worker preflight timed out before absence was verified."
+                raise WorkerBackendError(msg)
+            return value
+
+        try:
+            inventory_readers = (
+                self._apps.list_namespaced_deployment,
+                self._apps.list_namespaced_replica_set,
+                self._core.list_namespaced_pod,
+            )
+        except Exception as exc:
+            msg = f"Failed to initialize Kubernetes worker absence verification: {exc}"
+            raise WorkerBackendError(msg) from exc
+        # worker-id is stamped after extra labels and inherited by child resources.
+        # Even scaled-down controllers and terminating Pods must be removed first.
+        for list_resources in inventory_readers:
+            try:
+                response = list_resources(
+                    self.config.namespace,
+                    label_selector=_LABEL_WORKER_ID,
+                    limit=1,
+                    _preload_content=False,
+                    _request_timeout=remaining(),
+                )
+                try:
+                    payload = json.loads(response.data)
+                finally:
+                    response.release_conn()
+            except Exception as exc:
+                msg = f"Failed to verify Kubernetes worker absence: {exc}"
+                raise WorkerBackendError(msg) from exc
+            remaining()
+            if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+                msg = "Kubernetes worker preflight returned an invalid inventory."
+                raise WorkerBackendError(msg)
+            if payload["items"]:
+                msg = (
+                    "Remove all Kubernetes worker Deployments, ReplicaSets, and Pods carrying "
+                    f"{_LABEL_WORKER_ID} in namespace '{self.config.namespace}' before the private-storage upgrade."
+                )
+                raise WorkerBackendError(msg)
+            metadata = payload.get("metadata", {})
+            if not isinstance(metadata, dict) or metadata.get("continue"):
+                msg = "Kubernetes worker preflight returned an incomplete inventory."
+                raise WorkerBackendError(msg)
 
     def delete_service(self, service_name: str) -> None:
         """Delete one worker Service, ignoring 404s."""

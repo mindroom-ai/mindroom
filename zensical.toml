@@ -78,6 +78,7 @@ nav = [
   { "Deployment" = [
     { "Overview" = "deployment/index.md" },
     { "Nio 1.0 Upgrade" = "deployment/nio-upgrade.md" },
+    { "Private Storage Migration" = "deployment/private-storage-upgrade.md" },
     { "Hosted Matrix + Local Backend" = "deployment/hosted-matrix.md" },
     { "Bridges" = [
       { "Overview" = "deployment/bridges/index.md" },

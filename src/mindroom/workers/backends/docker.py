@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import math
 import os
 import threading
 import time
@@ -82,7 +83,7 @@ from mindroom.workers.models import (
 from mindroom.workers.worker_retirement import open_worker_state_root
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     class _DockerContainer(Protocol):
         attrs: dict[str, object]
@@ -102,6 +103,8 @@ if TYPE_CHECKING:
     class _DockerContainersApi(Protocol):
         def get(self, name: str) -> _DockerContainer: ...
 
+        def list(self, **kwargs: object) -> Sequence[_DockerContainer]: ...
+
         def run(self, image: str, **kwargs: object) -> _DockerContainer: ...
 
     class _DockerImage(Protocol):
@@ -112,9 +115,13 @@ if TYPE_CHECKING:
 
         def pull(self, name: str) -> _DockerImage: ...
 
+    class _DockerApiClient(Protocol):
+        timeout: float
+
     class _DockerClient(Protocol):
         containers: _DockerContainersApi
         images: _DockerImagesApi
+        api: _DockerApiClient
 
     class _DockerErrors(Protocol):
         DockerException: type[Exception]
@@ -151,6 +158,7 @@ _DOCKER_EXTRA = "docker"
 
 __all__ = [
     "DockerWorkerBackend",
+    "check_docker_workers_absent_for_storage_upgrade",
     "docker_backend_config_signature",
     "ensure_docker_dependencies",
 ]
@@ -267,22 +275,29 @@ def ensure_docker_dependencies(runtime_paths: RuntimePaths | None = None) -> Non
 def _load_docker_client_and_errors(
     *,
     runtime_paths: RuntimePaths | None = None,
+    timeout_seconds: float | None = None,
+    ensure_dependencies: bool = True,
 ) -> tuple[_DockerClient, _DockerErrors]:
-    ensure_docker_dependencies(runtime_paths)
+    if ensure_dependencies:
+        ensure_docker_dependencies(runtime_paths)
     try:
         docker_module = importlib.import_module("docker")
         docker_errors = cast("_DockerErrors", importlib.import_module("docker.errors"))
     except ModuleNotFoundError as exc:
-        msg = "The Docker worker backend could not import the Docker SDK after ensuring the optional 'docker' extra."
+        msg = (
+            "The Docker worker backend could not import the Docker SDK. "
+            "Install the optional 'docker' extra before starting the primary."
+        )
         raise WorkerBackendError(msg) from exc
 
     docker_from_env = cast("Callable[..., _DockerClient]", docker_module.from_env)
     try:
-        client = (
-            docker_from_env(environment=runtime_env_values(runtime_paths))
-            if runtime_paths is not None
-            else docker_from_env()
-        )
+        kwargs: dict[str, object] = {}
+        if runtime_paths is not None:
+            kwargs["environment"] = runtime_env_values(runtime_paths)
+        if timeout_seconds is not None:
+            kwargs["timeout"] = timeout_seconds
+        client = docker_from_env(**kwargs)
     except docker_errors.DockerException as exc:
         msg = f"Failed to initialize Docker client: {exc}"
         raise WorkerBackendError(msg) from exc
@@ -309,6 +324,58 @@ class _DockerWorkerMetadata:
     failure_count: int = 0
     failure_reason: str | None = None
     launch_config_hash: str | None = None
+
+
+def _set_docker_request_timeout(client: _DockerClient, timeout_seconds: float) -> None:
+    try:
+        client.api.timeout = timeout_seconds
+    except (AttributeError, TypeError) as exc:
+        msg = "Docker client does not expose a bounded request timeout."
+        raise WorkerBackendError(msg) from exc
+
+
+def check_docker_workers_absent_for_storage_upgrade(
+    runtime_paths: RuntimePaths,
+    *,
+    timeout_seconds: float,
+) -> None:
+    """Verify no containers remain in this runtime namespace, without changing state."""
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        msg = "Docker worker preflight timeout must be a positive finite number."
+        raise WorkerBackendError(msg)
+    deadline = time.monotonic() + timeout_seconds
+
+    def remaining() -> float:
+        value = deadline - time.monotonic()
+        if value <= 0:
+            msg = "Docker worker preflight timed out before absence was verified."
+            raise WorkerBackendError(msg)
+        return value
+
+    workers_root = docker_workers_root(resolve_docker_storage_path(runtime_paths=runtime_paths))
+    runtime_namespace = _runtime_namespace_for_workers_root(workers_root)
+    client, _docker_errors = _load_docker_client_and_errors(
+        runtime_paths=runtime_paths,
+        timeout_seconds=remaining(),
+        ensure_dependencies=False,
+    )
+    _set_docker_request_timeout(client, remaining())
+    try:
+        containers = client.containers.list(
+            all=True,
+            sparse=True,
+            filters={"label": [f"{_LABEL_RUNTIME_NAMESPACE}={runtime_namespace}"]},
+        )
+    except Exception as exc:
+        msg = f"Failed to verify Docker worker absence: {exc}"
+        raise WorkerBackendError(msg) from exc
+    remaining()
+    if not isinstance(containers, list):
+        msg = "Docker worker preflight returned an invalid container inventory."
+        raise WorkerBackendError(msg)
+    if containers:
+        msg = "Remove all Docker worker containers in this runtime namespace before the private-storage upgrade."
+        raise WorkerBackendError(msg)
 
 
 @dataclass(frozen=True, slots=True)

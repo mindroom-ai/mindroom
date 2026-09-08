@@ -108,6 +108,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
+    "mindroom.private_storage_migration",
     "mindroom.private_instance_identity",
     "mindroom.runtime_resolution",
 ]
@@ -1078,6 +1079,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
+    "mindroom.private_storage_migration",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
     "mindroom.api.thread_exports",
@@ -1772,6 +1774,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
+    "mindroom.private_storage_migration",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
     "mindroom.event_journal_open",
@@ -4781,6 +4784,7 @@ from = ["mindroom.thread_export"]
 
 [[interfaces]]
 expose = [
+    "normalize_worker_key_part",
     "ResolvedWorkerTarget",
     "ResolvedWorkerKeyScope",
     "SerializedToolExecutionIdentity",
@@ -5218,3 +5222,26 @@ visibility = ["mindroom.api.main"]
 path = "mindroom.cli.thread_export"
 depends_on = ["mindroom.constants", "mindroom.thread_export.models"]
 visibility = ["mindroom.cli.main"]
+
+
+[[modules]]
+path = "mindroom.private_storage_migration"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.durable_write",
+    "mindroom.file_locks",
+    "mindroom.private_instance_identity_store",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workers.storage_preflight",
+]
+visibility = ["mindroom.orchestrator", "mindroom.api.main"]
+
+[[modules]]
+path = "mindroom.workers.storage_preflight"
+depends_on = [
+    "mindroom.runtime_env_policy",
+    "mindroom.workers.backend",
+    "mindroom.workers.backends.docker",
+    "mindroom.workers.backends.kubernetes",
+]
+visibility = ["mindroom.private_storage_migration"]
