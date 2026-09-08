@@ -59,8 +59,9 @@ A missing volume, conflicting directory, changed owner record, or changed privat
 Rollback is intended for unchanged pre-traffic state and restores original owner-record bytes.
 After new traffic writes data, stop writers and review a coordinated recovery plan instead of restoring stale paths or starting an old image.
 
-Session verification requires the installed Agno session schema and each session table's matching run table, including application names such as `writer_sessions` and `writer_sessions_runs`.
-Missing tables or columns require explicit offline recovery before relocation; verification never creates or migrates database schemas.
+Session verification requires the installed Agno session schema and validates any existing matching run table, including application names such as `writer_sessions` and `writer_sessions_runs`.
+An absent run table is valid because Agno creates it lazily.
+Missing session schemas or required columns in present session/run tables require explicit offline recovery before relocation; verification never creates or migrates database schemas.
 Relative links must remain inside their moved scope throughout resolution; links that traverse through the old scope name are refused.
 Owner replacement uses a receipt-derived temporary filename inside the same scope, and recovery removes only that exact operation's recognizable partial owner write.
 Unknown temporary files are preserved and block recovery.

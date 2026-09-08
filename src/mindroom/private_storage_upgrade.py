@@ -828,9 +828,14 @@ def _session_database_snapshot(database: Path) -> str:
             expected_tables.update(
                 {"agno_runs" if name == "agno_sessions" else f"{name}_runs": "runs" for name in sessions},
             )
-            if not expected_tables.keys() <= {name for name, _ in tables}:
-                _fail("Session database is missing its matching run schema")
+            table_names = {name for name, _ in tables}
             for name, table_type in sorted(expected_tables.items()):
+                # Agno creates matching run tables lazily, including for named
+                # session tables. Absence is valid; malformed present objects are not.
+                if name not in table_names:
+                    if connection.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone():
+                        _fail("Session database has an incompatible run schema")
+                    continue
                 columns = {row[1] for row in connection.execute("SELECT * FROM pragma_table_info(?)", (name,))}
                 required = {column for column in get_table_schema_definition(table_type) if not column.startswith("_")}
                 if not required <= columns:

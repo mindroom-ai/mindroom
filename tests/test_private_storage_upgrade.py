@@ -867,13 +867,12 @@ def test_transaction_orphan_is_bounded_and_unrelated_data_is_preserved(tmp_path:
 @pytest.mark.parametrize(
     "statement",
     [
-        "DROP TABLE writer_sessions_runs",
         "ALTER TABLE writer_sessions DROP COLUMN summary",
         "ALTER TABLE writer_sessions_runs DROP COLUMN run_data",
     ],
 )
 def test_named_application_tables_require_complete_runtime_schema(tmp_path: Path, statement: str) -> None:
-    """Missing named run tables and incomplete current schemas fail without source writes."""
+    """Present tables with incomplete schemas fail without source writes."""
     database = tmp_path / "writer.db"
     storage = SqliteDb(db_file=str(database), session_table="writer_sessions")
     storage.upsert_session(AgentSession(session_id="original", agent_id="writer"))
@@ -897,3 +896,50 @@ def test_unknown_owner_temporary_is_preserved(tmp_path: Path) -> None:
     with pytest.raises(upgrade.StorageUpgradeError, match="Unrecognized"):
         upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
     assert unknown.read_text() == "retain this file"
+
+
+@pytest.mark.parametrize("session_table", ["agno_sessions", "writer_sessions"])
+def test_real_agno_session_without_lazy_run_table_survives(tmp_path: Path, session_table: str) -> None:
+    """Agno session-only databases remain readable without creating a runs table."""
+    source = _legacy(tmp_path)
+    database = source / "writer/sessions.db"
+    storage = SqliteDb(db_file=str(database), session_table=session_table)
+    storage.upsert_session(
+        AgentSession(session_id="session-only", agent_id="writer", session_data={"note": "retained"}),
+    )
+    storage.db_engine.dispose()
+    runs_table = "agno_runs" if session_table == "agno_sessions" else f"{session_table}_runs"
+    with closing(sqlite3.connect(database)) as connection:
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert session_table in tables
+    assert runs_table not in tables
+    reader = SqliteDb(db_file=str(database), session_table=session_table)
+    assert reader.get_session("session-only", SessionType.AGENT).session_data["note"] == "retained"
+    reader.db_engine.dispose()
+    original = database.read_bytes()
+    plan = upgrade.plan_storage_upgrade(tmp_path)
+    assert database.read_bytes() == original
+    upgrade.apply_storage_upgrade(plan, writers_stopped=True, backup_verified=True)
+    moved = source.with_name(plan.operations[0].destination) / "writer/sessions.db"
+    upgrade.verify_storage_upgrade(plan)
+    reader = SqliteDb(db_file=str(moved), session_table=session_table)
+    session = reader.get_session("session-only", SessionType.AGENT)
+    assert session.session_data["note"] == "retained"
+    assert not session.runs
+    reader.db_engine.dispose()
+    upgrade.rollback_storage_upgrade(plan, writers_stopped=True)
+    assert database.read_bytes() == original
+    with closing(sqlite3.connect(database)) as connection:
+        assert not connection.execute("SELECT name FROM sqlite_master WHERE name = ?", (runs_table,)).fetchall()
+
+
+def test_present_non_table_run_schema_is_not_lazy_absence(tmp_path: Path) -> None:
+    """A conflicting run view cannot masquerade as a lazily absent run table."""
+    database = tmp_path / "writer.db"
+    storage = SqliteDb(db_file=str(database), session_table="writer_sessions")
+    storage.upsert_session(AgentSession(session_id="session-only", agent_id="writer"))
+    storage.db_engine.dispose()
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("CREATE VIEW writer_sessions_runs AS SELECT session_id FROM writer_sessions")
+    with pytest.raises(upgrade.StorageUpgradeError, match="schema"):
+        upgrade._session_database_snapshot(database)
