@@ -48,6 +48,9 @@ async def _client(
     dispatch: Callable[[Request, str, dict[str, object]], Awaitable[dict[str, object]]],
     *,
     deadline_seconds: float = 60,
+    max_active_calls: int = 128,
+    max_user_calls: int = 32,
+    max_grant_calls: int = 16,
     record_activity: Callable[[Request], Awaitable[None]] | None = None,
 ) -> AsyncIterator[httpx.AsyncClient]:
     server = GatewayServer(
@@ -55,6 +58,9 @@ async def _client(
         dispatch=dispatch,
         public_url="https://portal.example.org",
         timeout_seconds=deadline_seconds,
+        max_active_calls=max_active_calls,
+        max_user_calls=max_user_calls,
+        max_grant_calls=max_grant_calls,
         record_activity=record_activity,
     )
     app = Starlette(routes=[Route("/mcp", endpoint=server, methods=["GET", "POST", "DELETE"])])
@@ -466,9 +472,27 @@ async def test_early_acknowledgements_keep_security_checks(
         assert response.status_code == status
 
 
-@pytest.mark.parametrize("grant_count", [1, 2])
-async def test_call_fairness_and_retained_cleanup(grant_count: int) -> None:
-    """Grant 16/requester 32 admission stays occupied until cancelled work finishes."""
+@pytest.mark.parametrize(
+    ("tokens", "calls_per_grant", "rejected_token", "other_user_admitted", "limits"),
+    [
+        (["alice"], 16, "alice", True, {}),
+        (["alice", "alice2"], 16, "alice3", True, {}),
+        (["alice"], 2, "alice", True, {"max_grant_calls": 2}),
+        (["alice", "alice2"], 2, "alice3", True, {"max_user_calls": 4}),
+        (["alice", "bob"], 1, "alice3", False, {"max_active_calls": 2}),
+        (["alice"], 17, "alice", True, {"max_grant_calls": 17}),
+        (["alice"], 129, "alice3", False, {"max_active_calls": 129, "max_user_calls": 256, "max_grant_calls": 256}),
+        (["alice", "alice2"], 17, "alice3", True, {"max_grant_calls": 17, "max_user_calls": 34}),
+    ],
+)
+async def test_call_fairness_and_retained_cleanup(
+    tokens: list[str],
+    calls_per_grant: int,
+    rejected_token: str,
+    other_user_admitted: bool,
+    limits: dict[str, int],
+) -> None:
+    """Configured admission stays occupied until cancelled work and cleanup finish."""
     started: asyncio.Queue[None] = asyncio.Queue()
     release = asyncio.Event()
     retained: list[asyncio.Task[bool]] = []
@@ -484,17 +508,16 @@ async def test_call_fairness_and_retained_cleanup(grant_count: int) -> None:
         await asyncio.Event().wait()
         return {}
 
-    async with _client(dispatch) as client:
+    async with _client(dispatch, **limits) as client:
         try:
-            for token in ["alice", "alice2"][:grant_count]:
-                for request_id in range(16):
+            for token in tokens:
+                for request_id in range(calls_per_grant):
                     calls.append(
                         asyncio.create_task(
                             client.post("/mcp", json=_call(request_id), headers={"Authorization": f"Bearer {token}"}),
                         ),
                     )
                     await asyncio.wait_for(started.get(), 2)
-            rejected_token = "alice" if grant_count == 1 else "alice3"
 
             async def probe(token: str) -> httpx.Response:
                 return await client.post(
@@ -506,7 +529,10 @@ async def test_call_fairness_and_retained_cleanup(grant_count: int) -> None:
             busy = await probe(rejected_token)
             assert busy.json()["result"]["structuredContent"]["error"]["code"] == "busy"
             bob = await probe("bob")
-            assert bob.json()["result"]["structuredContent"] == {"admitted": True}
+            if other_user_admitted:
+                assert bob.json()["result"]["structuredContent"] == {"admitted": True}
+            else:
+                assert bob.json()["result"]["structuredContent"]["error"]["code"] == "busy"
             # Same requester, other grant cannot cancel this grant's request.
             await client.post("/mcp", json=_cancel(0), headers={"Authorization": "Bearer alice3"})
             assert not calls[0].done()

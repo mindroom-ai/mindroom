@@ -139,6 +139,9 @@ class GatewayRuntime:
             public_url=self.origin,
             allowed_origins=_browser_origins(paths),
             record_activity=self._record_activity,
+            max_active_calls=int(paths.env_value("MINDROOM_MCP_GATEWAY_MAX_ACTIVE_CALLS") or "128"),
+            max_user_calls=int(paths.env_value("MINDROOM_MCP_GATEWAY_MAX_USER_CALLS") or "32"),
+            max_grant_calls=int(paths.env_value("MINDROOM_MCP_GATEWAY_MAX_GRANT_CALLS") or "16"),
         )
         authenticator = ClientAuthenticator(self.provider)
         self.authorize = AuthorizationHandler(self.provider)

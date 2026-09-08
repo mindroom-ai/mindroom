@@ -34,9 +34,6 @@ _MAX_RESPONSE_BYTES = 131072
 _MAX_REQUEST_ID_BYTES = 128
 _MAX_PROTOCOL_VERSION_BYTES = 64
 _RESPONSE_ENVELOPE_BYTES = 256
-_MAX_ACTIVE_CALLS = 128
-_MAX_REQUESTER_CALLS = 32
-_MAX_GRANT_CALLS = 16
 _PRINCIPAL_SCOPE_KEY = "mcp_gateway_principal"
 _PRIVATE_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
 logger = get_logger(__name__)
@@ -210,8 +207,17 @@ class GatewayServer:
         public_url: str,
         allowed_origins: tuple[str, ...] | None = None,
         timeout_seconds: float = 60,
+        max_active_calls: int = 128,
+        max_user_calls: int = 32,
+        max_grant_calls: int = 16,
         record_activity: Callable[[Request], Awaitable[None]] | None = None,
     ) -> None:
+        if min(max_active_calls, max_user_calls, max_grant_calls) < 1:
+            msg = "MCP call limits must be positive"
+            raise ValueError(msg)
+        self._max_active_calls = max_active_calls
+        self._max_user_calls = max_user_calls
+        self._max_grant_calls = max_grant_calls
         self._authenticate = authenticate
         self._dispatch = dispatch
         self._record_activity = record_activity
@@ -293,9 +299,9 @@ class GatewayServer:
         principal = key[0]
         if (
             self._closing
-            or len(self._active) >= _MAX_ACTIVE_CALLS
-            or sum(owner.grant_id == principal.grant_id for owner, _, _ in self._active) >= _MAX_GRANT_CALLS
-            or sum(owner.requester_id == principal.requester_id for owner, _, _ in self._active) >= _MAX_REQUESTER_CALLS
+            or len(self._active) >= self._max_active_calls
+            or sum(owner.grant_id == principal.grant_id for owner, _, _ in self._active) >= self._max_grant_calls
+            or sum(owner.requester_id == principal.requester_id for owner, _, _ in self._active) >= self._max_user_calls
         ):
             return _result(_error(GatewayErrorCode.BUSY, "Gateway call capacity is currently unavailable."))
         task = asyncio.current_task()

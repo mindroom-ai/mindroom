@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from mindroom import agents, constants
 from mindroom.api import config_lifecycle, main
-from mindroom.api.mcp_gateway import gateway_lifespan, install_gateway_routes
+from mindroom.api.mcp_gateway import GatewayRuntime, gateway_lifespan, install_gateway_routes
 from mindroom.config.main import Config
 from mindroom.mcp_gateway import admission
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
@@ -764,6 +764,15 @@ def test_token_storage_capacity_preserves_authorization_code(
         ("MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT", "invalid"),
         ("MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES", "0"),
         ("MINDROOM_MCP_GATEWAY_ONBOARDING_MAX_BYTES", "invalid"),
+        *[
+            (setting, value)
+            for setting in (
+                "MINDROOM_MCP_GATEWAY_MAX_ACTIVE_CALLS",
+                "MINDROOM_MCP_GATEWAY_MAX_USER_CALLS",
+                "MINDROOM_MCP_GATEWAY_MAX_GRANT_CALLS",
+            )
+            for value in ("0", "-1", "invalid", "1.5")
+        ],
         ("MINDROOM_MCP_OAUTH_MAX_BYTES", "0"),
         ("MINDROOM_MCP_OAUTH_MAX_BYTES", "invalid"),
         ("MINDROOM_MCP_OAUTH_USER_MAX_BYTES", "0"),
@@ -803,3 +812,77 @@ def test_registration_oversized_integer_is_private_invalid_request(gateway_app: 
     assert "no-store" in response.headers["cache-control"]
     assert marker not in response.text
     assert "1" * 5000 not in response.text
+
+
+@pytest.mark.parametrize(
+    ("setting", "other_grant_admitted", "other_user_admitted"),
+    [
+        ("MINDROOM_MCP_GATEWAY_MAX_ACTIVE_CALLS", False, False),
+        ("MINDROOM_MCP_GATEWAY_MAX_USER_CALLS", False, True),
+        ("MINDROOM_MCP_GATEWAY_MAX_GRANT_CALLS", True, True),
+    ],
+)
+def test_configured_call_limits_reach_http_admission(
+    gateway_app: FastAPI,
+    signed_headers: Callable[[str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    other_grant_admitted: bool,
+    other_user_admitted: bool,
+) -> None:
+    """Startup settings constrain the intended scope across real OAuth grants."""
+    snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={**snapshot.runtime_paths.process_env, setting: "1"},
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    async def dispatch(
+        _runtime: GatewayRuntime,
+        _request: Request,
+        _name: str,
+        arguments: dict[str, object],
+    ) -> dict[str, object]:
+        if arguments.get("query") == "hold":
+            started.set()
+            assert await asyncio.to_thread(release.wait, 10), "Call was never released"
+        return {"tools": []}
+
+    monkeypatch.setattr(GatewayRuntime, "dispatch", dispatch)
+    with (
+        TestClient(gateway_app, base_url=ORIGIN, follow_redirects=False) as client,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        tokens = [
+            _exchange(client, *_code(client, signed_headers(user))).json()["access_token"]
+            for user in ("alice", "alice", "bob")
+        ]
+
+        def call(token: str, request_id: int, query: str = "probe") -> httpx.Response:
+            return client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": "search_tools", "arguments": {"query": query}},
+                },
+                headers={**MCP_HEADERS, "Authorization": f"Bearer {token}"},
+            )
+
+        pending = executor.submit(call, tokens[0], 1, "hold")
+        try:
+            assert started.wait(10), "Call never reached dispatch"
+            for token, admitted in zip(tokens, (False, other_grant_admitted, other_user_admitted), strict=True):
+                result = call(token, 2).json()["result"]
+                if admitted:
+                    assert result["structuredContent"] == {"tools": []}
+                else:
+                    assert result["isError"] is True
+                    assert result["structuredContent"]["error"]["code"] == "busy"
+        finally:
+            release.set()
+            assert pending.result(timeout=10).json()["result"]["isError"] is False
+        assert call(tokens[0], 3).json()["result"]["structuredContent"] == {"tools": []}

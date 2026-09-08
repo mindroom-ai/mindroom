@@ -89,7 +89,6 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
             assert close_release.wait(5)
             closed.set()
 
-    monkeypatch.setattr(server, "_MAX_ACTIVE_CALLS", 1)
     monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: BlockingToolkit())
 
     async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
@@ -97,7 +96,11 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
             return {"ok": True}
         return await gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={})
 
-    async with _client(dispatch, deadline_seconds=0.5 if interruption == "timeout" else 60) as client:
+    async with _client(
+        dispatch,
+        max_active_calls=1,
+        deadline_seconds=0.5 if interruption == "timeout" else 60,
+    ) as client:
         first = asyncio.create_task(client.post("/mcp", json=_call(12)))
         try:
             await _wait(started)
@@ -154,7 +157,6 @@ async def test_cancelled_discovery_offload_keeps_capacity_until_thread_exits(
         return "done"
 
     monkeypatch.setattr(gateway, target, block)
-    monkeypatch.setattr(server, "_MAX_ACTIVE_CALLS", 1)
     monkeypatch.setattr(
         agents,
         "build_agent_toolkit",
@@ -168,7 +170,7 @@ async def test_cancelled_discovery_offload_keeps_capacity_until_thread_exits(
             return await gateway.search_tools(context)
         return await gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={})
 
-    async with _client(dispatch) as client:
+    async with _client(dispatch, max_active_calls=1) as client:
         first = asyncio.create_task(client.post("/mcp", json=_call(1)))
         try:
             await _wait(started)
@@ -220,7 +222,6 @@ async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity
                 cleanup_cancelled = True
                 raise
 
-    monkeypatch.setattr(server, "_MAX_ACTIVE_CALLS", 1)
     monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: AsyncToolkit())
 
     async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
@@ -229,7 +230,7 @@ async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity
     async def probe(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
         return {"ok": True}
 
-    async with _client(dispatch) as client:
+    async with _client(dispatch, max_active_calls=1) as client:
         first = asyncio.create_task(client.post("/mcp", json=_call(1)))
         try:
             await asyncio.wait_for(started.wait(), 2)
@@ -240,7 +241,7 @@ async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity
             await client.post("/mcp", json=_cancel(1))
             assert _code(await client.post("/mcp", json=_call(2))) == "busy"
             assert not cleanup_cancelled
-            async with _client(probe) as other:
+            async with _client(probe, max_active_calls=1) as other:
                 assert _code(await other.post("/mcp", json=_call(1))) is None
             release.set()
             await gateway_toolkits.drain_gateway_tool_cleanup()
@@ -278,7 +279,6 @@ async def test_cancelled_native_cleanup_failure_is_safely_logged_and_releases_ca
             await close_release.wait()
             raise RuntimeError(provider_detail)
 
-    monkeypatch.setattr(server, "_MAX_ACTIVE_CALLS", 1)
     monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: FailingCloseToolkit())
 
     async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
@@ -287,7 +287,7 @@ async def test_cancelled_native_cleanup_failure_is_safely_logged_and_releases_ca
         return await gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={})
 
     with capture_logs() as logs:
-        async with _client(dispatch) as client:
+        async with _client(dispatch, max_active_calls=1) as client:
             first = asyncio.create_task(client.post("/mcp", json=_call(1)))
             try:
                 await asyncio.wait_for(started.wait(), 2)
