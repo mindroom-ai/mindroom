@@ -67,10 +67,13 @@ from mindroom.event_journal.schema import (
     schema_statements,
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
+from mindroom.handled_turns import TurnRecordCodec
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix_delivery import MatrixDeliveryWorker
+from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.conftest import postgres_journal_schema_url
 from tests.journal_membership_helpers import admit_room_membership
+from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
@@ -1958,7 +1961,9 @@ class TestProjectedInteractivePrompts:
                 agent_name="general",
                 index_event_ids=("$turn",),
                 anchor_event_id="$turn",
-                record_json=json.dumps({"response_event_id": "$answer"}),
+                record_json=json.dumps(
+                    TurnRecordCodec._to_ledger_record(TurnRecord.create(["$turn"], response_event_id="$answer")),
+                ),
             ),
         )
         await admit_room_membership(alice, ROOM, "join")
@@ -1966,7 +1971,7 @@ class TestProjectedInteractivePrompts:
         assert acknowledgement == DeliveryAcknowledgement(settled_event_id="$answer", bound=True)
         assert await bodies(alice, thread_id="$thread") == []
         records = await journal_store.turn_records("general").load_all()
-        assert [json.loads(record_json)["response_event_id"] for _, _, record_json in records] == ["$answer"]
+        assert records == (), "retired membership cannot publish new terminal proof"
 
     async def test_source_less_delivery_keeps_the_membership_epoch_it_was_enqueued_under(
         self,
@@ -5050,6 +5055,451 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
 class TestOutbox:
     """Delivery survives a crash at every point around the network call."""
 
+    @pytest.mark.ledger_loads_from_disk
+    async def test_changed_source_claim_rolls_back_ack_without_losing_pending_owner(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """A newly discovered earlier source forces rollback, preserving accepted work."""
+        store = await _store(rival_stores.first, agent_name="general")
+        await store.record_pending_turn(TurnRecord.create(["$source"], completed=False))
+        registered = await store.register_edit_revision("$source", (20, "$edit"))
+        selected = canonicalize_turn_record(
+            registered,
+            response_event_id="$answer",
+            source_event_prompts={"$source": "selected edit"},
+            source_event_revisions={"$source": (20, "$edit")},
+        )
+        principal = rival_stores.second.principal("agent@alice")
+        await principal.enqueue_matrix_delivery(
+            delivery_id="$edit",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("answer"),
+        )
+        discovered, release = threading.Event(), threading.Event()
+
+        def pause_discovery() -> None:
+            discovered.set()
+            assert release.wait(_WORKER_WAIT_SECONDS), "ACK discovery was never released"
+
+        racing = EventJournalStore(
+            backend=_PausingBackend(
+                rival_stores.second.backend,
+                pause_discovery,
+                statement_matches=lambda sql: "SELECT index_event_id, record_json FROM turn_records" in sql,
+            ),
+        ).principal("agent@alice")
+        terminal = TerminalTurnWrite(
+            agent_name="general",
+            index_event_ids=selected.indexed_event_ids,
+            anchor_event_id="$source",
+            record_json=json.dumps(TurnRecordCodec._to_ledger_record(selected)),
+        )
+        acknowledgement = asyncio.create_task(
+            racing.acknowledge_matrix_delivery(
+                delivery_id="$edit",
+                stage=DeliveryStage.FINAL,
+                event_id="$answer",
+                delivered_projections=(),
+                terminal_turn=terminal,
+            ),
+        )
+        try:
+            assert await asyncio.to_thread(discovered.wait, _WORKER_WAIT_SECONDS), "ACK did not discover its owner"
+            await store.record_pending_turn(TurnRecord.create(["$a", "$source"], completed=False))
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="Canonical turn ownership changed"):
+            await acknowledgement
+        delivery = await principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
+        assert delivery is not None
+        assert delivery.acknowledged_event_id is None
+        retry = await principal.acknowledge_matrix_delivery(
+            delivery_id="$edit",
+            stage=DeliveryStage.FINAL,
+            event_id="$answer",
+            delivered_projections=(),
+            terminal_turn=terminal,
+        )
+        assert retry.bound
+        assert retry.terminal_turn is None
+        rows = await store.deps.turn_records.load_all()
+        assert {index for index, _, _ in rows} == {"$a", "$source"}
+        for index, _, raw in rows:
+            owner = TurnRecordCodec._from_ledger_record(index, json.loads(raw))
+            assert owner is not None
+            assert owner.source_event_ids == ("$a", "$source")
+            assert not owner.completed
+            assert owner.response_event_id is None
+            assert owner.source_event_revisions is None
+
+    @pytest.mark.ledger_loads_from_disk
+    @pytest.mark.parametrize("anchor", ["$source", "$thread"])
+    @pytest.mark.parametrize("mutation", ["alias", "projection"])
+    async def test_frozen_final_and_current_alias_writer_use_one_lock_order(  # noqa: PLR0915
+        self,
+        rival_stores: RivalStores,
+        anchor: str,
+        mutation: str,
+    ) -> None:
+        """Alias growth cannot invert the ledger and FINAL transaction's row ownership."""
+        source, alias, revision = "$source", "$a", "$zz-edit"
+        store = await _store(rival_stores.first, agent_name="general")
+        initial = TurnRecord.create(
+            [alias, source] if mutation == "projection" else [source],
+            anchor_event_id=anchor,
+            response_event_id="$answer",
+            completed=mutation != "projection",
+            source_event_prompts={source: "original"},
+            latest_edit_receipt_order=1,
+        )
+        if mutation == "projection":
+            await store.record_pending_turn(initial)
+        else:
+            await store.record_turn(initial)
+        registered = await store.register_edit_revision(source, (20, revision))
+        selected = canonicalize_turn_record(
+            registered,
+            source_event_prompts={source: "selected edit"},
+            source_event_revisions={source: (20, revision)},
+        )
+        if mutation == "alias":
+            await store.record_turn(canonicalize_turn_record(registered, discovery_event_ids=(alias,)))
+            assert store.get_turn_record(source).discovery_event_ids == (alias,)
+        assert selected.discovery_event_ids == ()
+        await rival_stores.second.principal("agent@alice").enqueue_matrix_delivery(
+            delivery_id=revision,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=edit("$answer", "answer"),
+            edits_event_id="$answer",
+        )
+        writer_claimed, ack_claimed = threading.Event(), threading.Event()
+        release_writer, release_ack = threading.Event(), threading.Event()
+
+        def pause_writer() -> None:
+            writer_claimed.set()
+            assert release_writer.wait(_WORKER_WAIT_SECONDS), "ordinary writer was never released"
+
+        def pause_ack() -> None:
+            ack_claimed.set()
+            assert release_ack.wait(_WORKER_WAIT_SECONDS), "acknowledgement was never released"
+
+        def claims(sql: str) -> bool:
+            return "UPDATE turn_records SET record_json = record_json" in sql
+
+        writer_store = await _store(
+            EventJournalStore(
+                backend=_PausingBackend(
+                    rival_stores.first.backend,
+                    pause_writer,
+                    statement_matches=claims,
+                ),
+            ),
+            agent_name="general",
+        )
+        principal = EventJournalStore(
+            backend=_PausingBackend(
+                rival_stores.second.backend,
+                pause_ack,
+                statement_matches=claims,
+            ),
+        ).principal("agent@alice")
+        echo = asyncio.create_task(
+            writer_store.record_pending_turn(
+                canonicalize_turn_record(
+                    registered,
+                    source_event_ids=(source,),
+                    visible_echo_event_id="$echo",
+                    timestamp=0,
+                ),
+            )
+            if mutation == "projection"
+            else writer_store.record_visible_echo(source, "$echo"),
+        )
+        assert await asyncio.to_thread(writer_claimed.wait, _WORKER_WAIT_SECONDS), "writer never claimed its row"
+        acknowledgement = asyncio.create_task(
+            principal.acknowledge_matrix_delivery(
+                delivery_id=revision,
+                stage=DeliveryStage.FINAL,
+                event_id="$physical-edit",
+                delivered_projections=(),
+                terminal_turn=TerminalTurnWrite(
+                    agent_name="general",
+                    index_event_ids=selected.indexed_event_ids,
+                    anchor_event_id=anchor,
+                    record_json=json.dumps(TurnRecordCodec._to_ledger_record(selected)),
+                ),
+            ),
+        )
+        queued = asyncio.create_task(
+            _await_queued_racers(
+                rival_stores.database_url,
+                application_name=rival_stores.racer_application_name,
+                expected=1,
+            ),
+        )
+        independently_claimed = asyncio.create_task(asyncio.to_thread(ack_claimed.wait, _WORKER_WAIT_SECONDS))
+        try:
+            # A correct ACK waits for the canonical claim; the old path claims a
+            # different row, then deadlocks when both transactions continue.
+            done, _ = await asyncio.wait((queued, independently_claimed), return_when=asyncio.FIRST_COMPLETED)
+            for completed in done:
+                assert completed.result() is not False, "ACK neither waited nor claimed its row"
+            release_writer.set()
+            release_ack.set()
+            results = await asyncio.gather(echo, acknowledgement, return_exceptions=True)
+        finally:
+            release_writer.set()
+            release_ack.set()
+            queued.cancel()
+            await asyncio.gather(queued, independently_claimed, echo, acknowledgement, return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        assert not errors, f"Current-owner lock inversion: {errors!r}"
+        rows = await rival_stores.first.turn_records("general").load_all()
+        assert {index for index, _, _ in rows} == ({source} if mutation == "projection" else {source, alias})
+        for index, _, raw in rows:
+            persisted = TurnRecordCodec._from_ledger_record(index, json.loads(raw))
+            assert persisted is not None
+            assert persisted.anchor_event_id == anchor
+            assert persisted.visible_echo_event_id == "$echo"
+            assert persisted.source_event_revisions == (None if mutation == "projection" else {source: (20, revision)})
+            assert persisted.revision_replay[revision].response_event_id == (
+                None if mutation == "projection" else "$answer"
+            )
+
+    @pytest.mark.ledger_loads_from_disk
+    async def test_frozen_final_and_later_physical_tombstone_share_claim_order(  # noqa: PLR0915
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """A frozen FINAL and one current ledger keep physical tombstones auxiliary."""
+        source, driving, later = "$source", "$zz-driving", "$a-later"
+        writer_claimed, ack_claimed = threading.Event(), threading.Event()
+        release_writer, release_ack = threading.Event(), threading.Event()
+        pause_enabled = False
+
+        def pause_writer() -> None:
+            if pause_enabled:
+                writer_claimed.set()
+                assert release_writer.wait(_WORKER_WAIT_SECONDS), "current ledger writer was never released"
+
+        def pause_ack() -> None:
+            ack_claimed.set()
+            assert release_ack.wait(_WORKER_WAIT_SECONDS), "frozen FINAL was never released"
+
+        def claims(sql: str) -> bool:
+            return "UPDATE turn_records SET record_json = record_json" in sql
+
+        store = await _store(
+            EventJournalStore(
+                backend=_PausingBackend(rival_stores.first.backend, pause_writer, statement_matches=claims),
+            ),
+            agent_name="general",
+        )
+        await store.record_responded_turn(
+            TurnRecord.create(
+                [source],
+                response_event_id="$answer",
+                source_event_prompts={source: "original"},
+                latest_edit_receipt_order=1,
+            ),
+        )
+        registered = await store.register_edit_revision(source, (20, driving))
+        selected = canonicalize_turn_record(
+            registered,
+            source_event_prompts={source: "driving edit"},
+            source_event_revisions={source: (20, driving)},
+        )
+        principal = rival_stores.second.principal("agent@alice")
+        await principal.enqueue_matrix_delivery(
+            delivery_id=driving,
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=edit("$answer", "generated answer"),
+            edits_event_id="$answer",
+            result={"prepared_edit_record": TurnRecordCodec._to_ledger_record(selected)},
+        )
+        # Registration and deletion share the echo writer's real ledger and
+        # reservations, while the outbox retains its earlier immutable input.
+        await store.register_edit_revision(source, (30, later))
+        await store.mark_source_redacted(later)
+        durable = {
+            index: TurnRecordCodec._from_ledger_record(index, json.loads(raw))
+            for index, _, raw in await store.deps.turn_records.load_all()
+        }
+        current, tombstone = durable[source], durable[later]
+        assert current is not None
+        assert tombstone is not None
+        assert current.revision_replay[later].redacted
+        assert tombstone.source_event_ids == (later,)
+        assert tombstone.redacted_source_event_ids == (later,)
+        frozen = await principal.load_matrix_delivery(delivery_id=driving, stage=DeliveryStage.FINAL)
+        assert frozen is not None
+        frozen_record = TurnRecordCodec._from_ledger_record(source, frozen.result["prepared_edit_record"])
+        assert frozen_record is not None
+        assert later not in frozen_record.revision_replay
+        ack_principal = EventJournalStore(
+            backend=_PausingBackend(rival_stores.second.backend, pause_ack, statement_matches=claims),
+        ).principal("agent@alice")
+
+        pause_enabled = True
+        echo = asyncio.create_task(store.record_visible_echo(source, "$echo"))
+        assert await asyncio.to_thread(writer_claimed.wait, _WORKER_WAIT_SECONDS), "writer never claimed its row"
+        acknowledgement = asyncio.create_task(
+            ack_principal.acknowledge_matrix_delivery(
+                delivery_id=driving,
+                stage=DeliveryStage.FINAL,
+                event_id="$physical-answer-edit",
+                delivered_projections=(),
+                terminal_turn=TerminalTurnWrite(
+                    agent_name="general",
+                    index_event_ids=frozen_record.indexed_event_ids,
+                    anchor_event_id=frozen_record.anchor_event_id,
+                    record_json=json.dumps(TurnRecordCodec._to_ledger_record(frozen_record)),
+                ),
+            ),
+        )
+        queued = asyncio.create_task(
+            _await_queued_racers(
+                rival_stores.database_url,
+                application_name=rival_stores.racer_application_name,
+                expected=1,
+            ),
+        )
+        independently_claimed = asyncio.create_task(asyncio.to_thread(ack_claimed.wait, _WORKER_WAIT_SECONDS))
+        try:
+            done, _ = await asyncio.wait((queued, independently_claimed), return_when=asyncio.FIRST_COMPLETED)
+            for completed in done:
+                assert completed.result() is not False, "ACK neither waited nor claimed its row"
+            release_writer.set()
+            release_ack.set()
+            results = await asyncio.gather(echo, acknowledgement, return_exceptions=True)
+        finally:
+            release_writer.set()
+            release_ack.set()
+            queued.cancel()
+            await asyncio.gather(queued, independently_claimed, echo, acknowledgement, return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        assert not errors, f"Frozen/current physical-tombstone lock inversion: {errors!r}"
+        durable = {
+            index: TurnRecordCodec._from_ledger_record(index, json.loads(raw))
+            for index, _, raw in await store.deps.turn_records.load_all()
+        }
+        persisted, tombstone = durable[source], durable[later]
+        assert persisted is not None
+        assert tombstone is not None
+        assert persisted.visible_echo_event_id == "$echo"
+        assert persisted.response_event_id == "$answer"
+        assert persisted.source_event_revisions == {source: (20, driving)}
+        assert persisted.revision_replay[driving].response_event_id == "$answer"
+        assert persisted.revision_replay[later].redacted
+        assert persisted.revision_replay[later].response_event_id is None
+        assert persisted.revision_replay[later].cleanup_pending == current.revision_replay[later].cleanup_pending
+        assert tombstone.redacted_source_event_ids == (later,)
+        delivered = await principal.load_matrix_delivery(delivery_id=driving, stage=DeliveryStage.FINAL)
+        assert delivered is not None
+        assert delivered.acknowledged_event_id == "$physical-answer-edit"
+
+    async def test_final_ack_waits_for_current_turn_record_before_merging(
+        self,
+        rival_stores: RivalStores,
+    ) -> None:
+        """Independent PostgreSQL connections retain both echo and delivered edit proof."""
+        record = TurnRecord.create(
+            ["$source"],
+            response_event_id="$answer",
+            source_event_prompts={"$source": "original"},
+            timestamp=1,
+        )
+        records = rival_stores.first.turn_records("general")
+        await records.upsert(
+            index_event_ids=record.indexed_event_ids,
+            anchor_event_id="$source",
+            record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
+        )
+        principal = rival_stores.second.principal("agent@alice")
+        await principal.enqueue_matrix_delivery(
+            delivery_id="$edit",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=edit("$answer", "new answer"),
+            edits_event_id="$answer",
+        )
+        claimed, release = threading.Event(), threading.Event()
+
+        def pause() -> None:
+            claimed.set()
+            assert release.wait(_WORKER_WAIT_SECONDS), "turn writer was never released"
+
+        writer = EventJournalStore(
+            backend=_PausingBackend(
+                rival_stores.first.backend,
+                pause,
+                statement_matches=lambda sql: "UPDATE turn_records SET record_json = record_json" in sql,
+            ),
+        ).turn_records("general")
+        echo = asyncio.create_task(
+            writer.upsert(
+                index_event_ids=record.indexed_event_ids,
+                anchor_event_id="$source",
+                record_json=json.dumps(
+                    TurnRecordCodec._to_ledger_record(replace(record, visible_echo_event_id="$echo", timestamp=2)),
+                ),
+            ),
+        )
+        await asyncio.to_thread(claimed.wait, _WORKER_WAIT_SECONDS)
+        assert claimed.is_set(), "the ledger did not claim the canonical row"
+        selected = TurnRecord.create(
+            ["$source"],
+            response_event_id="$answer",
+            source_event_prompts={"$source": "selected edit"},
+            source_event_revisions={"$source": (20, "$edit")},
+            timestamp=1,
+        )
+        acknowledgement = asyncio.create_task(
+            principal.acknowledge_matrix_delivery(
+                delivery_id="$edit",
+                stage=DeliveryStage.FINAL,
+                event_id="$physical-edit",
+                delivered_projections=(),
+                terminal_turn=TerminalTurnWrite(
+                    agent_name="general",
+                    index_event_ids=selected.indexed_event_ids,
+                    anchor_event_id="$source",
+                    record_json=json.dumps(TurnRecordCodec._to_ledger_record(selected)),
+                ),
+            ),
+        )
+        queued = asyncio.create_task(
+            _await_queued_racers(
+                rival_stores.database_url,
+                application_name=rival_stores.racer_application_name,
+                expected=1,
+            ),
+        )
+        try:
+            done, _ = await asyncio.wait((acknowledgement, queued), return_when=asyncio.FIRST_COMPLETED)
+            waited = queued in done and queued.exception() is None
+        finally:
+            release.set()
+            if not queued.done():
+                queued.cancel()
+            await asyncio.gather(queued, return_exceptions=True)
+            await asyncio.gather(echo, acknowledgement)
+        assert waited, "ACK derived a stale candidate before the ledger committed"
+        rows = await records.load_all()
+        persisted = TurnRecordCodec._from_ledger_record("$source", json.loads(rows[0][2]))
+        assert persisted is not None
+        assert persisted.visible_echo_event_id == "$echo"
+        assert persisted.source_event_revisions == {"$source": (20, "$edit")}
+        assert persisted.revision_replay["$edit"].response_event_id == "$answer"
+
     async def test_a_losing_acknowledgement_writes_neither_the_row_nor_the_record(
         self,
         journal_store: EventJournalStore,
@@ -5081,7 +5531,9 @@ class TestOutbox:
                 agent_name="general",
                 index_event_ids=("$source",),
                 anchor_event_id="$source",
-                record_json=json.dumps({"response_event_id": event_id}),
+                record_json=json.dumps(
+                    TurnRecordCodec._to_ledger_record(TurnRecord.create(["$source"], response_event_id=event_id)),
+                ),
             )
 
         await alice.acknowledge_matrix_delivery(
@@ -5213,7 +5665,9 @@ class TestOutbox:
                     agent_name="general",
                     index_event_ids=("$source",),
                     anchor_event_id="$source",
-                    record_json=json.dumps({"response_event_id": event_id}),
+                    record_json=json.dumps(
+                        TurnRecordCodec._to_ledger_record(TurnRecord.create(["$source"], response_event_id=event_id)),
+                    ),
                 ),
             )
 
@@ -8485,15 +8939,15 @@ class TestHotQueriesAreIndexCovered:
 
 
 class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
-    """The first half of collapsing "has this turn finished?" onto one writer.
+    """Typed durable records share the acknowledgement transaction owner."""
 
-    Today that question is answered by the journal's pending set and by a
-    JSON-file ledger, which cannot share a transaction and therefore settle at
-    different moments. These rows are the same records in the database that
-    settles the turns, so a future writer can commit both together. Nothing
-    reads them yet on purpose: a dedupe substrate that is half migrated is one
-    that can answer a message twice.
-    """
+    @staticmethod
+    def _record_json(*sources: str, timestamp: float = 1) -> str:
+        return json.dumps(
+            TurnRecordCodec._to_ledger_record(
+                TurnRecord.create(sources, anchor_event_id=sources[0], completed=False, timestamp=timestamp),
+            ),
+        )
 
     @staticmethod
     async def _stored(records: TurnRecordStore) -> dict[str, str]:
@@ -8518,13 +8972,13 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
         await records.upsert(
             index_event_ids=("$a", "$b", "$c"),
             anchor_event_id="$a",
-            record_json='{"anchor_event_id": "$a"}',
+            record_json=self._record_json("$a", "$b", "$c"),
         )
 
         assert await self._stored(records) == {
-            "$a": '{"anchor_event_id": "$a"}',
-            "$b": '{"anchor_event_id": "$a"}',
-            "$c": '{"anchor_event_id": "$a"}',
+            "$a": self._record_json("$a", "$b", "$c"),
+            "$b": self._record_json("$a", "$b", "$c"),
+            "$c": self._record_json("$a", "$b", "$c"),
         }
 
     async def test_an_index_the_turn_no_longer_answers_is_dropped(
@@ -8541,12 +8995,16 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
         await records.upsert(
             index_event_ids=("$a", "$b"),
             anchor_event_id="$a",
-            record_json='{"v": 1}',
+            record_json=self._record_json("$a", "$b"),
         )
 
-        await records.upsert(index_event_ids=("$a",), anchor_event_id="$a", record_json='{"v": 2}')
+        await records.upsert(
+            index_event_ids=("$a",),
+            anchor_event_id="$a",
+            record_json=self._record_json("$a", timestamp=2),
+        )
 
-        assert await self._stored(records) == {"$a": '{"v": 2}'}
+        assert await self._stored(records) == {"$a": self._record_json("$a", timestamp=2)}
 
     async def test_a_re_anchored_record_leaves_no_row_under_its_old_anchor(
         self,
@@ -8565,13 +9023,19 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
         await records.upsert(
             index_event_ids=("$a", "$b"),
             anchor_event_id="$a",
-            record_json='{"v": 1}',
+            record_json=self._record_json("$a", "$b"),
         )
 
         # `$a` is redacted away, so the record re-anchors onto `$b`.
-        await records.upsert(index_event_ids=("$b",), anchor_event_id="$b", record_json='{"v": 2}')
+        await records.upsert(
+            index_event_ids=("$b",),
+            anchor_event_id="$b",
+            record_json=self._record_json("$b", timestamp=2),
+        )
 
-        assert await self._stored(records) == {"$b": '{"v": 2}'}, "the old anchor's row survived re-anchoring"
+        assert await self._stored(records) == {"$b": self._record_json("$b", timestamp=2)}, (
+            "the old anchor's row survived re-anchoring"
+        )
 
     async def test_records_are_scoped_to_the_agent_not_the_matrix_identity(
         self,
@@ -8590,9 +9054,9 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
         """
         first = journal_store.turn_records("agent")
         other_agent = journal_store.turn_records("other-agent")
-        await first.upsert(index_event_ids=("$a",), anchor_event_id="$a", record_json='{"v": 1}')
+        await first.upsert(index_event_ids=("$a",), anchor_event_id="$a", record_json=self._record_json("$a"))
 
-        assert await self._stored(journal_store.turn_records("agent")) == {"$a": '{"v": 1}'}
+        assert await self._stored(journal_store.turn_records("agent")) == {"$a": self._record_json("$a")}
         assert await self._stored(other_agent) == {}, "one agent read another's turn records"
 
     async def test_a_warm_up_reads_every_record_in_a_stable_order(
@@ -8607,8 +9071,8 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
         differently ordered map would be a difference nothing else would catch.
         """
         records = journal_store.turn_records("agent")
-        await records.upsert(index_event_ids=("$B",), anchor_event_id="$B", record_json='{"v": "B"}')
-        await records.upsert(index_event_ids=("$a",), anchor_event_id="$a", record_json='{"v": "a"}')
+        await records.upsert(index_event_ids=("$B",), anchor_event_id="$B", record_json=self._record_json("$B"))
+        await records.upsert(index_event_ids=("$a",), anchor_event_id="$a", record_json=self._record_json("$a"))
 
         assert [index for index, _anchor, _json in await records.load_all()] == ["$B", "$a"]
 
@@ -8618,11 +9082,15 @@ class TestTurnRecordsLiveBesideTheTurnsTheyDescribe:
     ) -> None:
         """The ledger compacts terminal history, so these rows have to as well."""
         records = journal_store.turn_records("agent")
-        await records.upsert(index_event_ids=("$a", "$b"), anchor_event_id="$a", record_json='{"v": 1}')
+        await records.upsert(
+            index_event_ids=("$a", "$b"),
+            anchor_event_id="$a",
+            record_json=self._record_json("$a", "$b"),
+        )
 
         await records.forget(index_event_ids=("$a",))
 
-        assert await self._stored(records) == {"$b": '{"v": 1}'}
+        assert await self._stored(records) == {"$b": self._record_json("$a", "$b")}
 
 
 # Takes the journal's write lock on a database that is not yet in WAL, which is

@@ -258,7 +258,7 @@ Run metadata supplies a complete record when the ledger row is absent and otherw
 `TurnStore` immediately writes a recovered or enriched record back to the ledger, so callers never own backfill or repair decisions.
 One runtime process owns each ledger's semantic ordering, and nothing defines cross-process turn precedence.
 Terminal records live in the journal database rather than a per-agent JSON file, so the advisory file lock that used to make the file update atomic is gone; the database serializes the write itself.
-Neither substrate ever merged two processes' views of one record, so one process must own one agent's records — an unenforced contract, and a second runtime against the same storage path will still start.
+One process must own one agent's records; the database merges delivery acknowledgements with ledger writes for that owner, without coordinating independent runtimes against the same storage path.
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
 
 Matrix source redactions are durably tombstoned in the same transaction that withholds the redacted body, and every projection install path consults that tombstone table.
@@ -272,7 +272,12 @@ Registration, tombstone reconciliation, and cleanup share ledger conflict keys, 
 Recovery sanitizes each candidate before removing revision tags or backfilling missing prompts, and cleanup acknowledgement occurs only after all affected scopes are durably clean.
 The revision map remains ledger-owned; model runs carry consumption provenance without mutable cleanup debt.
 Each physical revision may retain a completed response ID as historical consumption proof, which registration alone never grants and deletion never erases.
+Successful edit generation freezes its selected turn record in the final outbox result before sending; internal prompts and ledger metadata never enter the Matrix payload.
+A winning acknowledgement under active delivery ownership commits that exact historical consumption proof with the canonical response identity, merging current tombstones, STOP, and newer edit facts in the same transaction.
+Acknowledgements and ordinary ledger writes claim the same existing canonical rows before merging, so a delayed cached write cannot erase delivered proof before cache publication or restart.
+Cache publication uses the actual committed record; final-delivery recovery uses the frozen outbox result without another model call.
 Coalesced regeneration refills invalidated slots through strict paginated reads proving source, requester, and visible revision, including sidecars.
+An exact principal/room/source projection tombstone proves canonical deletion during refill, allowing the edit owner to reconcile cleanup and rebuild surviving sources before the room FIFO reaches the deletion callback; missing unproven data still blocks generation.
 The locked edit preparation gate explicitly requests a rebuild for an invalid snapshot, preserving other pending edits when the driving revision is deleted.
 The source-preparation callback receives the actual request history both at early admission and after the final locked history and payload refresh, so context-only revisions are registered before consumption.
 Physical snapshot validation follows awaited cleanup and STOP preparation; synchronous stale-run pruning happens at most once for each immutable edit request.

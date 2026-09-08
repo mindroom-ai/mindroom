@@ -349,6 +349,7 @@ class EditRegenerator:
             source_event_prompts=prompt_map,
             source_event_revisions=revisions,
             suppressed_source_event_revisions=suppressed_revisions,
+            latest_edit_receipt_order=active_receipt_order,
         )
         target = record.conversation_target
         assert target is not None
@@ -402,6 +403,7 @@ class EditRegenerator:
                 current_timestamp_ms=normalize_timestamp_ms(driving_edit.revision[0]),
                 current_prompt_is_structured=structured,
                 prepare_source_turn=prepare_snapshot,
+                prepared_edit_record=record,
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=record_deferred_outcome,
@@ -430,6 +432,11 @@ class EditRegenerator:
                 source_event_id=source,
                 requester_id=requester,
             )
+            if message is None:
+                updated = await self.deps.turn_store.mark_source_redacted(source)
+                assert updated is not None
+                record = updated
+                continue
             updated = await self.deps.turn_store.refill_source_prompt(record, source, message)
             if updated == record and source in updated.invalidated_prompt_sources:
                 msg = "Canonical source revision changed during strict refill"
@@ -526,9 +533,6 @@ class EditRegenerator:
             if regenerated_event_id is not None:
                 if not applied:
                     return
-                await self.deps.turn_store.record_responded_turn(
-                    canonicalize_turn_record(record, response_event_id=regenerated_event_id),
-                )
                 self._discard(mailbox, applied)
                 continue
             fresh_record = self.deps.turn_store.get_turn_record(latest.original_event_id)

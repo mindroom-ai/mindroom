@@ -915,7 +915,7 @@ class _FailingWriteStore(TurnRecordStore):
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
-    ) -> None:
+    ) -> str | None:
         """Hold the write open, then fail it, leaving the database untouched."""
         _ = (index_event_ids, anchor_event_id, record_json)
         self.started.set()
@@ -972,11 +972,11 @@ class _CommittingWriteStore(TurnRecordStore):
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
-    ) -> None:
+    ) -> str | None:
         """Hold the write open, then let it land exactly as the real one would."""
         self.started.set()
         await self.released.wait()
-        await TurnRecordStore.upsert(
+        return await TurnRecordStore.upsert(
             self,
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,
@@ -998,7 +998,7 @@ class _DelayedFirstWriteStore(TurnRecordStore):
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
-    ) -> None:
+    ) -> str | None:
         """Let the test decide the first selected write's definite outcome."""
         if "$slow" in index_event_ids and not self.started.is_set():
             self.started.set()
@@ -1006,7 +1006,7 @@ class _DelayedFirstWriteStore(TurnRecordStore):
             if self.fail:
                 msg = "selected write failed before commit"
                 raise RuntimeError(msg)
-        await TurnRecordStore.upsert(
+        return await TurnRecordStore.upsert(
             self,
             index_event_ids=index_event_ids,
             anchor_event_id=anchor_event_id,

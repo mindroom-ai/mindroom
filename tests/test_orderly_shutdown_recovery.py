@@ -37,6 +37,7 @@ from tests.test_edit_regenerator import (
     NEW_RESPONSE_EVENT_ID,
     ORIGINAL_EVENT_ID,
     USER_ID,
+    _acknowledge_test_edit,
     _edit_event,
     _harness,
     _turn_record,
@@ -135,7 +136,8 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     assert interrupted is not None
     assert not interrupted.source_event_revisions
 
-    async def recover(_request: ResponseRequest) -> str:
+    async def recover(request: ResponseRequest) -> str:
+        await _acknowledge_test_edit(tmp_path, request, NEW_RESPONSE_EVENT_ID, store, journal_store=journal_store)
         return NEW_RESPONSE_EVENT_ID
 
     harness.regenerator.deps = replace(harness.regenerator.deps, generate_response=recover)

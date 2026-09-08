@@ -53,7 +53,13 @@ from .models import (
     IngestionConsumerBindingError,
     ResponseRecoveryState,
 )
-from .projection import discard_delivery_event, drop_refetched_message, install_refetched_revision, project
+from .projection import (
+    discard_delivery_event,
+    drop_refetched_message,
+    install_refetched_revision,
+    is_tombstoned,
+    project,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -417,6 +423,12 @@ class PrincipalStore:
                 self._principal_id,
                 source_event_id=source_event_id,
             ),
+        )
+
+    async def is_event_redacted(self, *, room_id: str, event_id: str) -> bool:
+        """Read exact projection tombstone authority for this principal."""
+        return await self._backend.read(
+            lambda transaction: is_tombstoned(transaction, self._principal_id, room_id, event_id),
         )
 
     async def read_conversation(
@@ -888,14 +900,11 @@ class PrincipalStore:
             # either. The row already names another event, and a terminal
             # record pointing somewhere else is the disagreement this whole
             # transaction exists to prevent.
-            if bound and terminal_turn is not None:
-                turn_records.upsert(
-                    transaction,
-                    terminal_turn.agent_name,
-                    index_event_ids=terminal_turn.index_event_ids,
-                    anchor_event_id=terminal_turn.anchor_event_id,
-                    record_json=terminal_turn.record_json,
-                )
+            committed_terminal = (
+                turn_records.commit_terminal(transaction, terminal_turn)
+                if bound and may_project and terminal_turn is not None
+                else None
+            )
             if bound and may_project:
                 for delivered_projection in delivered_projections:
                     project(
@@ -912,7 +921,7 @@ class PrincipalStore:
                     event_id=event_id,
                 )
             if bound:
-                return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
+                return DeliveryAcknowledgement(settled_event_id=event_id, bound=True, terminal_turn=committed_terminal)
             # Lost the row. Whatever is on it now is the answer this delivery
             # resolves to, and the caller has to be told that rather than its
             # own event id -- everything downstream records what `flush`
@@ -1719,10 +1728,10 @@ class TurnRecordStore:
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
-    ) -> None:
-        """Store one record under every event that indexes it."""
-        await self._backend.write(
-            lambda transaction: turn_records.upsert(
+    ) -> str | None:
+        """Store a record and return its committed state, or reject a changed owner."""
+        return await self._backend.write(
+            lambda transaction: turn_records.write_record(
                 transaction,
                 self._agent_name,
                 index_event_ids=index_event_ids,

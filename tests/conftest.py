@@ -1499,7 +1499,7 @@ class FakeOutbox:
         )
         self.acknowledged_terminal_turns.append((delivery_id, terminal_turn))
         self.acknowledged_projections.append(delivered_projections)
-        return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
+        return DeliveryAcknowledgement(settled_event_id=event_id, bound=True, terminal_turn=terminal_turn)
 
     async def unacknowledged_matrix_deliveries(
         self,

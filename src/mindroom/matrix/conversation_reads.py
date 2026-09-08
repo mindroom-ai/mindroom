@@ -195,6 +195,10 @@ class ConversationReader:
     store: ConversationReadView
     hydrator: ConversationHydrator
 
+    async def is_event_redacted(self, *, room_id: str, event_id: str) -> bool:
+        """Distinguish proven physical deletion from an unavailable projection row."""
+        return await self.store.is_event_redacted(room_id=room_id, event_id=event_id)
+
     async def may_have_unread_history(self, *, room_id: str, thread_id: str | None) -> bool:
         """Return whether local absence cannot prove this conversation is fresh.
 

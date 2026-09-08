@@ -199,6 +199,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.turn_record import TurnRecord
 
     from .response_admission import ResponseAdmissionGate
 
@@ -469,6 +470,7 @@ class ResponseRequest:
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     existing_event_id: str | None = None
+    prepared_edit_record: TurnRecord | None = None
     existing_event_is_placeholder: bool = False
     user_id: str | None = None
     media: MediaInputs | None = None
@@ -2064,6 +2066,7 @@ class ResponseRunner:
         response_identity: ResponseIdentity,
         tool_trace: list[Any] | None,
         extra_content: dict[str, Any] | None,
+        run_completed: bool,
     ) -> FinalDeliveryOutcome:
         """Finalize one streamed delivery and mark the terminal delivery timing."""
         with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
@@ -2072,6 +2075,7 @@ class ResponseRunner:
                     target=delivery_target,
                     stream_transport_outcome=transport_outcome,
                     initial_delivery_kind=delivery_kind,
+                    prepared_edit_record=request.prepared_edit_record if run_completed else None,
                     identity=response_identity,
                     tool_trace=tool_trace,
                     extra_content=extra_content,
@@ -3891,6 +3895,9 @@ class ResponseRunner:
                         transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                             StreamingDeliveryRequest(
                                 target=delivery_target,
+                                completed_edit_record=lambda: (
+                                    request.prepared_edit_record if team_turn_recorder.outcome == "completed" else None
+                                ),
                                 identity=response_identity,
                                 response_stream=response_stream,
                                 existing_event_id=delivery_request.existing_event_id,
@@ -3935,6 +3942,7 @@ class ResponseRunner:
                 await persist_failed_team_turn()
                 delivery = await self._finalize_streamed_turn(
                     request=request,
+                    run_completed=team_turn_recorder.outcome == "completed",
                     delivery_target=delivery_target,
                     transport_outcome=transport_outcome,
                     delivery_kind="edited" if message_id else "sent",
@@ -4029,6 +4037,9 @@ class ResponseRunner:
                     delivery = await self.deps.delivery_gateway.deliver_final(
                         FinalDeliveryRequest(
                             target=delivery_target,
+                            prepared_edit_record=request.prepared_edit_record
+                            if team_turn_recorder.outcome == "completed"
+                            else None,
                             existing_event_id=message_id,
                             existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
                             response_text=response_text,
@@ -4410,6 +4421,9 @@ class ResponseRunner:
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(
                         target=runtime.resolved_target,
+                        completed_edit_record=lambda: (
+                            request.prepared_edit_record if turn_recorder.outcome == "completed" else None
+                        ),
                         identity=identity,
                         response_stream=wrapped_response_stream,
                         existing_event_id=request.existing_event_id,
@@ -4558,6 +4572,7 @@ class ResponseRunner:
             delivery = await self.deps.delivery_gateway.deliver_final(
                 FinalDeliveryRequest(
                     target=runtime.resolved_target,
+                    prepared_edit_record=request.prepared_edit_record if turn_recorder.outcome == "completed" else None,
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                     response_text=generation.response_text,
@@ -4765,6 +4780,7 @@ class ResponseRunner:
             on_delivery_started(transport_outcome.last_physical_stream_event_id)
         delivery = await self._finalize_streamed_turn(
             request=request,
+            run_completed=turn_recorder.outcome == "completed",
             delivery_target=runtime.resolved_target,
             transport_outcome=transport_outcome,
             delivery_kind="edited" if request.existing_event_id else "sent",

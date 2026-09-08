@@ -639,7 +639,11 @@ def merge_edit_facts(ledger: TurnRecord, recovery: TurnRecord) -> tuple[dict[str
     recovery = sanitize_revision_replay(recovery, authority=ledger)
     prompts = dict(ledger.source_event_prompts or {})
     prompts.update(recovery.source_event_prompts or {})
-    revisions = dict(recovery.source_event_revisions or {})
+    revisions = {
+        event_id: revision
+        for event_id, revision in (recovery.source_event_revisions or {}).items()
+        if recovery.prompt_source_event_id(event_id) in (recovery.source_event_prompts or {})
+    }
     ledger_prompts = ledger.source_event_prompts or {}
     for event_id, revision in (ledger.source_event_revisions or {}).items():
         prompt_event_id = ledger.prompt_source_event_id(event_id)
@@ -647,6 +651,85 @@ def merge_edit_facts(ledger: TurnRecord, recovery: TurnRecord) -> tuple[dict[str
             revisions[event_id] = revision
             prompts[prompt_event_id] = ledger_prompts[prompt_event_id]
     return prompts, revisions
+
+
+def completed_response_record(
+    record: TurnRecord,
+    response_event_id: str,
+    *,
+    consumed_revisions: tuple[SourceEventRevision, ...] | None = None,
+) -> TurnRecord:
+    """Attribute only this generated snapshot's selected revisions to its answer."""
+    selected = (
+        tuple((record.source_event_revisions or {}).values()) if consumed_revisions is None else consumed_revisions
+    )
+    record = sanitize_revision_replay(record)
+    replay = dict(record.revision_replay or {})
+    for _, revision_id in selected:
+        revision = replay.get(revision_id)
+        if revision is not None:
+            replay[revision_id] = replace(revision, response_event_id=response_event_id)
+    return canonicalize_turn_record(
+        record,
+        response_event_id=response_event_id,
+        completed=True,
+        revision_replay=replay,
+    )
+
+
+def merge_committed_response(
+    current: TurnRecord | None,
+    committed: TurnRecord,
+    *,
+    tombstoned_event_ids: typing.Collection[str] = (),
+) -> TurnRecord | None:
+    """Join delivered proof with current authority without inventing consumed revisions."""
+    if current is None:
+        return sanitize_revision_replay(committed, tombstoned_event_ids=tombstoned_event_ids)
+    if not same_turn_identity(current, committed) or any(
+        before is not None and after is not None and before != after
+        for before, after in (
+            (current.response_owner, committed.response_owner),
+            (current.requester_id, committed.requester_id),
+            (current.conversation_target, committed.conversation_target),
+            (current.history_scope, committed.history_scope),
+        )
+    ):
+        return None
+    proofs = {
+        event_id: revision.response_event_id
+        for event_id, revision in (committed.revision_replay or {}).items()
+        if revision.response_event_id is not None
+    }
+    committed = sanitize_revision_replay(
+        committed,
+        authority=current,
+        tombstoned_event_ids=tombstoned_event_ids,
+    )
+    replay = dict(committed.revision_replay or {})
+    for event_id, response_event_id in proofs.items():
+        replay[event_id] = replace(
+            replay[event_id],
+            response_event_id=replay[event_id].response_event_id or response_event_id,
+        )
+    prompts, revisions = merge_edit_facts(current, committed)
+    return sanitize_revision_replay(
+        canonicalize_turn_record(
+            current,
+            response_event_id=current.response_event_id or committed.response_event_id,
+            completed=True,
+            source_event_prompts=prompts,
+            source_event_revisions=revisions,
+            revision_replay=replay,
+            latest_edit_receipt_order=max(
+                current.latest_edit_receipt_order or 0,
+                committed.latest_edit_receipt_order or 0,
+            )
+            or None,
+            timestamp=max(current.timestamp, committed.timestamp),
+        ),
+        tombstoned_event_ids=tombstoned_event_ids,
+    )
 
 
 def sanitize_revision_replay(  # noqa: C901

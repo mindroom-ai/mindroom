@@ -31,6 +31,8 @@ from mindroom.turn_record import (
     RevisionSnapshotChangedError,
     SourceEventRevision,
     canonicalize_turn_record,
+    completed_response_record,
+    merge_committed_response,
     sanitize_revision_replay,
 )
 
@@ -229,13 +231,13 @@ class TurnStore:
         if not turn_record.response_event_id:
             msg = "A responded turn requires a visible Matrix response event ID"
             raise RuntimeError(msg)
-        consumed_revisions = tuple((turn_record.source_event_revisions or {}).values())
-        turn_record = self._sanitize_candidate(turn_record)
-        replay = dict(turn_record.revision_replay or {})
-        for revision in consumed_revisions:
-            if revision[1] in replay:
-                replay[revision[1]] = replace(replay[revision[1]], response_event_id=turn_record.response_event_id)
-        await self.record_turn(canonicalize_turn_record(turn_record, revision_replay=replay))
+        await self.record_turn(
+            completed_response_record(
+                self._sanitize_candidate(turn_record),
+                turn_record.response_event_id,
+                consumed_revisions=tuple((turn_record.source_event_revisions or {}).values()),
+            ),
+        )
 
     async def refill_source_prompt(
         self,
@@ -358,7 +360,12 @@ class TurnStore:
         )
         return None if bound.anchor_event_id is None else bound
 
-    async def publish_committed_response(self, turn_id: str, response_event_id: str) -> None:
+    async def publish_committed_response(
+        self,
+        turn_id: str,
+        response_event_id: str,
+        committed: TurnRecord | None = None,
+    ) -> None:
         """Re-assert an acknowledged record through the ledger's conflict ownership.
 
         The acknowledgement transaction already persisted the response, but a
@@ -367,19 +374,28 @@ class TurnStore:
         settled state, preserving both the response identity and intervening
         facts. An unrelated turn does not need to wait for this reconciliation.
         """
-        if self._ledger.get_turn_record(turn_id) is None:
+        del turn_id, response_event_id
+        if committed is None:
             return
 
         def committed_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
-            existing = existing_records[turn_id]
-            return canonicalize_turn_record(
-                existing,
-                response_event_id=existing.response_event_id or response_event_id,
-                completed=True,
-                timestamp=0.0,
+            existing = next(
+                (existing_records[source] for source in committed.source_event_ids if source in existing_records),
+                None,
             )
+            merged = merge_committed_response(
+                existing,
+                committed,
+                tombstoned_event_ids=tuple(
+                    event_id for event_id in (committed.revision_replay or {}) if self.is_revision_redacted(event_id)
+                ),
+            )
+            if merged is not None:
+                return canonicalize_turn_record(merged, timestamp=0.0)
+            assert existing is not None
+            return existing
 
-        await self._ledger.update_handled_turn((turn_id,), committed_record)
+        await self._ledger.update_handled_turn(committed.indexed_event_ids, committed_record)
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""

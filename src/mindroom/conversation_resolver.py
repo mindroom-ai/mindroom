@@ -1089,9 +1089,11 @@ class ConversationResolver:
         target: MessageTarget,
         source_event_id: str,
         requester_id: str,
-    ) -> ResolvedVisibleMessage:
+    ) -> ResolvedVisibleMessage | None:
         """Prove an exact physical source and revision, paging beyond prompt windows."""
         reader = self.deps.conversation_reader
+        if await reader.is_event_redacted(room_id=target.room_id, event_id=source_event_id):
+            return None
         before = None
         while True:
             page = await reader.read_strict(
@@ -1117,6 +1119,8 @@ class ConversationResolver:
                     raise ThreadMembershipLookupError(msg)
                 return replace(message, body=body, content=content)
             if page.next_cursor is None:
+                if await reader.is_event_redacted(room_id=target.room_id, event_id=source_event_id):
+                    return None
                 msg = "Exact canonical source is unavailable in the strict conversation projection"
                 raise ThreadMembershipLookupError(msg)
             before = page.next_cursor

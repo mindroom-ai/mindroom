@@ -2075,11 +2075,11 @@ async def test_response_waits_for_pending_context_persistence_before_generation(
     pending_write_started = asyncio.Event()
     release_pending_write = asyncio.Event()
 
-    async def upsert_with_barrier(records: TurnRecordStore, **kwargs: object) -> None:
+    async def upsert_with_barrier(records: TurnRecordStore, **kwargs: object) -> str | None:
         if _is_pending_write_for(kwargs, event.event_id):
             pending_write_started.set()
             await release_pending_write.wait()
-        await real_upsert(records, **kwargs)
+        return await real_upsert(records, **kwargs)
 
     monkeypatch.setattr(TurnRecordStore, "upsert", upsert_with_barrier)
     delivery = asyncio.create_task(harness.deliver(room, event))

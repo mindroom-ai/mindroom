@@ -92,6 +92,7 @@ from mindroom.streaming import (
     send_streaming_response,
     strip_matching_visible_tool_markers,
 )
+from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -338,6 +339,7 @@ class FinalDeliveryRequest:  # noqa: D101
     existing_event_is_placeholder: bool = False
     skip_mentions: bool = False
     defer_source_handoff: bool = False
+    prepared_edit_record: TurnRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -423,6 +425,7 @@ class StreamingDeliveryRequest:
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
+    completed_edit_record: Callable[[], TurnRecord | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -456,7 +459,7 @@ class DeliveryGatewayDeps:
     # wrote is re-asserted through the ledger's own write ordering. Skipping
     # that leaves the row open to a mutation that derived before the commit and
     # lands after it, which erases the event the answer is stored under.
-    terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None
+    terminal_turn_committed: Callable[[str, str, TurnRecord | None], Awaitable[None]] | None = None
 
 
 _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
@@ -487,6 +490,7 @@ class FinalizeStreamedResponseRequest:
     extra_content: dict[str, Any] | None
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
+    prepared_edit_record: TurnRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -933,21 +937,49 @@ class DeliveryGateway:
             resolve_delivered=self._delivered_under_a_previous_device,
             handoff=handoff,
             terminal_turn_for=self._terminal_turn_write,
-            terminal_turn_committed=self.deps.terminal_turn_committed,
+            terminal_turn_committed=self._publish_terminal_turn,
             process_shutdown_requested=current_task_is_process_shutdown,
             delivery_locks=self._delivery_turn_locks,
         )
 
-    def _terminal_turn_write(self, turn_id: str, event_id: str) -> TerminalTurnWrite | None:
+    async def _publish_terminal_turn(self, turn_id: str, event_id: str, committed: TerminalTurnWrite | None) -> None:
+        """Publish the transaction's exact proof through the ledger's conflict owner."""
+        if self.deps.terminal_turn_committed is None:
+            return
+        record = (
+            None
+            if committed is None
+            else TurnRecordCodec._from_ledger_record(
+                committed.index_event_ids[0],
+                json.loads(committed.record_json),
+            )
+        )
+        await self.deps.terminal_turn_committed(turn_id, event_id, record)
+
+    def _terminal_turn_write(self, delivery: MatrixDelivery, event_id: str) -> TerminalTurnWrite | None:
         """Turn the terminal record for one delivered answer into a journal row.
 
         The turn store produces the record and stops at its own boundary; this
         layer already owns the journal's types, so the conversion belongs here
         rather than reaching across.
         """
-        if self.deps.terminal_turn_for is None:
-            return None
-        record = self.deps.terminal_turn_for(turn_id, event_id)
+        prepared = (delivery.result or {}).get("prepared_edit_record")
+        if prepared is not None:
+            assert isinstance(prepared, dict), "Corrupt prepared edit record"
+            prepared = cast("dict[str, object]", prepared)
+            sources = prepared.get("source_event_ids")
+            assert isinstance(sources, list), "Corrupt prepared edit sources"
+            assert sources, "Empty prepared edit sources"
+            assert isinstance(sources[0], str), "Corrupt prepared edit source"
+            record = TurnRecordCodec._from_ledger_record(sources[0], prepared)
+            assert record is not None, "Corrupt prepared edit record"
+            record = canonicalize_turn_record(record, response_event_id=event_id, completed=True)
+        else:
+            record = (
+                None
+                if self.deps.terminal_turn_for is None
+                else self.deps.terminal_turn_for(delivery.delivery_id, event_id)
+            )
         if record is None or record.anchor_event_id is None:
             return None
         return TerminalTurnWrite(
@@ -1493,6 +1525,8 @@ class DeliveryGateway:
                 ),
             )
         delivery_result: dict[str, object] | None = None
+        if request.prepared_edit_record is not None:
+            delivery_result = {"prepared_edit_record": TurnRecordCodec._to_ledger_record(request.prepared_edit_record)}
         if request.defer_source_handoff:
             metadata = interactive_response.interactive_metadata
             # Older readers recognize any mapping here as a successful FINAL.
@@ -1500,6 +1534,7 @@ class DeliveryGateway:
             # local outbox state and cannot make the Matrix event impossible.
             delivery_extra_content[DURABLE_FINAL_OUTCOME_KEY] = {"version": DURABLE_FINAL_OUTCOME_VERSION}
             delivery_result = {
+                **(delivery_result or {}),
                 "body": display_text,
                 "interactive": metadata.to_metadata() if metadata is not None else None,
             }
@@ -1851,8 +1886,8 @@ class DeliveryGateway:
                 request.preserve_existing_visible_on_empty_terminal
                 or (request.existing_event_id is not None and not request.adopt_existing_placeholder)
             ),
-            terminal_edit=self._durable_terminal_edit(delivery_turn_id, request.target),
-            terminal_send=self._durable_terminal_send(delivery_turn_id, request.target),
+            terminal_edit=self._durable_terminal_edit(delivery_turn_id, request.target, request.completed_edit_record),
+            terminal_send=self._durable_terminal_send(delivery_turn_id, request.target, request.completed_edit_record),
             final_text_transform=self._final_text_transform(request.identity),
             transport_is_current=self._stream_transport_gate(delivery_turn_id, request.target.room_id),
             interactive_creator_agent=self.deps.agent_name,
@@ -1877,7 +1912,12 @@ class DeliveryGateway:
 
         return transport_is_current
 
-    def _durable_terminal_send(self, turn_id: str, target: MessageTarget) -> TerminalSend:
+    def _durable_terminal_send(
+        self,
+        turn_id: str,
+        target: MessageTarget,
+        completed_edit_record: Callable[[], TurnRecord | None] | None = None,
+    ) -> TerminalSend:
         """Return a sender that records a stream's terminal *send* before making it.
 
         A stream normally edits a placeholder, but there is not always one to
@@ -1911,6 +1951,7 @@ class DeliveryGateway:
                 SendTextRequest(
                     target=target,
                     response_text="",
+                    delivery_result=self._prepared_edit_result(completed_edit_record, content),
                     retry_sync_recovery=retry_sync_recovery,
                     delivery_turn_id=turn_id,
                     delivery_stage=DeliveryStage.FINAL,
@@ -2011,7 +2052,25 @@ class DeliveryGateway:
 
         return transform
 
-    def _durable_terminal_edit(self, turn_id: str, target: MessageTarget) -> TerminalEdit:
+    @staticmethod
+    def _prepared_edit_result(
+        completed_record: Callable[[], TurnRecord | None] | None,
+        content: dict[str, Any],
+    ) -> dict[str, object] | None:
+        """Only a completed stream may attach its selected edit snapshot."""
+        if completed_record is None or content.get(constants.STREAM_STATUS_KEY) != constants.STREAM_STATUS_COMPLETED:
+            return None
+        record = completed_record()
+        if record is None:
+            return None
+        return {"prepared_edit_record": TurnRecordCodec._to_ledger_record(record)}
+
+    def _durable_terminal_edit(
+        self,
+        turn_id: str,
+        target: MessageTarget,
+        completed_edit_record: Callable[[], TurnRecord | None] | None = None,
+    ) -> TerminalEdit:
         """Return a sender that records a stream's terminal edit before making it.
 
         Nothing extra is sent. The edit the stream was going to make anyway is
@@ -2049,6 +2108,7 @@ class DeliveryGateway:
                     target=target,
                     event_id=event_id,
                     new_text=display_text,
+                    delivery_result=self._prepared_edit_result(completed_edit_record, content),
                     retry_sync_recovery=retry_sync_recovery,
                     delivery_turn_id=turn_id,
                 ),
@@ -2267,6 +2327,7 @@ class DeliveryGateway:
                         existing_event_id=existing_event_id,
                         existing_event_is_placeholder=existing_event_is_placeholder,
                         response_text=stream_outcome.canonical_final_body_candidate,
+                        prepared_edit_record=request.prepared_edit_record,
                         identity=request.identity,
                         tool_trace=request.tool_trace,
                         extra_content=request.extra_content,

@@ -127,7 +127,7 @@ def _loads(content_json: str) -> Mapping[str, object]:
     return cast("Mapping[str, object]", decoded)
 
 
-def _is_tombstoned(
+def is_tombstoned(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
@@ -201,7 +201,7 @@ def project(
             receipt_order=receipt_order,
         )
         return event.redacts_event_id
-    if _is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
+    if is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
         return event.event_id
     replaces = replacement_target(event.content)
     if replaces is None:
@@ -311,7 +311,7 @@ def _apply_unresolved_edit(
     )
     if held is None:
         return
-    if _is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
+    if is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
         return
     content = visible_content(_loads(held["content_json"]))
     record_projected_prompt(
@@ -354,7 +354,7 @@ def _project_edit(
         (principal_id, event.room_id, target_event_id),
     )
     if current is None:
-        if _is_tombstoned(transaction, principal_id, event.room_id, target_event_id):
+        if is_tombstoned(transaction, principal_id, event.room_id, target_event_id):
             return
         _hold_unresolved_edit(transaction, principal_id, event, target_event_id=target_event_id)
         return
@@ -671,7 +671,7 @@ def install_refetched_revision(
         )
     if holds_unresolved_sidecar(content):
         return False
-    if _is_tombstoned(transaction, principal_id, room_id, revision_event_id):
+    if is_tombstoned(transaction, principal_id, room_id, revision_event_id):
         return False
     row = transaction.fetchone(
         """

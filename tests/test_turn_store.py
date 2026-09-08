@@ -2232,11 +2232,11 @@ async def test_visible_echo_cannot_overwrite_concurrent_terminal_outcome(journal
     release_echo_write = asyncio.Event()
     real_upsert = TurnRecordStore.upsert
 
-    async def gate_first_write(records: TurnRecordStore, **kwargs: object) -> None:
+    async def gate_first_write(records: TurnRecordStore, **kwargs: object) -> str | None:
         if not echo_write_reached_storage.is_set():
             echo_write_reached_storage.set()
             await release_echo_write.wait()
-        await real_upsert(records, **kwargs)
+        return await real_upsert(records, **kwargs)
 
     with patch.object(TurnRecordStore, "upsert", gate_first_write):
         echo_task = asyncio.create_task(store.record_visible_echo("$event", "$echo"))

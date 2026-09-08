@@ -27,14 +27,162 @@ anchor alone would make "was this source answered?" a scan.
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
+
+from mindroom.handled_turns import TurnRecordCodec, resolve_turn_record
+from mindroom.turn_record import (
+    canonicalize_turn_record,
+    completed_response_record,
+    merge_committed_response,
+    same_turn_identity,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from mindroom.turn_record import TurnRecord
+
     from .backend import Transaction
+    from .models import TerminalTurnWrite
 
 _COLUMNS = "index_event_id, anchor_event_id, record_json"
+
+
+def _claim_records(transaction: Transaction, agent_name: str, event_ids: Sequence[str]) -> dict[str, TurnRecord]:
+    records = {}
+    for event_id in sorted(set(event_ids)):
+        row = transaction.fetchone(
+            """
+            UPDATE turn_records SET record_json = record_json
+            WHERE agent_name = ? AND index_event_id = ? RETURNING record_json
+            """,
+            (agent_name, event_id),
+        )
+        if row is not None:
+            record = TurnRecordCodec._from_ledger_record(event_id, json.loads(str(row["record_json"])))
+            assert record is not None, "Corrupt turn record"
+            records[event_id] = record
+    return records
+
+
+def _claim_turn_records(transaction: Transaction, agent_name: str, candidate: TurnRecord) -> dict[str, TurnRecord]:
+    """Claim current canonical sources before aliases, revisions, or old-anchor deletion."""
+    # Replay-only tombstones stay auxiliary even when a newer snapshot knows
+    # their standalone rows; only indexed identities discover canonical owners.
+    placeholders = ", ".join("?" for _ in candidate.indexed_event_ids)
+    rows = transaction.fetchall(
+        f"SELECT index_event_id, record_json FROM turn_records WHERE agent_name = ? AND index_event_id IN ({placeholders})",  # noqa: S608
+        (agent_name, *candidate.indexed_event_ids),
+    )
+    source_ids = set(candidate.source_event_ids)
+    for row in rows:
+        owner = TurnRecordCodec._from_ledger_record(str(row["index_event_id"]), json.loads(str(row["record_json"])))
+        assert owner is not None, "Corrupt turn record"
+        source_ids.update(owner.source_event_ids)
+    records = _claim_records(transaction, agent_name, tuple(source_ids))
+    if any(not source_ids.issuperset(owner.source_event_ids) for owner in records.values()):
+        # Roll back, including any ACK, so accepted work stays pending and a
+        # retry discovers the new owner without acquiring source locks backwards.
+        msg = "Canonical turn ownership changed while acquiring source rows"
+        raise RuntimeError(msg)
+    event_ids = {*candidate.indexed_event_ids, *(candidate.revision_replay or {})}
+    for owner in records.values():
+        event_ids.update(owner.indexed_event_ids)
+        event_ids.update(owner.revision_replay or {})
+    records.update(_claim_records(transaction, agent_name, tuple(event_ids - source_ids)))
+    return records
+
+
+def write_record(
+    transaction: Transaction,
+    agent_name: str,
+    *,
+    index_event_ids: Sequence[str],
+    anchor_event_id: str,
+    record_json: str,
+) -> str | None:
+    """Keep already-committed delivery proof when a cached ledger write arrives late."""
+    candidate = TurnRecordCodec._from_ledger_record(index_event_ids[0], json.loads(record_json))
+    assert candidate is not None, "Corrupt turn record"
+    assert candidate.anchor_event_id == anchor_event_id, "Mismatched turn anchor"
+    records = _claim_turn_records(transaction, agent_name, candidate)
+    candidate = resolve_turn_record(candidate, records)
+    if candidate is None:
+        return None
+    current = next((records[event_id] for event_id in candidate.source_event_ids if event_id in records), None)
+    if (
+        current is not None
+        and current.completed
+        and current.response_event_id
+        and same_turn_identity(current, candidate)
+    ):
+        candidate = merge_committed_response(candidate, current)
+        if candidate is None:
+            return None
+    assert candidate.anchor_event_id is not None
+    record_json = json.dumps(TurnRecordCodec._to_ledger_record(candidate))
+    upsert(
+        transaction,
+        agent_name,
+        index_event_ids=candidate.indexed_event_ids,
+        anchor_event_id=candidate.anchor_event_id,
+        record_json=record_json,
+    )
+    return record_json
+
+
+def commit_terminal(transaction: Transaction, prepared: TerminalTurnWrite) -> TerminalTurnWrite | None:
+    """Merge final-delivery proof against transaction-current canonical ownership."""
+    candidate = TurnRecordCodec._from_ledger_record(prepared.index_event_ids[0], json.loads(prepared.record_json))
+    assert candidate is not None, "Corrupt terminal turn record"
+    records = _claim_turn_records(transaction, prepared.agent_name, candidate)
+    current = next((records[event_id] for event_id in candidate.source_event_ids if event_id in records), None)
+    if any(
+        (owner := records.get(event_id)) is not None and owner.source_event_ids != candidate.source_event_ids
+        for event_id in candidate.indexed_event_ids
+    ):
+        return None
+    tombstones = tuple(
+        event_id
+        for event_id, record in records.items()
+        if record is not None and event_id in record.redacted_source_event_ids
+    )
+    if current is not None:
+        candidate = canonicalize_turn_record(candidate, redacted_source_event_ids=current.redacted_source_event_ids)
+    if (
+        current is not None
+        and candidate.latest_edit_receipt_order is not None
+        and (
+            current.user_stop_receipt_order is not None
+            and current.user_stop_receipt_order >= candidate.latest_edit_receipt_order
+        )
+    ):
+        committed = current
+    else:
+        assert candidate.response_event_id is not None
+        committed = merge_committed_response(
+            current,
+            completed_response_record(candidate, candidate.response_event_id),
+            tombstoned_event_ids=tombstones,
+        )
+    if committed is None or committed.anchor_event_id is None:
+        return None
+    write = replace(
+        prepared,
+        index_event_ids=committed.indexed_event_ids,
+        anchor_event_id=committed.anchor_event_id,
+        record_json=json.dumps(TurnRecordCodec._to_ledger_record(committed)),
+    )
+    upsert(
+        transaction,
+        write.agent_name,
+        index_event_ids=write.index_event_ids,
+        anchor_event_id=write.anchor_event_id,
+        record_json=write.record_json,
+    )
+    return write
 
 
 def upsert(
@@ -182,4 +330,4 @@ def forget(transaction: Transaction, agent_name: str, *, index_event_ids: Sequen
     )
 
 
-__all__ = ["adopt_missing", "forget", "load_all", "upsert"]
+__all__ = ["adopt_missing", "commit_terminal", "forget", "load_all", "upsert", "write_record"]

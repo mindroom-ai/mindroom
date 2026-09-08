@@ -464,6 +464,7 @@ class DeliveryAcknowledgement:
     # Whether this call's conditional update is the one that bound the row.
     # The only thing that licenses writing anything beside the row.
     bound: bool
+    terminal_turn: TerminalTurnWrite | None = None
 
 
 @dataclass(frozen=True, slots=True)

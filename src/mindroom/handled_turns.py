@@ -70,6 +70,7 @@ __all__ = [
     "canonicalize_turn_record",
     "legacy_responses_file_path",
     "merge_edit_facts",
+    "resolve_turn_record",
     "with_user_stop",
 ]
 
@@ -536,7 +537,7 @@ class HandledTurnLedger:
                             return None
                         keys.update(self._write_keys(candidate.indexed_event_ids, candidate.anchor_event_id))
                         keys.update(candidate.revision_replay or {})
-                        record = _resolve_turn_record(candidate, self._responses)
+                        record = resolve_turn_record(candidate, self._responses)
                         if record is not None:
                             keys.update(self._write_keys(record.indexed_event_ids, record.anchor_event_id))
                             keys.update(record.revision_replay or {})
@@ -577,6 +578,7 @@ class HandledTurnLedger:
         if pending is None:
             return None
         persisted_record = pending.record
+        write: asyncio.Future[str | None] | None = None
         try:
             # Canonicalization derives an anchor from the sources whenever one was
             # not supplied, and a record with no sources was already rejected above.
@@ -642,11 +644,26 @@ class HandledTurnLedger:
                 raise
         finally:
             with self._state.lock:
+                if write is not None and write.done() and not write.cancelled() and write.exception() is None:
+                    persisted_record = self._publish_write_result(pending, write.result())
                 for key in pending.keys:
                     del self._state.pending_writes[key]
                 pending.settled.set_result(None)
-        logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
+        if persisted_record is not None:
+            logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
         return persisted_record
+
+    def _publish_write_result(self, pending: _PendingLedgerWrite, result: str | None) -> TurnRecord | None:
+        """Replace the provisional claim with the transaction's actual merged record."""
+        self._restore_superseded(pending.record, pending.superseded)
+        if result is None:
+            return None
+        raw_record = json.loads(result)
+        record = TurnRecordCodec._from_ledger_record(raw_record["source_event_ids"][0], raw_record)
+        assert record is not None, "Corrupt committed turn record"
+        for key in record.indexed_event_ids:
+            self._responses[key] = record
+        return record
 
     def has_responded(self, event_id: str) -> bool:
         """Return whether the source event has a terminal recorded outcome."""
@@ -887,7 +904,7 @@ class HandledTurnLedger:
         )
 
 
-def _resolve_turn_record(
+def resolve_turn_record(
     turn_record: TurnRecord,
     existing_records: Mapping[str, TurnRecord],
 ) -> TurnRecord | None:
