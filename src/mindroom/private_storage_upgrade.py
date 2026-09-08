@@ -474,7 +474,7 @@ def _runtime_roots(runtime_paths: RuntimePaths) -> tuple[Path, Path]:
 
 
 @dataclass(frozen=True)
-class StorageUpgradeDiscovery:
+class _StorageUpgradeDiscovery:
     """Validated participants and any original transaction awaiting startup."""
 
     volumes: tuple[_Volume, ...]
@@ -482,7 +482,7 @@ class StorageUpgradeDiscovery:
     direction: Literal["apply", "rollback", "stopped"] = "apply"
 
 
-def discover_runtime_storage_upgrade(runtime_paths: RuntimePaths) -> StorageUpgradeDiscovery | None:
+def discover_runtime_storage_upgrade(runtime_paths: RuntimePaths) -> _StorageUpgradeDiscovery | None:
     """Inspect owners and receipts without inventorying files or creating roots."""
     try:
         return _discover_runtime_storage_upgrade(runtime_paths)
@@ -495,7 +495,7 @@ def discover_runtime_storage_upgrade(runtime_paths: RuntimePaths) -> StorageUpgr
 
 def _discover_runtime_storage_upgrade(  # noqa: C901, PLR0912 - validate all participant states before startup
     runtime_paths: RuntimePaths,
-) -> StorageUpgradeDiscovery | None:
+) -> _StorageUpgradeDiscovery | None:
     roots = tuple(dict.fromkeys(path.expanduser().absolute() for path in _runtime_roots(runtime_paths)))
     journals = []
     for root in roots:
@@ -522,9 +522,9 @@ def _discover_runtime_storage_upgrade(  # noqa: C901, PLR0912 - validate all par
         _check_configured_control_root(runtime_paths)
         _validate_plan(plan)
         if statuses == {"rolled_back"}:
-            return StorageUpgradeDiscovery(volumes, plan, "stopped")
+            return _StorageUpgradeDiscovery(volumes, plan, "stopped")
         direction = "rollback" if statuses & {"reversing", "rolled_back"} else "apply"
-        return StorageUpgradeDiscovery(volumes, plan, direction)
+        return _StorageUpgradeDiscovery(volumes, plan, direction)
     namespace = roots[0] / "private_instances"
     needs_upgrade = False
     if namespace.exists() or namespace.is_symlink():
@@ -536,7 +536,7 @@ def _discover_runtime_storage_upgrade(  # noqa: C901, PLR0912 - validate all par
     if needs_upgrade:
         _check_configured_control_root(runtime_paths)
         _check_secondary_scopes(roots[0], roots[-1])
-        return StorageUpgradeDiscovery(_volumes(roots[0], roots[-1]))
+        return _StorageUpgradeDiscovery(_volumes(roots[0], roots[-1]))
     _check_secondary_scopes(roots[0], roots[-1])
     check_runtime_storage_upgrade(runtime_paths)
     return None
