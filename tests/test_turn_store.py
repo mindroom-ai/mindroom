@@ -50,7 +50,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.text_ingress_dispatch import _run_claimed_response
-from mindroom.turn_record import EditPreparation
+from mindroom.turn_record import EditPreparation, RevisionReplay
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -433,6 +433,161 @@ def _owned_turn_record(target: MessageTarget) -> TurnRecord:
         history_scope=HistoryScope(kind="agent", scope_id="agent"),
         conversation_target=target,
     )
+
+
+async def _record_unrelated_turns(store: TurnStore) -> None:
+    """Populate other threads and rooms with ordinary retained turn history."""
+    for index in range(40):
+        source_id = f"$unrelated-{index}"
+        room_id = "!room:example.org" if index % 2 else "!other:example.org"
+        await store.record_turn(
+            TurnRecord.create(
+                [source_id],
+                response_event_id=f"$unrelated-reply-{index}",
+                response_owner="agent",
+                requester_id="@user:example.org",
+                source_event_prompts={source_id: "Unrelated retained message"},
+                source_event_revisions={source_id: (1, source_id)},
+                conversation_target=MessageTarget.resolve(room_id, source_id, source_id),
+            ),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("editing", [False, True])
+async def test_response_preparation_does_not_sanitize_unrelated_turns(
+    journal_store: EventJournalStore,
+    editing: bool,
+) -> None:
+    """Unrelated retained history must not add per-record sanitization to a response."""
+    store = await _store(journal_store)
+    await _record_unrelated_turns(store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    record = replace(
+        _owned_turn_record(target),
+        completed=editing,
+        response_event_id="$reply" if editing else None,
+        source_event_prompts={"$user_msg": "Current message"},
+        source_event_revisions={"$user_msg": (10, "$edit")},
+    )
+    if editing:
+        await store.record_turn(record)
+    else:
+        await store.record_pending_turn(record)
+    current = store.get_turn_record("$user_msg")
+    assert current is not None
+
+    with patch.object(store, "_sanitize_candidate", wraps=store._sanitize_candidate) as sanitize:
+        if editing:
+            suppressed = await store.prepare_edit_snapshot(
+                record=current,
+                driving_revision_id="$edit",
+                edit_receipt_order=1,
+            )
+        else:
+            suppressed = await store.prepare_pending_response_source(
+                target=target,
+                source_event_ids=("$user_msg",),
+                terminal_source_event_ids=("$user_msg",),
+            )
+
+    assert suppressed is False
+    assert store.get_turn_record("$user_msg").source_event_prompts == {"$user_msg": "Current message"}
+    # Count real sanitizations rather than impose a machine-dependent time limit.
+    assert {call.args[0].source_event_ids for call in sanitize.call_args_list} <= {("$user_msg",)}
+
+
+@pytest.mark.asyncio
+async def test_redaction_sanitizes_only_turns_referencing_that_revision(journal_store: EventJournalStore) -> None:
+    """One physical edit invalidates both its source and context consumers, not unrelated history."""
+    store = await _store(journal_store)
+    await _record_unrelated_turns(store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_turn(
+        replace(
+            _owned_turn_record(target),
+            source_event_prompts={"$user_msg": "Deleted edit"},
+            source_event_revisions={"$user_msg": (10, "$physical-edit")},
+        ),
+    )
+    await store.record_turn(
+        TurnRecord.create(
+            ["$context-consumer"],
+            response_event_id="$context-reply",
+            response_owner="agent",
+            requester_id="@user:example.org",
+            source_event_prompts={"$context-consumer": "Surviving message"},
+            revision_replay={"$physical-edit": RevisionReplay("$user_msg", 10)},
+            conversation_target=MessageTarget.resolve("!other:example.org", "$other-thread", "$context-consumer"),
+        ),
+    )
+
+    with patch.object(store, "_sanitize_candidate", wraps=store._sanitize_candidate) as sanitize:
+        await store.mark_source_redacted("$physical-edit")
+
+    for source_id in ("$user_msg", "$context-consumer"):
+        current = store.get_turn_record(source_id)
+        assert current is not None
+        assert current.revision_replay["$physical-edit"].redacted
+        assert current.revision_replay["$physical-edit"].cleanup_pending
+    assert store.get_turn_record("$user_msg").source_event_prompts is None
+    assert store.get_turn_record("$context-consumer").source_event_prompts == {"$context-consumer": "Surviving message"}
+    assert {call.args[0].source_event_ids for call in sanitize.call_args_list} <= {
+        ("$user_msg",),
+        ("$context-consumer",),
+    }
+
+
+@pytest.mark.asyncio
+async def test_response_preparation_repairs_interrupted_redaction_in_its_conversation(
+    journal_store: EventJournalStore,
+) -> None:
+    """A durable tombstone survives interrupted eager repair and is consumed by its next conversation."""
+    store = await _store(journal_store)
+    first = MessageTarget.resolve("!room:example.org", "$first-thread", "$first")
+    second = MessageTarget.resolve("!room:example.org", "$second-thread", "$second")
+    for source_id, target, edit_id in (("$first", first, "$first-edit"), ("$second", second, "$second-edit")):
+        await store.record_turn(
+            TurnRecord.create(
+                [source_id],
+                response_event_id=f"{source_id}-reply",
+                response_owner="agent",
+                requester_id="@user:example.org",
+                history_scope=HistoryScope(kind="agent", scope_id="agent"),
+                conversation_target=target,
+                source_event_prompts={source_id: "Deleted text"},
+                source_event_revisions={source_id: (10, edit_id)},
+            ),
+        )
+        with (
+            patch.object(store, "_reconcile_revision_tombstones", side_effect=asyncio.CancelledError),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await store.mark_source_redacted(edit_id)
+
+    with patch.object(store, "_remove_redacted_event_from_recorded_scopes", return_value=True):
+        assert not await store.prepare_pending_response_source(
+            target=first,
+            source_event_ids=("$next-first",),
+            terminal_source_event_ids=(),
+        )
+        repaired = store.get_turn_record("$first")
+        assert repaired.source_event_prompts is None
+        assert repaired.revision_replay["$first-edit"].redacted
+        assert not repaired.revision_replay["$first-edit"].cleanup_pending
+        untouched = store.get_turn_record("$second")
+        assert untouched.source_event_prompts == {"$second": "Deleted text"}
+        assert not untouched.revision_replay["$second-edit"].redacted
+
+        assert not await store.prepare_pending_response_source(
+            target=second,
+            source_event_ids=("$next-second",),
+            terminal_source_event_ids=(),
+        )
+        repaired = store.get_turn_record("$second")
+        assert repaired.source_event_prompts is None
+        assert repaired.revision_replay["$second-edit"].redacted
+        assert not repaired.revision_replay["$second-edit"].cleanup_pending
 
 
 async def _prepare_redaction(

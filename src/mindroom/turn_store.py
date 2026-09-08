@@ -35,7 +35,7 @@ from mindroom.turn_record import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
     from pathlib import Path
 
     import nio
@@ -136,11 +136,11 @@ class TurnStore:
     async def warm(self) -> None:
         """Load the ledger without pruning truth needed by startup recovery."""
         await self._ledger.load()
-        await self._reconcile_revision_tombstones()
+        await self._reconcile_revision_tombstones(self._ledger.all_turn_records())
 
     async def cleanup(self, *, unsettled_source_event_ids: Collection[str] = ()) -> None:
         """Compact terminal history after startup recovery identifies live sources."""
-        await self._reconcile_revision_tombstones()
+        await self._reconcile_revision_tombstones(self._ledger.all_turn_records())
         await self._ledger.cleanup(unsettled_source_event_ids=unsettled_source_event_ids)
 
     def _sanitize_candidate(self, candidate: TurnRecord, authority: TurnRecord | None = None) -> TurnRecord:
@@ -156,9 +156,9 @@ class TurnStore:
             tombstoned_event_ids=tuple(event_id for event_id in revisions if self._any_source_redacted((event_id,))),
         )
 
-    async def _reconcile_revision_tombstones(self) -> None:
-        """Close registration/tombstone crash windows before reads or retention."""
-        for record in self._ledger.all_turn_records():
+    async def _reconcile_revision_tombstones(self, records: Iterable[TurnRecord]) -> None:
+        """Close registration/tombstone crash windows for the relevant owners."""
+        for record in records:
             if self._sanitize_candidate(record) == record:
                 continue
             await self._ledger.update_handled_turn(
@@ -674,7 +674,12 @@ class TurnStore:
             (source_event_id,),
             redacted_record,
         )
-        await self._reconcile_revision_tombstones()
+        await self._reconcile_revision_tombstones(
+            record
+            for record in self._ledger.all_turn_records()
+            if source_event_id in (record.revision_replay or {})
+            or any(revision[1] == source_event_id for revision in (record.source_event_revisions or {}).values())
+        )
         return tombstone
 
     def _any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:
@@ -700,7 +705,9 @@ class TurnStore:
     ) -> bool:
         """Finish owed cleanup in this locked conversation, then check current sources."""
         await self._reconcile_journal_redactions(target)
-        await self._reconcile_revision_tombstones()
+        await self._reconcile_revision_tombstones(
+            self._ledger.turn_records_for_conversation(session_id=target.session_id),
+        )
         for owner in self._ledger.turn_records_for_conversation(session_id=target.session_id):
             for revision_id, revision in (owner.revision_replay or {}).items():
                 if not revision.cleanup_pending:
