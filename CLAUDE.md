@@ -400,6 +400,11 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
   - Reduces net complexity (simpler call flow, fewer special cases).
   - Is covered by tests in the same PR.
 
+### Migration Policy
+
+Assume there are no active responses when migrations run.
+Design migrations around that assumption rather than adding machinery to coordinate with active responses.
+
 ## 2. Workflow
 
 ### Step 1: Understand the Context
