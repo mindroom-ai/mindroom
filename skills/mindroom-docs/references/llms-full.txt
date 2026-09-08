@@ -18642,6 +18642,11 @@ Group management, bulk operations, password management, and sorting are unsuppor
 Disable group management in the connector; unsupported group requests return an explicit error.
 Connectors that insist on a successful test-group operation need a compatible configuration before this endpoint can be used.
 
+PATCH supports the top-level attributes `userName`, `active`, `displayName`, `externalId`, `name`, and `emails`, plus `name.givenName`, `name.familyName`, and `name.formatted`.
+Update email entries through the whole `emails` attribute; dotted email subattributes and filtered paths such as `emails[type eq "work"].value` are unsupported and return `400 invalidPath`.
+An unsupported operation rolls back the entire PATCH, including any accompanying deactivation.
+Configure and test the connector's actual update and deactivation payloads against this profile before relying on provisioning for offboarding.
+
 Use the base URL `https://assistant.example.org/mcp/scim/v2` with the dedicated bearer token in a compatible custom SCIM connector.
 Provision an active test user, approve an MCP client through the existing portal login, then deactivate the provisioned user and verify that token refresh, tool use, and further consent are rejected.
 Account deactivation, user-name changes, and deletion remove all bound grants and pending consent atomically.
