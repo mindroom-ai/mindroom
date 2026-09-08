@@ -1006,6 +1006,12 @@ class PrincipalStore:
             ),
         )
 
+    async def initial_response_delivery_id(self, event_id: str) -> str | None:
+        """Resolve this principal's exact INITIAL ACK, including retired cleanup proof."""
+        return await self._backend.read(
+            lambda transaction: outbox.initial_response_delivery_id(transaction, self._principal_id, event_id),
+        )
+
     async def response_delivery_id(self, *, room_id: str, event_id: str) -> str | None:
         """Resolve a visible response to its current exact delivery owner."""
         return await self._backend.read(

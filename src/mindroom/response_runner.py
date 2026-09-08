@@ -3466,12 +3466,14 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
-        if (
-            final_outcome.suppressed
-            and final_outcome.final_visible_event_id is None
-            and request.on_no_response_handled is not None
-        ):
-            await request.on_no_response_handled()
+        if final_outcome.suppressed and final_outcome.final_visible_event_id is None:
+            on_suppressed = (
+                request.on_source_turn_suppressed
+                if final_outcome.failure_reason == "source_deleted"
+                else request.on_no_response_handled
+            )
+            if on_suppressed is not None:
+                await on_suppressed()
         if final_outcome.terminal_status == "suspended" and request.source_handoff is not None:
             request.source_handoff.set()
         interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)

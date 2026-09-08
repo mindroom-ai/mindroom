@@ -504,14 +504,39 @@ class TurnStore:
         stop_receipt_order: int,
         *,
         delivery_settled: bool = False,
+        deleted_turn_id: str | None = None,
     ) -> TurnRecord | None:
-        """Durably terminate the turn that owns a user-stopped response."""
+        """Terminate a visible response, or its exact retired INITIAL proven by the delivery owner."""
         if isinstance(stop_receipt_order, bool) or stop_receipt_order <= 0:
             msg = "User-stop receipt order must be positive"
             raise ValueError(msg)
         turn_record = self.turn_record_for_response_event_id(response_event_id)
+        if turn_record is None and deleted_turn_id is not None:
+            turn_record = self.get_turn_record(deleted_turn_id)
+            if (
+                turn_record is not None
+                and turn_record.response_event_id is None
+                and set(turn_record.source_event_ids).issubset(turn_record.redacted_source_event_ids)
+            ):
+                if (turn_record.user_stop_settled_receipt_order or 0) >= stop_receipt_order:
+                    return turn_record
+
+                def stopped_deleted_record(records: Mapping[str, TurnRecord]) -> TurnRecord:
+                    current = records[deleted_turn_id]
+                    if (
+                        current.source_event_ids != turn_record.source_event_ids
+                        or current.response_event_id is not None
+                        or not set(current.source_event_ids).issubset(current.redacted_source_event_ids)
+                    ):
+                        return current
+                    return replace(
+                        with_user_stop(current, response_event_id, stop_receipt_order, delivery_settled=True),
+                        response_event_id=None,
+                    )
+
+                return await self._ledger.update_handled_turn(turn_record.indexed_event_ids, stopped_deleted_record)
         if turn_record is None:
-            return turn_record
+            return None
 
         def stopped_record(current: TurnRecord) -> TurnRecord:
             return with_user_stop(
@@ -824,16 +849,21 @@ class TurnStore:
         return False
 
     async def detach_deleted_response(self, turn_id: str, response_event_id: str | None) -> None:
-        """Forget exact unfinished visible attribution only after Matrix cleanup succeeds."""
+        """Detach the removed response after Matrix cleanup, retaining any concurrent STOP authority."""
         record = self.get_turn_record(turn_id)
         if record is None or response_event_id is None:
             return
 
         def detached(records: Mapping[str, TurnRecord]) -> TurnRecord:
             current = records[turn_id]
-            if current.completed or current.response_event_id != response_event_id:
+            if current.response_event_id != response_event_id:
                 return current
-            return replace(current, response_event_id=None, timestamp=0.0)
+            return replace(
+                current,
+                response_event_id=None,
+                user_stop_settled_receipt_order=current.user_stop_receipt_order,
+                timestamp=0.0,
+            )
 
         await self._ledger.update_handled_turn(record.indexed_event_ids, detached)
 

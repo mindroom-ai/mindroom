@@ -595,6 +595,16 @@ def owns_response(transaction: Transaction, principal_id: str, *, room_id: str, 
     return response_delivery_id(transaction, principal_id, room_id=room_id, event_id=event_id) is not None
 
 
+def initial_response_delivery_id(transaction: Transaction, principal_id: str, event_id: str) -> str | None:
+    """Resolve an exact INITIAL ACK, retaining identity after deleted-response retirement."""
+    row = transaction.fetchone(
+        """SELECT delivery_id FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND stage = 'initial' AND acknowledged_event_id = ?""",
+        (principal_id, event_id),
+    )
+    return None if row is None else str(row["delivery_id"])
+
+
 def response_delivery_id(transaction: Transaction, principal_id: str, *, room_id: str, event_id: str) -> str | None:
     """Resolve exact current transport ownership without granting semantic continuation."""
     row = transaction.fetchone(

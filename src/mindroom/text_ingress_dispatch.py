@@ -294,7 +294,7 @@ async def _blocked_before_plan(
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
         )
     if skips_turn:
-        await visible_responses.settle_source_events_ignored(prepared.handled_turn)
+        return await visible_responses.settle_superseded_turn(prepared.handled_turn, room_id=room.room_id)
     return skips_turn
 
 

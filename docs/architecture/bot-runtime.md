@@ -252,7 +252,9 @@ A committed service-restart or generic terminal interruption note records its ex
 Replacement recovery uses the registered room directly, while next-startup cleanup can rediscover the durable note and an interrupted edit revision remains uncommitted for re-drive.
 Startup scans route repair and relay publication through the same per-delivery owner as normal Matrix delivery.
 Pending journal replay, active generation, and owed or acknowledged FINAL delivery preclude synthetic continuation.
+Same-requester supersession preserves canonical replay when an INITIAL already owns durable delivery work, including unattempted sends and acknowledgements that precede response attribution.
 When every current source is deleted and no FINAL owns the response, its unfinished INITIAL remains durable cleanup debt until Matrix disappearance and visible-response attribution detachment are confirmed.
+Fallback eligibility and edits share the delivery lock with cleanup, and the transactional ledger prevents late completion writes from restoring a deleted INITIAL or inventing an answer.
 Cleanup preserves the INITIAL identity for surviving sources, and stale history for a surviving request retries canonical preparation with a refreshed payload.
 The two physical stores remain intentionally redundant so run metadata can repair a ledger write lost during a crash.
 `TurnStore` applies deterministic field precedence: a present ledger record owns canonical source identity and anchor, while a newer delivered run can repair mutable response and regeneration facts after a crash.

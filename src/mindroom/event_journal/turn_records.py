@@ -117,18 +117,46 @@ def write_record(
         and current.completed
         and current.response_event_id
         and same_turn_identity(current, candidate)
+        and not (
+            candidate.response_event_id is None
+            and candidate.user_stop_receipt_order is not None
+            and candidate.user_stop_settled_receipt_order == candidate.user_stop_receipt_order
+            and set(candidate.source_event_ids).issubset(candidate.redacted_source_event_ids)
+        )
     ):
         candidate = merge_committed_response(candidate, current)
         if candidate is None:
             return None
-    if not candidate.completed and candidate.response_event_id is not None and candidate.redacted_source_event_ids:
+    if candidate.response_event_id is not None and set(candidate.source_event_ids).issubset(
+        candidate.redacted_source_event_ids,
+    ):
         cleaned = transaction.fetchone(
-            """SELECT 1 FROM matrix_delivery_outbox
-            WHERE delivery_id = ? AND stage = 'initial' AND retired = 1 AND acknowledged_event_id = ?""",
-            (candidate.anchor_event_id, candidate.response_event_id),
+            """SELECT 1 FROM matrix_delivery_outbox AS initial
+            WHERE initial.delivery_id = ? AND initial.stage = 'initial'
+              AND initial.acknowledged_event_id = ? AND (initial.retired = 1 OR ?)
+              AND NOT EXISTS (
+                SELECT 1 FROM matrix_delivery_outbox AS final
+                WHERE final.principal_id = initial.principal_id AND final.delivery_id = initial.delivery_id
+                  AND final.stage = 'final' AND (final.acknowledged_event_id IS NOT NULL
+                    OR (final.retired = 0 AND final.permanent_failure_reason IS NULL))
+              )""",
+            (
+                candidate.anchor_event_id,
+                candidate.response_event_id,
+                candidate.completed
+                and candidate.user_stop_receipt_order is None
+                and (current is None or not current.completed),
+            ),
         )
         if cleaned is not None:
-            candidate = replace(candidate, response_event_id=None)
+            # A completed candidate can arrive after Matrix redaction but before
+            # detachment/retirement. Only FINAL proves this deleted INITIAL answered.
+            candidate = replace(
+                candidate,
+                response_event_id=None,
+                completed=candidate.user_stop_receipt_order is not None,
+                user_stop_settled_receipt_order=candidate.user_stop_receipt_order,
+            )
     assert candidate.anchor_event_id is not None
     record_json = json.dumps(TurnRecordCodec._to_ledger_record(candidate))
     upsert(

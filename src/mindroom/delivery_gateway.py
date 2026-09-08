@@ -651,7 +651,40 @@ class DeliveryGateway:
         self,
         request: _PlaceholderFailureUpdateRequest,
     ) -> FinalDeliveryOutcome:
-        """Best-effort terminal error edit for a visible placeholder."""
+        """Order fallback eligibility and transport with FINAL and INITIAL cleanup."""
+        turn_id = request.identity.response_envelope.source_event_id
+        worker = self._recovery_worker()
+        async with worker._delivery_lock(turn_id):
+            final = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.FINAL)
+            if final is not None and (
+                final.acknowledged_event_id is not None or not (final.retired or final.permanently_failed)
+            ):
+                return FinalDeliveryOutcome(
+                    terminal_status="suspended",
+                    event_id=None,
+                    failure_reason=request.failure_reason,
+                )
+            recovery = self.deps.response_recovery
+            if recovery is not None:
+                initial = await recovery.principal.load_matrix_delivery(
+                    delivery_id=turn_id,
+                    stage=DeliveryStage.INITIAL,
+                )
+                if initial is not None and recovery.deleted(await recovery.state(initial)):
+                    await recovery.cleanup(worker, turn_id)
+                    return FinalDeliveryOutcome(
+                        terminal_status="cancelled",
+                        event_id=None,
+                        suppressed=True,
+                        failure_reason="source_deleted",
+                    )
+            return await self._edit_placeholder_delivery_failure(request)
+
+    async def _edit_placeholder_delivery_failure(
+        self,
+        request: _PlaceholderFailureUpdateRequest,
+    ) -> FinalDeliveryOutcome:
+        """Apply the eligible direct fallback while its delivery lock remains held."""
         failure_extra_content = dict(request.extra_content or {})
         failure_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_ERROR
         edited = await self._visible_notice_is_current(
@@ -984,6 +1017,27 @@ class DeliveryGateway:
             return delivered.event_id
 
         return self._response_delivery(send, handoff=None)
+
+    @asynccontextmanager
+    async def supersession_scope(self, turn_id: str, room_id: str) -> AsyncIterator[bool]:
+        """Keep existing INITIAL debt with canonical replay until it reaches FINAL."""
+        recovery = self.deps.response_recovery
+        if recovery is None:
+            yield True
+            return
+        async with self._recovery_worker()._delivery_lock(turn_id):
+            initial = await recovery.principal.load_matrix_delivery(
+                delivery_id=turn_id,
+                stage=DeliveryStage.INITIAL,
+            )
+            yield (
+                initial is None
+                or initial.room_id != room_id
+                or initial.retired
+                or initial.permanently_failed
+                or initial.membership_epoch != await recovery.principal.membership_epoch(room_id)
+                or await recovery.permits_supersession(initial)
+            )
 
     async def cleanup_deleted_response(self, turn_id: str) -> bool:
         """Suppress deleted-source notices while retaining retryable INITIAL cleanup debt."""
@@ -1772,6 +1826,25 @@ class DeliveryGateway:
             failure_reason=failure_reason,
             extra_content=extra_content,
         )
+
+    @asynccontextmanager
+    async def user_stop_scope(self, event_id: str) -> AsyncIterator[str | None]:
+        """Order STOP intent and delivery with cleanup, yielding exact removed-response proof."""
+        recovery = self.deps.response_recovery
+        turn_id = None if recovery is None else await recovery.principal.initial_response_delivery_id(event_id)
+        if recovery is None or turn_id is None:
+            yield None
+            return
+        async with self._recovery_worker()._delivery_lock(turn_id):
+            initial = await recovery.principal.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.INITIAL)
+            yield (
+                turn_id
+                if initial is not None
+                and initial.acknowledged_event_id == event_id
+                and initial.retired
+                and recovery.deleted(await recovery.state(initial))
+                else None
+            )
 
     async def finalize_user_stopped_response(self, target: MessageTarget, event_id: str) -> bool:
         """Edit a recovered in-flight response into its terminal user-stop state."""

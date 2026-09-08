@@ -41,11 +41,13 @@ class UserStopReconciler:
         stop_receipt_order: int,
         *,
         delivery_settled: bool = False,
+        deleted_turn_id: str | None = None,
     ) -> TurnRecord:
         stopped = await self.deps.turn_store.record_user_stopped_response(
             response_event_id,
             stop_receipt_order,
             delivery_settled=delivery_settled,
+            deleted_turn_id=deleted_turn_id,
         )
         if (
             stopped is None
@@ -72,24 +74,27 @@ class UserStopReconciler:
         on_current_stop_finalized: Callable[[], Awaitable[None]],
         approval_settled: bool,
     ) -> bool:
-        stopped = await self._record(response_event_id, stop_receipt_order)
-        newer_edit_exists = (stopped.latest_edit_receipt_order or 0) > stop_receipt_order
-        if not self._is_settled(stopped, stop_receipt_order):
-            if (
-                not newer_edit_exists
-                and not approval_settled
-                and not await self.deps.delivery_gateway.finalize_user_stopped_response(
-                    target,
+        async with self.deps.delivery_gateway.user_stop_scope(response_event_id) as deleted_turn_id:
+            stopped = await self._record(response_event_id, stop_receipt_order, deleted_turn_id=deleted_turn_id)
+            newer_edit_exists = (stopped.latest_edit_receipt_order or 0) > stop_receipt_order
+            if not self._is_settled(stopped, stop_receipt_order):
+                if (
+                    not newer_edit_exists
+                    and not approval_settled
+                    and deleted_turn_id is None
+                    and not await self.deps.delivery_gateway.finalize_user_stopped_response(
+                        target,
+                        response_event_id,
+                    )
+                ):
+                    msg = f"Failed to finalize user-stopped response {response_event_id!r}"
+                    raise RuntimeError(msg)
+                stopped = await self._record(
                     response_event_id,
+                    stop_receipt_order,
+                    delivery_settled=True,
+                    deleted_turn_id=deleted_turn_id,
                 )
-            ):
-                msg = f"Failed to finalize user-stopped response {response_event_id!r}"
-                raise RuntimeError(msg)
-            stopped = await self._record(
-                response_event_id,
-                stop_receipt_order,
-                delivery_settled=True,
-            )
         if not self._is_settled(stopped, stop_receipt_order):
             return False
         if not newer_edit_exists:
@@ -103,15 +108,12 @@ class UserStopReconciler:
         on_current_stop_finalized: Callable[[], Awaitable[None]],
     ) -> bool:
         """Make one user-stop intent terminal independently of runtime recovery order."""
-        turn_record = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
-        if turn_record is None:
-            msg = f"User-stopped response {response_event_id!r} has no durable turn owner"
-            raise RuntimeError(msg)
-        target = turn_record.conversation_target
+        async with self.deps.delivery_gateway.user_stop_scope(response_event_id) as deleted_turn_id:
+            stopped_turn = await self._record(response_event_id, stop_receipt_order, deleted_turn_id=deleted_turn_id)
+        target = stopped_turn.conversation_target
         if target is None:
             msg = f"User-stopped response {response_event_id!r} has no durable conversation target"
             raise RuntimeError(msg)
-        stopped_turn = await self._record(response_event_id, stop_receipt_order)
         source_event_id = stopped_turn.indexed_event_ids[0]
         stopped = await self.deps.response_runner.finalize_user_stop(
             response_event_id,

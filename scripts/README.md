@@ -77,7 +77,8 @@ Each interruption is scheduled as the tail of a batch that still owes the agent 
 That is what makes it land inside a turn instead of against an idle runtime, which is all a restart between drained batches could ever do.
 Interruptions alternate between two kinds, because they prove different things:
 
-- `restart_mindroom` sends SIGINT, so MindRoom drains. The run fails if the child ignores the signal until the harness has to kill it, exits with an unexpected status, or never logs an orderly bot shutdown.
+- `restart_mindroom` sends SIGINT, so MindRoom drains.
+The run fails if the child ignores the signal until the harness has to kill it, exits with an unexpected status, or never logs an orderly bot shutdown.
 - `crash_mindroom` sends SIGKILL, so nothing drains and every committed, unsettled obligation is owed to durable recovery.
   There is no shutdown verdict to check here; each interrupted source must have exact response attribution or independently proven deliberate supersession.
 

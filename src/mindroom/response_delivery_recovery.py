@@ -63,7 +63,12 @@ class ResponseDeliveryRecovery:
         return (
             final is not None
             and (final.acknowledged_event_id is not None or not (final.retired or final.permanently_failed))
-        ) or any(record is not None and record.completed for record in state.turn_records)
+        ) or any(
+            record is not None
+            and record.completed
+            and not (record.user_stop_receipt_order is not None and record.response_event_id is None)
+            for record in state.turn_records
+        )
 
     async def permits_continuation(self, delivery: MatrixDelivery) -> bool:
         """Only genuinely orphaned work may acquire synthetic startup continuation."""
@@ -81,6 +86,16 @@ class ResponseDeliveryRecovery:
                 )
                 for record in state.turn_records
             )
+        )
+
+    async def permits_supersession(self, delivery: MatrixDelivery) -> bool:
+        """Only terminal or revoked INITIAL work may lose its canonical replay."""
+        state = await self.state(delivery)
+        return (
+            self.deleted(state)
+            or self._final_owned(state)
+            or state.sources_settled_by_departure
+            or any(record is not None and record.user_stop_receipt_order is not None for record in state.turn_records)
         )
 
     async def cleanup(self, worker: MatrixDeliveryWorker, turn_id: str) -> bool:

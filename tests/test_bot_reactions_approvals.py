@@ -2743,6 +2743,7 @@ class TestAgentBot(AgentBotTestBase):
             stop_receipt_order: int,
             *,
             delivery_settled: bool = False,
+            deleted_turn_id: str | None = None,
         ) -> TurnRecord:
             nonlocal alias_claimed
             if not alias_claimed:
@@ -2758,6 +2759,7 @@ class TestAgentBot(AgentBotTestBase):
                 response_event_id,
                 stop_receipt_order,
                 delivery_settled=delivery_settled,
+                deleted_turn_id=deleted_turn_id,
             )
 
         on_current_stop_finalized = AsyncMock()
