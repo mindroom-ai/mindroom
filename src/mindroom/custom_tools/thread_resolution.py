@@ -47,6 +47,7 @@ class ThreadResolutionTools(Toolkit):
                 event_id,
                 relations=context.relations,
             ),
+            fail_closed_on_normalization_error=True,
         )
         if target.error is not None:
             return cls._payload("error", thread_id=target.requested_thread_id, message=target.error)

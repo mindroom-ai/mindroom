@@ -217,6 +217,32 @@ async def test_thread_resolution_rejects_unresolved_explicit_target(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reopen", [False, True])
+async def test_thread_resolution_returns_error_when_target_lookup_raises(tmp_path: Path, reopen: bool) -> None:
+    """Lookup failures must return a structured error without changing lifecycle state."""
+    context = _context(tmp_path)
+    tool = ThreadResolutionTools()
+    method = tool.reopen_thread if reopen else tool.resolve_thread
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_resolution.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(side_effect=RuntimeError("lookup failed")),
+        ),
+        patch("mindroom.custom_tools.thread_resolution.set_thread_tag", new=AsyncMock()) as mock_set,
+        patch("mindroom.custom_tools.thread_resolution.remove_thread_tag", new=AsyncMock()) as mock_remove,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await method(thread_id="$other-root:localhost"))
+
+    assert payload["status"] == "error"
+    assert payload["thread_id"] == "$other-root:localhost"
+    assert "canonical thread root" in payload["message"]
+    mock_set.assert_not_awaited()
+    mock_remove.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method_name", "dependency", "action"),
     [
