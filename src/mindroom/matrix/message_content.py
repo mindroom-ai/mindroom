@@ -44,6 +44,7 @@ logger = get_logger(__name__)
 type VisibleRoomMessage = nio.RoomMessageFormatted | nio.RoomMessageMedia | nio.RoomEncryptedMedia
 
 _MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
+_MAX_SIDECAR_DOWNLOADS = 2
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
@@ -291,26 +292,32 @@ async def _resolve_canonical_content(
     content: dict[str, Any],
     client: nio.AsyncClient | None,
 ) -> dict[str, Any]:
-    """Hydrate canonical event content from a v2 JSON sidecar when available."""
-    sidecar_content = sidecar_content_to_resolve(content)
-    if client is None or sidecar_content is None:
+    """Hydrate at most two canonical sidecars, including nested edit envelopes."""
+    if client is None:
         return content
 
-    mxc_url = sidecar_mxc_url(sidecar_content)
-    if mxc_url is None:
-        return content
+    visited: set[str] = set()
+    for _ in range(_MAX_SIDECAR_DOWNLOADS):
+        sidecar_content = sidecar_content_to_resolve(content)
+        if sidecar_content is None:
+            break
+        mxc_url = sidecar_mxc_url(sidecar_content)
+        if mxc_url is None or mxc_url in visited:
+            break
+        visited.add(mxc_url)
 
-    full_text = await _download_mxc_text(
-        client,
-        mxc_url,
-        sidecar_content.get("file") if isinstance(sidecar_content.get("file"), dict) else None,
-    )
-    if full_text is None:
-        return content
+        full_text = await _download_mxc_text(
+            client,
+            mxc_url,
+            sidecar_content.get("file") if isinstance(sidecar_content.get("file"), dict) else None,
+        )
+        if full_text is None:
+            break
 
-    resolved_content = _extract_large_message_v2_content(full_text)
-    if resolved_content is None:
-        logger.warning("Invalid large-message v2 payload JSON, returning preview content")
-        return content
+        resolved_content = _extract_large_message_v2_content(full_text)
+        if resolved_content is None:
+            logger.warning("Invalid large-message v2 payload JSON, returning preview content")
+            break
+        content = resolved_content
 
-    return resolved_content
+    return content
