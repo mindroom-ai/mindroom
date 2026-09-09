@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import jwt
@@ -19,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from mindroom import agents
 from mindroom.api import config_lifecycle
+from mindroom.mcp_gateway import accounts, external_auth
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt_key
 from tests.api.test_mcp_gateway_api import (
@@ -34,6 +38,7 @@ from tests.api.test_mcp_gateway_api import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from datetime import tzinfo
 
     import httpx
     from fastapi import FastAPI
@@ -64,6 +69,22 @@ def _settings(app: FastAPI, **updates: str) -> None:
         snapshot.runtime_paths,
         process_env={**snapshot.runtime_paths.process_env, **updates},
     )
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Control account and JWT wall clocks without changing process time or sleeping."""
+    now = [time.time()]
+
+    class ClockDateTime(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return datetime.fromtimestamp(now[0], tz=tz)
+
+    monkeypatch.setattr(accounts, "time", SimpleNamespace(time=lambda: now[0]))
+    monkeypatch.setattr(external_auth, "time", SimpleNamespace(time=lambda: now[0], monotonic=time.monotonic))
+    monkeypatch.setattr(jwt.api_jwt, "datetime", ClockDateTime)
+    return now
 
 
 @pytest.fixture
@@ -98,13 +119,20 @@ def external_client(external_app: FastAPI) -> Iterator[TestClient]:
 
 
 @pytest.fixture
-def credential(profile: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> Callable[..., dict[str, str]]:
+def credential(
+    profile: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    clock: list[float],
+) -> Callable[..., dict[str, str]]:
     """Sign real JWTs; only replace the remote JWKS wire response."""
     key = _trusted_upstream_jwt_key()
     keys = _trusted_upstream_jwks(key)
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: keys)
+    serial = 0
 
     def headers(user: str = "alice", **claims: object) -> dict[str, str]:
+        nonlocal serial
+        serial += 1
         token = jwt.encode(
             {
                 "iss": profile["issuer"],
@@ -112,8 +140,9 @@ def credential(profile: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> Call
                 "sub": f"{user}@example.org",
                 "email": f"{user}@example.org",
                 "matrix_user_id": f"@{user}:example.org",
-                "iat": time.time(),
-                "exp": time.time() + 300,
+                "iat": clock[0],
+                "exp": clock[0] + 300,
+                "jti": f"token-{serial}",
                 "scope": "mcp:tools",
                 **({"client_id": "registered-client"} if profile["header"] == "authorization" else {}),
                 **claims,
@@ -155,6 +184,7 @@ def _active(client: TestClient, path: str, *, active: bool) -> None:
 
 
 def test_external_metadata_and_scim_offboarding(
+    clock: list[float],
     external_client: TestClient,
     profile: dict[str, str],
     credential: Callable[..., dict[str, str]],
@@ -171,7 +201,9 @@ def test_external_metadata_and_scim_offboarding(
     }
     assert _list(client, credential()).status_code == 401
     alice_path = _provision(client, "alice")
+    clock[0] += 61
     _provision(client, "bob")
+    clock[0] += 61
     alice, bob = credential("alice"), credential("bob")
     for headers in (alice, bob):
         response = _list(client, headers)
@@ -195,12 +227,47 @@ def test_external_metadata_and_scim_offboarding(
     assert _list(client, alice).status_code == 401
     assert _list(client, bob).status_code == 200
     _active(client, alice_path, active=True)
+    clock[0] += 61
     assert _list(client, alice).status_code == 401
     assert _list(client, credential()).status_code == 200
     assert _list(client, bob).status_code == 200
 
 
+def test_issuer_ahead_token_cannot_revive_after_scim_reactivation(
+    external_app: FastAPI,
+    external_client: TestClient,
+    credential: Callable[..., dict[str, str]],
+    clock: list[float],
+) -> None:
+    """A pre-disable token dated 30 seconds ahead stays denied when gateway time catches up."""
+    path = _provision(external_client, "alice")
+    clock[0] += 61
+    start = clock[0]
+    admitted = credential()
+    assert _list(external_client, admitted).status_code == 200
+    clock[0] = start + 1
+    old = credential(iat=start + 31)
+    assert _list(external_client, old).status_code == 401
+    clock[0] = start + 2
+    _active(external_client, path, active=False)
+    assert _list(external_client, admitted).status_code == 401
+    clock[0] = start + 3
+    _active(external_client, path, active=True)
+    runtime = config_lifecycle.app_state(external_app).mcp_gateway_runtime
+    assert runtime is not None
+    with sqlite3.connect(runtime.provider.store.path) as connection:
+        assert connection.execute("SELECT token_valid_after FROM gateway_accounts").fetchone()[0] == start + 3
+    clock[0] = start + 32
+    assert _list(external_client, old).status_code == 401
+    clock[0] = start + 63
+    assert _list(external_client, credential()).status_code == 401
+    clock[0] = start + 64
+    assert _list(external_client, old).status_code == 401
+    assert _list(external_client, credential()).status_code == 200
+
+
 def test_external_cancellation_and_user_limit_span_tokens(
+    clock: list[float],
     external_app: FastAPI,
     credential: Callable[..., dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
@@ -234,7 +301,9 @@ def test_external_cancellation_and_user_limit_span_tokens(
     cancel = {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 7}}
     with TestClient(external_app, base_url=ORIGIN) as client, ThreadPoolExecutor(max_workers=1) as executor:
         _provision(client, "alice")
+        clock[0] += 61
         _provision(client, "bob")
+        clock[0] += 61
         alice, renewed, bob = credential(), credential(), credential("bob")
         assert alice != renewed
         pending = executor.submit(client.post, "/mcp", json=call, headers={**MCP_HEADERS, **alice})
@@ -254,6 +323,7 @@ def test_external_cancellation_and_user_limit_span_tokens(
 
 
 def test_external_native_tools_keep_requester_identity(
+    clock: list[float],
     external_client: TestClient,
     credential: Callable[..., dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
@@ -273,6 +343,7 @@ def test_external_native_tools_keep_requester_identity(
     )
     for user in ("alice", "bob"):
         _provision(external_client, user)
+        clock[0] += 61
         response = external_client.post(
             "/mcp",
             headers={
@@ -297,6 +368,7 @@ def test_external_native_tools_keep_requester_identity(
 
 @pytest.mark.parametrize("change", ["account", "issuer", "mode"])
 def test_external_security_change_between_admission_and_dispatch(
+    clock: list[float],
     external_app: FastAPI,
     external_client: TestClient,
     credential: Callable[..., dict[str, str]],
@@ -305,6 +377,7 @@ def test_external_security_change_between_admission_and_dispatch(
 ) -> None:
     """A committed account or authority change after HTTP admission stops provider execution."""
     path = _provision(external_client, "alice")
+    clock[0] += 61
     runtime = config_lifecycle.app_state(external_app).mcp_gateway_runtime
     assert runtime is not None
     authenticate = runtime.authenticate
@@ -381,6 +454,7 @@ def _assert_native_call_denied(client: TestClient, headers: dict[str, str], monk
 @pytest.mark.parametrize("phase", ["verify", "account"])
 @pytest.mark.parametrize("change", ["issuer", "mode"])
 def test_external_setting_change_during_dispatch_lookup(
+    clock: list[float],
     external_app: FastAPI,
     external_client: TestClient,
     credential: Callable[..., dict[str, str]],
@@ -390,6 +464,7 @@ def test_external_setting_change_during_dispatch_lookup(
 ) -> None:
     """Authority changes during dispatch awaits cannot bind old credentials to a new snapshot."""
     _provision(external_client, "alice")
+    clock[0] += 61
     runtime = config_lifecycle.app_state(external_app).mcp_gateway_runtime
     assert runtime is not None
     assert runtime.external_auth is not None
@@ -447,12 +522,14 @@ def test_builtin_mode_change_during_dispatch_token_lookup(
 
 
 def test_external_credentials_do_not_fall_back(
+    clock: list[float],
     external_client: TestClient,
     credential: Callable[..., dict[str, str]],
     profile: dict[str, str],
 ) -> None:
     """Owner, browser, wrong audience, and wrong token transport cannot acquire MCP authority."""
     _provision(external_client, "alice")
+    clock[0] += 61
     valid = credential()
     assert _list(external_client, valid).status_code == 200
     raw = next(iter(valid.values())).removeprefix("Bearer ")
@@ -481,12 +558,14 @@ def test_external_credentials_do_not_fall_back(
 
 
 def test_external_client_pin_isolates_shared_issuer(
+    clock: list[float],
     external_client: TestClient,
     credential: Callable[..., dict[str, str]],
     profile: dict[str, str],
 ) -> None:
     """Another signed client cannot impersonate a provisioned user through the pinned bearer profile."""
     _provision(external_client, "alice")
+    clock[0] += 61
     assert _list(external_client, credential()).status_code == 200
     other = credential(client_id="other-client", aud=[RESOURCE, "other-client"])
     response = _list(external_client, other)
@@ -539,6 +618,7 @@ def test_external_disables_local_issuer_and_client_controls(
     ],
 )
 def test_external_setting_changes_fail_closed(
+    clock: list[float],
     external_app: FastAPI,
     external_client: TestClient,
     credential: Callable[..., dict[str, str]],
@@ -547,6 +627,7 @@ def test_external_setting_changes_fail_closed(
 ) -> None:
     """Hot configuration changes cannot silently weaken or replace the pinned authority."""
     _provision(external_client, "alice")
+    clock[0] += 61
     headers = credential()
     assert _list(external_client, headers).status_code == 200
     _settings(external_app, **{setting: value})

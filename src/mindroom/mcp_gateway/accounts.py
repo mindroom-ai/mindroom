@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
     from mindroom.mcp_gateway.store import GatewayOAuthStore
 
+_EXTERNAL_CLOCK_SKEW_SECONDS = 60
+
 
 class AccountConflictError(Exception):
     """The exact provisioned user name already exists."""
@@ -173,14 +175,14 @@ class GatewayAccounts:
         return await self.store.transact(write)
 
     async def resolve_external(self, user_name: str, issued_at: float) -> str | None:
-        """Require exact active email and a JWT issued strictly after the durable cutoff."""
+        """Require exact active email and issue time beyond the cutoff plus bounded issuer skew."""
         if isinstance(issued_at, bool) or not isinstance(issued_at, (int, float)) or not math.isfinite(issued_at):
             return None
 
         def read(connection: sqlite3.Connection) -> str | None:
             row = connection.execute(
                 "SELECT account_id FROM gateway_accounts WHERE user_name = ? AND active = 1 AND token_valid_after < ?",
-                (user_name, issued_at),
+                (user_name, issued_at - _EXTERNAL_CLOCK_SKEW_SECONDS),
             ).fetchone()
             return row["account_id"] if row else None
 

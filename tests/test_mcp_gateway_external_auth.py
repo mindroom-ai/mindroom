@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import time
 from dataclasses import replace
+from json.scanner import py_make_scanner  # ty: ignore[unresolved-import] -- stdlib Python scanner is absent from stubs
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import jwt
@@ -451,15 +454,26 @@ async def test_untrusted_algorithm_never_fetches_keys(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parser", ["default", "python"])
 async def test_deeply_nested_payload_is_invalid_credential(
     settings: ExternalAuthSettings,
     signing_key: rsa.RSAPrivateKey,
     monkeypatch: pytest.MonkeyPatch,
+    parser: str,
 ) -> None:
     """Bounded but excessively nested signed JSON cannot escape credential rejection."""
     verifier = _verifier(settings, signing_key, monkeypatch)
     payload = b'{"nested":' + b"[" * 1200 + b"0" + b"]" * 1200 + b"}"
     token = PyJWS().encode(payload, signing_key, algorithm="RS256", headers={"kid": "key-1"})
+    assert len(token) <= 16384
+    if parser == "python":
+        decoder = json.JSONDecoder()
+        decoder.scan_once = py_make_scanner(decoder)
+        with pytest.raises(RecursionError):
+            decoder.decode(payload.decode())
+        monkeypatch.setattr(jwt.api_jwt, "json", SimpleNamespace(loads=lambda value: decoder.decode(value.decode())))
     with pytest.raises(HTTPException) as error:
         await verifier.verify(_request(token))
     assert error.value.status_code == 401
+    if parser == "python":
+        assert isinstance(error.value.__cause__, RecursionError)

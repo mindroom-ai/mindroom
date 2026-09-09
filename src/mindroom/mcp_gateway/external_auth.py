@@ -220,7 +220,7 @@ class ExternalAuth:
             if not localpart or not domain:
                 raise jwt.InvalidTokenError
             matrix_id = self._matrix_identity(claims, localpart, domain)
-        except (jwt.PyJWTError, ValueError, TypeError, OverflowError) as error:
+        except (jwt.PyJWTError, ValueError, TypeError, OverflowError, RecursionError) as error:
             raise HTTPException(status_code=401, detail="Invalid external MCP credential") from error
         scope = claims.get("scope", "")
         if not isinstance(scope, str) or not set(self.settings.required_scopes).issubset(scope.split()):

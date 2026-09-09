@@ -18697,14 +18697,15 @@ MINDROOM_MCP_EXTERNAL_JWKS_URL=https://identity.example.org/.well-known/jwks.jso
 MINDROOM_MCP_EXTERNAL_MATRIX_USER_ID_CLAIM=matrix_user_id
 ```
 
-Protected-resource metadata advertises `AUTHORIZATION_SERVER`, whose discovery document supplies the client's OAuth endpoints.
-This issuer identifier may differ from the JWT `ISSUER`; preserve significant trailing slashes.
+Protected-resource metadata's `authorization_servers` field advertises `MINDROOM_MCP_EXTERNAL_AUTHORIZATION_SERVER`, whose discovery document supplies the client's OAuth endpoints.
+This issuer identifier may differ from `MINDROOM_MCP_EXTERNAL_ISSUER`; preserve significant trailing slashes.
 External mode disables MindRoom's OAuth registration, authorization, consent, token, revocation, authorization-server metadata, and client-management controls.
 Manage external authorizations at their issuer; provider connections in the portal remain separate.
 Restart the API after changing authentication settings: changed or invalid settings fail closed until restart.
 
 By default, send `Authorization: Bearer <JWT>`.
-Credentials must use RS256 or ES256 and contain signed `iss`, `aud`, `exp`, `iat`, `sub`, email, and the configured Matrix identity claim.
+Credentials must use RS256 or ES256 and contain signed `iss`, `aud`, `exp`, `iat`, `sub`, and the configured email claim.
+Unless the email-domain/template mapping below is configured, they must also contain the configured Matrix identity claim.
 `MINDROOM_MCP_EXTERNAL_EMAIL_CLAIM` defaults to `email`.
 Opaque tokens, introspection, and OIDC ID tokens are unsupported; use an audience dedicated to this MCP resource, distinct from a client ID or browser application's audience.
 Set optional `MINDROOM_MCP_EXTERNAL_REQUIRED_SCOPES` to whitespace-separated scopes required in the signed `scope` claim; no tool scope is implicitly required in external mode.
@@ -18744,9 +18745,11 @@ Cloudflare labels Managed OAuth beta.
 
 ### External lifecycle and validation
 
-Account creation, rename, disable, reactivation, and delete/recreate reject tokens issued before the latest account security change; profile-only updates preserve access.
-Integer-second issue times in the same second as a security change require renewal in a later second.
-Existing accounts receive a one-time issue-time cutoff when upgrading, so external clients need fresh credentials.
+Account creation, migration, rename, reactivation, and delete/recreate require a fresh JWT whose `iat` is strictly more than 60 seconds after the latest account security event recorded by the gateway; profile-only updates preserve access.
+With synchronized clocks, obtain that fresh JWT more than 60 seconds after the event; initial provisioning also incurs this delay, and issuer lag can extend it.
+Strict future-`iat` rejection remains in force.
+The revocation guarantee assumes the issuer is at most 60 seconds ahead of the gateway and the gateway clock does not move backward: keep stable, synchronized clocks; unbounded skew is unsupported.
+Existing accounts receive a one-time event cutoff when upgrading; the same 60-second margin also applies to already-persisted cutoffs.
 JWKS refresh is shared and bounded; signing-key revocation can lag by up to 60 seconds.
 SCIM disable takes effect when received and committed; already-started provider actions may finish.
 The issuer owns refresh revocation and login policy: after account reactivation, silent renewal can produce an accepted fresh token without interactive login.
@@ -18760,7 +18763,8 @@ Before general access, verify real client login/resource handling, two users' to
 
 ## Access and lifecycle
 
-The OAuth token, client-management, and issuer-storage limits in this section apply to built-in mode.
+The OAuth token lifetimes, client-management controls, and issuer-storage limits in this section govern built-in credentials.
+External mode reuses the shared provider/account store, so its provider and storage configuration still validates at startup; leave unused `MINDROOM_MCP_OAUTH_*` settings at valid defaults.
 Personal-agent authorization, persistence, and active MCP call limits apply to both modes; external credential lifecycle is described above.
 
 Access tokens last up to 15 minutes.

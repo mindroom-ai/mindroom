@@ -117,9 +117,10 @@ async def test_external_token_cannot_revive_after_account_change(
     directory = _directory(tmp_path)
     account = await directory.create({"userName": "Alice@example.org", "active": True})
     assert await directory.resolve_external("Alice@example.org", 100.0) is None
-    assert await directory.resolve_external("Alice@example.org", 100.2) == account["id"]
-    assert await directory.resolve_external("alice@example.org", 100.2) is None
-    now[0] = 100.3
+    assert await directory.resolve_external("Alice@example.org", 160.1) is None
+    assert await directory.resolve_external("Alice@example.org", 160.2) == account["id"]
+    assert await directory.resolve_external("alice@example.org", 160.2) is None
+    now[0] = 160.3
     if operation == "delete":
         await directory.delete(account["id"])
         account = await directory.create({"userName": "Alice@example.org", "active": True})
@@ -132,12 +133,12 @@ async def test_external_token_cannot_revive_after_account_change(
             },
         )
         await directory.replace(account["id"], {"userName": "Alice@example.org", "active": True})
-    assert await directory.resolve_external("Alice@example.org", 100.2) is None
-    assert await directory.resolve_external("Alice@example.org", 100.3) is None
-    assert await directory.resolve_external("Alice@example.org", 100.4) == account["id"]
+    assert await directory.resolve_external("Alice@example.org", 160.2) is None
+    assert await directory.resolve_external("Alice@example.org", 220.3) is None
+    assert await directory.resolve_external("Alice@example.org", 220.4) == account["id"]
     assert "token_valid_after" not in account
     reopened = _directory(tmp_path)
-    assert await reopened.resolve_external("Alice@example.org", 100.2) is None
+    assert await reopened.resolve_external("Alice@example.org", 160.2) is None
 
 
 async def test_external_profile_update_preserves_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,9 +147,9 @@ async def test_external_profile_update_preserves_access(tmp_path: Path, monkeypa
     monkeypatch.setattr(accounts_module.time, "time", lambda: now[0])
     directory = _directory(tmp_path)
     account = await directory.create({"userName": "Alice@example.org", "active": True})
-    now[0] = 101.1
+    now[0] = 161.1
     await directory.replace(account["id"], {"userName": "Alice@example.org", "active": True, "displayName": "New Name"})
-    assert await directory.resolve_external("Alice@example.org", 100.2) == account["id"]
+    assert await directory.resolve_external("Alice@example.org", 160.2) == account["id"]
 
 
 async def test_migration_does_not_revive_preexisting_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -160,6 +161,7 @@ async def test_migration_does_not_revive_preexisting_tokens(tmp_path: Path, monk
     monkeypatch.setattr(accounts_module.time, "time", lambda: 200.5)
     migrated = _directory(tmp_path)
     assert await migrated.resolve_external("Alice@example.org", 200.4) is None
-    assert await migrated.resolve_external("Alice@example.org", 200.6) == account["id"]
-    monkeypatch.setattr(accounts_module.time, "time", lambda: 201.5)
-    assert await _directory(tmp_path).resolve_external("Alice@example.org", 200.6) == account["id"]
+    assert await migrated.resolve_external("Alice@example.org", 260.5) is None
+    assert await migrated.resolve_external("Alice@example.org", 260.6) == account["id"]
+    monkeypatch.setattr(accounts_module.time, "time", lambda: 261.5)
+    assert await _directory(tmp_path).resolve_external("Alice@example.org", 260.6) == account["id"]
