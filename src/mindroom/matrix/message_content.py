@@ -44,6 +44,8 @@ logger = get_logger(__name__)
 type VisibleRoomMessage = nio.RoomMessageFormatted | nio.RoomMessageMedia | nio.RoomEncryptedMedia
 
 _MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
+# Legacy delivery prepared terminal edits twice, nesting one sidecar in another.
+# Current sends preserve the frozen payload; reading that history still needs both layers.
 _MAX_SIDECAR_DOWNLOADS = 2
 
 
@@ -292,7 +294,7 @@ async def _resolve_canonical_content(
     content: dict[str, Any],
     client: nio.AsyncClient | None,
 ) -> dict[str, Any]:
-    """Hydrate at most two canonical sidecars, including nested edit envelopes."""
+    """Hydrate canonical sidecars, including one legacy double-prepared edit."""
     if client is None:
         return content
 

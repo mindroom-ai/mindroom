@@ -1667,7 +1667,7 @@ class TestSidecarResolution:
         self,
         alice: PrincipalStore,
     ) -> None:
-        """A canonical edit envelope can point to a second complete sidecar."""
+        """Legacy double preparation stored an edit preview in another sidecar."""
         original = raw("$message", "original body")
         edit = self._sidecar_source("$edit", "outer preview", "mxc://s/outer", ts=2_000)
         edit["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$message"}
