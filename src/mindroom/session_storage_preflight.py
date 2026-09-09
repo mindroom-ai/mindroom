@@ -107,6 +107,7 @@ def _archive_sessions(db_dir: Path, missing_columns: frozenset[str]) -> None:
     db_dir.rename(archive)
     fsync_directory_durable(db_dir.parent)
     db_dir.mkdir(mode=mode)
+    db_dir.chmod(mode)
     fsync_directory_durable(db_dir)
     fsync_directory_durable(db_dir.parent)
     logger.warning(

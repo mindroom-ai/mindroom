@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import stat
 import subprocess
@@ -114,6 +115,23 @@ def test_incompatible_session_schema_is_archived_before_real_session_use(
     assert stat.S_IMODE((state_root / "sessions").stat().st_mode) == 0o700
     assert (older_archive / "retained").read_text() == "keep this archive"
     assert {path: path.read_bytes() for path in untouched} == untouched
+
+
+def test_recovery_preserves_directory_modes_under_restrictive_umask(tmp_path: Path) -> None:
+    """Recovery must preserve existing permissions on both archive and replacement."""
+    database = _old_database(tmp_path)
+    database.parent.chmod(0o750)
+    previous_umask = os.umask(0o077)
+    try:
+        with closing(_storage(tmp_path)) as storage:
+            assert storage.upsert_session(AgentSession(session_id="new-session", agent_id="general", created_at=1))
+    finally:
+        os.umask(previous_umask)
+
+    archived = _archived_database(tmp_path)
+    assert stat.S_IMODE(archived.parent.stat().st_mode) == 0o750
+    assert stat.S_IMODE(database.parent.stat().st_mode) == 0o750
+    _assert_old_row(archived)
 
 
 def test_compatible_session_reopen_preserves_history_and_extra_columns(tmp_path: Path) -> None:
