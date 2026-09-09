@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import hashlib
 import json
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.tools.function import FunctionCall, ToolResult
 
 from mindroom.attachments import load_attachment, register_local_attachment
 from mindroom.config.agent import AgentConfig
@@ -173,7 +175,8 @@ async def test_attachments_tool_get_attachment_returns_local_path(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_path: Path) -> None:
+@pytest.mark.parametrize("view", [False, True])
+async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_path: Path, view: bool) -> None:
     """Tool should reject attachment IDs not present in runtime context."""
     tool = AttachmentTools()
     sample_file = tmp_path / "sample.txt"
@@ -187,11 +190,72 @@ async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_pa
     assert attachment is not None
 
     with tool_runtime_context(_tool_context(tmp_path, attachment_ids=())):
-        payload = json.loads(await tool.get_attachment("att_sample"))
+        payload = json.loads(await tool.get_attachment("att_sample", view=view))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "attachments"
     assert "not available in this context" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
+    """Registered images reach the model as media, not just a path in JSON."""
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+    )
+    image_path = tmp_path / "plot.jpg"  # Byte detection must win over the extension.
+    image_path.write_bytes(image_bytes)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
+    with tool_runtime_context(_tool_context(tmp_path)):
+        registered = json.loads(await tool.register_attachment("plot.jpg"))
+        attachment_id = registered["attachment_id"]
+        metadata = await tool.get_attachment(attachment_id)
+        execution = await FunctionCall(
+            function=tool.async_functions["get_attachment"],
+            arguments={"attachment_id": attachment_id, "view": True},
+        ).aexecute()
+
+    assert execution.status == "success"
+    result = execution.result
+    assert isinstance(result, ToolResult)
+    assert result.content == metadata
+    assert result.images is not None
+    assert len(result.images) == 1
+    assert result.images[0].content == image_bytes
+    assert result.images[0].mime_type == "image/png"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["non_image", "oversized", "missing", "save_and_view"])
+async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case: str) -> None:
+    """Viewing must fail explicitly rather than forward unusable media or silently save."""
+    image_path = tmp_path / "plot.png"
+    image_path.write_bytes(b"not an image")
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
+    with tool_runtime_context(_tool_context(tmp_path)):
+        registered = json.loads(await tool.register_attachment("plot.png"))
+        if case == "oversized":
+            with image_path.open("r+b") as image_file:
+                image_file.truncate(20 * 1024 * 1024 + 1)
+        elif case == "missing":
+            image_path.unlink()
+        result = await tool.get_attachment(
+            registered["attachment_id"],
+            view=True,
+            mindroom_output_path="copy.png" if case == "save_and_view" else None,
+        )
+
+    assert isinstance(result, str)
+    payload = json.loads(result)
+    assert payload["status"] == "error"
+    expected = {
+        "non_image": "PNG, JPEG, GIF, or WebP",
+        "oversized": "size limit",
+        "missing": "missing on disk",
+        "save_and_view": "cannot be combined",
+    }
+    assert expected[case] in payload["message"]
+    assert not (tmp_path / "copy.png").exists()
 
 
 @pytest.mark.asyncio

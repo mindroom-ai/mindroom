@@ -84,10 +84,15 @@ agents:
 | Operation | Description |
 |-----------|-------------|
 | `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, event_timestamp, created_at) |
-| `get_attachment(attachment_id, mindroom_output_path?)` | Return one context attachment record, or save its bytes to a workspace-relative path and return a save receipt |
+| `get_attachment(attachment_id, mindroom_output_path?, view=False)` | Return metadata, save bytes to a workspace-relative path, or send image pixels to the model with `view=True` |
 | `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
 
-When `mindroom_output_path` is omitted, `get_attachment()` returns the attachment metadata response, including the runtime-local `local_path`.
+By default, `get_attachment()` returns the attachment metadata response, including the runtime-local `local_path`.
+Use `get_attachment("att_...", view=True)` to visually inspect an image from earlier in the conversation or a local file registered with `register_attachment(file_path)`.
+Viewing sends image bytes to the configured model; listing or registering an attachment alone does not let the model see its pixels.
+It requires an image-capable model and supports PNG, JPEG, GIF, and WebP images up to 20 MiB, with the format detected from the bytes.
+The attachment must be available in the current context and have a readable local file.
+`view=True` cannot be combined with `mindroom_output_path`.
 For worker-routed agents, prefer `get_attachment("att_...", mindroom_output_path="incoming/file.ext")` before processing an attachment with `file`, `coding`, `python`, or `shell`, because the runtime-local path may not exist inside the worker workspace.
 `mindroom_output_path` must be a file path relative to the agent workspace.
 It must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.
