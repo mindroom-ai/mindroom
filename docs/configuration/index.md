@@ -629,6 +629,8 @@ matrix_space:
 matrix_sync:
   mode: classic                    # Default: classic
   sliding_timeline_limit: 100       # Per-room Sliding window, minimum 1
+  max_response_bytes: 16777216      # Per-session HTTP response limit: 16 MiB
+  max_pending_bytes: 67108864       # Per-session encoded pending output limit: 64 MiB
 
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
@@ -643,6 +645,20 @@ See [Authorization](../authorization.md) for the current access model.
 The root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
 Demote stale Space admins manually in a Matrix client when needed.
+
+## Matrix Sync Limits
+
+`matrix_sync.max_response_bytes` and `matrix_sync.max_pending_bytes` accept positive integers in bytes and apply to both Classic and Sliding Sync.
+The defaults are 16 MiB per HTTP response and 64 MiB of encoded pending output per sync session.
+If a large initial sync exceeds the durable input bound, increase `max_response_bytes` enough to fit the response.
+If preparing events exceeds the durable pending bound, increase `max_pending_bytes` enough to fit the encoded output.
+These are separate budgets: encoded events can take more space than the HTTP response, so raising the response limit may also require raising the pending limit.
+Each bot owns its own sync session; allow sufficient memory and disk space when increasing these limits.
+Changing either setting through config reload restarts running agents to apply it.
+
+Large initial syncs may also need more startup time.
+`MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` controls the first-sync watchdog allowance, and runtime Helm chart values under `probes.startup` control the Kubernetes startup probe allowance.
+Size those time allowances independently of the byte limits.
 
 ## Credential Seeds
 
