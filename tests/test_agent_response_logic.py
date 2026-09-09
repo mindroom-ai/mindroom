@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mindroom.authorization import ResponderCandidatePermissions
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -193,6 +194,7 @@ class TestAgentResponseLogic:
                 reason="Team request includes no available members.",
             ),
             responder_pool,
+            [],
         )
 
         assert responder_pool == [team_id]
@@ -243,7 +245,7 @@ class TestAgentResponseLogic:
         )
         responder_pool = [ids["private_worker"], ids["shared"]]
         owner = policy._response_owner_for_team_resolution(team_resolution, responder_pool)
-        action = policy._team_response_action(team_resolution, responder_pool)
+        action = policy._team_response_action(team_resolution, responder_pool, [])
 
         assert owner == ids["shared"]
         assert action is not None
@@ -305,6 +307,7 @@ class TestAgentResponseLogic:
         action = policy._team_response_action(
             team_resolution,
             responder_pool=[ids["private_one"], ids["ops"], ids["shared"]],
+            pending_responders=[],
         )
 
         assert owner == ids["shared"]
@@ -362,8 +365,10 @@ class TestAgentResponseLogic:
 
         candidate_ids = entity_ids(self.config, self.runtime_paths)
         with patch(
-            "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
-            new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+            "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+            new=MagicMock(
+                return_value=ResponderCandidatePermissions([candidate_ids["calculator"], candidate_ids["general"]], []),
+            ),
         ):
             multiple_visible_action = await policy._resolve_response_action(
                 dispatch,
@@ -375,8 +380,8 @@ class TestAgentResponseLogic:
         assert multiple_visible_action.kind == "skip"
 
         with patch(
-            "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
-            new=MagicMock(return_value=[candidate_ids["calculator"]]),
+            "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+            new=MagicMock(return_value=ResponderCandidatePermissions([candidate_ids["calculator"]], [])),
         ):
             single_visible_action = await policy._resolve_response_action(
                 dispatch,
@@ -440,8 +445,13 @@ class TestAgentResponseLogic:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
-                new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+                new=MagicMock(
+                    return_value=ResponderCandidatePermissions(
+                        [candidate_ids["calculator"], candidate_ids["general"]],
+                        [],
+                    ),
+                ),
             ),
             patch(
                 "mindroom.turn_policy.decide_team_formation",
@@ -522,8 +532,10 @@ class TestAgentResponseLogic:
         candidate_ids = entity_ids(self.config, self.runtime_paths)
 
         with patch(
-            "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
-            new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+            "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+            new=MagicMock(
+                return_value=ResponderCandidatePermissions([candidate_ids["calculator"], candidate_ids["general"]], []),
+            ),
         ):
             action = await policy._resolve_response_action(
                 dispatch,
@@ -601,8 +613,13 @@ class TestAgentResponseLogic:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
-                new=MagicMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
+                new=MagicMock(
+                    return_value=ResponderCandidatePermissions(
+                        [candidate_ids["calculator"], candidate_ids["general"]],
+                        [],
+                    ),
+                ),
             ),
             patch(
                 "mindroom.turn_policy.decide_team_formation",

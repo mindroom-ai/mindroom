@@ -2577,21 +2577,22 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
     """Final shutdown fences a provider thread even after its asyncio owner is cancelled."""
     workers_runtime_module._reset_primary_worker_manager()
     runtime_paths = _runtime_paths(tmp_path)
-    build_started = threading.Event()
+    loop = asyncio.get_running_loop()
+    build_started = asyncio.Event()
     release_build = threading.Event()
-    manager_shutdown = threading.Event()
+    manager_shutdown = asyncio.Event()
 
     class _LateManager:
         shutdown_calls = 0
 
         def shutdown(self) -> None:
             self.shutdown_calls += 1
-            manager_shutdown.set()
+            loop.call_soon_threadsafe(manager_shutdown.set)
 
     late_manager = _LateManager()
 
     def build_manager(*_args: object, **_kwargs: object) -> WorkerBackend:
-        build_started.set()
+        loop.call_soon_threadsafe(build_started.set)
         assert release_build.wait(timeout=5)
         return cast("WorkerBackend", late_manager)
 
@@ -2625,13 +2626,13 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
             proxy_token=None,
             storage_root=runtime_paths.storage_root,
         ),
-        pass_timeout_seconds=0.01,
     )
-    runtime.bind_api("http://primary.test/api/script-gateway")
+    acquisition_task = None
 
     try:
         await runtime.start()
-        assert await asyncio.to_thread(build_started.wait, 1)
+        runtime.bind_api("http://primary.test/api/script-gateway")
+        await build_started.wait()
         acquisition_task = runtime._pending_worker_lease_task
         assert acquisition_task is not None
         await runtime.shutdown(timeout_seconds=0.01)
@@ -2642,7 +2643,7 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
         workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
         release_build.set()
 
-        assert await asyncio.to_thread(manager_shutdown.wait, 1)
+        await manager_shutdown.wait()
         assert workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY is None
         assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
         assert late_manager.shutdown_calls == 1
@@ -2650,13 +2651,14 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
         workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
         assert late_manager.shutdown_calls == 1
     finally:
+        pending_acquisition = acquisition_task or runtime._pending_worker_lease_task
+        await runtime.shutdown(timeout_seconds=0.01)
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
         release_build.set()
-        with workers_runtime_module._PRIMARY_WORKER_MANAGER_CONDITION:
-            active_entry = workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY
-            if active_entry is not None:
-                active_entry.active_leases = 0
-            for retired_entry in workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES:
-                retired_entry.active_leases = 0
+        if pending_acquisition is not None:
+            await asyncio.gather(pending_acquisition, return_exceptions=True)
+        if build_started.is_set():
+            await manager_shutdown.wait()
         workers_runtime_module._reset_primary_worker_manager()
 
 
@@ -2668,16 +2670,17 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
     """Cancellation after publication cannot strand the executor-owned lease delivery."""
     workers_runtime_module._reset_primary_worker_manager()
     runtime_paths = _runtime_paths(tmp_path)
-    lease_published = threading.Event()
+    loop = asyncio.get_running_loop()
+    lease_published = asyncio.Event()
     release_provider = threading.Event()
-    manager_shutdown = threading.Event()
+    manager_shutdown = asyncio.Event()
 
     class _PublishedManager:
         shutdown_calls = 0
 
         def shutdown(self) -> None:
             self.shutdown_calls += 1
-            manager_shutdown.set()
+            loop.call_soon_threadsafe(manager_shutdown.set)
 
     published_manager = _PublishedManager()
 
@@ -2699,7 +2702,7 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
             proxy_token=None,
             storage_root=runtime_paths.storage_root,
         )
-        lease_published.set()
+        loop.call_soon_threadsafe(lease_published.set)
         assert release_provider.wait(timeout=5)
         return lease
 
@@ -2722,13 +2725,13 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
         ),
         config_provider=_config,
         worker_lease_provider=lease_provider,
-        pass_timeout_seconds=0.01,
     )
-    runtime.bind_api("http://primary.test/api/script-gateway")
+    acquisition_task = None
 
     try:
         await runtime.start()
-        assert await asyncio.to_thread(lease_published.wait, 1)
+        runtime.bind_api("http://primary.test/api/script-gateway")
+        await lease_published.wait()
         acquisition_task = runtime._pending_worker_lease_task
         assert acquisition_task is not None
 
@@ -2744,20 +2747,21 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
             await acquisition_task
         release_provider.set()
 
-        assert await asyncio.to_thread(manager_shutdown.wait, 1)
+        await manager_shutdown.wait()
         assert workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES == []
         assert published_manager.shutdown_calls == 1
 
         workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
         assert published_manager.shutdown_calls == 1
     finally:
+        pending_acquisition = acquisition_task or runtime._pending_worker_lease_task
+        await runtime.shutdown(timeout_seconds=0.01)
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
         release_provider.set()
-        with workers_runtime_module._PRIMARY_WORKER_MANAGER_CONDITION:
-            active_entry = workers_runtime_module._PRIMARY_WORKER_MANAGER_ENTRY
-            if active_entry is not None:
-                active_entry.active_leases = 0
-            for retired_entry in workers_runtime_module._RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES:
-                retired_entry.active_leases = 0
+        if pending_acquisition is not None:
+            await asyncio.gather(pending_acquisition, return_exceptions=True)
+        if lease_published.is_set():
+            await manager_shutdown.wait()
         workers_runtime_module._reset_primary_worker_manager()
 
 
@@ -3272,24 +3276,33 @@ async def test_blocking_retired_lease_release_cannot_stall_reconciliation(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_reload_timeout_aborts_after_durably_revoking_all_removed_owner_runs(tmp_path: Path) -> None:
-    """A stuck process confirmation aborts the reload after durable revocation has completed."""
+async def test_cancelled_reload_preserves_completed_durable_and_broker_revocation(tmp_path: Path) -> None:
+    """Cancellation at stuck process reconciliation preserves prior revocation and clears the launch fence."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     first = _stored_run(store, runtime_paths)
     second = _stored_run(store, runtime_paths, run_id="run-2")
     never = asyncio.Event()
+    broker_revoked = asyncio.Event()
+    process_reconciliation_started = asyncio.Event()
     broker_revocations: list[str] = []
+    end_startup_reconciliation = AsyncMock()
 
     def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
         return store.request_cancel(run_id, reason=reason)
 
     async def revoke(run_id: str, *, reason: str) -> ScriptRunRecord:
+        assert store.get_run(first.run_id).cancel_requested_at is not None
+        assert store.get_run(second.run_id).cancel_requested_at is not None
+        revoked = store.request_cancel(run_id, reason=reason)
         broker_revocations.append(run_id)
-        return store.request_cancel(run_id, reason=reason)
+        if set(broker_revocations) == {first.run_id, second.run_id}:
+            broker_revoked.set()
+        return revoked
 
     async def reconcile_revoked_process(*, run_id: str) -> ScriptRunRecord:
         if run_id == first.run_id:
+            process_reconciliation_started.set()
             await never.wait()
         return store.get_run(run_id)
 
@@ -3304,7 +3317,7 @@ async def test_reload_timeout_aborts_after_durably_revoking_all_removed_owner_ru
         broker=MagicMock(),
         manager=SimpleNamespace(
             begin_startup_reconciliation=AsyncMock(),
-            end_startup_reconciliation=AsyncMock(),
+            end_startup_reconciliation=end_startup_reconciliation,
             request_revocation=request_revocation,
             revoke=revoke,
             reconcile_revoked_process=reconcile_revoked_process,
@@ -3313,15 +3326,25 @@ async def test_reload_timeout_aborts_after_durably_revoking_all_removed_owner_ru
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=lambda: current,
         worker_lease_provider=lambda _locator: None,
-        pass_timeout_seconds=0.2,
     )
 
-    with pytest.raises(RuntimeError, match="Background script reload did not durably revoke every active run"):
-        await runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []})))
+    reload_task = asyncio.create_task(runtime.apply_update_plan(_plan(current, Config(defaults={"tools": []}))))
+    try:
+        await broker_revoked.wait()
+        await process_reconciliation_started.wait()
+        assert runtime._reload_launch_fence_started is True
+        reload_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reload_task
 
-    assert store.get_run(first.run_id).cancel_requested_at is not None
-    assert store.get_run(second.run_id).cancel_requested_at is not None
-    assert set(broker_revocations) == {first.run_id, second.run_id}
+        assert store.get_run(first.run_id).cancel_requested_at is not None
+        assert store.get_run(second.run_id).cancel_requested_at is not None
+        assert set(broker_revocations) == {first.run_id, second.run_id}
+        assert runtime._reload_launch_fence_started is False
+        end_startup_reconciliation.assert_awaited_once()
+    finally:
+        reload_task.cancel()
+        await asyncio.gather(reload_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

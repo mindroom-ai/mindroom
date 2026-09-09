@@ -184,6 +184,10 @@ class ConversationReadView(Protocol):
     could write one is a reader that can be made to.
     """
 
+    async def is_event_redacted(self, *, room_id: str, event_id: str) -> bool:
+        """Return exact principal/room/physical-event tombstone proof."""
+        ...
+
     async def read_conversation(
         self,
         *,

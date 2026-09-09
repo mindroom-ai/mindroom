@@ -31,6 +31,8 @@ from tests.test_script_tool_broker import _call_through_gateway, _RuntimeResolve
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.event_journal.store import PrincipalStore
+
 
 @pytest.mark.asyncio
 async def test_launch_preapproval_does_not_expand_from_live_script_config(tmp_path: Path) -> None:
@@ -178,11 +180,30 @@ async def test_background_approval_fails_closed_when_room_departure_is_fenced(tm
     ["approved", "denied"],
 )
 async def test_background_script_approval_uses_exact_matrix_actor_and_first_decision(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     status: Literal["approved", "denied"],
 ) -> None:
     """Only the exact Matrix actor can commit the first decision for one call."""
     manager, journal, initial_sent = await _approval_manager(tmp_path)
+    cards = journal.principal("router@shared")
+    read_started = asyncio.Event()
+    decision_committed = asyncio.Event()
+    original_read = type(cards).background_approval_decision
+    decision_task: asyncio.Task[BackgroundApprovalDecision] | None = None
+
+    async def read_after_commit(
+        principal: PrincipalStore,
+        *,
+        run_id: str,
+        call_id: str,
+    ) -> BackgroundApprovalDecision | None:
+        if asyncio.current_task() is decision_task and principal is manager.cards:
+            read_started.set()
+            await decision_committed.wait()
+        return await original_read(principal, run_id=run_id, call_id=call_id)
+
+    monkeypatch.setattr(type(cards), "background_approval_decision", read_after_commit)
     decision_task = asyncio.create_task(
         manager.request_background_approval(
             origin=_origin(),
@@ -197,8 +218,9 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
         ),
     )
     try:
-        await asyncio.wait_for(initial_sent.wait(), timeout=1.0)
+        await initial_sent.wait()
         stored = await _wait_for_pending_card(journal)
+        await read_started.wait()
         assert stored.target_kind == "background_script"
         wrong_actor = await manager.handle_card_response(
             room_id="!room:localhost",
@@ -210,6 +232,7 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
         )
         assert wrong_actor.consumed is False
         assert decision_task.done() is False
+        assert await cards.background_approval_decision(run_id="run-1", call_id="call-1") is None
 
         result = await manager.handle_card_response(
             room_id="!room:localhost",
@@ -221,7 +244,12 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
         )
         assert result.consumed is True
         assert result.resolved is True
-        decision = await asyncio.wait_for(decision_task, timeout=1.0)
+        committed = await cards.background_approval_decision(run_id="run-1", call_id="call-1")
+        assert committed is not None
+        assert committed.status == status
+        assert committed.reason == "operator decision"
+        decision_committed.set()
+        decision = await decision_task
         assert decision.status == status
         assert decision.reason == "operator decision"
         assert await journal.principal("router@shared").is_terminal_approval_card(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,6 +13,10 @@ import yaml
 from mindroom.config.main import Config
 from mindroom.orchestration.config_updates import build_config_update_plan
 from scripts.testing import fuzz_live_matrix as fuzz
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+    from pathlib import Path
 
 
 @pytest.mark.parametrize("profile", ["sustained-stream-capacity", "restart-regression"])
@@ -27,15 +31,39 @@ from scripts.testing import fuzz_live_matrix as fuzz
 def test_cli_sync_mode_reaches_generated_config(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
     profile: str,
     mode_args: list[str],
     expected_mode: str,
 ) -> None:
     """Catch a parsed option that gets lost before capacity or restart startup."""
-    monkeypatch.setattr(sys, "argv", ["fuzz_live_matrix.py", "--profile", profile, *mode_args])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["fuzz_live_matrix.py", "--profile", profile, "--artifact-root", str(tmp_path / "artifacts"), *mode_args],
+    )
 
     def start_without_services(stack: fuzz.ManagedTuwunelStack) -> None:
         stack._write_config(9292)
+        generation = {
+            "mindroom_dirty": False,
+            "mindroom_revision": "test-head",
+            "mindroom_expected_revision": "test-head",
+            "mindroom_source_sha256": "a" * 64,
+            "nio_version": "1.0.0",
+            "nio_expected_version": "1.0.0",
+            "nio_module_sha256": "b" * 64,
+        }
+        stack.runtime_provenance = {
+            **generation,
+            "mindroom_frozen_revision": "test-head",
+            "runtime_generations": [dict(generation)],
+            "final_source_validation": dict(generation),
+        }
+
+    def revalidate_without_services(stack: fuzz.ManagedTuwunelStack) -> dict[str, object]:
+        assert stack.runtime_provenance is not None
+        return stack.runtime_provenance
 
     async def inspect_started_config(
         stack: fuzz.ManagedTuwunelStack,
@@ -44,8 +72,11 @@ def test_cli_sync_mode_reaches_generated_config(
         reply_timeout: float,
         settle_seconds: float,
         root_fanout: int,
+        pending_grace: float,
+        runner_sink: Callable[[fuzz.LiveFuzzRunner], None],
+        journal: Callable[[Mapping[str, object]], None],
     ) -> dict[str, str]:
-        del scenario, reply_timeout, settle_seconds, root_fanout
+        del scenario, reply_timeout, settle_seconds, root_fanout, pending_grace, runner_sink, journal
         config = yaml.safe_load(stack.config_path.read_text(encoding="utf-8"))
         assert config["matrix_sync"] == {"mode": expected_mode}
         validated = Config.model_validate(config)
@@ -54,6 +85,7 @@ def test_cli_sync_mode_reaches_generated_config(
         return {"status": "PASS"}
 
     monkeypatch.setattr(fuzz.ManagedTuwunelStack, "start", start_without_services)
+    monkeypatch.setattr(fuzz.ManagedTuwunelStack, "revalidate_runtime_provenance", revalidate_without_services)
     monkeypatch.setattr(fuzz, "_run_live", inspect_started_config)
 
     fuzz.main()

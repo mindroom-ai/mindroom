@@ -42,16 +42,16 @@ type _ObserveDelivered = Callable[[MatrixDelivery, str], Awaitable[tuple[Project
 # the answer is already in the room, or ``None`` if it never arrived.
 type ResolveDelivered = Callable[[MatrixDelivery], Awaitable[str | None]]
 
-# The terminal turn record one delivered answer completes, given ``(delivery_id,
-# response_event_id)``. Returns ``None`` when there is nothing to write --
+# The terminal turn record one delivered answer completes, given the claimed
+# delivery and canonical response event ID. Returns None when there is nothing to write --
 # no record for the turn, or one that already knows its response event.
-type _TerminalTurnFor = Callable[[str, str], "TerminalTurnWrite | None"]
+type _TerminalTurnFor = Callable[[MatrixDelivery, str], "TerminalTurnWrite | None"]
 
 # Told after an acknowledgement this caller actually bound, so the record the
 # transaction committed can be re-asserted through whatever ordering the ledger
 # uses for every other write. A caller that lost the row is never told, because
 # it committed nothing to settle.
-type _TerminalTurnCommitted = Callable[[str, str], Awaitable[None]]
+type _TerminalTurnCommitted = Callable[[str, str, "TerminalTurnWrite | None"], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +93,7 @@ class _FlushOutcome:
     event_id: str | None
     terminal_response_event_id: str | None = None
     publish_committed_terminal: bool = False
+    committed_terminal: TerminalTurnWrite | None = None
     retry_required: bool = False
     propagate_cancellation: asyncio.CancelledError | None = field(default=None, repr=False, compare=False)
 
@@ -129,6 +130,7 @@ class MatrixDeliveryWorker:
     terminal_turn_for: _TerminalTurnFor | None = None
     terminal_turn_committed: _TerminalTurnCommitted | None = None
     process_shutdown_requested: Callable[[], bool] = lambda: False
+    cleanup_deleted_initial: Callable[[MatrixDeliveryWorker, str], Awaitable[bool]] | None = None
     delivery_locks: WeakValueDictionary[str, asyncio.Lock] = field(
         default_factory=WeakValueDictionary,
         repr=False,
@@ -361,6 +363,12 @@ class MatrixDeliveryWorker:
         on_cancelled: Callable[[], None] | None = None,
     ) -> _FlushOutcome:
         """Send one delivery while holding its visible-delivery lock."""
+        if (
+            stage is DeliveryStage.INITIAL
+            and self.cleanup_deleted_initial is not None
+            and await self.cleanup_deleted_initial(self, delivery_id)
+        ):
+            return _FlushOutcome(event_id=None)
         claimed = await self.store.claim_matrix_delivery(
             delivery_id=delivery_id,
             stage=stage,
@@ -539,8 +547,7 @@ class MatrixDeliveryWorker:
             event_id=event_id,
             delivered_projections=delivered_projections,
             terminal_turn=self._terminal_turn(
-                claimed.delivery_id,
-                claimed.stage,
+                claimed,
                 terminal_response_event_id,
             ),
         )
@@ -551,6 +558,7 @@ class MatrixDeliveryWorker:
             event_id=acknowledged.settled_event_id,
             terminal_response_event_id=terminal_response_event_id if bound_terminal else None,
             publish_committed_terminal=bound_terminal,
+            committed_terminal=acknowledged.terminal_turn,
         )
 
     async def _delivered_projections(
@@ -580,7 +588,11 @@ class MatrixDeliveryWorker:
             async def publish_committed_terminal() -> None:
                 assert self.terminal_turn_committed is not None
                 assert outcome.terminal_response_event_id is not None
-                await self.terminal_turn_committed(delivery_id, outcome.terminal_response_event_id)
+                await self.terminal_turn_committed(
+                    delivery_id,
+                    outcome.terminal_response_event_id,
+                    outcome.committed_terminal,
+                )
 
             await run_coroutine_until_complete(
                 publish_committed_terminal(),
@@ -589,16 +601,16 @@ class MatrixDeliveryWorker:
             raise outcome.propagate_cancellation
         return event_id
 
-    def _terminal_turn(self, delivery_id: str, stage: DeliveryStage, event_id: str) -> TerminalTurnWrite | None:
+    def _terminal_turn(self, delivery: MatrixDelivery, event_id: str) -> TerminalTurnWrite | None:
         """Return the turn record this acknowledgement should also commit.
 
         Only for ``FINAL``. An ``INITIAL`` row is a placeholder, and binding a
         turn's terminal record to one would call a turn finished while the
         model is still running.
         """
-        if stage is not DeliveryStage.FINAL or self.terminal_turn_for is None:
+        if delivery.stage is not DeliveryStage.FINAL or self.terminal_turn_for is None:
             return None
-        return self.terminal_turn_for(delivery_id, event_id)
+        return self.terminal_turn_for(delivery, event_id)
 
     async def _resolve_delivered_event(self, claimed: MatrixDelivery) -> str | None:
         """Return the event an earlier attempt left in the room, if any.

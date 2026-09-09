@@ -12,6 +12,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from uuid import UUID
 
+    from mindroom.turn_record import TurnRecord
+
     from .projection import ProjectedEvent
 
 
@@ -443,6 +445,9 @@ class ResponseRecoveryState:
     pending_sources: tuple[bool, ...]
     final_delivery: MatrixDelivery | None
     sources_settled_by_departure: bool
+    redacted_sources: tuple[bool, ...]
+    turn_records: tuple[TurnRecord | None, ...]
+    source_tombstones: tuple[bool, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +469,7 @@ class DeliveryAcknowledgement:
     # Whether this call's conditional update is the one that bound the row.
     # The only thing that licenses writing anything beside the row.
     bound: bool
+    terminal_turn: TerminalTurnWrite | None = None
 
 
 @dataclass(frozen=True, slots=True)

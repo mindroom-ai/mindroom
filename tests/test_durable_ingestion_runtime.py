@@ -30,7 +30,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.bot_helpers import make_matrix_client_mock
 from tests.test_bot_ready_hook import _agent_bot
 from tests.test_durable_ingestion_admission import ROOM
-from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt
+from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt, projection
 from tests.test_room_invites import _handle_invite, _live_router_invite_scenario, _pending_room_invites
 
 if TYPE_CHECKING:
@@ -416,11 +416,16 @@ async def test_malformed_message_does_not_block_following_valid_message(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_quiesce_is_bounded_when_delivery_projection_cannot_recover(
+@pytest.mark.parametrize("process_shutdown", [False, True], ids=["source-quiesce", "process-shutdown"])
+@pytest.mark.parametrize("projection_recovers", [False, True], ids=["unavailable", "recovered"])
+async def test_quiesce_retains_projection_ownership_until_drain_or_timeout(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    process_shutdown: bool,
+    projection_recovers: bool,
 ) -> None:
-    """Source drain must let shutdown continue while retaining blocked input."""
+    """Projection shutdown retains the source until it drains or the bounded owner cancels it."""
+    monkeypatch.setattr("mindroom.bot.SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.05)
     bot = _agent_bot(tmp_path)
     principal = bot.journal_principal()
     account = bot.agent_user.user_id
@@ -431,12 +436,13 @@ async def test_quiesce_is_bounded_when_delivery_projection_cannot_recover(
         sender=account,
         content=interactive_prompt("Old?", "old", source_event_id="$turn"),
     )
+    edit = interactive_edit("$prompt", "New?", "new", source_event_id="$turn")
     await principal.enqueue_matrix_delivery(
         delivery_id="$edit",
         stage=DeliveryStage.FINAL,
         room_id=ROOM,
         thread_id=None,
-        payload=interactive_edit("$prompt", "New?", "new", source_event_id="$turn"),
+        payload=edit,
         edits_event_id="$prompt",
     )
     await principal.claim_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
@@ -461,17 +467,43 @@ async def test_quiesce_is_bounded_when_delivery_projection_cannot_recover(
                 ),
             )
         recovery_attempted = asyncio.Event()
+        release_recovery = asyncio.Event()
+        session._maintain_crypto = AsyncMock()
 
-        async def unavailable_delivery() -> bool:
+        async def recover_projection() -> bool:
             recovery_attempted.set()
-            return False
+            await release_recovery.wait()
+            if projection_recovers:
+                await principal.acknowledge_matrix_delivery(
+                    delivery_id="$edit",
+                    stage=DeliveryStage.FINAL,
+                    event_id="$edit-event",
+                    delivered_projections=(projection("$edit-event", sender=account, ts=2500, content=edit),),
+                )
+            return projection_recovers
 
-        monkeypatch.setattr(bot, "_recover_unacknowledged_matrix_deliveries", unavailable_delivery)
+        monkeypatch.setattr(bot, "_recover_unacknowledged_matrix_deliveries", recover_projection)
         sync = asyncio.create_task(bot.sync_forever())
         try:
             await asyncio.wait_for(recovery_attempted.wait(), timeout=2)
-            await asyncio.wait_for(bot._quiesce_matrix_ingestion(), timeout=5.2)
+            source = session._running
+            assert source is not None
+            if process_shutdown:
+                bot.begin_process_shutdown()
+            quiescing = asyncio.create_task(bot._quiesce_matrix_ingestion())
+            await asyncio.sleep(0)
+            release_recovery.set()
+            await asyncio.wait_for(quiescing, timeout=1)
+            if projection_recovers:
+                await asyncio.wait_for(sync, timeout=1)
+                assert not source.cancelled()
+                assert await session.next_batch() is None
+                assert await principal.load_event("$reaction") is not None
+            else:
+                assert not source.done()
+                assert not sync.done()
         finally:
+            release_recovery.set()
             bot._sync_shutting_down = True
             bot._delivery_recovery_wake.set()
             sync.cancel()
@@ -480,9 +512,12 @@ async def test_quiesce_is_bounded_when_delivery_projection_cannot_recover(
                 await asyncio.gather(bot._delivery_recovery_task, return_exceptions=True)
     async with _owned_session(bot) as session:
         retained = await session.next_batch()
-        assert retained is not None
-        assert retained.records[0].source["event_id"] == "$reaction"
-        assert await principal.load_event("$reaction") is None
+        if projection_recovers:
+            assert retained is None
+        else:
+            assert retained is not None
+            assert retained.records[0].source["event_id"] == "$reaction"
+            assert await principal.load_event("$reaction") is None
 
 
 @pytest.mark.asyncio

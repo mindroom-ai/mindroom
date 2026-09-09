@@ -50,6 +50,7 @@ from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
 )
+from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import resolve_room_aliases
@@ -63,6 +64,7 @@ from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
     RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
     SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS,
     ResponseShutdownTimeoutError,
@@ -127,6 +129,7 @@ from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .response_admission import admitted_response_decision
+from .response_delivery_recovery import ResponseDeliveryRecovery
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import (
     ResponseRequest,
@@ -153,6 +156,7 @@ from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from contextlib import AbstractAsyncContextManager
     from datetime import datetime
     from pathlib import Path
 
@@ -381,7 +385,7 @@ class AgentBot:
     _local_membership_lock: asyncio.Lock
     _ingestion_admission_progress: asyncio.Event
     _sync_continuity_store: SyncContinuityStore
-    _response_recovery_diagnostic_classes: set[str]
+    _response_recovery_diagnostic_classes: set[tuple[str, tuple[str, ...], str | None]]
 
     def __init__(
         self,
@@ -615,6 +619,11 @@ class AgentBot:
                     hook_context=self._hook_context_support,
                 ),
                 outbox=self._journal_store.principal(self._journal_principal_id),
+                response_recovery=ResponseDeliveryRecovery(
+                    self._journal_store.principal(self._journal_principal_id),
+                    lambda: self._turn_store,
+                    self._redact_message_event,
+                ),
                 turn_handoff=TurnHandoff(
                     sources_for_turn=self._delivered_turn_source_ids,
                     # Resolved late: the dispatcher is built after the gateway.
@@ -629,9 +638,10 @@ class AgentBot:
                 # produced an event ID, so the acknowledgement can carry the
                 # record that needs to know it.
                 terminal_turn_for=lambda turn_id, event_id: self._turn_store.terminal_turn_record(turn_id, event_id),
-                terminal_turn_committed=lambda turn_id, event_id: self._turn_store.publish_committed_response(
+                terminal_turn_committed=lambda turn_id, event_id, record: self._turn_store.publish_committed_response(
                     turn_id,
                     event_id,
+                    record,
                 ),
             ),
         )
@@ -650,6 +660,7 @@ class AgentBot:
             TurnStoreDeps(
                 agent_name=self.agent_name,
                 turn_records=self._journal_store.turn_records(self.agent_name),
+                redacted_event_ids=self._journal_store.principal(self._journal_principal_id).redacted_event_ids,
                 legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
@@ -1299,6 +1310,8 @@ class AgentBot:
         first ``SyncResponse`` or ``SyncError`` arrives.  The watchdog has its
         own startup timeout for the pre-first-response window.
         """
+        if self._matrix_ingestion_quiesce_requested:
+            return
         self._sync_shutting_down = False
         self._sync_shutdown_budget = None
         self._deferred_stop_required = False
@@ -1492,16 +1505,17 @@ class AgentBot:
         )
 
     async def _wait_for_delivery_projection(self) -> None:
-        """Retry admission after one outbox pass, preserving unrelated backoff."""
-        if self._sync_shutting_down:
-            raise asyncio.CancelledError
+        """Retain the pump until projection advances or its supervisor cancels it.
+
+        A final recovery pass can still unblock captured input during shutdown.
+        Otherwise bounded source quiescence expires before supervisor teardown
+        cancels the pump; cancelling here would also abort the source it drains.
+        """
         task = self._delivery_recovery_task
         if task is None or task.done():
             self._schedule_delivery_recovery()
         await self._delivery_projection_progress.wait()
         self._delivery_projection_progress.clear()
-        if self._sync_shutting_down:
-            raise asyncio.CancelledError
 
     async def _run_scheduled_delivery_recovery(self) -> None:
         """Recover outbox debt without making Matrix receive progress wait."""
@@ -1846,6 +1860,8 @@ class AgentBot:
 
     def release_pending_turn_journal_replay(self) -> None:
         """Start semantic dispatch after the runtime publishes initial memberships."""
+        if self._sync_shutting_down:
+            return
         self._journal_dispatcher.start()
         self._journal_dispatcher.release_turn_replay()
 
@@ -1857,35 +1873,43 @@ class AgentBot:
             unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),
         )
 
+    def response_recovery_scope(self, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
+        """Expose the delivery owner's startup operation to fleet discovery."""
+        return self._delivery_gateway.response_recovery_scope(room_id, event_id)
+
     async def _response_recovery_ready(self, turn_record: TurnRecord) -> bool:
         """Prove that a terminal response is complete or still durably owned."""
         if any(self._turn_store.has_live_turn_claim(event_id) for event_id in turn_record.indexed_event_ids):
             self._record_response_recovery_not_ready(
                 reason="live_turn_claim",
-                source_count=len(turn_record.source_event_ids),
+                turn_record=turn_record,
                 pending_source_count=None,
             )
             return False
         principal = self._journal_store.principal(self._journal_principal_id)
         turn_id = turn_record.anchor_event_id
         recovery_state = await principal.response_recovery_state(
-            source_event_ids=turn_record.source_event_ids,
-            turn_id=turn_id,
+            turn_record=turn_record,
+            agent_name=self._turn_store.deps.agent_name,
+            redaction_target=replayable_redaction_target,
         )
         pending_sources = recovery_state.pending_sources
-        if all(pending_sources) or (turn_id is not None and recovery_state.sources_settled_by_departure):
+        if all(
+            pending or redacted
+            for pending, redacted in zip(pending_sources, recovery_state.redacted_sources, strict=True)
+        ) or (turn_id is not None and recovery_state.sources_settled_by_departure):
             return True
         if any(pending_sources):
             self._record_response_recovery_not_ready(
                 reason="mixed_source_pending",
-                source_count=len(turn_record.source_event_ids),
+                turn_record=turn_record,
                 pending_source_count=sum(pending_sources),
             )
             return False
         if turn_id is None:
             self._record_response_recovery_not_ready(
                 reason="missing_turn_anchor",
-                source_count=len(turn_record.source_event_ids),
+                turn_record=turn_record,
                 pending_source_count=0,
             )
             return False
@@ -1893,7 +1917,7 @@ class AgentBot:
         if final_delivery is None:
             self._record_response_recovery_not_ready(
                 reason="missing_final_delivery",
-                source_count=len(turn_record.source_event_ids),
+                turn_record=turn_record,
                 pending_source_count=0,
             )
             return False
@@ -1905,7 +1929,7 @@ class AgentBot:
             )
             if event_id is not None
         }
-        completed_turns = tuple(map(self._turn_store.get_turn_record, turn_record.indexed_event_ids))
+        completed_turns = recovery_state.turn_records
         missing_completed_turn_count = sum(completed_turn is None for completed_turn in completed_turns)
         incomplete_completed_turn_count = sum(
             completed_turn is not None and not completed_turn.completed for completed_turn in completed_turns
@@ -1934,7 +1958,7 @@ class AgentBot:
         if not ready:
             self._record_response_recovery_not_ready(
                 reason="terminal_turn_mismatch",
-                source_count=len(turn_record.source_event_ids),
+                turn_record=turn_record,
                 pending_source_count=0,
                 missing_completed_turn_count=missing_completed_turn_count,
                 incomplete_completed_turn_count=incomplete_completed_turn_count,
@@ -1948,7 +1972,7 @@ class AgentBot:
         self,
         *,
         reason: str,
-        source_count: int,
+        turn_record: TurnRecord,
         pending_source_count: int | None,
         missing_completed_turn_count: int | None = None,
         incomplete_completed_turn_count: int | None = None,
@@ -1957,9 +1981,10 @@ class AgentBot:
         response_event_mismatch_count: int | None = None,
     ) -> None:
         """Log each non-sensitive recovery boundary once per bot lifetime."""
-        if reason in self._response_recovery_diagnostic_classes:
+        identity = (reason, turn_record.source_event_ids, turn_record.anchor_event_id)
+        if identity in self._response_recovery_diagnostic_classes:
             return
-        self._response_recovery_diagnostic_classes.add(reason)
+        self._response_recovery_diagnostic_classes.add(identity)
         mismatch_counts = {}
         if missing_completed_turn_count is not None:
             assert incomplete_completed_turn_count is not None
@@ -1976,7 +2001,9 @@ class AgentBot:
         self.logger.info(
             "response_recovery_proof_not_ready",
             reason=reason,
-            source_count=source_count,
+            source_count=len(turn_record.source_event_ids),
+            source_event_ids=turn_record.source_event_ids,
+            anchor_event_id=turn_record.anchor_event_id,
             pending_source_count=pending_source_count,
             **mismatch_counts,
         )
@@ -2020,6 +2047,8 @@ class AgentBot:
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> None:
         """Stop the agent bot."""
+        if shutdown_intent.stop_reason == "shutdown":
+            self.begin_process_shutdown()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -2043,11 +2072,17 @@ class AgentBot:
             defer_expected_response_timeout=shutdown_intent.stop_reason == "shutdown",
         )
         pending_response_count = self._response_runner.pending_inbox_response_count
-        if shutdown_intent.stop_reason != "restart" and pending_response_count > 0:
+        pending_callback_count = (
+            self._journal_dispatcher.pending_task_count if shutdown_intent.stop_reason == "shutdown" else 0
+        )
+        if shutdown_intent.stop_reason != "restart" and (pending_response_count > 0 or pending_callback_count > 0):
             self._deferred_stop_required = True
             if failures:
                 raise failures[0]
-            msg = f"{pending_response_count} response tasks still own runtime resources"
+            msg = (
+                f"{pending_response_count} response tasks and {pending_callback_count} journal tasks "
+                "still own runtime resources"
+            )
             raise ResponseShutdownTimeoutError(msg)
 
         await self._release_stopped_resources(failures, shutdown_intent=shutdown_intent)
@@ -2073,10 +2108,15 @@ class AgentBot:
             raise RuntimeError(msg)
         if not self._deferred_stop_required:
             return
+        shutdown_budget = ShutdownBudget.start(timeout_seconds)
         try:
+            self._deferred_stop_phase = DeferredStopPhase.JOURNAL_DISPATCHER
+            if not await self._journal_dispatcher.wait_stopped(timeout_seconds=shutdown_budget.remaining_seconds()):
+                msg = "journal callback cleanup exceeded bounded finalization"
+                raise ResponseShutdownTimeoutError(msg)
             self._deferred_stop_phase = DeferredStopPhase.RECOVERY_PROOF
             recoverable = await self._response_runner.finish_process_shutdown_recovery(
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=shutdown_budget.remaining_seconds(),
             )
             if not recoverable:
                 msg = "deferred response cleanup lacks durable recovery proof"
@@ -2213,6 +2253,15 @@ class AgentBot:
 
         await asyncio.gather(drain_task, return_exceptions=True)
 
+    def begin_process_shutdown(self) -> None:
+        """Close response and callback admission before any shutdown teardown yields."""
+        self._matrix_ingestion_quiesce_requested = True
+        self._sync_shutting_down = True
+        self._delivery_recovery_wake.set()
+        self._response_runner.refuse_pending_admissions()
+        self._journal_dispatcher.begin_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+        self._response_runner.begin_process_shutdown()
+
     async def prepare_for_sync_shutdown(
         self,
         *,
@@ -2230,7 +2279,7 @@ class AgentBot:
         self._delivery_recovery_wake.set()
         self._response_runner.refuse_pending_admissions()
         if shutdown_intent.stop_reason == "shutdown":
-            self._response_runner.begin_process_shutdown()
+            self.begin_process_shutdown()
         if shutdown_intent.stop_reason == "shutdown" and self.client is not None:
             cast(
                 _ProcessShutdownMatrixClient,  # noqa: TC006 - runtime reference proves the private protocol is live
@@ -2246,6 +2295,9 @@ class AgentBot:
             timeout=shutdown_budget.remaining_seconds(),
             owner=self._runtime_view,
             shutdown_intent=shutdown_intent,
+        )
+        callbacks_drained = shutdown_intent.stop_reason != "shutdown" or await self._journal_dispatcher.wait_stopped(
+            timeout_seconds=shutdown_budget.remaining_seconds(),
         )
         drain_result = await self._coalescing_gate.drain_all(
             shutdown_budget=shutdown_budget,
@@ -2278,6 +2330,7 @@ class AgentBot:
         )
         if (
             not background_tasks_completed
+            or not callbacks_drained
             or not drain_result.completed
             or not responses_drained
             or not post_drain_background_tasks_completed
@@ -2286,6 +2339,7 @@ class AgentBot:
                 "runtime_drain_incomplete_with_durable_dispatch_recovery",
                 agent_name=self.agent_name,
                 background_tasks_completed=background_tasks_completed,
+                callbacks_drained=callbacks_drained,
                 coalescing_drain_completed=drain_result.completed,
                 responses_drained=responses_drained,
                 response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,

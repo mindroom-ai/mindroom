@@ -5,6 +5,7 @@ from __future__ import annotations
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from enum import Enum
 from types import MappingProxyType
 
 from mindroom.history.types import HistoryScope
@@ -50,6 +51,61 @@ class SourceEventMetadata:
 
 
 SourceEventRevision = tuple[int, str]
+
+
+class EditPreparation(Enum):
+    """A locked edit snapshot needs rebuilding without settling its callback."""
+
+    REBUILD = "rebuild"
+
+
+class RevisionSnapshotChangedError(RuntimeError):
+    """A stale request must retain its callback and retry canonical preparation."""
+
+
+@dataclass(frozen=True)
+class RevisionReplay:
+    """Physical edit provenance, independent of source completion and selection."""
+
+    source_event_id: str
+    timestamp_ms: int
+    redacted: bool = False
+    cleanup_pending: bool = False
+    response_event_id: str | None = None
+    legacy_summary_provenance: bool = False
+
+    def to_record(self) -> dict[str, object]:
+        """Serialize ledger-owned provenance and cleanup state."""
+        return {
+            "source_event_id": self.source_event_id,
+            "timestamp_ms": self.timestamp_ms,
+            "redacted": self.redacted,
+            "cleanup_pending": self.cleanup_pending,
+            "response_event_id": self.response_event_id,
+            "legacy_summary_provenance": self.legacy_summary_provenance,
+        }
+
+
+def _revision_replay_map(raw: Mapping[str, object] | None) -> Mapping[str, RevisionReplay]:
+    """Freeze validated ledger provenance."""
+    result: dict[str, RevisionReplay] = {}
+    for event_id, value in (raw or {}).items():
+        if isinstance(value, RevisionReplay):
+            result[event_id] = value
+        elif isinstance(value, Mapping):
+            value = typing.cast("Mapping[str, object]", value)
+            source = value.get("source_event_id")
+            timestamp = value.get("timestamp_ms")
+            if isinstance(source, str) and isinstance(timestamp, int) and not isinstance(timestamp, bool):
+                result[event_id] = RevisionReplay(
+                    source,
+                    timestamp,
+                    value.get("redacted") is True,
+                    value.get("cleanup_pending") is True,
+                    canonical_optional_string(value.get("response_event_id")),
+                    value.get("legacy_summary_provenance") is True,
+                )
+    return MappingProxyType(result)
 
 
 @dataclass(frozen=True)
@@ -119,6 +175,7 @@ class TurnRecord:
     visible_echo_is_fallback: bool | None = None
     source_event_prompts: Mapping[str, str] | None = None
     source_event_revisions: Mapping[str, SourceEventRevision] | None = None
+    revision_replay: Mapping[str, RevisionReplay] | None = None
     suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None = None
     latest_edit_receipt_order: int | None = None
     user_stop_receipt_order: int | None = None
@@ -148,6 +205,7 @@ class TurnRecord:
         visible_echo_is_fallback: bool | None = None,
         source_event_prompts: Mapping[str, str] | None = None,
         source_event_revisions: Mapping[str, object] | None = None,
+        revision_replay: Mapping[str, object] | None = None,
         suppressed_source_event_revisions: Mapping[str, object] | None = None,
         latest_edit_receipt_order: int | None = None,
         user_stop_receipt_order: int | None = None,
@@ -204,6 +262,7 @@ class TurnRecord:
             visible_echo_is_fallback=delivery.visible_echo_is_fallback,
             source_event_prompts=source.source_event_prompts,
             source_event_revisions=source.source_event_revisions,
+            revision_replay=_revision_replay_map(revision_replay) or None,
             suppressed_source_event_revisions=source.suppressed_source_event_revisions,
             latest_edit_receipt_order=dispatch.latest_edit_receipt_order,
             user_stop_receipt_order=dispatch.user_stop_receipt_order,
@@ -223,6 +282,31 @@ class TurnRecord:
     def is_coalesced(self) -> bool:
         """Return whether the turn combines multiple source events."""
         return len(self.source_event_ids) > 1
+
+    def revision_watermark(self, source_event_id: str) -> SourceEventRevision | None:
+        """Keep stale callbacks stale after selecting an older surviving body."""
+        source = self.prompt_source_event_id(source_event_id)
+        revisions = [
+            (value.timestamp_ms, event_id)
+            for event_id, value in (self.revision_replay or {}).items()
+            if value.source_event_id == source
+        ]
+        selected = (self.source_event_revisions or {}).get(source_event_id)
+        if selected is not None:
+            revisions.append(selected)
+        return max(revisions, default=None)
+
+    @property
+    def invalidated_prompt_sources(self) -> frozenset[str]:
+        """Return slots whose deleted revision still lacks a canonical refill."""
+        prompts = self.source_event_prompts or {}
+        return frozenset(
+            value.source_event_id
+            for value in (self.revision_replay or {}).values()
+            if value.redacted
+            and value.source_event_id not in prompts
+            and value.source_event_id in self.replay_source_event_ids
+        )
 
     @property
     def indexed_event_ids(self) -> tuple[str, ...]:
@@ -269,6 +353,7 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     visible_echo_is_fallback: bool | None
     source_event_prompts: Mapping[str, str] | None
     source_event_revisions: Mapping[str, object] | None
+    revision_replay: Mapping[str, object] | None
     suppressed_source_event_revisions: Mapping[str, object] | None
     latest_edit_receipt_order: int | None
     user_stop_receipt_order: int | None
@@ -302,6 +387,7 @@ def canonicalize_turn_record(
         visible_echo_is_fallback=candidate.visible_echo_is_fallback,
         source_event_prompts=candidate.source_event_prompts,
         source_event_revisions=candidate.source_event_revisions,
+        revision_replay=candidate.revision_replay,
         suppressed_source_event_revisions=candidate.suppressed_source_event_revisions,
         latest_edit_receipt_order=candidate.latest_edit_receipt_order,
         user_stop_receipt_order=candidate.user_stop_receipt_order,
@@ -550,9 +636,14 @@ def same_turn_identity(first: TurnRecord, second: TurnRecord) -> bool:
 
 def merge_edit_facts(ledger: TurnRecord, recovery: TurnRecord) -> tuple[dict[str, str], dict[str, SourceEventRevision]]:
     """Merge source prompts and revisions by canonical Matrix revision."""
+    recovery = sanitize_revision_replay(recovery, authority=ledger)
     prompts = dict(ledger.source_event_prompts or {})
     prompts.update(recovery.source_event_prompts or {})
-    revisions = dict(recovery.source_event_revisions or {})
+    revisions = {
+        event_id: revision
+        for event_id, revision in (recovery.source_event_revisions or {}).items()
+        if recovery.prompt_source_event_id(event_id) in (recovery.source_event_prompts or {})
+    }
     ledger_prompts = ledger.source_event_prompts or {}
     for event_id, revision in (ledger.source_event_revisions or {}).items():
         prompt_event_id = ledger.prompt_source_event_id(event_id)
@@ -560,3 +651,138 @@ def merge_edit_facts(ledger: TurnRecord, recovery: TurnRecord) -> tuple[dict[str
             revisions[event_id] = revision
             prompts[prompt_event_id] = ledger_prompts[prompt_event_id]
     return prompts, revisions
+
+
+def completed_response_record(
+    record: TurnRecord,
+    response_event_id: str,
+    *,
+    consumed_revisions: tuple[SourceEventRevision, ...] | None = None,
+) -> TurnRecord:
+    """Attribute only this generated snapshot's selected revisions to its answer."""
+    selected = (
+        tuple((record.source_event_revisions or {}).values()) if consumed_revisions is None else consumed_revisions
+    )
+    record = sanitize_revision_replay(record)
+    replay = dict(record.revision_replay or {})
+    for _, revision_id in selected:
+        revision = replay.get(revision_id)
+        if revision is not None:
+            replay[revision_id] = replace(revision, response_event_id=response_event_id)
+    return canonicalize_turn_record(
+        record,
+        response_event_id=response_event_id,
+        completed=True,
+        revision_replay=replay,
+    )
+
+
+def merge_committed_response(
+    current: TurnRecord | None,
+    committed: TurnRecord,
+    *,
+    tombstoned_event_ids: typing.Collection[str] = (),
+) -> TurnRecord | None:
+    """Join delivered proof with current authority without inventing consumed revisions."""
+    if current is None:
+        return sanitize_revision_replay(committed, tombstoned_event_ids=tombstoned_event_ids)
+    if not same_turn_identity(current, committed) or any(
+        before is not None and after is not None and before != after
+        for before, after in (
+            (current.response_owner, committed.response_owner),
+            (current.requester_id, committed.requester_id),
+            (current.conversation_target, committed.conversation_target),
+            (current.history_scope, committed.history_scope),
+        )
+    ):
+        return None
+    proofs = {
+        event_id: revision.response_event_id
+        for event_id, revision in (committed.revision_replay or {}).items()
+        if revision.response_event_id is not None
+    }
+    committed = sanitize_revision_replay(
+        committed,
+        authority=current,
+        tombstoned_event_ids=tombstoned_event_ids,
+    )
+    replay = dict(committed.revision_replay or {})
+    for event_id, response_event_id in proofs.items():
+        replay[event_id] = replace(
+            replay[event_id],
+            response_event_id=replay[event_id].response_event_id or response_event_id,
+        )
+    prompts, revisions = merge_edit_facts(current, committed)
+    return sanitize_revision_replay(
+        canonicalize_turn_record(
+            current,
+            response_event_id=current.response_event_id or committed.response_event_id,
+            completed=True,
+            source_event_prompts=prompts,
+            source_event_revisions=revisions,
+            revision_replay=replay,
+            latest_edit_receipt_order=max(
+                current.latest_edit_receipt_order or 0,
+                committed.latest_edit_receipt_order or 0,
+            )
+            or None,
+            timestamp=max(current.timestamp, committed.timestamp),
+        ),
+        tombstoned_event_ids=tombstoned_event_ids,
+    )
+
+
+def sanitize_revision_replay(  # noqa: C901
+    candidate: TurnRecord,
+    *,
+    authority: TurnRecord | None = None,
+    tombstoned_event_ids: typing.Collection[str] = (),
+) -> TurnRecord:
+    """Join monotonic invalidation before removing any candidate provenance.
+
+    Acknowledgement is final for one physical revision: no future request may
+    consume it. Only ledger records carry cleanup state; model runs cannot
+    acknowledge debt or restore it after acknowledgement.
+    """
+    replay = dict(candidate.revision_replay or {})
+    for source, (timestamp, revision_id) in (candidate.source_event_revisions or {}).items():
+        prompt_source = candidate.prompt_source_event_id(source)
+        if revision_id != prompt_source:
+            replay.setdefault(revision_id, RevisionReplay(prompt_source, timestamp))
+    for event_id, old in (authority.revision_replay or {}).items() if authority else ():
+        new = replay.get(event_id)
+        if new is None or (old.redacted and not new.redacted):
+            replay[event_id] = old
+        elif old.redacted and new.redacted:
+            replay[event_id] = replace(
+                old,
+                cleanup_pending=old.cleanup_pending and new.cleanup_pending,
+                response_event_id=old.response_event_id or new.response_event_id,
+            )
+        elif old.response_event_id is not None and new.response_event_id is None:
+            replay[event_id] = replace(new, response_event_id=old.response_event_id)
+        if old.legacy_summary_provenance:
+            replay[event_id] = replace(replay[event_id], legacy_summary_provenance=True)
+    for event_id in tombstoned_event_ids:
+        value = replay.get(event_id)
+        if value is not None and not value.redacted:
+            replay[event_id] = replace(value, redacted=True, cleanup_pending=True)
+    prompts = dict(candidate.source_event_prompts or {})
+    revisions = dict(candidate.source_event_revisions or {})
+    invalid_sources = {value.source_event_id for value in replay.values() if value.redacted}
+    for source in invalid_sources:
+        selected = next(
+            (revision for key, revision in revisions.items() if candidate.prompt_source_event_id(key) == source),
+            None,
+        )
+        if selected is None or (selected[1] in replay and replay[selected[1]].redacted):
+            prompts.pop(source, None)
+            revisions = {
+                key: revision for key, revision in revisions.items() if candidate.prompt_source_event_id(key) != source
+            }
+    return canonicalize_turn_record(
+        candidate,
+        revision_replay=replay or None,
+        source_event_prompts=prompts or None,
+        source_event_revisions=revisions or None,
+    )

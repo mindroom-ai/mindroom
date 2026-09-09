@@ -50,6 +50,7 @@ import mindroom.matrix.rooms as matrix_rooms_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
+from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingDrainResult
 from mindroom.coalescing_batch import PendingEvent
@@ -1498,7 +1499,7 @@ class FakeOutbox:
         )
         self.acknowledged_terminal_turns.append((delivery_id, terminal_turn))
         self.acknowledged_projections.append(delivered_projections)
-        return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
+        return DeliveryAcknowledgement(settled_event_id=event_id, bound=True, terminal_turn=terminal_turn)
 
     async def unacknowledged_matrix_deliveries(
         self,
@@ -2914,6 +2915,12 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
     else:
         with ExitStack() as stack:
             if "enforce_turn_authorization" not in request.fixturenames:
+                stack.enter_context(
+                    patch(
+                        "mindroom.authorization._responder_reply_authorization",
+                        return_value=_ReplyAuthorizationDecision.ALLOWED,
+                    ),
+                )
                 stack.enter_context(patch("mindroom.authorization.is_sender_allowed_for_responder", return_value=True))
                 stack.enter_context(
                     patch(

@@ -439,6 +439,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_team_bot:localhost")
     edit_event = MagicMock()
     edit_event.event_id = "$edit"
+    edit_event.server_timestamp = 1000
     edit_event.sender = "@user:localhost"
     edit_event.source = {}
     event_info = MagicMock(original_event_id="$original", thread_id=None, thread_id_from_edit=None)
@@ -480,9 +481,10 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
             return_value=turn_record,
         ),
         patch.object(turn_store, "build_run_metadata", return_value={}),
+        patch.object(turn_store, "register_edit_revision", return_value=turn_record),
         patch.object(turn_store, "record_turn"),
         patch.object(turn_store, "remove_stale_runs_for_edit"),
-        patch.object(turn_store, "prepare_edit_response_source", return_value=False),
+        patch.object(turn_store, "prepare_edit_snapshot", return_value=False),
         patch.object(bot._ingress_hook_runner, "emit_message_received_hooks", new=AsyncMock(return_value=False)),
     ):
         await bot._edit_regenerator.handle_message_edit(

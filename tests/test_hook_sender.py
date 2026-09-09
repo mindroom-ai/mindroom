@@ -2167,6 +2167,12 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
     turn_store.record_turn = AsyncMock()
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     room.canonical_alias = None
+    bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
+    bot.client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@mindroom_router:localhost", None, None)],
+        room_id=room.room_id,
+    )
+    await bot._runtime_view.agent_reply_memberships.refresh(bot.config, bot.runtime_paths, bot.client)
     event = nio.RoomMessageText.from_dict(
         {
             "event_id": "$unauthorized-hook-dispatch",

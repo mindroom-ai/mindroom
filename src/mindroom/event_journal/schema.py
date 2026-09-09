@@ -423,6 +423,10 @@ _INDEXES = (
     CREATE INDEX IF NOT EXISTS approval_continuations_owner_scan
     ON approval_continuations (entity_name/*bytes*/, approval_id/*bytes*/)
     """,
+    """
+    CREATE INDEX IF NOT EXISTS turn_records_anchor
+    ON turn_records (agent_name, anchor_event_id)
+    """,
 )
 
 

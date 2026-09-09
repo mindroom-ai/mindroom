@@ -1595,7 +1595,7 @@ class TestRoutingRegression:
                 models={"default": ModelConfig(provider="test", id="test-model")},
                 router=RouterConfig(
                     model="default",
-                    access=ResponderAccessConfig(users=["@alice:localhost"]),
+                    access=ResponderAccessConfig(current_room_members=False, users=["@alice:localhost"]),
                 ),
             ),
             tmp_path,

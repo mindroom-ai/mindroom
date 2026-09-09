@@ -53,13 +53,21 @@ from .models import (
     IngestionConsumerBindingError,
     ResponseRecoveryState,
 )
-from .projection import discard_delivery_event, drop_refetched_message, install_refetched_revision, project
+from .projection import (
+    discard_delivery_event,
+    drop_refetched_message,
+    install_refetched_revision,
+    is_tombstoned,
+    project,
+    tombstoned_event_ids,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
+    from mindroom.turn_record import TurnRecord
 
     from .backend import Backend, Transaction
     from .interactive_questions import InteractiveSelection
@@ -217,18 +225,25 @@ class PrincipalStore:
     async def response_recovery_state(
         self,
         *,
-        source_event_ids: tuple[str, ...],
-        turn_id: str | None,
+        turn_record: TurnRecord,
+        agent_name: str,
+        redaction_target: Callable[[JournalEvent], str | None],
     ) -> ResponseRecoveryState:
         """Read one response's durable handoff through the reserved recovery lane."""
 
         def load(transaction: Transaction) -> ResponseRecoveryState:
+            source_event_ids = turn_record.source_event_ids
+            turn_id = turn_record.anchor_event_id
+            records = {
+                event_id: turn_records.load_record(transaction, agent_name, event_id)
+                for event_id in turn_record.indexed_event_ids
+            }
             pending = tuple(
                 journal.is_pending(transaction, self._principal_id, event_id) for event_id in source_event_ids
             )
             delivery = (
                 None
-                if any(pending) or turn_id is None
+                if turn_id is None
                 else outbox.load(
                     transaction,
                     self._principal_id,
@@ -238,10 +253,38 @@ class PrincipalStore:
             )
             return ResponseRecoveryState(
                 pending_sources=pending,
+                redacted_sources=tuple(
+                    not is_pending
+                    and journal.source_has_redaction_handoff(
+                        transaction,
+                        self._principal_id,
+                        event_id,
+                        turn_record,
+                        records.get(event_id),
+                        redaction_target,
+                    )
+                    for event_id, is_pending in zip(source_event_ids, pending, strict=True)
+                ),
+                turn_records=tuple(records.values()),
                 final_delivery=delivery,
                 sources_settled_by_departure=(
                     not any(pending)
                     and journal.sources_settled_by_departure(transaction, self._principal_id, source_event_ids)
+                ),
+                source_tombstones=tuple(
+                    (
+                        turn_record.conversation_target is not None
+                        and is_tombstoned(
+                            transaction,
+                            self._principal_id,
+                            room_id=turn_record.conversation_target.room_id,
+                            event_id=event_id,
+                        )
+                    )
+                    or (
+                        (current := records.get(event_id)) is not None and event_id in current.redacted_source_event_ids
+                    )
+                    for event_id in source_event_ids
                 ),
             )
 
@@ -416,6 +459,22 @@ class PrincipalStore:
                 transaction,
                 self._principal_id,
                 source_event_id=source_event_id,
+            ),
+        )
+
+    async def is_event_redacted(self, *, room_id: str, event_id: str) -> bool:
+        """Read exact projection tombstone authority for this principal."""
+        return await self._backend.read(
+            lambda transaction: is_tombstoned(transaction, self._principal_id, room_id, event_id),
+        )
+
+    async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
+        """Read recorded context tombstones in one transaction and one offload."""
+        return await self._backend.read(
+            lambda transaction: frozenset(
+                event_id
+                for batch in batched(event_ids, 256)
+                for event_id in tombstoned_event_ids(transaction, self._principal_id, room_id, batch)
             ),
         )
 
@@ -888,14 +947,11 @@ class PrincipalStore:
             # either. The row already names another event, and a terminal
             # record pointing somewhere else is the disagreement this whole
             # transaction exists to prevent.
-            if bound and terminal_turn is not None:
-                turn_records.upsert(
-                    transaction,
-                    terminal_turn.agent_name,
-                    index_event_ids=terminal_turn.index_event_ids,
-                    anchor_event_id=terminal_turn.anchor_event_id,
-                    record_json=terminal_turn.record_json,
-                )
+            committed_terminal = (
+                turn_records.commit_terminal(transaction, terminal_turn)
+                if bound and may_project and terminal_turn is not None
+                else None
+            )
             if bound and may_project:
                 for delivered_projection in delivered_projections:
                     project(
@@ -912,7 +968,7 @@ class PrincipalStore:
                     event_id=event_id,
                 )
             if bound:
-                return DeliveryAcknowledgement(settled_event_id=event_id, bound=True)
+                return DeliveryAcknowledgement(settled_event_id=event_id, bound=True, terminal_turn=committed_terminal)
             # Lost the row. Whatever is on it now is the answer this delivery
             # resolves to, and the caller has to be told that rather than its
             # own event id -- everything downstream records what `flush`
@@ -948,6 +1004,45 @@ class PrincipalStore:
                 event_type=event_type,
                 after=after,
             ),
+        )
+
+    async def initial_response_delivery_id(self, event_id: str) -> str | None:
+        """Resolve this principal's exact INITIAL ACK, including retired cleanup proof."""
+        return await self._backend.read(
+            lambda transaction: outbox.initial_response_delivery_id(transaction, self._principal_id, event_id),
+        )
+
+    async def response_delivery_id(self, *, room_id: str, event_id: str) -> str | None:
+        """Resolve a visible response to its current exact delivery owner."""
+        return await self._backend.read(
+            lambda transaction: outbox.response_delivery_id(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                event_id=event_id,
+            ),
+        )
+
+    async def deleted_initial_deliveries(
+        self,
+        *,
+        agent_name: str,
+        after: tuple[int, str] | None = None,
+    ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
+        """Discover exact deleted-source INITIAL debt, including acknowledged sends."""
+        return await self._backend.read(
+            lambda transaction: outbox.deleted_initials(
+                transaction,
+                self._principal_id,
+                agent_name=agent_name,
+                after=after,
+            ),
+        )
+
+    async def retire_deleted_initial(self, *, delivery_id: str) -> None:
+        """Fence an INITIAL whose visible cleanup and record detachment finished."""
+        await self._backend.write(
+            lambda transaction: outbox.retire_deleted_initial(transaction, self._principal_id, delivery_id),
         )
 
     async def reserve_approval_card_deliveries(
@@ -1719,10 +1814,10 @@ class TurnRecordStore:
         index_event_ids: Sequence[str],
         anchor_event_id: str,
         record_json: str,
-    ) -> None:
-        """Store one record under every event that indexes it."""
-        await self._backend.write(
-            lambda transaction: turn_records.upsert(
+    ) -> str | None:
+        """Store a record and return its committed state, or reject a changed owner."""
+        return await self._backend.write(
+            lambda transaction: turn_records.write_record(
                 transaction,
                 self._agent_name,
                 index_event_ids=index_event_ids,

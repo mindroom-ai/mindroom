@@ -2653,7 +2653,7 @@ class TestAgentBot(AgentBotTestBase):
                 conversation_target=target,
             ),
         )
-        assert not await bot._turn_store.prepare_edit_response_source(
+        assert not await bot._turn_store._prepare_edit_response_source(
             target=target,
             source_event_ids=("$source",),
             response_event_id="$response",
@@ -2743,6 +2743,7 @@ class TestAgentBot(AgentBotTestBase):
             stop_receipt_order: int,
             *,
             delivery_settled: bool = False,
+            deleted_turn_id: str | None = None,
         ) -> TurnRecord:
             nonlocal alias_claimed
             if not alias_claimed:
@@ -2758,6 +2759,7 @@ class TestAgentBot(AgentBotTestBase):
                 response_event_id,
                 stop_receipt_order,
                 delivery_settled=delivery_settled,
+                deleted_turn_id=deleted_turn_id,
             )
 
         on_current_stop_finalized = AsyncMock()

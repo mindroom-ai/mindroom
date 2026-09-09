@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from enum import Enum
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +35,21 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class _ReplyAuthorizationDecision(Enum):
+    """Separate a proven denial from temporarily unresolved membership."""
+
+    ALLOWED = "allowed"
+    DENIED = "denied"
+    PENDING = "pending"
+
+
+class ReplyMembershipPendingError(RuntimeError):
+    """The exact journal source must retry after authoritative membership refresh."""
+
+    def __init__(self) -> None:
+        super().__init__("Reply authorization awaits authoritative room membership")
+
+
 def is_sender_allowed_for_responder(
     sender_id: str,
     entity_name: str,
@@ -40,8 +57,32 @@ def is_sender_allowed_for_responder(
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
+    *,
+    require_resolved_membership: bool = False,
 ) -> bool:
-    """Apply the complete membership policy for one responder."""
+    """Apply the complete membership policy, failing closed on uncertainty."""
+    decision = _responder_reply_authorization(
+        sender_id,
+        entity_name,
+        room_id,
+        config,
+        runtime_paths,
+        membership_index,
+    )
+    if require_resolved_membership and decision is _ReplyAuthorizationDecision.PENDING:
+        raise ReplyMembershipPendingError
+    return decision is _ReplyAuthorizationDecision.ALLOWED
+
+
+def _responder_reply_authorization(
+    sender_id: str,
+    entity_name: str,
+    room_id: str | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+) -> _ReplyAuthorizationDecision:
+    """Allow any proven grant before considering unresolved relevant membership."""
     allowed = sender_id in _current_internal_sender_ids_for_auth(config, runtime_paths)
     resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     access = resolve_responder_access(config, entity_name)
@@ -52,7 +93,7 @@ def is_sender_allowed_for_responder(
         and access.current_room_members
         and membership_index.is_current_room_member(resolved_sender, room_id, config, runtime_paths)
     )
-    return allowed or (
+    allowed = allowed or (
         bool(access.members_of_rooms)
         and membership_index.is_allowed(
             resolved_sender,
@@ -61,6 +102,15 @@ def is_sender_allowed_for_responder(
             runtime_paths,
         )
     )
+    if allowed:
+        return _ReplyAuthorizationDecision.ALLOWED
+    if membership_index.grants_pending(
+        config,
+        joined_rooms=access.members_of_rooms,
+        current_room_id=room_id if access.current_room_members else None,
+    ):
+        return _ReplyAuthorizationDecision.PENDING
+    return _ReplyAuthorizationDecision.DENIED
 
 
 def is_sender_allowed_for_agent_reply_in_room(
@@ -70,6 +120,8 @@ def is_sender_allowed_for_agent_reply_in_room(
     room_id: str,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
+    *,
+    require_resolved_membership: bool = False,
 ) -> bool:
     """Require both current-room access and entity reply access."""
     return is_sender_allowed_for_entity_replies_in_room(
@@ -79,6 +131,7 @@ def is_sender_allowed_for_agent_reply_in_room(
         room_id,
         runtime_paths,
         membership_index,
+        require_resolved_membership=require_resolved_membership,
     )
 
 
@@ -89,10 +142,12 @@ def is_sender_allowed_for_entity_replies_in_room(
     room_id: str,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
+    *,
+    require_resolved_membership: bool = False,
 ) -> bool:
     """Require membership access for every execution entity."""
-    return all(
-        is_sender_allowed_for_responder(
+    decisions = {
+        _responder_reply_authorization(
             sender_id,
             entity_name,
             room_id,
@@ -101,7 +156,14 @@ def is_sender_allowed_for_entity_replies_in_room(
             membership_index,
         )
         for entity_name in entity_names
-    )
+    }
+    if _ReplyAuthorizationDecision.DENIED in decisions:
+        return False
+    if _ReplyAuthorizationDecision.PENDING in decisions:
+        if require_resolved_membership:
+            raise ReplyMembershipPendingError
+        return False
+    return True
 
 
 def _current_internal_sender_ids_for_auth(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
@@ -272,6 +334,47 @@ async def _get_available_responders_for_sender_authoritative(
     return _get_available_responders_for_sender(room, sender_id, config, runtime_paths, membership_index)
 
 
+@dataclass(frozen=True)
+class ResponderCandidatePermissions:
+    """Separate proven candidates from unresolved grants at durable planning."""
+
+    allowed: list[MatrixID]
+    pending: list[MatrixID]
+
+
+def classify_responder_candidates_from_cached_room(
+    room: nio.MatrixRoom,
+    sender_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+) -> ResponderCandidatePermissions:
+    """Preserve membership uncertainty without deciding which candidates matter."""
+    responders = _configured_responder_entities_for_room(room, config, runtime_paths)
+    if responders is None:
+        responders = get_available_responders_in_room(room, config, runtime_paths)
+    registry = entity_identity_registry(config, runtime_paths)
+    allowed: list[MatrixID] = []
+    pending: list[MatrixID] = []
+    for responder in responders:
+        name = registry.current_entity_name_for_user_id(responder.full_id, include_router=False)
+        if name is None:
+            continue
+        decision = _responder_reply_authorization(
+            sender_id,
+            name,
+            room.room_id,
+            config,
+            runtime_paths,
+            membership_index,
+        )
+        if decision is _ReplyAuthorizationDecision.ALLOWED:
+            allowed.append(responder)
+        elif decision is _ReplyAuthorizationDecision.PENDING:
+            pending.append(responder)
+    return ResponderCandidatePermissions(allowed, pending)
+
+
 def responder_candidate_entities_from_cached_room(
     room: nio.MatrixRoom,
     sender_id: str,
@@ -280,43 +383,31 @@ def responder_candidate_entities_from_cached_room(
     membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
     """Return sender-visible responder candidates without refreshing Matrix membership."""
-    configured_entities = _configured_responder_candidates_for_room(
+    return classify_responder_candidates_from_cached_room(
         room,
         sender_id,
         config,
         runtime_paths,
         membership_index,
-    )
-    if configured_entities is not None:
-        return configured_entities
-    return _get_available_responders_for_sender(room, sender_id, config, runtime_paths, membership_index)
+    ).allowed
 
 
-def _configured_responder_candidates_for_room(
+def _configured_responder_entities_for_room(
     room: nio.MatrixRoom,
-    sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID] | None:
-    """Return configured-room responder candidates, or None for ad-hoc rooms."""
+    """Return configured-room responders before permissions, or None for ad-hoc rooms."""
     room_alias = room.canonical_alias
     room_aliases = (room_alias,) if isinstance(room_alias, str) and room_alias else ()
-    configured_entities = configured_routable_entity_ids_for_room(
-        config,
-        room.room_id,
-        runtime_paths,
-        room_aliases=room_aliases,
-    )
-    if not configured_entities:
-        return None
-    return filter_responders_by_sender_permissions(
-        configured_entities,
-        sender_id,
-        config,
-        runtime_paths,
-        membership_index,
-        room.room_id,
+    return (
+        configured_routable_entity_ids_for_room(
+            config,
+            room.room_id,
+            runtime_paths,
+            room_aliases=room_aliases,
+        )
+        or None
     )
 
 
@@ -329,15 +420,16 @@ async def responder_candidate_entities_with_membership_refresh(
     membership_index: AgentReplyMembershipIndex,
 ) -> list[MatrixID]:
     """Return candidates, refreshing unsynced ad-hoc room membership when possible."""
-    configured_entities = _configured_responder_candidates_for_room(
-        room,
-        sender_id,
-        config,
-        runtime_paths,
-        membership_index,
-    )
+    configured_entities = _configured_responder_entities_for_room(room, config, runtime_paths)
     if configured_entities is not None:
-        return configured_entities
+        return filter_responders_by_sender_permissions(
+            configured_entities,
+            sender_id,
+            config,
+            runtime_paths,
+            membership_index,
+            room.room_id,
+        )
     return await _get_available_responders_for_sender_authoritative(
         client,
         room,

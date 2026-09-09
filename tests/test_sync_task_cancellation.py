@@ -35,6 +35,7 @@ from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.hooks import HookRegistry, HookRegistryState
+from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.health import (
     get_matrix_sync_health_snapshot,
@@ -665,6 +666,11 @@ async def test_process_shutdown_signals_responses_before_coalescing_drain() -> N
         return drain_result
 
     bot = object.__new__(AgentBot)
+    bot._journal_dispatcher = MagicMock(
+        spec=JournalDispatcher,
+        wait_stopped=AsyncMock(return_value=True),
+        pending_task_count=0,
+    )
     bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
     bot.agent_user = AgentMatrixUser(
         agent_name="busy",
@@ -733,6 +739,11 @@ async def test_process_shutdown_fences_matrix_transport_before_response_drain() 
         return drain_result
 
     bot = object.__new__(AgentBot)
+    bot._journal_dispatcher = MagicMock(
+        spec=JournalDispatcher,
+        wait_stopped=AsyncMock(return_value=True),
+        pending_task_count=0,
+    )
     bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
     bot.agent_user = AgentMatrixUser(
         agent_name="busy",
@@ -797,6 +808,11 @@ async def test_process_shutdown_preparation_does_not_wait_for_transport_close() 
         return drain_result
 
     bot = object.__new__(AgentBot)
+    bot._journal_dispatcher = MagicMock(
+        spec=JournalDispatcher,
+        wait_stopped=AsyncMock(return_value=True),
+        pending_task_count=0,
+    )
     bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
     bot.agent_user = AgentMatrixUser(
         agent_name="busy",
@@ -857,6 +873,11 @@ async def test_router_process_shutdown_fences_transport_before_first_await() -> 
         await release_router_cleanup.wait()
 
     bot = object.__new__(AgentBot)
+    bot._journal_dispatcher = MagicMock(
+        spec=JournalDispatcher,
+        wait_stopped=AsyncMock(return_value=True),
+        pending_task_count=0,
+    )
     bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
     bot.agent_user = AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
@@ -1990,6 +2011,7 @@ async def test_stop_does_not_close_runtime_resources_under_live_response_owner()
     bot._call_manager = None
     bot._response_runner = MagicMock(pending_inbox_response_count=1)
     bot.prepare_for_sync_shutdown = AsyncMock(side_effect=shutdown_failure)
+    bot.begin_process_shutdown = MagicMock()
     bot._journal_dispatcher = journal_dispatcher
     bot._ingestion_session = ingestion_session
     bot._own_journal = journal
@@ -2033,6 +2055,7 @@ async def test_orderly_stop_defers_saturated_response_timeouts_without_traceback
         bot._call_manager = None
         bot._response_runner = MagicMock(pending_inbox_response_count=index % 3 + 1)
         bot.prepare_for_sync_shutdown = AsyncMock(side_effect=failure)
+        bot.begin_process_shutdown = MagicMock()
         bot._journal_dispatcher = MagicMock(stop=AsyncMock())
         bot._ingestion_session = MagicMock(close=AsyncMock())
         bot._own_journal = MagicMock(close=AsyncMock())
@@ -3216,6 +3239,7 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         mock_bot2.running = True
 
         for mock_bot in (mock_bot1, mock_bot2):
+            mock_bot.begin_process_shutdown = MagicMock()
             mock_bot.pending_response_owner_count = 0
             mock_bot.pending_response_phase_counts = {}
             mock_bot.deferred_stop_phase = None
@@ -3481,7 +3505,7 @@ async def test_deferred_agent_stop_exposes_each_real_resource_release_phase() ->
         return gated
 
     async def finish_recovery(*, timeout_seconds: float) -> bool:
-        assert timeout_seconds == 0.1
+        assert 0 < timeout_seconds <= 0.1
         await gated_call("recovery_proof")()
         return True
 
@@ -3493,6 +3517,7 @@ async def test_deferred_agent_stop_exposes_each_real_resource_release_phase() ->
     runner.finish_process_shutdown_recovery = AsyncMock(side_effect=finish_recovery)
     dispatcher = MagicMock()
     dispatcher.stop = AsyncMock(side_effect=gated_call("journal_dispatcher"))
+    dispatcher.wait_stopped = AsyncMock(return_value=True)
     session = MagicMock()
     session.close = AsyncMock(side_effect=gated_call("ingestion_session"))
     journal = MagicMock()
@@ -3580,6 +3605,11 @@ async def test_deferred_agent_stop_clears_phase_after_failed_recovery_proof() ->
     runner = MagicMock()
     runner.finish_process_shutdown_recovery = AsyncMock(return_value=False)
     bot = object.__new__(AgentBot)
+    bot._journal_dispatcher = MagicMock(
+        spec=JournalDispatcher,
+        wait_stopped=AsyncMock(return_value=True),
+        pending_task_count=0,
+    )
     bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
     bot._deferred_stop_required = True
     bot._response_runner = runner
@@ -3911,6 +3941,11 @@ async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -
     await proof_cancelled.wait()
 
     bot = object.__new__(AgentBot)
+    bot._journal_dispatcher = MagicMock(
+        spec=JournalDispatcher,
+        wait_stopped=AsyncMock(return_value=True),
+        pending_task_count=0,
+    )
     bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
     bot._deferred_stop_required = True
     bot._response_runner = runner
@@ -3980,6 +4015,11 @@ async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None: 
     await first_proof_cancelled.wait()
 
     bot = object.__new__(AgentBot)
+    bot._journal_dispatcher = MagicMock(
+        spec=JournalDispatcher,
+        wait_stopped=AsyncMock(return_value=True),
+        pending_task_count=0,
+    )
     bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
     bot._deferred_stop_required = True
     bot._response_runner = runner
@@ -4115,6 +4155,11 @@ async def test_deferred_agent_stop_deadline_keeps_resources_under_live_proof() -
         )
 
     bot = object.__new__(AgentBot)
+    bot._journal_dispatcher = MagicMock(
+        spec=JournalDispatcher,
+        wait_stopped=AsyncMock(return_value=True),
+        pending_task_count=0,
+    )
     bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
     bot._deferred_stop_required = True
     bot._response_runner = runner

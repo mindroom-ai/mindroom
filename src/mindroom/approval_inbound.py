@@ -93,6 +93,7 @@ async def handle_tool_approval_action(
             config,
             runtime_paths,
             membership_index,
+            require_resolved_membership=True,
         )
         if not allowed:
             logger.debug(

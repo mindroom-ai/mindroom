@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
@@ -16,11 +16,11 @@ from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
-from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError, canonicalize_turn_record
 from mindroom.turn_store import record_deferred_outcome_response, record_user_stop_terminal
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     import nio
 
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.handled_turns import SourceEventRevision, TurnRecord
     from mindroom.hooks import MessageEnvelope
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
     from mindroom.sync_restart_retry import InterruptedTurnRooms
@@ -84,6 +85,7 @@ class _Mailbox:
     pending: dict[str, _Edit] = field(default_factory=dict)
     reserved_revisions: dict[str, SourceEventRevision] = field(default_factory=dict)
     participants: int = 0
+    rebuild_requested: bool = False
 
 
 @dataclass
@@ -190,7 +192,14 @@ class EditRegenerator:
         receipt_order = await self.deps.receipt_order()
         revision = (event.server_timestamp, event.event_id)
         committed = (turn_record.source_event_revisions or {}).get(original_event_id)
-        if committed is not None and revision < committed:
+        watermark = turn_record.revision_watermark(original_event_id)
+        if watermark is not None and revision < watermark:
+            return
+        registered = await self.deps.turn_store.register_edit_revision(original_event_id, revision)
+        if registered is None:
+            return
+        replay = (registered.revision_replay or {}).get(revision[1])
+        if replay is not None and replay.redacted:
             return
 
         edited_content, _ = await extract_visible_edit_body(
@@ -246,7 +255,7 @@ class EditRegenerator:
             if mailbox.participants == 0 and self._mailboxes.get(key) is mailbox:
                 self._mailboxes.pop(key)
 
-    async def _build_request(  # noqa: C901
+    async def _build_request(  # noqa: C901, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
         mailbox: _Mailbox,
@@ -274,8 +283,12 @@ class EditRegenerator:
         retrying = True
         for source_event_id, edit in mailbox.pending.items():
             committed = revisions.get(source_event_id)
-            if source_event_id in record.redacted_source_event_ids or (
-                committed is not None and edit.revision < committed
+            watermark = record.revision_watermark(source_event_id)
+            replay = (record.revision_replay or {}).get(edit.revision[1])
+            if (
+                source_event_id in record.redacted_source_event_ids
+                or (watermark is not None and edit.revision < watermark)
+                or (replay is not None and replay.redacted)
             ):
                 applied[source_event_id] = edit.revision
                 continue
@@ -298,7 +311,19 @@ class EditRegenerator:
                 await self.deps.turn_store.record_turn(record)
             return None, None, applied
 
+        record = await self._refill_invalidated_prompts(record, active)
+        prompt_map = {**(record.source_event_prompts or {}), **prompt_map}
+        revisions = {**(record.source_event_revisions or {}), **revisions}
         driving_edit = max(active.values(), key=lambda edit: edit.revision)
+        if any(
+            self.deps.turn_store.is_revision_redacted(message.latest_event_id)
+            for message in driving_edit.context.thread_history or ()
+        ):
+            target = record.conversation_target
+            assert target is not None
+            if target.resolved_thread_id is not None:
+                history = await self.deps.resolver.fetch_thread_history(target.room_id, target.resolved_thread_id)
+                driving_edit = replace(driving_edit, context=replace(driving_edit.context, thread_history=history))
         active_receipt_order = max(edit.receipt_order for edit in active.values())
         retry_source_event_id = record.prompt_source_event_id(driving_edit.original_event_id) if retrying else None
         if record.is_coalesced:
@@ -324,6 +349,7 @@ class EditRegenerator:
             source_event_prompts=prompt_map,
             source_event_revisions=revisions,
             suppressed_source_event_revisions=suppressed_revisions,
+            latest_edit_receipt_order=active_receipt_order,
         )
         target = record.conversation_target
         assert target is not None
@@ -344,6 +370,26 @@ class EditRegenerator:
             applied=applied,
         )
 
+        stale_runs_removed = False
+
+        async def prepare_snapshot(history: Sequence[ResolvedVisibleMessage]) -> bool | EditPreparation:
+            nonlocal stale_runs_removed
+            result = await self.deps.turn_store.prepare_edit_snapshot(
+                record=record,
+                driving_revision_id=driving_edit.revision[1],
+                edit_receipt_order=active_receipt_order,
+                consumed_revision_ids=tuple(message.latest_event_id for message in history),
+                thread_history=history,
+            )
+            mailbox.rebuild_requested = result is EditPreparation.REBUILD
+            if result is False and not stale_runs_removed:
+                self.deps.turn_store.remove_stale_runs_for_edit(
+                    turn_record=record,
+                    requester_user_id=requester_id,
+                )
+                stale_runs_removed = True
+            return result
+
         return (
             ResponseRequest(
                 thread_history=driving_edit.context.thread_history,
@@ -356,18 +402,8 @@ class EditRegenerator:
                 matrix_run_metadata=metadata,
                 current_timestamp_ms=normalize_timestamp_ms(driving_edit.revision[0]),
                 current_prompt_is_structured=structured,
-                on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
-                    turn_record=record,
-                    requester_user_id=requester_id,
-                ),
-                prepare_source_turn=lambda: self.deps.turn_store.prepare_edit_response_source(
-                    target=target,
-                    source_event_ids=tuple(
-                        dict.fromkeys((*record.replay_source_event_ids, driving_edit.original_event_id)),
-                    ),
-                    response_event_id=record.response_event_id,
-                    edit_receipt_order=active_receipt_order,
-                ),
+                prepare_source_turn=prepare_snapshot,
+                prepared_edit_record=record,
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=record_deferred_outcome,
@@ -376,6 +412,36 @@ class EditRegenerator:
             record,
             applied,
         )
+
+    async def _refill_invalidated_prompts(self, record: TurnRecord, active: dict[str, _Edit]) -> TurnRecord:
+        """Refill invalidated siblings while pending edits supply their own fresh bodies."""
+        while True:
+            sources = record.invalidated_prompt_sources.difference(
+                record.prompt_source_event_id(source) for source in active
+            )
+            if not sources:
+                return record
+            assert record.conversation_target is not None
+            source = next(iter(sources))
+            requester = record.requester_id_for_source(source)
+            if requester is None:
+                msg = "Cannot prove the requester for a canonical edit refill"
+                raise ValueError(msg)
+            message = await self.deps.resolver.resolve_exact_source(
+                target=record.conversation_target,
+                source_event_id=source,
+                requester_id=requester,
+            )
+            if message is None:
+                updated = await self.deps.turn_store.mark_source_redacted(source)
+                assert updated is not None
+                record = updated
+                continue
+            updated = await self.deps.turn_store.refill_source_prompt(record, source, message)
+            if updated == record and source in updated.invalidated_prompt_sources:
+                msg = "Canonical source revision changed during strict refill"
+                raise RevisionSnapshotChangedError(msg)
+            record = updated
 
     def _settlement_callbacks(
         self,
@@ -461,15 +527,23 @@ class EditRegenerator:
                     return
                 continue
             regenerated_event_id = await self.deps.generate_response(request)
+            if mailbox.rebuild_requested:
+                mailbox.rebuild_requested = False
+                continue
             if regenerated_event_id is not None:
                 if not applied:
                     return
-                await self.deps.turn_store.record_responded_turn(
-                    canonicalize_turn_record(record, response_event_id=regenerated_event_id),
-                )
                 self._discard(mailbox, applied)
                 continue
             fresh_record = self.deps.turn_store.get_turn_record(latest.original_event_id)
+            deleted_revisions = {
+                source: revision
+                for source, revision in applied.items()
+                if self.deps.turn_store.is_revision_redacted(revision[1])
+            }
+            if deleted_revisions:
+                self._discard(mailbox, deleted_revisions)
+                continue
             if fresh_record is not None and fresh_record.redacted_source_event_ids != record.redacted_source_event_ids:
                 self._discard(
                     mailbox,

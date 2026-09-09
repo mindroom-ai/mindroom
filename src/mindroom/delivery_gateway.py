@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from html import escape as html_escape
@@ -26,6 +27,7 @@ from mindroom.event_journal import (
     replacement_target,
     thread_root,
 )
+from mindroom.event_journal.models import UnreadableMatrixDelivery
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.hooks import (
@@ -92,6 +94,7 @@ from mindroom.streaming import (
     send_streaming_response,
     strip_matching_visible_tool_markers,
 )
+from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -108,6 +111,7 @@ if TYPE_CHECKING:
     )
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
+    from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
     from mindroom.streaming import StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
@@ -338,6 +342,7 @@ class FinalDeliveryRequest:  # noqa: D101
     existing_event_is_placeholder: bool = False
     skip_mentions: bool = False
     defer_source_handoff: bool = False
+    prepared_edit_record: TurnRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -423,6 +428,7 @@ class StreamingDeliveryRequest:
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
+    completed_edit_record: Callable[[], TurnRecord | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -456,7 +462,8 @@ class DeliveryGatewayDeps:
     # wrote is re-asserted through the ledger's own write ordering. Skipping
     # that leaves the row open to a mutation that derived before the commit and
     # lands after it, which erases the event the answer is stored under.
-    terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None
+    terminal_turn_committed: Callable[[str, str, TurnRecord | None], Awaitable[None]] | None = None
+    response_recovery: ResponseDeliveryRecovery | None = None
 
 
 _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
@@ -487,6 +494,7 @@ class FinalizeStreamedResponseRequest:
     extra_content: dict[str, Any] | None
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
+    prepared_edit_record: TurnRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -643,7 +651,40 @@ class DeliveryGateway:
         self,
         request: _PlaceholderFailureUpdateRequest,
     ) -> FinalDeliveryOutcome:
-        """Best-effort terminal error edit for a visible placeholder."""
+        """Order fallback eligibility and transport with FINAL and INITIAL cleanup."""
+        turn_id = request.identity.response_envelope.source_event_id
+        worker = self._recovery_worker()
+        async with worker._delivery_lock(turn_id):
+            final = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.FINAL)
+            if final is not None and (
+                final.acknowledged_event_id is not None or not (final.retired or final.permanently_failed)
+            ):
+                return FinalDeliveryOutcome(
+                    terminal_status="suspended",
+                    event_id=None,
+                    failure_reason=request.failure_reason,
+                )
+            recovery = self.deps.response_recovery
+            if recovery is not None:
+                initial = await recovery.principal.load_matrix_delivery(
+                    delivery_id=turn_id,
+                    stage=DeliveryStage.INITIAL,
+                )
+                if initial is not None and recovery.deleted(await recovery.state(initial)):
+                    await recovery.cleanup(worker, turn_id)
+                    return FinalDeliveryOutcome(
+                        terminal_status="cancelled",
+                        event_id=None,
+                        suppressed=True,
+                        failure_reason="source_deleted",
+                    )
+            return await self._edit_placeholder_delivery_failure(request)
+
+    async def _edit_placeholder_delivery_failure(
+        self,
+        request: _PlaceholderFailureUpdateRequest,
+    ) -> FinalDeliveryOutcome:
+        """Apply the eligible direct fallback while its delivery lock remains held."""
         failure_extra_content = dict(request.extra_content or {})
         failure_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_ERROR
         edited = await self._visible_notice_is_current(
@@ -933,21 +974,127 @@ class DeliveryGateway:
             resolve_delivered=self._delivered_under_a_previous_device,
             handoff=handoff,
             terminal_turn_for=self._terminal_turn_write,
-            terminal_turn_committed=self.deps.terminal_turn_committed,
+            terminal_turn_committed=self._publish_terminal_turn,
             process_shutdown_requested=current_task_is_process_shutdown,
             delivery_locks=self._delivery_turn_locks,
+            cleanup_deleted_initial=(
+                self.deps.response_recovery.cleanup if self.deps.response_recovery is not None else None
+            ),
         )
 
-    def _terminal_turn_write(self, turn_id: str, event_id: str) -> TerminalTurnWrite | None:
+    @asynccontextmanager
+    async def response_recovery_scope(self, room_id: str, event_id: str) -> AsyncIterator[bool]:
+        """Keep startup decision and visible effect under normal FINAL delivery ownership."""
+        recovery = self.deps.response_recovery
+        if recovery is None:
+            yield False
+            return
+        turn_id = await recovery.principal.response_delivery_id(room_id=room_id, event_id=event_id)
+        if turn_id is None:
+            yield False
+            return
+        worker = self._recovery_worker()
+        async with worker._delivery_lock(turn_id):
+            initial = await recovery.principal.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.INITIAL)
+            if (
+                initial is None
+                or initial.retired
+                or not await recovery.principal.owns_matrix_response(
+                    room_id=room_id,
+                    event_id=event_id,
+                )
+            ):
+                yield False
+                return
+            await recovery.cleanup(worker, turn_id)
+            yield await recovery.permits_continuation(initial)
+
+    def _recovery_worker(self) -> MatrixDeliveryWorker:
+        """Use the same writer and exact locks for recovery and normal delivery."""
+
+        async def send(claimed: MatrixDelivery) -> str:
+            delivered = await self._send_claimed(claimed, retry_sync_recovery=True)
+            return delivered.event_id
+
+        return self._response_delivery(send, handoff=None)
+
+    @asynccontextmanager
+    async def supersession_scope(self, turn_id: str, room_id: str) -> AsyncIterator[bool]:
+        """Keep existing INITIAL debt with canonical replay until it reaches FINAL."""
+        recovery = self.deps.response_recovery
+        if recovery is None:
+            yield True
+            return
+        async with self._recovery_worker()._delivery_lock(turn_id):
+            initial = await recovery.principal.load_matrix_delivery(
+                delivery_id=turn_id,
+                stage=DeliveryStage.INITIAL,
+            )
+            yield (
+                initial is None
+                or initial.room_id != room_id
+                or initial.retired
+                or initial.permanently_failed
+                or initial.membership_epoch != await recovery.principal.membership_epoch(room_id)
+                or await recovery.permits_supersession(initial)
+            )
+
+    async def cleanup_deleted_response(self, turn_id: str) -> bool:
+        """Suppress deleted-source notices while retaining retryable INITIAL cleanup debt."""
+        recovery = self.deps.response_recovery
+        if recovery is None:
+            return False
+        worker = self._recovery_worker()
+        async with worker._delivery_lock(turn_id):
+            initial = await recovery.principal.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.INITIAL)
+            if initial is None:
+                return recovery.turn_store().is_revision_redacted(turn_id)
+            if not recovery.deleted(await recovery.state(initial)):
+                return False
+            try:
+                await recovery.cleanup(worker, turn_id)
+            except Exception:
+                self.deps.logger.exception("Deleted response cleanup remains owed", delivery_id=turn_id)
+            return True
+
+    async def _publish_terminal_turn(self, turn_id: str, event_id: str, committed: TerminalTurnWrite | None) -> None:
+        """Publish the transaction's exact proof through the ledger's conflict owner."""
+        if self.deps.terminal_turn_committed is None:
+            return
+        record = (
+            None
+            if committed is None
+            else TurnRecordCodec._from_ledger_record(
+                committed.index_event_ids[0],
+                json.loads(committed.record_json),
+            )
+        )
+        await self.deps.terminal_turn_committed(turn_id, event_id, record)
+
+    def _terminal_turn_write(self, delivery: MatrixDelivery, event_id: str) -> TerminalTurnWrite | None:
         """Turn the terminal record for one delivered answer into a journal row.
 
         The turn store produces the record and stops at its own boundary; this
         layer already owns the journal's types, so the conversion belongs here
         rather than reaching across.
         """
-        if self.deps.terminal_turn_for is None:
-            return None
-        record = self.deps.terminal_turn_for(turn_id, event_id)
+        prepared = (delivery.result or {}).get("prepared_edit_record")
+        if prepared is not None:
+            assert isinstance(prepared, dict), "Corrupt prepared edit record"
+            prepared = cast("dict[str, object]", prepared)
+            sources = prepared.get("source_event_ids")
+            assert isinstance(sources, list), "Corrupt prepared edit sources"
+            assert sources, "Empty prepared edit sources"
+            assert isinstance(sources[0], str), "Corrupt prepared edit source"
+            record = TurnRecordCodec._from_ledger_record(sources[0], prepared)
+            assert record is not None, "Corrupt prepared edit record"
+            record = canonicalize_turn_record(record, response_event_id=event_id, completed=True)
+        else:
+            record = (
+                None
+                if self.deps.terminal_turn_for is None
+                else self.deps.terminal_turn_for(delivery.delivery_id, event_id)
+            )
         if record is None or record.anchor_event_id is None:
             return None
         return TerminalTurnWrite(
@@ -1034,12 +1181,30 @@ class DeliveryGateway:
         the returned outcome, which is how the caller knows to come back.
         Nothing escapes here.
         """
-
-        async def send(claimed: MatrixDelivery) -> str:
-            delivered = await self._send_claimed(claimed, retry_sync_recovery=True)
-            return delivered.event_id
-
-        return await self._response_delivery(send, handoff=None).recover()
+        worker = self._recovery_worker()
+        failed: set[tuple[str, DeliveryStage]] = set()
+        recovery = self.deps.response_recovery
+        if recovery is not None:
+            cursor: tuple[int, str] | None = None
+            while batch := await recovery.principal.deleted_initial_deliveries(
+                agent_name=self.deps.agent_name,
+                after=cursor,
+            ):
+                cursor = (batch[-1].created_at_ns, batch[-1].delivery_id)
+                for initial in batch:
+                    if isinstance(initial, UnreadableMatrixDelivery):
+                        failed.add((initial.delivery_id, DeliveryStage.INITIAL))
+                        self.deps.logger.error("Deleted INITIAL is unreadable", delivery_id=initial.delivery_id)
+                        continue
+                    try:
+                        async with worker._delivery_lock(initial.delivery_id):
+                            await recovery.cleanup(worker, initial.delivery_id)
+                    except Exception:
+                        failed.add((initial.delivery_id, DeliveryStage.INITIAL))
+                        self.deps.logger.exception("Deleted INITIAL cleanup failed", delivery_id=initial.delivery_id)
+        outcome = await worker.recover()
+        failed.update(outcome.failed_deliveries)
+        return RecoveryOutcome(recovered=outcome.recovered, failed=len(failed), failed_deliveries=frozenset(failed))
 
     async def _send_content(
         self,
@@ -1493,6 +1658,8 @@ class DeliveryGateway:
                 ),
             )
         delivery_result: dict[str, object] | None = None
+        if request.prepared_edit_record is not None:
+            delivery_result = {"prepared_edit_record": TurnRecordCodec._to_ledger_record(request.prepared_edit_record)}
         if request.defer_source_handoff:
             metadata = interactive_response.interactive_metadata
             # Older readers recognize any mapping here as a successful FINAL.
@@ -1500,6 +1667,7 @@ class DeliveryGateway:
             # local outbox state and cannot make the Matrix event impossible.
             delivery_extra_content[DURABLE_FINAL_OUTCOME_KEY] = {"version": DURABLE_FINAL_OUTCOME_VERSION}
             delivery_result = {
+                **(delivery_result or {}),
                 "body": display_text,
                 "interactive": metadata.to_metadata() if metadata is not None else None,
             }
@@ -1658,6 +1826,25 @@ class DeliveryGateway:
             failure_reason=failure_reason,
             extra_content=extra_content,
         )
+
+    @asynccontextmanager
+    async def user_stop_scope(self, event_id: str) -> AsyncIterator[str | None]:
+        """Order STOP intent and delivery with cleanup, yielding exact removed-response proof."""
+        recovery = self.deps.response_recovery
+        turn_id = None if recovery is None else await recovery.principal.initial_response_delivery_id(event_id)
+        if recovery is None or turn_id is None:
+            yield None
+            return
+        async with self._recovery_worker()._delivery_lock(turn_id):
+            initial = await recovery.principal.load_matrix_delivery(delivery_id=turn_id, stage=DeliveryStage.INITIAL)
+            yield (
+                turn_id
+                if initial is not None
+                and initial.acknowledged_event_id == event_id
+                and initial.retired
+                and recovery.deleted(await recovery.state(initial))
+                else None
+            )
 
     async def finalize_user_stopped_response(self, target: MessageTarget, event_id: str) -> bool:
         """Edit a recovered in-flight response into its terminal user-stop state."""
@@ -1851,8 +2038,8 @@ class DeliveryGateway:
                 request.preserve_existing_visible_on_empty_terminal
                 or (request.existing_event_id is not None and not request.adopt_existing_placeholder)
             ),
-            terminal_edit=self._durable_terminal_edit(delivery_turn_id, request.target),
-            terminal_send=self._durable_terminal_send(delivery_turn_id, request.target),
+            terminal_edit=self._durable_terminal_edit(delivery_turn_id, request.target, request.completed_edit_record),
+            terminal_send=self._durable_terminal_send(delivery_turn_id, request.target, request.completed_edit_record),
             final_text_transform=self._final_text_transform(request.identity),
             transport_is_current=self._stream_transport_gate(delivery_turn_id, request.target.room_id),
             interactive_creator_agent=self.deps.agent_name,
@@ -1877,7 +2064,12 @@ class DeliveryGateway:
 
         return transport_is_current
 
-    def _durable_terminal_send(self, turn_id: str, target: MessageTarget) -> TerminalSend:
+    def _durable_terminal_send(
+        self,
+        turn_id: str,
+        target: MessageTarget,
+        completed_edit_record: Callable[[], TurnRecord | None] | None = None,
+    ) -> TerminalSend:
         """Return a sender that records a stream's terminal *send* before making it.
 
         A stream normally edits a placeholder, but there is not always one to
@@ -1911,6 +2103,7 @@ class DeliveryGateway:
                 SendTextRequest(
                     target=target,
                     response_text="",
+                    delivery_result=self._prepared_edit_result(completed_edit_record, content),
                     retry_sync_recovery=retry_sync_recovery,
                     delivery_turn_id=turn_id,
                     delivery_stage=DeliveryStage.FINAL,
@@ -2011,7 +2204,25 @@ class DeliveryGateway:
 
         return transform
 
-    def _durable_terminal_edit(self, turn_id: str, target: MessageTarget) -> TerminalEdit:
+    @staticmethod
+    def _prepared_edit_result(
+        completed_record: Callable[[], TurnRecord | None] | None,
+        content: dict[str, Any],
+    ) -> dict[str, object] | None:
+        """Only a completed stream may attach its selected edit snapshot."""
+        if completed_record is None or content.get(constants.STREAM_STATUS_KEY) != constants.STREAM_STATUS_COMPLETED:
+            return None
+        record = completed_record()
+        if record is None:
+            return None
+        return {"prepared_edit_record": TurnRecordCodec._to_ledger_record(record)}
+
+    def _durable_terminal_edit(
+        self,
+        turn_id: str,
+        target: MessageTarget,
+        completed_edit_record: Callable[[], TurnRecord | None] | None = None,
+    ) -> TerminalEdit:
         """Return a sender that records a stream's terminal edit before making it.
 
         Nothing extra is sent. The edit the stream was going to make anyway is
@@ -2049,6 +2260,7 @@ class DeliveryGateway:
                     target=target,
                     event_id=event_id,
                     new_text=display_text,
+                    delivery_result=self._prepared_edit_result(completed_edit_record, content),
                     retry_sync_recovery=retry_sync_recovery,
                     delivery_turn_id=turn_id,
                 ),
@@ -2267,6 +2479,7 @@ class DeliveryGateway:
                         existing_event_id=existing_event_id,
                         existing_event_is_placeholder=existing_event_is_placeholder,
                         response_text=stream_outcome.canonical_final_body_candidate,
+                        prepared_edit_record=request.prepared_edit_record,
                         identity=request.identity,
                         tool_trace=request.tool_trace,
                         extra_content=request.extra_content,

@@ -1550,7 +1550,7 @@ async def test_router_visible_voice_echo_respects_reply_permissions(tmp_path) ->
     """Router should not post visible echoes when it cannot reply to the sender."""
     bot, room, event = _make_visible_router_echo_scenario(
         tmp_path,
-        router_access=ResponderAccessConfig(users=["@bob:example.com"]),
+        router_access=ResponderAccessConfig(current_room_members=False, users=["@bob:example.com"]),
     )
 
     with (

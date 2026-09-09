@@ -101,17 +101,18 @@ class ResponseAttemptRunner:
             process_shutdown=process_shutdown,
         )
         if process_shutdown:
-            while not task.done():
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    if not task.done():
-                        request_task_cancel(task, process_shutdown=True)
-                except Exception:
-                    break
-            self._log_attempt_unwind_failure(task)
+            await self._wait_for_process_shutdown_child(task)
             return
-        done, pending = await asyncio.wait({task}, timeout=_FORWARDED_CANCEL_WAIT_SECONDS)
+        try:
+            done, pending = await asyncio.wait({task}, timeout=_FORWARDED_CANCEL_WAIT_SECONDS)
+        except asyncio.CancelledError:
+            if not current_task_is_process_shutdown():
+                raise
+            # A process stop can upgrade a generic cancellation already in flight.
+            # Retag and retain the same child under the process-shutdown wait.
+            request_task_cancel(task, process_shutdown=True)
+            await self._wait_for_process_shutdown_child(task)
+            return
         if pending:
             self.deps.logger.warning(
                 "Response attempt task did not finish after forwarded cancellation",
@@ -120,6 +121,18 @@ class ResponseAttemptRunner:
             task.add_done_callback(self._log_attempt_unwind_failure)
         for finished in done:
             self._log_attempt_unwind_failure(finished)
+
+    async def _wait_for_process_shutdown_child(self, task: asyncio.Task[None]) -> None:
+        """Keep the awaiting owner alive until its process-tagged child finishes."""
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.done():
+                    request_task_cancel(task, process_shutdown=True)
+            except Exception:
+                break
+        self._log_attempt_unwind_failure(task)
 
     def _log_attempt_unwind_failure(self, task: asyncio.Task[None]) -> None:
         """Consume one finished attempt task's outcome, reporting unwind failures.
@@ -175,6 +188,7 @@ class ResponseAttemptRunner:
                 if request.on_cancelled is not None:
                     request.on_cancelled(failure_reason)
                 await self._forward_cancel_to_attempt_task(task, cancellation)
+                process_shutdown = current_task_is_process_shutdown()
                 log_cancelled_response(
                     self.deps.logger,
                     exc=cancellation,

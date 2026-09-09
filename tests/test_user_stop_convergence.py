@@ -11,6 +11,7 @@ rather than something a broader harness would absorb.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
@@ -23,7 +24,7 @@ from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import EventJournalStore
@@ -72,6 +73,12 @@ class _CountingGateway:
 
     finalized: list[str] = field(default_factory=list)
 
+    @asynccontextmanager
+    async def user_stop_scope(self, response_event_id: str) -> AsyncIterator[None]:
+        """Represent a gateway with no outbox cleanup competing with STOP."""
+        del response_event_id
+        yield None
+
     async def finalize_user_stopped_response(self, target: MessageTarget, response_event_id: str) -> bool:
         """Commit the cancellation note for one response."""
         del target
@@ -95,6 +102,7 @@ async def _store(journal_store: EventJournalStore) -> TurnStore:
         TurnStoreDeps(
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
+            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
             legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),

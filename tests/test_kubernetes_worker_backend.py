@@ -4245,7 +4245,11 @@ def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:
             progress_sink=events.append,
         )
 
-    assert [event.phase for event in events] == ["cold_start", "failed"]
+    # Setup before the polling stub can already emit waiting.
+    phases = [event.phase for event in events]
+    assert phases[0] == "cold_start"
+    assert phases[-1] == "failed"
+    assert all(phase == "waiting" for phase in phases[1:-1])
     assert events[-1].error == error_message
 
 

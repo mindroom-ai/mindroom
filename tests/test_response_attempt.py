@@ -264,6 +264,56 @@ async def test_process_shutdown_keeps_outer_attempt_owned_until_child_stops(
 
 
 @pytest.mark.asyncio
+async def test_process_shutdown_upgrade_retains_generic_unwind_child() -> None:
+    """A second cancellation upgrades child ownership and still propagates interruption."""
+    runner, stop_manager = _runner()
+    started = asyncio.Event()
+    unwinding = asyncio.Event()
+    upgraded = asyncio.Event()
+    release = asyncio.Event()
+    flags: list[bool] = []
+
+    async def response_function(_message_id: str | None) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            flags.append(current_task_is_process_shutdown())
+            unwinding.set()
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    flags.append(current_task_is_process_shutdown())
+                    upgraded.set()
+            raise
+
+    outer = asyncio.create_task(
+        runner.run(
+            ResponseAttemptRequest(
+                target=MessageTarget.resolve("!room:localhost", "$thread", "$reply"),
+                existing_event_id="$existing",
+                response_function=response_function,
+            ),
+        ),
+    )
+    await started.wait()
+    request_task_cancel(outer, cancel_source="sync_restart")
+    await unwinding.wait()
+    request_task_cancel(outer, process_shutdown=True)
+    try:
+        await asyncio.wait_for(upgraded.wait(), timeout=0.1)
+        assert flags == [False, True]
+        assert not outer.done()
+        assert "$existing" in stop_manager.tracked_messages
+    finally:
+        release.set()
+        results = await asyncio.gather(outer, return_exceptions=True)
+    assert isinstance(results[0], asyncio.CancelledError)
+    assert stop_manager.cleared_messages == [("$existing", False)]
+
+
+@pytest.mark.asyncio
 async def test_process_shutdown_during_stop_button_setup_still_owns_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

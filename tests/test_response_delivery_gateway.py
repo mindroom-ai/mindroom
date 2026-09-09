@@ -161,7 +161,7 @@ def _gateway(
     *,
     sending_device_id: str | None = "CURRENT-DEVICE",
     terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
-    terminal_turn_committed: Callable[[str, str], Awaitable[None]] | None = None,
+    terminal_turn_committed: Callable[[str, str, TurnRecord | None], Awaitable[None]] | None = None,
     turn_handoff: TurnHandoff = ignore_final_delivery_handoff,
     large_message_strategy: _LargeMessageStrategy = "sidecar",
 ) -> DeliveryGateway:
@@ -2035,7 +2035,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert outbox.rows["$cause", "initial"].acknowledged_event_id == "$placeholder"
         assert outbox.rows["$cause", "final"].acknowledged_event_id == "$answer"
-        terminal_committed.assert_awaited_once_with("$cause", "$answer")
+        terminal_committed.assert_awaited_once_with("$cause", "$answer", None)
 
     async def test_process_shutdown_finishes_started_initial_without_starting_final(
         self,
@@ -2100,7 +2100,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             handoff=None,
         )
         assert await recovery.recover() == RecoveryOutcome(recovered=1, failed=0)
-        terminal_committed.assert_awaited_once_with("$cause", "$answer")
+        terminal_committed.assert_awaited_once_with("$cause", "$answer", None)
 
     async def test_live_final_ignores_its_inline_initial_result_when_another_process_wins(
         self,
@@ -2843,10 +2843,10 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         losing_publishes: list[tuple[str, str]] = []
         winning_publishes: list[tuple[str, str]] = []
 
-        async def losing_publish(turn_id: str, event_id: str) -> None:
+        async def losing_publish(turn_id: str, event_id: str, _committed: TerminalTurnWrite | None) -> None:
             losing_publishes.append((turn_id, event_id))
 
-        async def winning_publish(turn_id: str, event_id: str) -> None:
+        async def winning_publish(turn_id: str, event_id: str, _committed: TerminalTurnWrite | None) -> None:
             winning_publishes.append((turn_id, event_id))
 
         losing = MatrixDeliveryWorker(
@@ -2896,10 +2896,7 @@ async def test_process_shutdown_recovery_bypasses_saturated_ordinary_journal_rea
             },
         ),
     )
-    bot = object.__new__(AgentBot)
-    bot._journal_store = journal_store
-    bot._journal_principal_id = "agent@alice"
-    bot._turn_store = SimpleNamespace(has_live_turn_claim=lambda _event_id: False)
+    bot = _response_recovery_bot(journal_store, await _store(journal_store))
 
     backend = journal_store.backend
     ordinary_capacity = (
@@ -3695,7 +3692,7 @@ class TestTurnDeliverySerialization:
             await accept_final.wait()
             return "$final"
 
-        async def publish(turn_id: str, event_id: str) -> None:
+        async def publish(turn_id: str, event_id: str, _committed: TurnRecord | None) -> None:
             published.append((turn_id, event_id))
 
         gateway = _gateway(tmp_path, alice, terminal_turn_committed=publish)
@@ -3827,10 +3824,10 @@ class TestTurnDeliverySerialization:
         publication_started = asyncio.Event()
         allow_publication = asyncio.Event()
 
-        async def publish_committed_response(turn_id: str, event_id: str) -> None:
+        async def publish_committed_response(turn_id: str, event_id: str, committed: TurnRecord | None) -> None:
             publication_started.set()
             await allow_publication.wait()
-            await turn_store.publish_committed_response(turn_id, event_id)
+            await turn_store.publish_committed_response(turn_id, event_id, committed)
 
         gateway = _gateway(
             tmp_path,
@@ -4414,7 +4411,7 @@ class TestTurnDeliverySerialization:
         reentered: list[str | None] = []
         reentrant_delivery: MatrixDeliveryWorker | None = None
 
-        async def publish_committed(_turn_id: str, _event_id: str) -> None:
+        async def publish_committed(_turn_id: str, _event_id: str, _committed: TurnRecord | None) -> None:
             assert reentrant_delivery is not None
             reentered.append(await reentrant_delivery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
 

@@ -26,7 +26,7 @@ from mindroom.approval_response import (
     identify_approval_tools,
     require_ordered_pause_presentation,
 )
-from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
+from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -132,6 +132,7 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
 )
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
+from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
@@ -198,6 +199,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.turn_record import TurnRecord
 
     from .response_admission import ResponseAdmissionGate
 
@@ -468,6 +470,7 @@ class ResponseRequest:
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     existing_event_id: str | None = None
+    prepared_edit_record: TurnRecord | None = None
     existing_event_is_placeholder: bool = False
     user_id: str | None = None
     media: MediaInputs | None = None
@@ -483,7 +486,9 @@ class ResponseRequest:
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
-    prepare_source_turn: Callable[[], Coroutine[Any, Any, bool]] | None = None
+    prepare_source_turn: (
+        Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, bool | EditPreparation]] | None
+    ) = None
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     on_interrupted_response_recoverable: Callable[[], None] | None = None
@@ -2061,6 +2066,7 @@ class ResponseRunner:
         response_identity: ResponseIdentity,
         tool_trace: list[Any] | None,
         extra_content: dict[str, Any] | None,
+        run_completed: bool,
     ) -> FinalDeliveryOutcome:
         """Finalize one streamed delivery and mark the terminal delivery timing."""
         with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
@@ -2069,6 +2075,7 @@ class ResponseRunner:
                     target=delivery_target,
                     stream_transport_outcome=transport_outcome,
                     initial_delivery_kind=delivery_kind,
+                    prepared_edit_record=request.prepared_edit_record if run_completed else None,
                     identity=response_identity,
                     tool_trace=tool_trace,
                     extra_content=extra_content,
@@ -2407,7 +2414,8 @@ class ResponseRunner:
                     isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
                 )
                 if (
-                    early_placeholder.placeholder_event_id is None
+                    isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError))
+                    or early_placeholder.placeholder_event_id is None
                     or early_placeholder.settlement_started
                     or already_linked
                 ):
@@ -2458,6 +2466,7 @@ class ResponseRunner:
             owned.room_id,
             self.deps.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
+            require_resolved_membership=True,
         ):
             return await self._settle_unauthorized_approval_continuation(owned)
         claimed = await self.deps.approval_store.claim_approval_continuation(
@@ -2846,6 +2855,8 @@ class ResponseRunner:
             if request.payload_preparation is None:
                 return request
             return await self.deps.request_preparer.prepare(request)
+        except (ReplyMembershipPendingError, RevisionSnapshotChangedError):
+            raise
         except Exception as exc:
             raise PostLockRequestPreparationError from exc
 
@@ -2988,6 +2999,7 @@ class ResponseRunner:
             request.room_id,
             self.deps.runtime_paths,
             self.deps.runtime.agent_reply_memberships,
+            require_resolved_membership=True,
         ):
             return True
         self.deps.logger.info(
@@ -3041,14 +3053,47 @@ class ResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
-        if request.prepare_source_turn is not None and await run_coroutine_until_complete(
-            request.prepare_source_turn(),
-        ):
+        prepared_request = await self._prepare_locked_source(
+            request,
+            resolved_target=resolved_target,
+            history_scope=history_scope,
+        )
+        if prepared_request is None:
+            return None
+        request = prepared_request
+        await record_silent_schedule_started_if_needed(
+            entity_name=self.deps.agent_name,
+            agent_names=request.participating_agent_names or (self.deps.agent_name,),
+            envelope=request.response_envelope,
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+        )
+        return request
+
+    async def _prepare_locked_source(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+        history_scope: HistoryScope,
+    ) -> ResponseRequest | None:
+        """Apply the owner gate to this exact request history, before and after refresh."""
+        preparation = (
+            await run_coroutine_until_complete(request.prepare_source_turn(request.thread_history))
+            if request.prepare_source_turn is not None
+            else False
+        )
+        if preparation is EditPreparation.REBUILD:
+            return None
+        if preparation:
             self.deps.logger.info(
                 "response_suppressed_for_terminal_source",
                 source_event_id=request.response_envelope.source_event_id,
             )
-            if request.existing_event_id is not None and request.existing_event_is_placeholder:
+            source_deleted = await self.deps.delivery_gateway.cleanup_deleted_response(
+                request.response_envelope.source_event_id,
+            )
+            if not source_deleted and request.existing_event_id is not None and request.existing_event_is_placeholder:
                 await self.deps.delivery_gateway.deliver_cancelled_visible_note(
                     CancelledVisibleNoteRequest(
                         target=resolved_target,
@@ -3064,13 +3109,6 @@ class ResponseRunner:
             if request.on_source_turn_suppressed is not None:
                 await request.on_source_turn_suppressed()
             return None
-        await record_silent_schedule_started_if_needed(
-            entity_name=self.deps.agent_name,
-            agent_names=request.participating_agent_names or (self.deps.agent_name,),
-            envelope=request.response_envelope,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-        )
         return request
 
     async def _prepare_admitted_locked_turn(
@@ -3082,7 +3120,7 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity,
         placeholder_message: str | None = None,
         early_placeholder_state: _EarlyPlaceholderState | None = None,
-    ) -> ResponseRequest:
+    ) -> ResponseRequest | None:
         """Run placeholder and request preparation for an already-admitted locked turn."""
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
         placeholder_event_id = None
@@ -3124,7 +3162,12 @@ class ResponseRunner:
             request,
             exclude_history_event_id=placeholder_event_id,
         )
-        return self._request_with_locked_target(request, resolved_target)
+        request = self._request_with_locked_target(request, resolved_target)
+        return await self._prepare_locked_source(
+            request,
+            resolved_target=resolved_target,
+            history_scope=history_scope,
+        )
 
     async def _begin_locked_turn(
         self,
@@ -3423,12 +3466,14 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
-        if (
-            final_outcome.suppressed
-            and final_outcome.final_visible_event_id is None
-            and request.on_no_response_handled is not None
-        ):
-            await request.on_no_response_handled()
+        if final_outcome.suppressed and final_outcome.final_visible_event_id is None:
+            on_suppressed = (
+                request.on_source_turn_suppressed
+                if final_outcome.failure_reason == "source_deleted"
+                else request.on_no_response_handled
+            )
+            if on_suppressed is not None:
+                await on_suppressed()
         if final_outcome.terminal_status == "suspended" and request.source_handoff is not None:
             request.source_handoff.set()
         interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
@@ -3615,6 +3660,8 @@ class ResponseRunner:
             placeholder_message=(None if _is_silent_schedule_response(request) else "🤝 Team Response: Thinking..."),
             early_placeholder_state=placeholder_state,
         )
+        if request is None:
+            return None
         team_request = replace(team_request, request=request)
         reason = team_request.resolution_reason
         if reason is not None:
@@ -3855,6 +3902,9 @@ class ResponseRunner:
                         transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                             StreamingDeliveryRequest(
                                 target=delivery_target,
+                                completed_edit_record=lambda: (
+                                    request.prepared_edit_record if team_turn_recorder.outcome == "completed" else None
+                                ),
                                 identity=response_identity,
                                 response_stream=response_stream,
                                 existing_event_id=delivery_request.existing_event_id,
@@ -3899,6 +3949,7 @@ class ResponseRunner:
                 await persist_failed_team_turn()
                 delivery = await self._finalize_streamed_turn(
                     request=request,
+                    run_completed=team_turn_recorder.outcome == "completed",
                     delivery_target=delivery_target,
                     transport_outcome=transport_outcome,
                     delivery_kind="edited" if message_id else "sent",
@@ -3993,6 +4044,9 @@ class ResponseRunner:
                     delivery = await self.deps.delivery_gateway.deliver_final(
                         FinalDeliveryRequest(
                             target=delivery_target,
+                            prepared_edit_record=request.prepared_edit_record
+                            if team_turn_recorder.outcome == "completed"
+                            else None,
                             existing_event_id=message_id,
                             existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
                             response_text=response_text,
@@ -4374,6 +4428,9 @@ class ResponseRunner:
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(
                         target=runtime.resolved_target,
+                        completed_edit_record=lambda: (
+                            request.prepared_edit_record if turn_recorder.outcome == "completed" else None
+                        ),
                         identity=identity,
                         response_stream=wrapped_response_stream,
                         existing_event_id=request.existing_event_id,
@@ -4522,6 +4579,7 @@ class ResponseRunner:
             delivery = await self.deps.delivery_gateway.deliver_final(
                 FinalDeliveryRequest(
                     target=runtime.resolved_target,
+                    prepared_edit_record=request.prepared_edit_record if turn_recorder.outcome == "completed" else None,
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                     response_text=generation.response_text,
@@ -4729,6 +4787,7 @@ class ResponseRunner:
             on_delivery_started(transport_outcome.last_physical_stream_event_id)
         delivery = await self._finalize_streamed_turn(
             request=request,
+            run_completed=turn_recorder.outcome == "completed",
             delivery_target=runtime.resolved_target,
             transport_outcome=transport_outcome,
             delivery_kind="edited" if request.existing_event_id else "sent",
@@ -4789,7 +4848,7 @@ class ResponseRunner:
             thread_id=response_thread_id,
             runtime_paths=self.deps.runtime_paths,
         ).model_name
-        request = await self._prepare_admitted_locked_turn(
+        prepared_request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
             history_scope=history_scope,
@@ -4797,6 +4856,9 @@ class ResponseRunner:
             placeholder_message=None if _is_silent_schedule_response(request) else "Thinking...",
             early_placeholder_state=placeholder_state,
         )
+        if prepared_request is None:
+            return None
+        request = prepared_request
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,

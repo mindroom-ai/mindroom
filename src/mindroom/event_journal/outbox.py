@@ -592,9 +592,24 @@ def claim_active_delivery_ownership(
 
 def owns_response(transaction: Transaction, principal_id: str, *, room_id: str, event_id: str) -> bool:
     """Require a current attempted delivery before history can trigger auto-resume."""
+    return response_delivery_id(transaction, principal_id, room_id=room_id, event_id=event_id) is not None
+
+
+def initial_response_delivery_id(transaction: Transaction, principal_id: str, event_id: str) -> str | None:
+    """Resolve an exact INITIAL ACK, retaining identity after deleted-response retirement."""
+    row = transaction.fetchone(
+        """SELECT delivery_id FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND stage = 'initial' AND acknowledged_event_id = ?""",
+        (principal_id, event_id),
+    )
+    return None if row is None else str(row["delivery_id"])
+
+
+def response_delivery_id(transaction: Transaction, principal_id: str, *, room_id: str, event_id: str) -> str | None:
+    """Resolve exact current transport ownership without granting semantic continuation."""
     row = transaction.fetchone(
         """
-        SELECT 1 FROM matrix_delivery_outbox AS delivery
+        SELECT delivery.delivery_id FROM matrix_delivery_outbox AS delivery
         JOIN room_membership AS membership
           ON membership.principal_id = delivery.principal_id
          AND membership.room_id = delivery.room_id
@@ -607,7 +622,58 @@ def owns_response(transaction: Transaction, principal_id: str, *, room_id: str, 
         """,
         (principal_id, room_id, event_id, event_id),
     )
-    return row is not None
+    return None if row is None else str(row["delivery_id"])
+
+
+def deleted_initials(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    agent_name: str,
+    after: tuple[int, str] | None = None,
+) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
+    """Keep deleted-source cleanup discoverable after its journal callback settles."""
+    cursor_clause = "" if after is None else " AND (created_at_ns, delivery_id/*bytes*/) > (?, ?)"
+    rows = transaction.fetchall(
+        f"""
+        SELECT {_OUTBOX_COLUMNS} FROM matrix_delivery_outbox AS delivery
+        WHERE principal_id = ? AND event_type = 'm.room.message' AND stage = 'initial' AND retired = 0
+          AND EXISTS (
+            SELECT 1 FROM redaction_tombstones AS tombstone
+            WHERE tombstone.principal_id = delivery.principal_id AND tombstone.room_id = delivery.room_id
+              AND (tombstone.redacted_event_id = delivery.delivery_id OR EXISTS (
+                SELECT 1 FROM turn_records AS record WHERE record.agent_name = ?
+                  AND record.index_event_id = tombstone.redacted_event_id
+                  AND record.anchor_event_id = delivery.delivery_id
+              ))
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM matrix_delivery_outbox AS final
+            WHERE final.principal_id = delivery.principal_id AND final.delivery_id = delivery.delivery_id
+              AND final.stage = 'final' AND (final.acknowledged_event_id IS NOT NULL
+                OR (final.retired = 0 AND final.permanent_failure_reason IS NULL))
+          ){cursor_clause}
+        ORDER BY created_at_ns, delivery_id/*bytes*/ LIMIT 100
+        """,  # noqa: S608 - fixed column list and cursor clause
+        (principal_id, agent_name, *(after or ())),
+    )
+    return tuple(_recovery_delivery(row) for row in rows)
+
+
+def retire_deleted_initial(transaction: Transaction, principal_id: str, delivery_id: str) -> None:
+    """Retain exact ACK identity while fencing sends after proven disappearance."""
+    _lock_delivery_stages(transaction, principal_id, delivery_id)
+    final = load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+    if final is not None and (
+        final.acknowledged_event_id is not None or not (final.retired or final.permanently_failed)
+    ):
+        msg = "FINAL acquired deleted INITIAL during cleanup"
+        raise RuntimeError(msg)
+    transaction.execute(
+        """UPDATE matrix_delivery_outbox SET retired = 1
+        WHERE principal_id = ? AND delivery_id = ? AND stage = 'initial'""",
+        (principal_id, delivery_id),
+    )
 
 
 def event_belongs_to_membership(

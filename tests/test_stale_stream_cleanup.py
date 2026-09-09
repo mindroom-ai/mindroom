@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -52,6 +53,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
 from mindroom.streaming import build_cancelled_response_update, build_restart_interrupted_body
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 from tests.access_schema_support import with_current_room_member_access
@@ -64,6 +66,8 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.test_response_delivery_gateway import _gateway
+from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -264,6 +268,12 @@ async def _raising_aiter(exc: Exception) -> AsyncIterator[None]:
     raise exc
 
 
+@asynccontextmanager
+async def _permitted_recovery_scope(*_args: str) -> AsyncIterator[bool]:
+    """Keep scanner transport unit tests independent of source ownership policy."""
+    yield True
+
+
 async def _run_cleanup(
     client: AsyncMock,
     config: Config,
@@ -279,6 +289,7 @@ async def _run_cleanup(
     with patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000):
         return await cleanup_stale_streaming_room(
             client,
+            response_recovery_scope=_permitted_recovery_scope,
             room_id=ROOM_ID,
             actors={BOT_USER_ID: client},
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
@@ -782,7 +793,7 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 2
@@ -826,7 +837,7 @@ async def test_auto_resume_skips_interruption_without_resolved_requester(tmp_pat
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 0
@@ -888,7 +899,7 @@ async def test_auto_resume_classifies_later_activity_by_effective_sender_and_his
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == expected_resumes
@@ -937,7 +948,7 @@ async def test_prior_auto_resume_relay_does_not_suppress_sibling_resume(tmp_path
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 1
@@ -1001,7 +1012,7 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 0
@@ -1037,7 +1048,7 @@ async def test_auto_resume_propagates_cancelled_source_refresh(tmp_path: Path) -
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     mock_send.assert_not_awaited()
@@ -1075,7 +1086,7 @@ async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 0
@@ -1142,7 +1153,7 @@ async def test_auto_resume_checks_freshness_after_delay_before_each_delivery(tmp
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 3
@@ -1199,7 +1210,7 @@ async def test_auto_resume_target_mention_ignores_unprepared_unrelated_entity(tm
             interrupted,
             config=config,
             runtime_paths=runtime_paths,
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 1
@@ -1300,7 +1311,7 @@ async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 1
@@ -1338,7 +1349,7 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 1
@@ -2003,7 +2014,7 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
             config=config,
             runtime_paths=runtime_paths_for(config),
             delay=0,
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == (0 if newer_human_activity else 1)
@@ -2036,7 +2047,7 @@ async def test_targeted_recovery_scans_only_handoff_rooms_without_a_clock_cutoff
             startup_cutoff_ms=None,
             scanned_room_ids=scanned_room_ids,
             target_room_ids={ROOM_ID},
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
@@ -2108,7 +2119,7 @@ async def test_failed_targeted_room_scan_remains_unscanned_for_retry(tmp_path: P
             startup_cutoff_ms=None,
             scanned_room_ids=scanned_room_ids,
             target_room_ids={ROOM_ID},
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
@@ -2852,7 +2863,7 @@ async def test_auto_resume_dedupes_same_agent_and_thread_using_newest_target(tmp
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 1
@@ -2920,7 +2931,7 @@ async def test_auto_resume_sends_all_unique_threads_after_replacing_older_target
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 3
@@ -2973,7 +2984,7 @@ async def test_auto_resume_sends_threads_from_every_room(tmp_path: Path) -> None
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 2
@@ -3048,7 +3059,7 @@ async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(
                 runtime_paths=runtime_paths_for(config),
                 startup_cutoff_ms=NOW_MS,
                 scanned_room_ids=scanned_room_ids,
-                response_is_owned=AsyncMock(return_value=True),
+                response_recovery_scope=_permitted_recovery_scope,
             ),
         )
         await asyncio.wait_for(slow_room_started.wait(), timeout=1.0)
@@ -3064,7 +3075,7 @@ async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=NOW_MS,
             scanned_room_ids=scanned_room_ids,
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert result == StaleStreamRecoveryResult(room_count=3, cleaned_count=1, resumed_count=1)
@@ -3126,7 +3137,7 @@ async def test_recovery_skips_auto_resume_when_resume_identity_is_not_joined(tmp
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=NOW_MS,
             scanned_room_ids=scanned_room_ids,
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=0)
@@ -3180,7 +3191,7 @@ async def test_recovery_retries_auto_resume_after_resume_identity_joins(tmp_path
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=NOW_MS,
             scanned_room_ids=scanned_room_ids,
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
         router_is_joined = True
         delta_result = await recover_stale_streaming_messages(
@@ -3190,7 +3201,7 @@ async def test_recovery_retries_auto_resume_after_resume_identity_joins(tmp_path
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=NOW_MS,
             scanned_room_ids=scanned_room_ids,
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert initial_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=0)
@@ -3237,7 +3248,7 @@ async def test_targeted_recovery_tracks_resume_membership_outside_scan_actors(tm
             startup_cutoff_ms=None,
             scanned_room_ids=set(),
             target_room_ids={ROOM_ID},
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=1)
@@ -3299,7 +3310,7 @@ async def test_recovery_resumes_all_51_rooms_even_when_newest_room_finishes_last
                 startup_cutoff_ms=NOW_MS,
                 scanned_room_ids=scanned_room_ids,
                 room_concurrency=51,
-                response_is_owned=AsyncMock(return_value=True),
+                response_recovery_scope=_permitted_recovery_scope,
             ),
         )
         await asyncio.wait_for(slow_room_started.wait(), timeout=1.0)
@@ -3348,7 +3359,7 @@ async def test_recovery_without_resume_client_still_cleans_rooms(tmp_path: Path)
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=NOW_MS,
             scanned_room_ids=scanned_room_ids,
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=0)
@@ -3399,6 +3410,7 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
     ):
         cleaned_count, interrupted = await cleanup_stale_streaming_room(
             first_client,
+            response_recovery_scope=_permitted_recovery_scope,
             room_id=ROOM_ID,
             actors=actors,
             bot_user_ids=set(actors),
@@ -3637,7 +3649,7 @@ async def test_auto_resume_continues_after_send_exception(tmp_path: Path) -> Non
             interrupted,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            response_is_owned=AsyncMock(return_value=True),
+            response_recovery_scope=_permitted_recovery_scope,
         )
 
     assert resumed_count == 2
@@ -3822,6 +3834,20 @@ async def test_startup_resume_requires_current_journal_ownership_across_restarts
         bot.client = client
         bot.agent_user = MagicMock(user_id=BOT_USER_ID)
         bot.journal_principal.return_value = reopened.principal(principal_id)
+        turn_store = await _store(reopened, agent_name="test_agent")
+        gateway = _gateway(tmp_path, reopened.principal(principal_id))
+        gateway = replace(
+            gateway,
+            deps=replace(
+                gateway.deps,
+                response_recovery=ResponseDeliveryRecovery(
+                    reopened.principal(principal_id),
+                    lambda turn_store=turn_store: turn_store,
+                    gateway.deps.redact_message_event,
+                ),
+            ),
+        )
+        bot.response_recovery_scope.side_effect = gateway.response_recovery_scope
         router = MagicMock(spec=AgentBot)
         router.client = client
         orchestrator.agent_bots = {"test_agent": bot, ROUTER_AGENT_NAME: router}

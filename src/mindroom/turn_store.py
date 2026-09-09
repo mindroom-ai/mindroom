@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from agno.db.base import SessionType
@@ -14,20 +13,29 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session, replace_runs
 from mindroom.agents import remove_run_by_event_id
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.handled_turns import (
     HandledTurnLedger,
     TurnRecord,
     TurnRecordCodec,
-    merge_edit_facts,
     same_turn_identity,
     with_user_stop,
 )
 from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
 from mindroom.session_ids import create_session_id
-from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_record import (
+    EditPreparation,
+    RevisionReplay,
+    RevisionSnapshotChangedError,
+    SourceEventRevision,
+    canonicalize_turn_record,
+    completed_response_record,
+    merge_committed_response,
+    sanitize_revision_replay,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
     from pathlib import Path
 
     import nio
@@ -36,6 +44,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.event_journal.store import TurnRecordStore
     from mindroom.history.types import HistoryScope
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_policy import ResponseAction
@@ -60,6 +69,7 @@ class TurnStoreDeps:
     # principal-scoped: the answer stays true across a re-login, and a bot that
     # lost it would answer every outstanding message a second time.
     turn_records: TurnRecordStore
+    redacted_event_ids: Callable[[str, tuple[str, ...]], Awaitable[frozenset[str]]]
     # The JSON ledger this agent used before its records moved into the
     # database, imported once on first load. An installation that has been
     # answering messages keeps all of its terminal truth there, and a runtime
@@ -101,14 +111,12 @@ async def record_user_stop_terminal(
 
 @dataclass
 class TurnStore:
-    """Own replication, precedence, backfill, and repair for one entity's turns.
+    """Own durable turn state and absent-record history import for one entity.
 
-    A present handled-turn ledger row owns canonical source identity and anchor.
-    Newer delivered Agno run metadata repairs mutable response and regeneration
-    facts; older or incomplete runs only backfill absent optional facts.
-    Recovery never replaces a ledger record changed while metadata was loading.
-    Any recovered or enriched record is repaired back into the ledger before it
-    is returned to the caller.
+    A present handled-turn ledger row owns the complete record. Agno run
+    metadata supplies a candidate only when the requested identity is absent.
+    Import publication waits for conflicting writes and returns any record that
+    acquired the requested identity while metadata was loading.
     """
 
     deps: TurnStoreDeps
@@ -128,10 +136,88 @@ class TurnStore:
     async def warm(self) -> None:
         """Load the ledger without pruning truth needed by startup recovery."""
         await self._ledger.load()
+        await self._reconcile_revision_tombstones(self._ledger.all_turn_records())
 
     async def cleanup(self, *, unsettled_source_event_ids: Collection[str] = ()) -> None:
         """Compact terminal history after startup recovery identifies live sources."""
+        await self._reconcile_revision_tombstones(self._ledger.all_turn_records())
         await self._ledger.cleanup(unsettled_source_event_ids=unsettled_source_event_ids)
+
+    def _sanitize_candidate(self, candidate: TurnRecord, authority: TurnRecord | None = None) -> TurnRecord:
+        """Join exact physical tombstones before any candidate loses provenance."""
+        revisions = {
+            *(candidate.revision_replay or {}),
+            *(revision[1] for revision in (candidate.source_event_revisions or {}).values()),
+            *(authority.revision_replay or {} if authority else {}),
+        }
+        return sanitize_revision_replay(
+            candidate,
+            authority=authority,
+            tombstoned_event_ids=tuple(event_id for event_id in revisions if self._any_source_redacted((event_id,))),
+        )
+
+    async def _reconcile_revision_tombstones(self, records: Iterable[TurnRecord]) -> None:
+        """Close registration/tombstone crash windows for the relevant owners."""
+        for record in records:
+            if self._sanitize_candidate(record) == record:
+                continue
+            await self._ledger.update_handled_turn(
+                (
+                    *record.indexed_event_ids,
+                    *(record.revision_replay or {}),
+                    *(revision[1] for revision in (record.source_event_revisions or {}).values()),
+                ),
+                lambda existing, source=record.source_event_ids[0]: self._sanitize_candidate(existing[source]),
+            )
+
+    async def register_edit_revision(
+        self,
+        source_event_id: str,
+        revision: SourceEventRevision,
+    ) -> TurnRecord | None:
+        """Retain a physical edit before its text enters a prompt or mailbox."""
+        if self.get_turn_record(source_event_id) is None:
+            return None
+
+        def registered(existing: Mapping[str, TurnRecord]) -> TurnRecord:
+            owner = existing[source_event_id]
+            replay = dict(owner.revision_replay or {})
+            replay.setdefault(
+                revision[1],
+                RevisionReplay(owner.prompt_source_event_id(source_event_id), revision[0]),
+            )
+            return self._sanitize_candidate(canonicalize_turn_record(owner, revision_replay=replay, timestamp=0.0))
+
+        return await self._ledger.update_handled_turn((source_event_id, revision[1]), registered)
+
+    async def _register_context_revisions(
+        self,
+        source_event_id: str,
+        thread_history: Sequence[ResolvedVisibleMessage],
+    ) -> None:
+        """Retain physical edits consumed only as another turn's context."""
+        replay = {
+            message.latest_event_id: RevisionReplay(
+                message.event_id,
+                message.edited_timestamp or message.timestamp,
+            )
+            for message in thread_history
+            if message.latest_event_id != message.event_id
+        }
+        if not replay or self.get_turn_record(source_event_id) is None:
+            return
+
+        def registered(existing: Mapping[str, TurnRecord]) -> TurnRecord:
+            owner = existing[source_event_id]
+            return self._sanitize_candidate(
+                canonicalize_turn_record(
+                    owner,
+                    revision_replay={**replay, **(owner.revision_replay or {})},
+                    timestamp=0.0,
+                ),
+            )
+
+        await self._ledger.update_handled_turn((source_event_id, *replay), registered)
 
     async def record_turn(self, turn_record: TurnRecord) -> None:
         """Persist one terminal turn, preserving any previously recorded optional facts."""
@@ -142,7 +228,52 @@ class TurnStore:
         if not turn_record.response_event_id:
             msg = "A responded turn requires a visible Matrix response event ID"
             raise RuntimeError(msg)
-        await self.record_turn(turn_record)
+        await self.record_turn(
+            completed_response_record(
+                self._sanitize_candidate(turn_record),
+                turn_record.response_event_id,
+                consumed_revisions=tuple((turn_record.source_event_revisions or {}).values()),
+            ),
+        )
+
+    async def refill_source_prompt(
+        self,
+        record: TurnRecord,
+        source_event_id: str,
+        message: ResolvedVisibleMessage,
+    ) -> TurnRecord:
+        """Install exact canonical text only while the physical revision watermark agrees."""
+        if message.event_id != source_event_id or self.deps.resolver.canonical_source_requester(
+            message,
+        ) != record.requester_id_for_source(source_event_id):
+            msg = "Canonical refill does not match the recorded source and requester"
+            raise ValueError(msg)
+
+        def refilled(existing: Mapping[str, TurnRecord]) -> TurnRecord:
+            current = self._sanitize_candidate(existing[source_event_id])
+            if current.revision_watermark(source_event_id) != record.revision_watermark(source_event_id):
+                return current
+            if source_event_id not in current.invalidated_prompt_sources:
+                return current
+            prompts = dict(current.source_event_prompts or {})
+            revisions = dict(current.source_event_revisions or {})
+            prompts[source_event_id] = message.body
+            revisions[source_event_id] = (message.edited_timestamp or message.timestamp, message.latest_event_id)
+            return self._sanitize_candidate(
+                canonicalize_turn_record(
+                    current,
+                    source_event_prompts=prompts,
+                    source_event_revisions=revisions,
+                    timestamp=0.0,
+                ),
+            )
+
+        updated = await self._ledger.update_handled_turn(
+            (*record.indexed_event_ids, message.latest_event_id),
+            refilled,
+        )
+        assert updated is not None
+        return updated
 
     async def _record_terminal_turn(self, turn_record: TurnRecord) -> None:
         """Apply the canonical terminal merge, durable once it returns.
@@ -162,10 +293,11 @@ class TurnStore:
                 if not existing.completed or same_turn_identity(existing, turn_record)
             )
             existing_record = next(iter(compatible_existing_records), None)
+            candidate = self._sanitize_candidate(turn_record, existing_record)
             merged_record = (
-                _backfill_missing_turn_facts(turn_record, existing_record)
+                _backfill_missing_turn_facts(candidate, self._sanitize_candidate(existing_record, candidate))
                 if existing_record is not None
-                else turn_record
+                else candidate
             )
             redacted_source_event_ids, pending_redaction_cleanup_event_ids = _merged_redaction_markers(
                 turn_record,
@@ -225,7 +357,12 @@ class TurnStore:
         )
         return None if bound.anchor_event_id is None else bound
 
-    async def publish_committed_response(self, turn_id: str, response_event_id: str) -> None:
+    async def publish_committed_response(
+        self,
+        turn_id: str,
+        response_event_id: str,
+        committed: TurnRecord | None = None,
+    ) -> None:
         """Re-assert an acknowledged record through the ledger's conflict ownership.
 
         The acknowledgement transaction already persisted the response, but a
@@ -234,19 +371,28 @@ class TurnStore:
         settled state, preserving both the response identity and intervening
         facts. An unrelated turn does not need to wait for this reconciliation.
         """
-        if self._ledger.get_turn_record(turn_id) is None:
+        del turn_id, response_event_id
+        if committed is None:
             return
 
         def committed_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
-            existing = existing_records[turn_id]
-            return canonicalize_turn_record(
-                existing,
-                response_event_id=existing.response_event_id or response_event_id,
-                completed=True,
-                timestamp=0.0,
+            existing = next(
+                (existing_records[source] for source in committed.source_event_ids if source in existing_records),
+                None,
             )
+            merged = merge_committed_response(
+                existing,
+                committed,
+                tombstoned_event_ids=tuple(
+                    event_id for event_id in (committed.revision_replay or {}) if self.is_revision_redacted(event_id)
+                ),
+            )
+            if merged is not None:
+                return canonicalize_turn_record(merged, timestamp=0.0)
+            assert existing is not None
+            return existing
 
-        await self._ledger.update_handled_turn((turn_id,), committed_record)
+        await self._ledger.update_handled_turn(committed.indexed_event_ids, committed_record)
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
@@ -354,14 +500,39 @@ class TurnStore:
         stop_receipt_order: int,
         *,
         delivery_settled: bool = False,
+        deleted_turn_id: str | None = None,
     ) -> TurnRecord | None:
-        """Durably terminate the turn that owns a user-stopped response."""
+        """Terminate a visible response, or its exact retired INITIAL proven by the delivery owner."""
         if isinstance(stop_receipt_order, bool) or stop_receipt_order <= 0:
             msg = "User-stop receipt order must be positive"
             raise ValueError(msg)
         turn_record = self.turn_record_for_response_event_id(response_event_id)
+        if turn_record is None and deleted_turn_id is not None:
+            turn_record = self.get_turn_record(deleted_turn_id)
+            if (
+                turn_record is not None
+                and turn_record.response_event_id is None
+                and set(turn_record.source_event_ids).issubset(turn_record.redacted_source_event_ids)
+            ):
+                if (turn_record.user_stop_settled_receipt_order or 0) >= stop_receipt_order:
+                    return turn_record
+
+                def stopped_deleted_record(records: Mapping[str, TurnRecord]) -> TurnRecord:
+                    current = records[deleted_turn_id]
+                    if (
+                        current.source_event_ids != turn_record.source_event_ids
+                        or current.response_event_id is not None
+                        or not set(current.source_event_ids).issubset(current.redacted_source_event_ids)
+                    ):
+                        return current
+                    return replace(
+                        with_user_stop(current, response_event_id, stop_receipt_order, delivery_settled=True),
+                        response_event_id=None,
+                    )
+
+                return await self._ledger.update_handled_turn(turn_record.indexed_event_ids, stopped_deleted_record)
         if turn_record is None:
-            return turn_record
+            return None
 
         def stopped_record(current: TurnRecord) -> TurnRecord:
             return with_user_stop(
@@ -400,10 +571,11 @@ class TurnStore:
                 key=lambda record: (record.completed, record.timestamp),
                 default=None,
             )
+            candidate = self._sanitize_candidate(pending_record, existing_record)
             merged_record = (
-                _backfill_missing_turn_facts(pending_record, existing_record)
+                _backfill_missing_turn_facts(candidate, self._sanitize_candidate(existing_record, candidate))
                 if existing_record is not None
-                else pending_record
+                else candidate
             )
             redacted_source_event_ids, pending_redaction_cleanup_event_ids = _merged_redaction_markers(
                 pending_record,
@@ -498,10 +670,17 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        return await self._ledger.update_handled_turn(
+        tombstone = await self._ledger.update_handled_turn(
             (source_event_id,),
             redacted_record,
         )
+        await self._reconcile_revision_tombstones(
+            record
+            for record in self._ledger.all_turn_records()
+            if source_event_id in (record.revision_replay or {})
+            or any(revision[1] == source_event_id for revision in (record.source_event_revisions or {}).values())
+        )
+        return tombstone
 
     def _any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:
         """Return whether durable state tombstones any source in one pending response."""
@@ -514,6 +693,10 @@ class TurnStore:
             for source_event_id in source_event_ids
         )
 
+    def is_revision_redacted(self, revision_id: str) -> bool:
+        """Return exact durable physical-event invalidation."""
+        return self._any_source_redacted((revision_id,))
+
     async def _prepare_response_for_redactions(
         self,
         *,
@@ -521,6 +704,29 @@ class TurnStore:
         source_event_ids: tuple[str, ...],
     ) -> bool:
         """Finish owed cleanup in this locked conversation, then check current sources."""
+        await self._reconcile_journal_redactions(target)
+        await self._reconcile_revision_tombstones(
+            self._ledger.turn_records_for_conversation(session_id=target.session_id),
+        )
+        for owner in self._ledger.turn_records_for_conversation(session_id=target.session_id):
+            for revision_id, revision in (owner.revision_replay or {}).items():
+                if not revision.cleanup_pending:
+                    continue
+                if _has_redaction_cleanup_context(owner):
+                    assert owner.conversation_target is not None
+                    assert owner.requester_id is not None
+                    await run_coroutine_until_complete(
+                        asyncio.to_thread(
+                            self._remove_redacted_event_from_recorded_scopes,
+                            target=owner.conversation_target,
+                            requester_user_id=owner.requester_id,
+                            redacted_event_id=revision_id,
+                            legacy_summary_source_id=(
+                                revision.source_event_id if revision.legacy_summary_provenance else None
+                            ),
+                        ),
+                    )
+                await self._acknowledge_revision_cleanup(owner.source_event_ids[0], revision_id)
         for redacted_event_id in self._ledger.pending_redaction_cleanup_event_ids():
             turn_record = self._ledger.get_turn_record(redacted_event_id)
             if turn_record is None:
@@ -545,20 +751,126 @@ class TurnStore:
             await self._clear_pending_redaction_cleanup(redacted_event_id)
         return self._any_source_redacted(source_event_ids)
 
+    async def _reconcile_journal_redactions(self, target: MessageTarget) -> None:
+        """Recover admitted cleanup before an earlier FIFO source can consume its context."""
+        event_ids = {
+            event_id
+            for record in self._ledger.turn_records_for_conversation(session_id=target.session_id)
+            for event_id in (
+                *record.indexed_event_ids,
+                *(record.revision_replay or {}),
+                *(revision[1] for revision in (record.source_event_revisions or {}).values()),
+            )
+            if not self.is_revision_redacted(event_id)
+        }
+        if not event_ids:
+            return
+        redacted = await self.deps.redacted_event_ids(target.room_id, tuple(sorted(event_ids)))
+        for event_id in sorted(redacted):
+            await self.mark_source_redacted(event_id)
+
+    async def _acknowledge_revision_cleanup(self, source_event_id: str, revision_id: str) -> None:
+        """Acknowledge only after all affected scopes are durably sanitized."""
+
+        def acknowledged(existing: Mapping[str, TurnRecord]) -> TurnRecord:
+            owner = existing[source_event_id]
+            replay = dict(owner.revision_replay or {})
+            replay[revision_id] = replace(replay[revision_id], cleanup_pending=False)
+            return canonicalize_turn_record(owner, revision_replay=replay, timestamp=0.0)
+
+        await self._ledger.update_handled_turn((source_event_id, revision_id), acknowledged)
+
+    async def prepare_edit_snapshot(
+        self,
+        *,
+        record: TurnRecord,
+        driving_revision_id: str,
+        edit_receipt_order: int,
+        consumed_revision_ids: tuple[str, ...] = (),
+        thread_history: Sequence[ResolvedVisibleMessage] = (),
+    ) -> bool | EditPreparation:
+        """Check an immutable edit snapshot after cleanup under the response lock."""
+        assert record.conversation_target is not None
+        await self._register_context_revisions(record.source_event_ids[0], thread_history)
+        if await self._prepare_edit_response_source(
+            target=record.conversation_target,
+            source_event_ids=record.replay_source_event_ids,
+            response_event_id=record.response_event_id,
+            edit_receipt_order=edit_receipt_order,
+        ):
+            return True
+        current = self.get_turn_record(record.source_event_ids[0])
+        if current is None or self.is_revision_redacted(driving_revision_id):
+            return True
+        sanitized = self._sanitize_candidate(record, current)
+        if any(self.is_revision_redacted(event_id) for event_id in consumed_revision_ids):
+            return EditPreparation.REBUILD
+        for source in record.replay_source_event_ids:
+            latest = current.revision_watermark(source)
+            if latest is None:
+                continue
+            replay = (current.revision_replay or {}).get(latest[1])
+            selected = next(
+                (
+                    revision
+                    for key, revision in (record.source_event_revisions or {}).items()
+                    if record.prompt_source_event_id(key) == source
+                ),
+                None,
+            )
+            if replay is not None and not replay.redacted and selected != latest:
+                return EditPreparation.REBUILD
+        if sanitized.source_event_prompts != record.source_event_prompts or any(
+            current_revision > snapshot_revision
+            for source in record.replay_source_event_ids
+            if (current_revision := current.revision_watermark(source)) is not None
+            and (snapshot_revision := record.revision_watermark(source)) is not None
+        ):
+            return EditPreparation.REBUILD
+        return False
+
     async def prepare_pending_response_source(
         self,
         *,
         target: MessageTarget,
         source_event_ids: tuple[str, ...],
         terminal_source_event_ids: tuple[str, ...],
+        thread_history: Sequence[ResolvedVisibleMessage] = (),
     ) -> bool:
         """Finish cleanup, then suppress a pending response whose source became terminal."""
-        return await self._prepare_response_for_redactions(
+        if source_event_ids:
+            await self._register_context_revisions(source_event_ids[0], thread_history)
+        suppressed = await self._prepare_response_for_redactions(
             target=target,
             source_event_ids=source_event_ids,
-        ) or any(self.is_handled(source_event_id) for source_event_id in terminal_source_event_ids)
+        )
+        if suppressed or any(self.is_handled(source_event_id) for source_event_id in terminal_source_event_ids):
+            return True
+        if any(self.is_revision_redacted(message.latest_event_id) for message in thread_history):
+            msg = "Conversation revision changed before locked response preparation"
+            raise RevisionSnapshotChangedError(msg)
+        return False
 
-    async def prepare_edit_response_source(
+    async def detach_deleted_response(self, turn_id: str, response_event_id: str | None) -> None:
+        """Detach the removed response after Matrix cleanup, retaining any concurrent STOP authority."""
+        record = self.get_turn_record(turn_id)
+        if record is None or response_event_id is None:
+            return
+
+        def detached(records: Mapping[str, TurnRecord]) -> TurnRecord:
+            current = records[turn_id]
+            if current.response_event_id != response_event_id:
+                return current
+            return replace(
+                current,
+                response_event_id=None,
+                user_stop_settled_receipt_order=current.user_stop_receipt_order,
+                timestamp=0.0,
+            )
+
+        await self._ledger.update_handled_turn(record.indexed_event_ids, detached)
+
+    async def _prepare_edit_response_source(
         self,
         *,
         target: MessageTarget,
@@ -660,10 +972,12 @@ class TurnStore:
         original_event_id: str,
         requester_user_id: str,
     ) -> TurnRecord | None:
-        """Load, deterministically merge, and repair one durable turn record."""
-        ledger_record_before_recovery = self._ledger.get_turn_record(original_event_id)
+        """Return journal authority, importing saved history only for an absent identity."""
+        existing_record = await self._ledger.get_settled_turn_record(original_event_id)
+        if existing_record is not None:
+            return existing_record
         if not self.deps.state_writer.supports_run_recovery():
-            return ledger_record_before_recovery
+            return None
         recovery_record = self._load_persisted_turn_record(
             _LoadPersistedTurnRequest(
                 room=room,
@@ -673,23 +987,29 @@ class TurnStore:
             ),
         )
         if recovery_record is None:
-            return self._ledger.get_turn_record(original_event_id)
+            return await self._ledger.get_settled_turn_record(original_event_id)
 
-        def repaired_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
-            ledger_record = existing_records.get(original_event_id)
-            return (
-                _reconcile_ledger_and_recovery(
-                    ledger_record,
-                    recovery_record,
-                    recovery_may_replace=ledger_record == ledger_record_before_recovery,
-                )
-                if ledger_record is not None
-                else recovery_record
+        def imported_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord | None:
+            current = existing_records.get(original_event_id)
+            if current is not None:
+                return current
+            source_owner = next(
+                (
+                    existing_records[source_event_id]
+                    for source_event_id in recovery_record.source_event_ids
+                    if source_event_id in existing_records
+                ),
+                None,
             )
+            if source_owner is not None:
+                return source_owner
+            if existing_records:
+                return None
+            return self._sanitize_candidate(recovery_record)
 
         return await self._ledger.update_handled_turn(
             (original_event_id, *recovery_record.indexed_event_ids),
-            repaired_record,
+            imported_record,
         )
 
     def remove_stale_runs_for_edit(
@@ -711,6 +1031,7 @@ class TurnStore:
         target: MessageTarget,
         requester_user_id: str,
         redacted_event_id: str,
+        legacy_summary_source_id: str | None = None,
     ) -> bool:
         """Remove causal replay from every self-owned scope in one conversation."""
         candidate_records = self._ledger.turn_records_for_conversation(session_id=target.session_id)
@@ -748,6 +1069,7 @@ class TurnStore:
                 history_scope=history_scope,
                 requester_user_id=candidate_requester_id,
                 redacted_event_id=redacted_event_id,
+                legacy_summary_source_id=legacy_summary_source_id,
             )
             removed_any = removed or removed_any
         return removed_any
@@ -778,6 +1100,7 @@ class TurnStore:
         history_scope: HistoryScope,
         requester_user_id: str,
         redacted_event_id: str,
+        legacy_summary_source_id: str | None = None,
     ) -> bool:
         """Remove source-backed replay from one source-derived fallback scope."""
         execution_identity = self.deps.tool_runtime.build_execution_identity(
@@ -804,6 +1127,8 @@ class TurnStore:
                 session,
                 history_scope,
             )
+            if session is not None and session.summary is not None and legacy_summary_source_id is not None:
+                scope_contains_source |= legacy_summary_source_id in read_scope_seen_event_ids(session, history_scope)
             removed_summary_dependents = bool(
                 session is not None and session.summary is not None and scope_contains_source and session.runs,
             )
@@ -976,6 +1301,8 @@ def _has_redaction_cleanup_context(turn_record: TurnRecord) -> bool:
 
 def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) -> TurnRecord:
     """Fill absent optional facts from recovery without overriding ledger authority."""
+    recovery = sanitize_revision_replay(recovery, authority=authority)
+    authority = sanitize_revision_replay(authority, authority=recovery)
     return canonicalize_turn_record(
         authority,
         discovery_event_ids=(*authority.discovery_event_ids, *recovery.discovery_event_ids),
@@ -1015,68 +1342,6 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         command_result_text=authority.command_result_text or recovery.command_result_text,
         history_scope=authority.history_scope or recovery.history_scope,
         conversation_target=authority.conversation_target or recovery.conversation_target,
-    )
-
-
-def _reconcile_ledger_and_recovery(
-    ledger_record: TurnRecord,
-    recovery_record: TurnRecord,
-    *,
-    recovery_may_replace: bool,
-) -> TurnRecord:
-    """Keep ledger identity while accepting a newer delivered run's mutable facts."""
-    if (
-        not recovery_may_replace
-        or recovery_record.timestamp < int(ledger_record.timestamp)
-        or recovery_record.response_event_id is None
-        or not same_turn_identity(ledger_record, recovery_record)
-    ):
-        recovery_record = canonicalize_turn_record(recovery_record, source_event_revisions=None)
-        backfilled_record = _backfill_missing_turn_facts(ledger_record, recovery_record)
-        return (
-            canonicalize_turn_record(
-                backfilled_record,
-                timestamp=math.nextafter(ledger_record.timestamp, math.inf),
-            )
-            if backfilled_record != ledger_record
-            else ledger_record
-        )
-    source_event_prompts, source_event_revisions = merge_edit_facts(ledger_record, recovery_record)
-    recovered_record = canonicalize_turn_record(
-        ledger_record,
-        discovery_event_ids=(*ledger_record.discovery_event_ids, *recovery_record.discovery_event_ids),
-        redacted_source_event_ids=(
-            *ledger_record.redacted_source_event_ids,
-            *recovery_record.redacted_source_event_ids,
-        ),
-        response_event_id=recovery_record.response_event_id,
-        completed=recovery_record.completed,
-        source_event_prompts=source_event_prompts,
-        source_event_revisions=source_event_revisions,
-        latest_edit_receipt_order=_latest_edit_receipt_order(ledger_record, recovery_record),
-        user_stop_receipt_order=_latest_user_stop_receipt_order(ledger_record, recovery_record),
-        user_stop_settled_receipt_order=_latest_user_stop_settled_receipt_order(
-            ledger_record,
-            recovery_record,
-        ),
-        source_event_metadata=(
-            recovery_record.source_event_metadata
-            if recovery_record.source_event_metadata is not None
-            else ledger_record.source_event_metadata
-        ),
-        response_owner=recovery_record.response_owner or ledger_record.response_owner,
-        requester_id=recovery_record.requester_id or ledger_record.requester_id,
-        correlation_id=recovery_record.correlation_id or ledger_record.correlation_id,
-        history_scope=recovery_record.history_scope or ledger_record.history_scope,
-        conversation_target=recovery_record.conversation_target or ledger_record.conversation_target,
-    )
-    return (
-        canonicalize_turn_record(
-            recovered_record,
-            timestamp=max(recovery_record.timestamp, math.nextafter(ledger_record.timestamp, math.inf)),
-        )
-        if recovered_record != ledger_record
-        else ledger_record
     )
 
 

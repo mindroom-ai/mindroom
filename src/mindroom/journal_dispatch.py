@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.event_journal import DispatchView, InteractiveSelection
+    from mindroom.runtime_shutdown import RuntimeShutdownIntent
 
 from mindroom.event_journal import JournalEvent
 
@@ -132,6 +133,19 @@ class JournalDispatcher:
     async def stop(self) -> None:
         """Stop draining, leaving unfinished work pending for the next start."""
         await self._worker.stop()
+
+    def begin_shutdown(self, *, shutdown_intent: RuntimeShutdownIntent) -> None:
+        """Close semantic admission before the runtime withdraws its capabilities."""
+        self._worker.begin_shutdown(shutdown_intent=shutdown_intent)
+
+    @property
+    def pending_task_count(self) -> int:
+        """Return callback and pump owners still holding runtime resources."""
+        return self._worker.pending_task_count
+
+    async def wait_stopped(self, *, timeout_seconds: float) -> bool:
+        """Bound callback cleanup without releasing unfinished owners."""
+        return await self._worker.wait_stopped(timeout_seconds=timeout_seconds)
 
     async def drain_once(self) -> int:
         """Run everything currently pending to completion.

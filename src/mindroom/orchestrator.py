@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, cast, overload
@@ -1430,16 +1430,15 @@ class _MultiAgentOrchestrator:
             return
         router_bot = self._router_bot()
 
-        principals = {bot.agent_name: bot.journal_principal() for bot in bots if bot.client is not None}
+        recovery_bots = {bot.agent_name: bot for bot in bots if bot.client is not None}
 
-        async def response_is_owned(agent_name: str, room_id: str, event_id: str) -> bool:
-            principal = principals.get(agent_name)
-            return principal is not None and await principal.owns_matrix_response(room_id=room_id, event_id=event_id)
+        def response_recovery_scope(agent_name: str, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
+            return recovery_bots[agent_name].response_recovery_scope(room_id, event_id)
 
         result = await recover_stale_streaming_messages(
             actors,
             resume_client=router_bot.client if router_bot is not None else None,
-            response_is_owned=response_is_owned,
+            response_recovery_scope=response_recovery_scope,
             config=config,
             runtime_paths=self.runtime_paths,
             startup_cutoff_ms=startup_cutoff_ms,
@@ -1586,6 +1585,7 @@ class _MultiAgentOrchestrator:
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_bot.client)
         self.agent_reply_membership_sync.record_authoritative_refresh(config)
+        self._schedule_ready_turn_dispatch_recovery()
         for bot in self.agent_bots.values():
             bot.schedule_pending_invite_reconciliation()
         await self.revoke_reply_authorized_calls()
@@ -2406,9 +2406,10 @@ class _MultiAgentOrchestrator:
     async def stop(self) -> None:  # noqa: C901, PLR0912, PLR0915
         """Stop all agent bots."""
         self.running = False
+        for bot in self.agent_bots.values():
+            bot.begin_process_shutdown()
         self.hook_registry = HookRegistry.empty()
         set_scheduling_hook_registry(self.hook_registry)
-        self.invalidate_agent_reply_memberships(reason="shutdown")
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
@@ -2502,11 +2503,12 @@ class _MultiAgentOrchestrator:
                 phase_cancellations.append(cancellation)
         pending_response_owner_count = sum(bot.pending_response_owner_count for bot in self.agent_bots.values())
         pending_response_phase_counts = _aggregate_response_phase_counts(self.agent_bots.values())
+        callback_cleanup_pending = any(bot.deferred_stop_required is True for bot in stopping_bots)
         await _run_shutdown_step("attachment_cleanup", wait_for_attachment_cleanup_tasks())
         # Last, because every bot borrows it: closing it earlier would pull the
         # store out from under a bot still draining its outbox.
         journal_failures: list[BaseException] = []
-        if self._open_journal is not None and pending_response_owner_count == 0:
+        if self._open_journal is not None and pending_response_owner_count == 0 and not callback_cleanup_pending:
             journal, self._open_journal = self._open_journal, None
             close_results, cancellation = await _run_shutdown_step(
                 "event_journal",
@@ -2515,7 +2517,7 @@ class _MultiAgentOrchestrator:
             if cancellation is not None:
                 phase_cancellations.append(cancellation)
             journal_failures.extend(result for result in close_results if isinstance(result, BaseException))
-        elif pending_response_owner_count > 0:
+        elif pending_response_owner_count > 0 or callback_cleanup_pending:
             logger.warning(
                 "orchestrator_shared_journal_close_deferred",
                 live_response_owner_count=pending_response_owner_count,
@@ -2550,6 +2552,7 @@ class _MultiAgentOrchestrator:
         ]
         if failures:
             raise failures[0]
+        self.invalidate_agent_reply_memberships(reason="shutdown")
         logger.info("All agent bots stopped")
 
 

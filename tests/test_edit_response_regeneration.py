@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -38,10 +38,13 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     resolve_runtime_paths,
 )
+from mindroom.delivery_gateway import FinalDeliveryRequest, ResponseIdentity
+from mindroom.event_journal import DeliveryStage
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
 from mindroom.history.interrupted_replay import _build_interrupted_replay_run, build_interrupted_replay_snapshot
 from mindroom.history.types import HistoryScope
+from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import thread_history_result
@@ -49,6 +52,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.session_ids import create_session_id
+from mindroom.turn_store import TurnStore
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot, make_test_team_bot
 from tests.conftest import (
@@ -73,6 +77,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 
     from mindroom.bot import AgentBot, TeamBot
+    from mindroom.event_journal import EventJournalStore
 
 
 def _room_send_response(event_id: str) -> MagicMock:
@@ -345,7 +350,7 @@ def _generate_response_with_locked_callback(
     async def _generate_response(request: ResponseRequest) -> str | None:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if request.prepare_source_turn is not None and await request.prepare_source_turn():
+        if request.prepare_source_turn is not None and await request.prepare_source_turn(request.thread_history):
             return None
         return response_event_id
 
@@ -1850,8 +1855,10 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
 
 
 @pytest.mark.asyncio
+@pytest.mark.ledger_loads_from_disk
 async def test_handle_message_edit_does_not_mark_regeneration_success_when_existing_edit_fails(
     tmp_path: Path,
+    journal_store: EventJournalStore,
 ) -> None:
     """Preserved in-place regeneration edits must leave the prior response linkage untouched."""
     agent_user = AgentMatrixUser(
@@ -1871,7 +1878,15 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         rooms=["!test:example.com"],
     )
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
-    replace_edit_regenerator_deps(bot)
+    turn_store = TurnStore(
+        replace(
+            _turn_store(bot).deps,
+            turn_records=journal_store.turn_records("test_agent"),
+        ),
+    )
+    await turn_store.warm()
+    bot._turn_store = turn_store
+    replace_edit_regenerator_deps(bot, turn_store=turn_store)
     stored_target = MessageTarget.resolve(
         room_id="!test:example.com",
         thread_id=None,
@@ -1885,9 +1900,19 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         history_scope=_agent_history_scope("test_agent"),
         conversation_target=stored_target,
     )
-    turn_store = _turn_store(bot)
-    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
+
+    principal = journal_store.principal("test_agent@@mindroom_test_agent:example.com")
+    gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
+    gateway = replace(
+        gateway,
+        deps=replace(
+            gateway.deps,
+            outbox=principal,
+            terminal_turn_for=turn_store.terminal_turn_record,
+            terminal_turn_committed=turn_store.publish_committed_response,
+        ),
+    )
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
     edit_event = nio.RoomMessageText.from_dict(
@@ -1929,9 +1954,25 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
     }
 
     async def fail_visible_update(request: ResponseRequest) -> str | None:
-        if request.on_lifecycle_lock_acquired is not None:
-            request.on_lifecycle_lock_acquired()
-        return "$response:example.com"
+        assert request.prepare_source_turn is not None
+        assert await request.prepare_source_turn(request.thread_history) is False
+        outcome = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=request.response_envelope.target,
+                existing_event_id=request.existing_event_id,
+                response_text="The regenerated answer",
+                identity=ResponseIdentity(
+                    response_kind="agent",
+                    response_envelope=request.response_envelope,
+                    correlation_id=request.correlation_id or "failed-edit",
+                ),
+                tool_trace=None,
+                extra_content=None,
+                prepared_edit_record=request.prepared_edit_record,
+            ),
+        )
+        assert outcome.terminal_status == "error"
+        return outcome.event_id
 
     mock_generate_response = AsyncMock(side_effect=fail_visible_update)
     replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
@@ -1942,6 +1983,10 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
             "create_storage",
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=False) as mock_remove_run,
+        patch(
+            "mindroom.delivery_gateway.send_message_outcome",
+            return_value=MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "Matrix send failed"),
+        ),
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=True,
@@ -1960,17 +2005,26 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         )
 
         mock_generate_response.assert_awaited_once()
-        turn_store.record_turn.assert_called_once()
-        assert turn_store.record_turn.call_args.args[0].response_event_id == "$response:example.com"
         assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
 
+    delivery = await principal.load_matrix_delivery(delivery_id="$edit:example.com", stage=DeliveryStage.FINAL)
+    assert delivery is not None
+    assert delivery.attempted
+    assert delivery.acknowledged_event_id is None
+    rows = await turn_store.deps.turn_records.load_all()
+    persisted = TurnRecordCodec._from_ledger_record("$original:example.com", json.loads(rows[0][2]))
+    assert persisted is not None
+    assert persisted.response_event_id == "$response:example.com"
+    assert persisted.source_event_revisions is None
+    assert persisted.revision_replay["$edit:example.com"].response_event_id is None
+
 
 @pytest.mark.asyncio
-async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_metadata(
+async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_from_run_metadata(
     tmp_path: Path,
 ) -> None:
-    """Coalesced edit regeneration should fall back to persisted run metadata when the ledger lacks prompts."""
+    """Saved prompts cannot fill a current coalesced journal record."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -2080,7 +2134,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             bot._conversation_state_writer,
             "create_storage",
             return_value=storage,
-        ),
+        ) as mock_create_storage,
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True) as mock_remove_run,
     ):
         mock_context.return_value = MagicMock(
@@ -2099,55 +2153,11 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             requester_user_id=edit_event.sender,
         )
 
-        mock_generate_response.assert_awaited_once()
-        request = mock_generate_response.call_args.args[0]
-        assert request.prompt == _tagged_prompt(
-            ("$first:example.com", "$primary:example.com"),
-            {"$first:example.com": "updated first", "$primary:example.com": "primary"},
-        )
-        response_target = request.response_envelope.target
-        assert response_target.reply_to_event_id == "$primary:example.com"
-        assert response_target == stored_target
-        assert request.matrix_run_metadata == {
-            "matrix_source_event_ids": ["$first:example.com", "$primary:example.com"],
-            "matrix_source_event_prompts": {
-                "$first:example.com": "updated first",
-                "$primary:example.com": "primary",
-            },
-            MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(
-                "$first:example.com",
-                "$primary:example.com",
-            ),
-            "matrix_source_event_revisions": {
-                "$first:example.com": [1000001, "$edit:example.com"],
-            },
-            **_run_response_context_metadata(
-                response_owner="test_agent",
-                history_scope=_agent_history_scope("test_agent"),
-                conversation_target=stored_target,
-            ),
-        }
+        mock_generate_response.assert_not_awaited()
+        mock_create_storage.assert_not_called()
         assert _response_event_id(bot, "$first:example.com") == "$response:example.com"
         assert _response_event_id(bot, "$primary:example.com") == "$response:example.com"
-        assert mock_remove_run.call_count == 2
-        mock_remove_run.assert_has_calls(
-            [
-                call(
-                    storage,
-                    "!test:example.com",
-                    "$first:example.com",
-                    session_type=SessionType.AGENT,
-                    remove_following_runs=True,
-                ),
-                call(
-                    storage,
-                    "!test:example.com",
-                    "$primary:example.com",
-                    session_type=SessionType.AGENT,
-                    remove_following_runs=True,
-                ),
-            ],
-        )
+        mock_remove_run.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -3708,10 +3718,10 @@ def _persisted_run_metadata(bot: AgentBot, session_id: str) -> dict[str, object]
 
 @pytest.mark.ledger_loads_from_disk
 @pytest.mark.asyncio
-async def test_handle_message_edit_recovers_newer_run_response_event_id_after_restart(
+async def test_handle_message_edit_uses_journal_response_event_id_after_restart(
     tmp_path: Path,
 ) -> None:
-    """A fresh bot should repair stale ledger linkage from a delivered persisted run."""
+    """A newer saved response ID must not replace current journal linkage after restart."""
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
         user_id="@mindroom_test_agent:example.com",
@@ -3901,9 +3911,9 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
 
     mock_generate_response.assert_awaited_once()
     request = mock_generate_response.call_args.args[0]
-    assert request.existing_event_id == "$response-new:example.com"
+    assert request.existing_event_id == "$response-old:example.com"
     assert request.response_envelope.target.session_id == "!test:example.com"
-    assert _response_event_id(restarted_bot, "$original:example.com") == "$response-new:example.com"
+    assert _response_event_id(restarted_bot, "$original:example.com") == "$response-old:example.com"
 
 
 @pytest.mark.asyncio

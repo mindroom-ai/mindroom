@@ -1702,10 +1702,11 @@ class TurnController:
                 attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
                 matrix_run_metadata=selection_matrix_run_metadata,
-                prepare_source_turn=lambda: self.deps.turn_store.prepare_pending_response_source(
+                prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(
                     target=response_target,
                     source_event_ids=selection_handled_turn.indexed_event_ids,
                     terminal_source_event_ids=selection_handled_turn.source_event_ids,
+                    thread_history=history,
                 ),
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 on_deferred_outcome_handled=record_deferred_outcome,
@@ -2046,10 +2047,11 @@ class TurnController:
                     current_prompt_is_structured=dispatch.current_prompt_is_structured,
                     pipeline_timing=dispatch_timing,
                     on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-                    prepare_source_turn=lambda: self.deps.turn_store.prepare_pending_response_source(
+                    prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(
                         target=dispatch.target,
                         source_event_ids=handled_turn.indexed_event_ids,
                         terminal_source_event_ids=handled_turn.source_event_ids,
+                        thread_history=history,
                     ),
                     on_source_turn_suppressed=settle_redacted_sources,
                     on_interrupted_response_recoverable=record_interrupted_turn,

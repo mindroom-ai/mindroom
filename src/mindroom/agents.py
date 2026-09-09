@@ -1164,6 +1164,13 @@ def remove_run_by_event_id(
             if include_seen_event_ids and isinstance(raw_seen_event_ids, list)
             else []
         )
+        revisions = run.metadata.get(constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY)
+        if include_seen_event_ids and isinstance(revisions, dict):
+            seen_event_ids.extend(
+                revision[1]
+                for revision in revisions.values()
+                if isinstance(revision, list | tuple) and len(revision) == 2 and isinstance(revision[1], str)
+            )
         matches_event_id = run.metadata.get(constants.MATRIX_EVENT_ID_METADATA_KEY) == event_id
         if (
             matches_event_id

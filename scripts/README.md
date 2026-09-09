@@ -71,7 +71,21 @@ uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --thread
 uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
 uv run python scripts/testing/fuzz_live_matrix.py --profile short-stream-correctness
 uv run python scripts/testing/fuzz_live_matrix.py --profile sustained-stream-capacity --threads 200 --reply-timeout 180
+uv run python scripts/testing/fuzz_live_matrix.py --profile chaos --seed 42 --steps 200 --clients 4 --rooms 2
 ```
+
+The `chaos` profile adds concurrent clients across multiple rooms, hot-thread traffic, in-flight edits and redactions, MindRoom restarts, Tuwunel restarts, and downtime followed by recovery.
+It settles at generated checkpoints and audits the final Matrix view against exact source events, response bodies, redaction provenance, and durable turn records in the current event journal.
+It uses the installed `mindroom-nio` dependency from `uv.lock`; no separate source checkout is required.
+
+Generated fuzz and chaos traces append explicit follow-up probes for conversations with source redactions.
+The probes wait for durable tombstones, require deferred session cleanup, and check that redacted source markers are absent from the complete model request.
+Probe operations are additional to `--steps` and appear in the saved trace.
+
+Use `--save-trace scenario.json` to save the logical workload and `--trace scenario.json` to replay it against a fresh disposable server.
+Replay preserves batches and inputs; concurrent scheduling and runtime output can differ.
+Failure bundles retain the scenario, realized operation order, logs, runtime provenance, and audit evidence under `--artifact-root`.
+The `saturation` profile retains the original short-stream scenario; use `sustained-stream-capacity` for the long-running capacity gate.
 
 `--restart-interval` is the only knob that decides how much recovery a fuzz run exercises, so the command above passes it explicitly.
 The default of 100 buys one interruption in a 200-step run; `5` buys around forty.
@@ -85,8 +99,16 @@ Each interruption is scheduled as the tail of a batch that still owes the agent 
 That is what makes it land inside a turn instead of against an idle runtime, which is all a restart between drained batches could ever do.
 Interruptions alternate between two kinds, because they prove different things:
 
-- `restart_mindroom` sends SIGINT, so MindRoom drains. The run fails if the child ignores the signal until the harness has to kill it, exits with an unexpected status, or never logs an orderly bot shutdown.
-- `crash_mindroom` sends SIGKILL, so nothing drains and every committed, unsettled obligation is owed to durable recovery. There is no shutdown verdict to check here; the oracle is that each interrupted turn still produces exactly one reply.
+- `restart_mindroom` sends SIGINT, so MindRoom drains.
+The run fails if the child ignores the signal until the harness has to kill it, exits with an unexpected status, or never logs an orderly bot shutdown.
+- `crash_mindroom` sends SIGKILL, so nothing drains and every committed, unsettled obligation is owed to durable recovery.
+  There is no shutdown verdict to check here; each interrupted source must have exact response attribution or independently proven deliberate supersession.
+
+Supersession requires an exact positive replay-guard log, a matching admitted and settled principal-scoped journal source, and its named newer same-requester/thread source anchored in completed durable generation with a canonical visible response covering its current marker.
+An old visible reply must retain exact durable attribution and terminal restart-interruption metadata; superseded work is counted separately from completed generation and cannot waive delivery, edit, redaction, or source-revision debt.
+Restart continuation requires one exact trusted requester-bound relay, its completed durable response and acknowledged FINAL, joined to the original settled source and terminal interruption in one consistent ownership snapshot.
+Only that continuation's exact model call may supply the original current marker from request history; earlier published output retains its own active-message marker checks.
+`ledger_recovered_sources` and `recovered_interrupted_bodies` count these outcomes separately, while `completed_final_bodies` counts completed responses and the original generation remains unchanged.
 
 A run whose interruptions all found an idle journal fails instead of reporting the count as coverage.
 `restarts`, `crashes`, and `interruptions_with_work_outstanding` are all in the result JSON, and the third must equal the sum of the first two.
@@ -141,8 +163,8 @@ It is not claimed here because it has not been run on a GitHub runner, and shipp
 
 #### Making a red run mean the product is broken
 
-Every event in one Matrix room is handled by a single sequential lane, so a batch that asks forty-five threads for a reply is asking for forty-five agent turns back to back.
-Holding that to the same flat deadline as a single turn made the fuzz profile fail on a busy machine for reasons that had nothing to do with the code under test, so the harness now derives its deadlines from the work and from measured latency.
+A batch can owe many agent turns, including work serialized within a conversation.
+The harness derives its deadlines from the outstanding work and measured latency so healthy progress on a busy machine is not held to a single-turn deadline.
 
 - For fuzz, restart-regression, and short-stream-correctness, `--reply-timeout` is the deadline for a *single* agent turn and the floor under every larger adaptive deadline.
 - For sustained-stream-capacity, `--reply-timeout` is one fixed non-extending deadline for the complete root-release, reply, drain, and fence workflow.
@@ -153,6 +175,8 @@ Holding that to the same flat deadline as a single turn made the fuzz profile fa
 - A deadline that arrives while replies are still landing is extended up to three times, and each extension prints a `slow machine:` line to stderr.
   An extension is only granted to a window that actually produced a reply, so a wedged runtime can never extend its way out of failing.
 - A managed MindRoom child that has exited fails the wait on the next poll instead of being waited out.
+- Graceful shutdown has a separate 60-second outer watchdog so the runtime can complete its sequential cleanup phases.
+  Forced kills, unexpected exit status, and missing orderly shutdown evidence still fail the run.
 
 When a wait does fail, the harness reads the run's own `mindroom_data/tracking/event_journal.db` and reports where each missing reply's source event actually stopped: `not_admitted`, `admitted_never_dispatched`, `dispatched_never_sent`, `settled_without_reply`, or `sent_but_unobserved`.
 The report also names the per-room pending depth and the event at the head of the blocked lane.
@@ -168,11 +192,12 @@ The `--threads` and `--max-batch-size` defaults are unchanged.
 
 The `restart-regression` profile is a manual opt-in oracle for config replacement, cold-history suppression, and durable callback recovery across a hard MindRoom restart.
 It creates a dormant public room, writes explicitly agent-mentioned historical text and media there, then atomically adds that room and switches only the managed agent to the replacement model used by the in-flight latch.
-The disposable room is world-readable so replacement bots can actually receive and cache events authored before they joined.
-The run waits for config-reload shutdown of both old bots, setup of both replacement bots, configuration-update completion, and durable caching of all four principal/event pairs.
-It sends the fresh request only after that cold-history boundary, then waits for the exact callback, its unsettled durable obligation, a deterministic model request held in flight, and a sync checkpoint strictly later than the fresh event's cache write.
+The disposable room is world-readable so replacement bots can project events authored before they joined.
+The run waits for config-reload shutdown of both old bots, setup of both replacement bots, and configuration-update completion.
+It then sends the fresh request and waits for the exact callback, its pending journal event, a deterministic model request held in flight, and durable producer settlement after projection of the fresh event.
 The harness hard-kills MindRoom, switches to a recovery-only deterministic model while the process is down, boots a new process, and waits for both recovered bots to complete setup.
-The run passes only when the pending obligation becomes succeeded, the exact fresh event reaches semantic ingress once before and once after restart, and the recovered generation produces exactly one complete agent response and no router response.
+The run passes only when the pending journal event becomes settled, the exact fresh event reaches semantic ingress once before and once after restart, and the recovered generation produces exactly one complete agent response and no router response.
+After the recovered answer, the harness explicitly reads the historical room projection; historical hydration is lazy and is not a prerequisite for sending the fresh request.
 Transport callback entry may repeat while Matrix sync and durable recovery race, so the oracle counts the `Received message` boundary after durable dedup instead of the lower-level callback-entry log.
 Neither historical event may start a callback, reach the fresh prompt, or produce output.
 An orderly final shutdown must complete without the production durable-recovery drain-failure marker.
@@ -188,7 +213,7 @@ uv run python scripts/testing/fuzz_live_matrix.py \
   --failure-log restart-regression.log
 ```
 
-`--reply-timeout` bounds lifecycle, cache, durable-obligation, model-latch, response, and final-drain observation.
+`--reply-timeout` bounds lifecycle, projection, durable-producer, journal, model-latch, response, and final-drain observation.
 `--settle-seconds` controls the final Matrix long-poll after the orderly drain.
 `--failure-log` preserves the complete MindRoom log when the oracle fails without printing content-bearing runtime output to the terminal.
 `--seed`, `--steps`, `--threads`, `--max-batch-size`, and `--restart-interval` do not change this fixed profile.

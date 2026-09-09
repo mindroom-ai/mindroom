@@ -227,6 +227,7 @@ visibility = [
 [[modules]]
 path = "mindroom.pending_event_worker"
 depends_on = [
+    "mindroom.cancellation",
     "mindroom.logging_config",
 ]
 visibility = ["mindroom.journal_dispatch"]

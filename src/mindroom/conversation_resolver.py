@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
@@ -47,6 +47,7 @@ from mindroom.matrix.thread_membership import (
     thread_messages_thread_membership_access,
 )
 from mindroom.message_target import MessageTarget
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_utils import check_agent_mentioned
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -1077,3 +1078,49 @@ class ConversationResolver:
             thread_id,
             mode=ThreadReadMode.STRICT,
         )
+
+    def canonical_source_requester(self, message: ResolvedVisibleMessage) -> str:
+        """Resolve the authenticated physical sender through configured human aliases."""
+        return resolve_human_requester_alias(message.sender, self.deps.runtime.config, self.deps.runtime_paths)
+
+    async def resolve_exact_source(
+        self,
+        *,
+        target: MessageTarget,
+        source_event_id: str,
+        requester_id: str,
+    ) -> ResolvedVisibleMessage | None:
+        """Prove an exact physical source and revision, paging beyond prompt windows."""
+        reader = self.deps.conversation_reader
+        if await reader.is_event_redacted(room_id=target.room_id, event_id=source_event_id):
+            return None
+        before = None
+        while True:
+            page = await reader.read_strict(
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
+                limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
+                before=before,
+            )
+            for message in projected_thread_history(page, complete=True):
+                if message.event_id != source_event_id:
+                    continue
+                if self.canonical_source_requester(message) != requester_id:
+                    msg = "Canonical source requester does not match the recorded owner"
+                    raise ThreadMembershipLookupError(msg)
+                resolved = await resolve_event_source_content(
+                    {"content": dict(message.content)},
+                    self._client(),
+                )
+                content = resolved["content"]
+                body = content.get("body")
+                if not isinstance(body, str):
+                    msg = "Canonical source has no resolved text body"
+                    raise ThreadMembershipLookupError(msg)
+                return replace(message, body=body, content=content)
+            if page.next_cursor is None:
+                if await reader.is_event_redacted(room_id=target.room_id, event_id=source_event_id):
+                    return None
+                msg = "Exact canonical source is unavailable in the strict conversation projection"
+                raise ThreadMembershipLookupError(msg)
+            before = page.next_cursor

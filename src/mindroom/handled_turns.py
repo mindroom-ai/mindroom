@@ -41,6 +41,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.turn_record import (
+    RevisionReplay,
     SourceEventMetadata,
     SourceEventRevision,
     TurnRecord,
@@ -49,6 +50,7 @@ from mindroom.turn_record import (
     canonicalize_turn_record,
     merge_edit_facts,
     same_turn_identity,
+    sanitize_revision_replay,
 )
 
 if typing.TYPE_CHECKING:
@@ -68,6 +70,7 @@ __all__ = [
     "canonicalize_turn_record",
     "legacy_responses_file_path",
     "merge_edit_facts",
+    "resolve_turn_record",
     "with_user_stop",
 ]
 
@@ -138,6 +141,9 @@ class TurnRecordCodec:
             "response_event_id": record.response_event_id,
             "completed": record.completed,
             "timestamp": record.timestamp,
+            "revision_replay": {
+                event_id: revision.to_record() for event_id, revision in (record.revision_replay or {}).items()
+            },
         }
         if record.discovery_event_ids:
             payload["discovery_event_ids"] = list(record.discovery_event_ids)
@@ -232,6 +238,7 @@ class TurnRecordCodec:
             visible_echo_is_fallback=_bool_or_none(record.get("visible_echo_is_fallback")),
             source_event_prompts=_mapping_or_none(record.get("source_event_prompts")),
             source_event_revisions=_mapping_or_none(record.get("source_event_revisions")),
+            revision_replay=_mapping_or_none(record.get("revision_replay")),
             suppressed_source_event_revisions=_mapping_or_none(
                 record.get("suppressed_source_event_revisions"),
             ),
@@ -252,6 +259,19 @@ class TurnRecordCodec:
         )
         if event_id not in turn_record.indexed_event_ids:
             return None
+        if "revision_replay" not in record and turn_record.source_event_revisions:
+            turn_record = canonicalize_turn_record(
+                turn_record,
+                revision_replay={
+                    revision_id: RevisionReplay(
+                        turn_record.prompt_source_event_id(source),
+                        timestamp,
+                        legacy_summary_provenance=True,
+                    )
+                    for source, (timestamp, revision_id) in turn_record.source_event_revisions.items()
+                    if revision_id != turn_record.prompt_source_event_id(source)
+                },
+            )
         return turn_record
 
     @staticmethod
@@ -352,6 +372,8 @@ class _LedgerState:
     """In-memory canonical records shared by every ledger for one agent."""
 
     responses: dict[str, TurnRecord] = field(default_factory=dict)
+    conversation_responses: dict[str, dict[str, TurnRecord]] = field(default_factory=dict)
+    cleanup_responses: dict[str, TurnRecord] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     # Reserve conflicting identities briefly; cleanup holds this mutex while
     # draining active writes. Unrelated updates may await persistence together.
@@ -421,7 +443,39 @@ class HandledTurnLedger:
 
     @_responses.setter
     def _responses(self, responses: dict[str, TurnRecord]) -> None:
-        self._state.responses = responses
+        self._state.responses = {}
+        self._state.conversation_responses.clear()
+        self._state.cleanup_responses.clear()
+        for event_id, record in responses.items():
+            self._set_response(event_id, record)
+
+    def _set_response(self, event_id: str, record: TurnRecord | None) -> None:
+        """Publish or restore one alias and its read indexes with the state lock held.
+
+        Index the actual aliases, including partially superseded owners, so the
+        scoped views agree with the primary map during provisional writes too.
+        Startup and retention rebuild these derived indexes from that same map.
+        """
+        previous = self._responses.get(event_id)
+        previous_session = (
+            previous.conversation_target.session_id if previous is not None and previous.conversation_target else None
+        )
+        session = record.conversation_target.session_id if record is not None and record.conversation_target else None
+        if previous_session is not None and previous_session != session:
+            conversation = self._state.conversation_responses[previous_session]
+            del conversation[event_id]
+            if not conversation:
+                del self._state.conversation_responses[previous_session]
+        if record is None:
+            self._responses.pop(event_id, None)
+        else:
+            self._responses[event_id] = record
+            if session is not None:
+                self._state.conversation_responses.setdefault(session, {})[event_id] = record
+        if record is not None and record.pending_redaction_cleanup_event_ids:
+            self._state.cleanup_responses[event_id] = record
+        else:
+            self._state.cleanup_responses.pop(event_id, None)
 
     async def load(self) -> None:
         """Read every stored record into memory, once per process.
@@ -483,6 +537,7 @@ class HandledTurnLedger:
         for event_id in event_ids:
             if (record := self._responses.get(event_id)) is not None:
                 keys.update(record.indexed_event_ids)
+                keys.update(record.revision_replay or {})
                 if record.anchor_event_id is not None:
                     keys.add(record.anchor_event_id)
         return keys
@@ -490,7 +545,7 @@ class HandledTurnLedger:
     async def _reserve_update(
         self,
         lookup_event_ids: tuple[str, ...],
-        update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
+        update: Callable[[Mapping[str, TurnRecord]], TurnRecord | None],
     ) -> _PendingLedgerWrite | None:
         """Derive and publish after earlier conflicting writes have settled."""
         while True:
@@ -508,6 +563,8 @@ class HandledTurnLedger:
                             },
                         )
                         updated = update(existing)
+                        if updated is None:
+                            return None
                         candidate = canonicalize_turn_record(
                             updated,
                             timestamp=updated.timestamp if updated.timestamp != 0.0 else time.time(),
@@ -515,9 +572,11 @@ class HandledTurnLedger:
                         if not candidate.source_event_ids:
                             return None
                         keys.update(self._write_keys(candidate.indexed_event_ids, candidate.anchor_event_id))
-                        record = _resolve_turn_record(candidate, self._responses)
+                        keys.update(candidate.revision_replay or {})
+                        record = resolve_turn_record(candidate, self._responses)
                         if record is not None:
                             keys.update(self._write_keys(record.indexed_event_ids, record.anchor_event_id))
+                            keys.update(record.revision_replay or {})
                         blockers = {
                             self._state.pending_writes[key] for key in keys if key in self._state.pending_writes
                         }
@@ -532,21 +591,22 @@ class HandledTurnLedger:
                             )
                             self._state.pending_writes.update(dict.fromkeys(keys, pending.settled))
                             for key in record.indexed_event_ids:
-                                self._responses[key] = record
+                                self._set_response(key, record)
                             return pending
             await asyncio.gather(*(asyncio.shield(blocker) for blocker in blockers))
 
     async def update_handled_turn(
         self,
         lookup_event_ids: Sequence[str],
-        update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
+        update: Callable[[Mapping[str, TurnRecord]], TurnRecord | None],
     ) -> TurnRecord | None:
         """Persist an update, serializing mutations of related identities.
 
         Unrelated turns can wait for their writes independently. The synchronous
         derivation may run again after a conflicting write settles; it must not
-        perform external effects. Provisional claims remain visible until the
-        write commits or its definite failure has been rolled back.
+        perform external effects. Returning ``None`` declines the mutation before
+        provisional publication. Provisional claims remain visible until the write
+        commits or its definite failure has been rolled back.
         """
         normalized = canonical_source_event_ids(lookup_event_ids)
         if not normalized:
@@ -555,6 +615,7 @@ class HandledTurnLedger:
         if pending is None:
             return None
         persisted_record = pending.record
+        write: asyncio.Future[str | None] | None = None
         try:
             # Canonicalization derives an anchor from the sources whenever one was
             # not supplied, and a record with no sources was already rejected above.
@@ -620,11 +681,26 @@ class HandledTurnLedger:
                 raise
         finally:
             with self._state.lock:
+                if write is not None and write.done() and not write.cancelled() and write.exception() is None:
+                    persisted_record = self._publish_write_result(pending, write.result())
                 for key in pending.keys:
                     del self._state.pending_writes[key]
                 pending.settled.set_result(None)
-        logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
+        if persisted_record is not None:
+            logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
         return persisted_record
+
+    def _publish_write_result(self, pending: _PendingLedgerWrite, result: str | None) -> TurnRecord | None:
+        """Replace the provisional claim with the transaction's actual merged record."""
+        self._restore_superseded(pending.record, pending.superseded)
+        if result is None:
+            return None
+        raw_record = json.loads(result)
+        record = TurnRecordCodec._from_ledger_record(raw_record["source_event_ids"][0], raw_record)
+        assert record is not None, "Corrupt committed turn record"
+        for key in record.indexed_event_ids:
+            self._set_response(key, record)
+        return record
 
     def has_responded(self, event_id: str) -> bool:
         """Return whether the source event has a terminal recorded outcome."""
@@ -730,10 +806,7 @@ class HandledTurnLedger:
             for event_id, previous in superseded.items():
                 if self._responses.get(event_id) is not published:
                     continue
-                if previous is None:
-                    self._responses.pop(event_id, None)
-                else:
-                    self._responses[event_id] = previous
+                self._set_response(event_id, previous)
 
     def _require_loaded(self) -> None:
         """Fail loudly if a reader arrives before the records are in memory.
@@ -766,6 +839,17 @@ class HandledTurnLedger:
             self._require_loaded()
             return self._responses.get(source_event_id)
 
+    async def get_settled_turn_record(self, source_event_id: str) -> TurnRecord | None:
+        """Return one record after owning writes and cache replacement settle."""
+        while True:
+            async with self._state.write_lock:
+                with self._state.lock:
+                    self._require_loaded()
+                    pending_write = self._state.pending_writes.get(source_event_id)
+                    if pending_write is None:
+                        return self._responses.get(source_event_id)
+            await asyncio.shield(pending_write)
+
     def pending_redaction_cleanup_event_ids(self) -> tuple[str, ...]:
         """Return every durable redaction cleanup intent still awaiting completion."""
         with self._state.lock:
@@ -773,10 +857,16 @@ class HandledTurnLedger:
             return canonical_source_event_ids(
                 tuple(
                     event_id
-                    for record in self._responses.values()
+                    for record in self._state.cleanup_responses.values()
                     for event_id in record.pending_redaction_cleanup_event_ids
                 ),
             )
+
+    def all_turn_records(self) -> tuple[TurnRecord, ...]:
+        """Return each retained owner once without publishing provenance aliases."""
+        with self._state.lock:
+            self._require_loaded()
+            return tuple({record.indexed_event_ids: record for record in self._responses.values()}.values())
 
     def turn_records_for_conversation(
         self,
@@ -786,13 +876,8 @@ class HandledTurnLedger:
         """Return unique records that can identify persisted scopes for one conversation."""
         with self._state.lock:
             self._require_loaded()
-            unique_records: dict[tuple[str, ...], TurnRecord] = {}
-            for record in self._responses.values():
-                target = record.conversation_target
-                if target is None or target.session_id != session_id:
-                    continue
-                unique_records[record.indexed_event_ids] = record
-            return tuple(unique_records.values())
+            records = self._state.conversation_responses.get(session_id, {})
+            return tuple({record.indexed_event_ids: record for record in records.values()}.values())
 
     def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:
         """Return the sole turn whose visible response has this Matrix event ID."""
@@ -859,11 +944,22 @@ class HandledTurnLedger:
         )
 
 
-def _resolve_turn_record(
+def resolve_turn_record(
     turn_record: TurnRecord,
     existing_records: Mapping[str, TurnRecord],
 ) -> TurnRecord | None:
     """Resolve one candidate against completed identities and newer same-turn rows."""
+    turn_record = sanitize_revision_replay(
+        turn_record,
+        tombstoned_event_ids=tuple(
+            event_id
+            for event_id in {
+                *(turn_record.revision_replay or {}),
+                *(revision[1] for revision in (turn_record.source_event_revisions or {}).values()),
+            }
+            if (record := existing_records.get(event_id)) is not None and event_id in record.redacted_source_event_ids
+        ),
+    )
     conflicting_source_event_ids = tuple(
         event_id
         for event_id in turn_record.source_event_ids
@@ -941,6 +1037,8 @@ def _project_redaction_alias(
 
 def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) -> TurnRecord:
     """Keep the newer same-turn record while preserving older echo and discovery facts."""
+    candidate = sanitize_revision_replay(candidate, authority=existing)
+    existing = sanitize_revision_replay(existing, authority=candidate)
     if candidate.completed != existing.completed:
         newer, older = (candidate, existing) if candidate.completed else (existing, candidate)
     else:
@@ -1009,6 +1107,11 @@ def _response_group_requires_retention(
     return (
         not unsettled_source_event_ids.isdisjoint(group.records)
         or any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
+        or any(
+            not unsettled_source_event_ids.isdisjoint(record.revision_replay or {})
+            or any(value.cleanup_pending for value in (record.revision_replay or {}).values())
+            for record in group.records.values()
+        )
         or any(not record.completed and record.replay_source_event_ids for record in group.records.values())
         or any(
             record.user_stop_receipt_order is not None

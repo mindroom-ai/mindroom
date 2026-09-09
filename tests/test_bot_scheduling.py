@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.authorization import ResponderCandidatePermissions
 from mindroom.coalescing_batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.access import ResponderAccessConfig
@@ -788,7 +789,7 @@ class TestCommandHandling:
             Config(
                 router=RouterConfig(
                     model="default",
-                    access=ResponderAccessConfig(users=["@alice:server"]),
+                    access=ResponderAccessConfig(current_room_members=False, users=["@alice:server"]),
                 ),
             ),
         )
@@ -1799,12 +1800,15 @@ class TestRouterSkipsSingleAgent:
         with (
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
                 new_callable=MagicMock,
             ) as mock_get_available,
         ):
             # Return only one agent (general)
-            mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [entity_ids(config, runtime_paths_for(config))["general"]],
+                [],
+            )
 
             await bot._on_message(room, event)
             await drain_coalescing(bot)
@@ -1886,15 +1890,18 @@ class TestRouterSkipsSingleAgent:
         with (
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
                 new_callable=MagicMock,
             ) as mock_get_available,
         ):
             # Return multiple agents
-            mock_get_available.return_value = [
-                entity_ids(config, runtime_paths_for(config))["general"],
-                entity_ids(config, runtime_paths_for(config))["calculator"],
-            ]
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                ],
+                [],
+            )
 
             await bot._on_message(room, event)
             await drain_coalescing(bot)
@@ -1990,14 +1997,17 @@ class TestRouterSkipsSingleAgent:
         with (
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
                 new_callable=MagicMock,
             ) as mock_get_available,
         ):
-            mock_get_available.return_value = [
-                entity_ids(config, runtime_paths_for(config))["general"],
-                entity_ids(config, runtime_paths_for(config))["calculator"],
-            ]
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                ],
+                [],
+            )
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
@@ -2072,11 +2082,14 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
                 new_callable=MagicMock,
             ) as mock_get_available,
         ):
-            mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [entity_ids(config, runtime_paths_for(config))["general"]],
+                [],
+            )
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
@@ -2140,11 +2153,14 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
                 new_callable=MagicMock,
             ) as mock_get_available,
         ):
-            mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [entity_ids(config, runtime_paths_for(config))["general"]],
+                [],
+            )
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 
@@ -2224,12 +2240,15 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
                 new_callable=MagicMock,
             ) as mock_get_available,
             patch("mindroom.turn_policy.get_agents_in_thread") as mock_agents_in_thread,
         ):
-            mock_get_available.return_value = [entity_ids(config, runtime_paths_for(config))["general"]]
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [entity_ids(config, runtime_paths_for(config))["general"]],
+                [],
+            )
             mock_agents_in_thread.return_value = []
             await bot._on_message(room, voice_event)
             await drain_coalescing(bot)
@@ -2300,14 +2319,17 @@ class TestRouterSkipsSingleAgent:
 
         with (
             patch(
-                "mindroom.turn_policy.responder_candidate_entities_from_cached_room",
+                "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
                 new_callable=MagicMock,
             ) as mock_get_available,
         ):
-            mock_get_available.return_value = [
-                entity_ids(config, runtime_paths_for(config))["general"],
-                entity_ids(config, runtime_paths_for(config))["calculator"],
-            ]
+            mock_get_available.return_value = ResponderCandidatePermissions(
+                [
+                    entity_ids(config, runtime_paths_for(config))["general"],
+                    entity_ids(config, runtime_paths_for(config))["calculator"],
+                ],
+                [],
+            )
             await bot._on_message(room, event)
             await drain_coalescing(bot)
 

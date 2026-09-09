@@ -34,6 +34,7 @@ from mindroom import approval_receipt, interactive, response_runner
 from mindroom import background_tasks as background_tasks_module
 from mindroom.agent_storage import get_agent_session
 from mindroom.approval_response import require_ordered_pause_presentation
+from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.access import ResponderAccessConfig
@@ -115,7 +116,7 @@ from mindroom.tool_system.events import ToolTraceEntry, format_tool_started_even
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
-from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_record import EditPreparation, canonicalize_turn_record
 from tests.conftest import (
     make_matrix_client_mock,
     make_visible_message,
@@ -1141,7 +1142,11 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycle_lock(tmp_path: Path) -> None:
+@pytest.mark.parametrize("uncertain", [False, True])
+async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycle_lock(  # noqa: PLR0915
+    tmp_path: Path,
+    uncertain: bool,
+) -> None:
     """A room-backed grant revoked during lock wait must prevent model execution."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -1196,8 +1201,8 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
     ):
         first = asyncio.create_task(runner.generate_response(first_request))
         await asyncio.wait_for(first_started.wait(), timeout=2)
+        assert await runner._request_remains_authorized(second_request)
         second = asyncio.create_task(runner.generate_response(second_request))
-        await asyncio.sleep(0)
         leave = nio.RoomMemberEvent.from_dict(
             {
                 "type": "m.room.member",
@@ -1217,13 +1222,24 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
             leave,
             control_user_id="@mindroom_router:localhost",
         )
+        if uncertain:
+            memberships.invalidate(config, reason="uncertain_sync_response")
         release_first.set()
 
         assert await asyncio.wait_for(first, timeout=2) == "$response"
-        assert await asyncio.wait_for(second, timeout=2) is None
+        if uncertain:
+            with pytest.raises(ReplyMembershipPendingError):
+                await asyncio.wait_for(second, timeout=2)
+            assert model_sources == ["$first"]
+            second_suppressed.assert_not_awaited()
+            await memberships.refresh(config, runner.deps.runtime_paths, membership_client)
+            assert await runner.generate_response(second_request) == "$response"
+        else:
+            assert await asyncio.wait_for(second, timeout=2) is None
 
-    assert model_sources == ["$first"]
-    second_suppressed.assert_awaited_once_with()
+    assert model_sources == (["$first", "$second"] if uncertain else ["$first"])
+    if not uncertain:
+        second_suppressed.assert_awaited_once_with()
 
 
 def _async_callback[**Args](callback: Callable[Args, object]) -> Callable[Args, Coroutine[Any, Any, None]]:
@@ -1235,7 +1251,7 @@ def _async_callback[**Args](callback: Callable[Args, object]) -> Callable[Args, 
     return invoke
 
 
-async def _suppress_source_turn() -> bool:
+async def _suppress_source_turn(_history: object) -> bool:
     """Report the source terminal, the way a redaction tombstone does under the lock."""
     return True
 
@@ -1260,7 +1276,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     preparations = 0
     on_source_turn_suppressed = AsyncMock()
 
-    async def prepare_source_turn() -> bool:
+    async def prepare_source_turn(_history: object) -> bool:
         nonlocal preparations
         preparations += 1
         return True
@@ -1294,6 +1310,48 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("final_result", [False, True, EditPreparation.REBUILD])
+async def test_final_source_gate_uses_refreshed_history_without_repeating_lifecycle_hooks(
+    tmp_path: Path,
+    final_result: bool | EditPreparation,
+) -> None:
+    """The final owner gate sees refreshed history and keeps rebuild distinct from suppression."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    history = ThreadHistoryResult(
+        [make_visible_message(event_id="$context", body="refreshed")],
+        is_full_history=True,
+    )
+    runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=history)
+    prepare = AsyncMock(side_effect=[False, final_result])
+    acquired = MagicMock()
+    suppressed = AsyncMock()
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="hello",
+        user_id="@user:localhost",
+        response_envelope=_envelope(target, source_event_id="$event"),
+        prepare_source_turn=prepare,
+        on_lifecycle_lock_acquired=acquired,
+        on_source_turn_suppressed=suppressed,
+    )
+    prepared = await runner._begin_locked_turn(
+        request,
+        resolved_target=target,
+        history_scope=runner.deps.state_writer.history_scope(),
+        execution_identity=runner.deps.tool_runtime.build_execution_identity(target=target, user_id=request.user_id),
+    )
+    assert [item.args[0] for item in prepare.await_args_list] == [[], history]
+    acquired.assert_called_once_with()
+    if final_result is True:
+        suppressed.assert_awaited_once_with()
+    else:
+        suppressed.assert_not_awaited()
+    assert (prepared is not None) is (final_result is False)
+
+
+@pytest.mark.asyncio
 async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path: Path) -> None:
     """Cancellation must not release the lifecycle lock while cleanup still mutates storage."""
     bot = _bot(tmp_path)
@@ -1303,7 +1361,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
     allow_preparation_finish = asyncio.Event()
     retries: list[str] = []
 
-    async def prepare_source_turn() -> bool:
+    async def prepare_source_turn(_history: object) -> bool:
         preparation_started.set()
         await allow_preparation_finish.wait()
         return False
@@ -2474,6 +2532,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
     target = _target(thread_id="$thread", reply_to_event_id="$event")
     envelope = _envelope(target, source_event_id="$event")
     delivery_gateway = MagicMock(spec=DeliveryGateway)
+    delivery_gateway.cleanup_deleted_response = AsyncMock(return_value=False)
     delivery_gateway.deliver_cancelled_visible_note = AsyncMock(
         return_value=FinalDeliveryOutcome(terminal_status="cancelled", event_id="$ack"),
     )
@@ -2798,7 +2857,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("revoked_layer", ["room", "entity"])
+@pytest.mark.parametrize("revoked_layer", ["room", "entity", "pending"])
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_ready_approval_replay_rechecks_current_authorization(
     tmp_path: Path,
@@ -2823,10 +2882,18 @@ async def test_ready_approval_replay_rechecks_current_authorization(
         state="ready",
     )
     assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
-    if revoked_layer == "room":
+    if revoked_layer in {"room", "pending"}:
         runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(
             current_room_members=True,
         )
+        membership_client = AsyncMock(spec=nio.AsyncClient)
+        membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
+        if revoked_layer == "room":
+            await runner.deps.runtime.agent_reply_memberships.refresh(
+                runner.deps.runtime.config,
+                runner.deps.runtime_paths,
+                membership_client,
+            )
     else:
         runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(users=[])
     failing = replace(
@@ -2848,6 +2915,25 @@ async def test_ready_approval_replay_rechecks_current_authorization(
             new=AsyncMock(side_effect=AssertionError("revoked continuation executed")),
         ) as execute,
     ):
+        if revoked_layer == "pending":
+            with pytest.raises(ReplyMembershipPendingError):
+                await runner._run_owned_or_locked_response(
+                    request,
+                    target=request.response_envelope.target,
+                    early_placeholder=response_runner._EarlyPlaceholderState(),
+                    locked_operation=AsyncMock(side_effect=AssertionError("approval source regenerated")),
+                )
+            assert await runner.deps.approval_store.approval_continuation(continuation.approval_id) == continuation
+            assert await runner.deps.approval_store.is_pending("$source")
+            request_failure.assert_not_awaited()
+            settle_failure.assert_not_awaited()
+            execute.assert_not_awaited()
+            # The same owned source becomes a definitive denial after refresh.
+            await runner.deps.runtime.agent_reply_memberships.refresh(
+                runner.deps.runtime.config,
+                runner.deps.runtime_paths,
+                membership_client,
+            )
         event_id = await runner._run_owned_or_locked_response(
             request,
             target=request.response_envelope.target,

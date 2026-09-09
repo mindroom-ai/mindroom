@@ -48,6 +48,7 @@ async def test_capacity_warmup_waits_for_committed_room_baseline(
     stack.storage_path = tmp_path
     stack.agent_id = "@general:example"
     stack.room_id = "!workload:example"
+    stack.room_ids = {stack.room_keys[0]: stack.room_id}
     client = _WarmClient()
     database = tmp_path / "encryption_keys" / "general" / "@general:example_device.db"
 

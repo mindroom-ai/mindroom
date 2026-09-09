@@ -27,6 +27,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.event_journal.models import DeliveryStage
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
@@ -627,13 +628,11 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
 
 
 @pytest.mark.asyncio
-async def test_persistent_sync_recovery_barrier_settles_placeholder_as_delivery_failure(tmp_path: Path) -> None:
-    """An exhausted final-edit retry should still run placeholder failure settlement."""
+async def test_persistent_sync_recovery_barrier_preserves_owed_final_until_recovery(tmp_path: Path) -> None:
+    """A retryable barrier keeps the immutable FINAL owed without a competing error edit."""
     gateway = _delivery_gateway(tmp_path)
+    gateway = replace(gateway, deps=replace(gateway.deps, sending_device_id=lambda: "DEVICE"))
     barrier_error = nio.SendRetryError("Room timeline recovery is still pending.")
-    # The two attempts take different primitives now. The answer's edit carries a
-    # delivery turn and goes out through the outbox as a frozen replace envelope;
-    # the placeholder failure notice has no turn and edits directly.
     durable_edit = AsyncMock(side_effect=barrier_error)
     failure_edit = AsyncMock(return_value=None)
     with (
@@ -658,11 +657,37 @@ async def test_persistent_sync_recovery_barrier_settles_placeholder_as_delivery_
 
     assert durable_edit.await_count == 1
     assert durable_edit.await_args.kwargs["retry_sync_recovery"] is True
-    assert failure_edit.await_count == 1
-    assert failure_edit.await_args.kwargs["retry_sync_recovery"] is False
-    assert outcome.terminal_status == "error"
-    assert outcome.final_visible_event_id == "$placeholder"
+    failure_edit.assert_not_awaited()
+    assert outcome.terminal_status == "suspended"
+    assert outcome.final_visible_event_id is None
+    assert not outcome.mark_handled
     assert outcome.failure_reason == "delivery_failed"
+    owed = await gateway.deps.outbox.load_matrix_delivery(delivery_id="$reply", stage=DeliveryStage.FINAL)
+    assert owed is not None
+    assert owed.attempted
+    assert not owed.retired
+    assert not owed.permanently_failed
+    assert owed.acknowledged_event_id is None
+    assert owed.edits_event_id == "$placeholder"
+    assert owed.payload["m.new_content"]["body"] == "final answer"
+    first_attempt = durable_edit.await_args
+    durable_edit.side_effect = None
+    durable_edit.return_value = DeliveredMatrixEvent("$final-edit", content_sent=owed.payload)
+    with (
+        patch("mindroom.delivery_gateway.send_message_outcome", new=durable_edit),
+        patch("mindroom.delivery_gateway.edit_message_outcome", new=failure_edit),
+    ):
+        await gateway._recovery_worker().flush(delivery_id="$reply", stage=DeliveryStage.FINAL)
+    assert durable_edit.await_count == 2
+    assert durable_edit.await_args.args == first_attempt.args
+    for key in ("transaction_id", "retry_sync_recovery", "content_is_prepared"):
+        assert durable_edit.await_args.kwargs[key] == first_attempt.kwargs[key]
+    failure_edit.assert_not_awaited()
+    delivered = await gateway.deps.outbox.load_matrix_delivery(delivery_id="$reply", stage=DeliveryStage.FINAL)
+    assert delivered is not None
+    assert delivered.acknowledged_event_id == "$final-edit"
+    assert delivered.payload == owed.payload
+    assert delivered.transaction_id == owed.transaction_id
 
 
 @pytest.mark.asyncio
