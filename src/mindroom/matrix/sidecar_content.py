@@ -48,9 +48,8 @@ def sidecar_content_to_resolve(content: Mapping[str, Any]) -> Mapping[str, Any] 
 def holds_unresolved_sidecar(content: Mapping[str, Any]) -> bool:
     """Return whether this content's text is a preview rather than the message.
 
-    A fully resolved payload carries no sidecar metadata of its own.
-    Legacy double-prepared edits still hold a pointer after the first download,
-    so keep them unresolved until the remaining sidecar is read.
-    Nothing has to remember to clear a flag.
+    Resolved content is what the sidecar file itself holds, and that payload
+    carries no sidecar metadata of its own, so resolving is what makes this
+    false. Nothing has to remember to clear a flag.
     """
     return sidecar_content_to_resolve(content) is not None

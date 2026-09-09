@@ -10,6 +10,7 @@ This directory contains utility scripts for MindRoom self-hosting.
 - **`testing/fuzz_live_matrix.py`** - Replay concurrent Matrix mutations through disposable Tuwunel and MindRoom stacks
 
 ### 🔧 Utilities
+- **`utilities/repair_nested_sidecars.py`** - Repair an explicitly selected legacy nested-attachment edit through Matrix
 - **`utilities/cleanup_agent_edits.sh`** - Clean up agent-edited files in Matrix database
 - **`utilities/cleanup_agent_edits_docker.sh`** - Clean up agent edits in Docker environment
 - **`utilities/cleanup_agent_edits.py`** - Python version of cleanup script with more options
@@ -23,6 +24,27 @@ This directory contains utility scripts for MindRoom self-hosting.
 If you're looking for platform deployment scripts (infrastructure, database migrations, etc.), those have been moved to the `saas-platform/` directory as they are specific to the hosted service offering.
 
 ## Usage Examples
+
+### Repair a legacy nested attachment
+
+Some older terminal edits were prepared twice, leaving an attachment that points to another attachment.
+The writer was fixed in PR #1827; this utility repairs an existing message at its Matrix source.
+It reuses the existing inner attachment, verifies the corrected edit and full content, then redacts only the selected broken edit.
+The default is read-only and prints event IDs and status, without message text or credentials.
+
+From the repository root, set `MATRIX_ACCESS_TOKEN` to the original author's token through your normal secret-handling workflow, then preview:
+
+```bash
+uv run python -m scripts.utilities.repair_nested_sidecars --homeserver https://matrix.example.org --room-id '!room:example.org' --event-id '$broken-edit'
+```
+
+Review the selected event IDs, then repeat with `--apply` during a quiet period for that message.
+Applying publishes a replacement and redacts the old edit; it does not change the original message, upload new attachments, or edit a database directly.
+If redaction fails after publication, rerunning with the same target finishes cleanup without another replacement.
+The command refuses a different current edit, encrypted rooms, unreadable attachments, payloads over 2 MiB, chains deeper than two layers, and edit histories exceeding 20 pages of 100 events.
+This targets known broken edits rather than scanning an installation; it does not claim to repair other messages or recover missing data.
+No runtime module imports this utility, and the normal reader remains unchanged.
+Once the affected messages have been repaired and a fresh import has been verified, this utility and its tests can be removed without a runtime or schema migration.
 
 ### Clean up agent edits
 ```bash
