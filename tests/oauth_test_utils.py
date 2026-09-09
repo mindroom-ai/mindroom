@@ -1,9 +1,11 @@
-"""Test helpers for publishing current OAuth credential state."""
+"""Test helpers for publishing and corrupting current OAuth credential state."""
 
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +14,7 @@ from mindroom.oauth.credential_store import oauth_credential_transaction
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
@@ -49,3 +52,13 @@ def publish_oauth_credentials(
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         executor.submit(asyncio.run, publish()).result()
+
+
+def corrupt_oauth_credential_payload(database_path: Path, payload: bytes) -> None:
+    """Replace a current credential payload with unreadable bytes for recovery tests."""
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.execute(
+            "UPDATE oauth_credential_state SET credential_payload = ? WHERE singleton = 1",
+            (payload,),
+        )
+        connection.commit()

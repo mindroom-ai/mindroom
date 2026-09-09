@@ -10,7 +10,6 @@ import inspect
 import io
 import json
 import logging
-import sqlite3
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -39,7 +38,7 @@ from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
-from tests.oauth_test_utils import publish_oauth_credentials
+from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -560,13 +559,7 @@ def test_unreadable_credentials_return_reset_required_payload(tmp_path: Path, un
             worker_target=oauth_target,
         )
         _publish_oauth_credentials(context, _oauth_credentials("unreadable-access"))
-        connection = sqlite3.connect(_oauth_credential_database_path(context))
-        connection.execute(
-            "UPDATE oauth_credential_state SET credential_payload = ? WHERE singleton = 1",
-            (b"corrupt-plaintext-secret",),
-        )
-        connection.commit()
-        connection.close()
+        corrupt_oauth_credential_payload(_oauth_credential_database_path(context), b"corrupt-plaintext-secret")
         credential_path = scoped_credentials_path(
             "github_oauth",
             credentials_manager=manager,

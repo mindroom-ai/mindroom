@@ -8,7 +8,6 @@ import asyncio
 import base64
 import hashlib
 import json
-import sqlite3
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -66,7 +65,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_target,
 )
 from tests.api.conftest import trusted_upstream_headers
-from tests.oauth_test_utils import publish_oauth_credentials
+from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 
 @pytest.fixture(autouse=True)
@@ -2860,13 +2859,10 @@ def test_unreadable_oauth_status_can_be_reset_and_reconnected(
         )
     else:
         _publish_stored_oauth_credentials(provider, runtime_paths, credentials)
-        connection = sqlite3.connect(oauth_credential_store._oauth_credential_database_path(context))
-        connection.execute(
-            "UPDATE oauth_credential_state SET credential_payload = ? WHERE singleton = 1",
-            (b"corrupt-plaintext-secret",),
+        corrupt_oauth_credential_payload(
+            oauth_credential_store._oauth_credential_database_path(context),
+            b"corrupt-plaintext-secret",
         )
-        connection.commit()
-        connection.close()
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:

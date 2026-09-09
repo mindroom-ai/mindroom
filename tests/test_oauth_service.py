@@ -47,7 +47,7 @@ from mindroom.oauth.providers import (
 )
 from mindroom.oauth.service import OAUTH_RESET_REQUIRED_REASON, oauth_connection_required
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.oauth_test_utils import publish_oauth_credentials
+from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -673,13 +673,7 @@ async def test_reset_deletes_unreadable_sqlite_credentials_and_allows_reconnect(
         worker_target=_worker_target(),
     )
     _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
-    connection = sqlite3.connect(_oauth_credential_database_path(context))
-    connection.execute(
-        "UPDATE oauth_credential_state SET credential_payload = ? WHERE singleton = 1",
-        (b"not-a-readable-credential",),
-    )
-    connection.commit()
-    connection.close()
+    corrupt_oauth_credential_payload(_oauth_credential_database_path(context), b"not-a-readable-credential")
 
     assert await credential_lifecycle.reset_oauth_credentials(context) is True
     assert _load(context) is None

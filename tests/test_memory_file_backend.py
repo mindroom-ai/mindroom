@@ -1239,8 +1239,9 @@ async def test_private_file_memory_only_reads_memory_files(
     assert not any(result.get("memory") == "Runbook secret." for result in runbook_results)
     assert any(result.get("memory") == "Private note." for result in note_results)
     assert "Private note." in prompt_parts.transient_turn_context
-    assert "Template soul secret." not in prompt_parts.transient_turn_context
-    assert "Runbook secret." not in prompt_parts.transient_turn_context
+    for prompt_text in (prompt_parts.session_preamble, prompt_parts.transient_turn_context):
+        assert "Template soul secret." not in prompt_text
+        assert "Runbook secret." not in prompt_text
 
 
 @pytest.mark.asyncio

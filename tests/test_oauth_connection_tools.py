@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 from urllib.parse import parse_qs, urlparse
@@ -36,7 +35,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, write_config_yaml
-from tests.oauth_test_utils import publish_oauth_credentials
+from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -189,13 +188,7 @@ async def test_reset_oauth_connection_issues_browser_confirmation_for_unreadable
         worker_target=worker_target,
     )
     corrupt_payload = b"not-a-readable-credential"
-    connection = sqlite3.connect(_oauth_credential_database_path(lifecycle_context))
-    connection.execute(
-        "UPDATE oauth_credential_state SET credential_payload = ? WHERE singleton = 1",
-        (corrupt_payload,),
-    )
-    connection.commit()
-    connection.close()
+    corrupt_oauth_credential_payload(_oauth_credential_database_path(lifecycle_context), corrupt_payload)
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)

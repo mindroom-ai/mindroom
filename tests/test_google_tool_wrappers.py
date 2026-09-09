@@ -8,7 +8,6 @@ import io
 import json
 import logging
 import socket
-import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -54,7 +53,7 @@ from mindroom.oauth.google_drive import GOOGLE_DRIVE_READ_OAUTH_SCOPES
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthTokenResult
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
-from tests.oauth_test_utils import publish_oauth_credentials
+from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -493,13 +492,7 @@ def test_google_wrapper_routes_unreadable_credentials_to_reset_flow(
             credentials_manager=credentials_manager,
             worker_target=worker_target,
         )
-        connection = sqlite3.connect(_oauth_credential_database_path(context))
-        connection.execute(
-            "UPDATE oauth_credential_state SET credential_payload = ? WHERE singleton = 1",
-            (b"corrupt-plaintext-secret",),
-        )
-        connection.commit()
-        connection.close()
+        corrupt_oauth_credential_payload(_oauth_credential_database_path(context), b"corrupt-plaintext-secret")
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,

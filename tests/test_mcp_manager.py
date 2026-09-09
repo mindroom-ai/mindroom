@@ -7,7 +7,6 @@ import base64
 import contextlib
 import hashlib
 import json
-import sqlite3
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Generator, Mapping
@@ -69,7 +68,7 @@ from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.identity_helpers import persist_entity_accounts
-from tests.oauth_test_utils import publish_oauth_credentials
+from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from datetime import timedelta
@@ -1240,13 +1239,7 @@ async def test_mcp_bridge_returns_reset_guidance_for_unreadable_credentials(
             credentials_manager=credentials_manager,
             worker_target=worker_target,
         )
-        connection = sqlite3.connect(_oauth_credential_database_path(context))
-        connection.execute(
-            "UPDATE oauth_credential_state SET credential_payload = ? WHERE singleton = 1",
-            (b"corrupt-plaintext-secret",),
-        )
-        connection.commit()
-        connection.close()
+        corrupt_oauth_credential_payload(_oauth_credential_database_path(context), b"corrupt-plaintext-secret")
 
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": server_config}))
