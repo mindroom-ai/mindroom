@@ -316,7 +316,7 @@ async def _resolve_canonical_content(
 
         resolved_content = _extract_large_message_v2_content(full_text)
         if resolved_content is None:
-            logger.warning("Invalid large-message v2 payload JSON, returning preview content")
+            logger.warning("Invalid large-message v2 payload JSON, stopping sidecar resolution")
             break
         content = resolved_content
 
