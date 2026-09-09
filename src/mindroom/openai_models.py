@@ -28,8 +28,8 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
 
-# Agno (still in 3.0.5) omits arguments for empty Anthropic tool inputs; agno-agi/agno#8970 proposes the source fix.
-# Remove this repair only after upgrading to a release with that fix and migrating or dropping older histories.
+# Agno 3.0.7 includes agno-agi/agno#8970, preserving empty Anthropic tool arguments.
+# Keep repairing histories written before that fix until they are migrated or dropped.
 def _messages_with_openai_tool_arguments(messages: list[Message]) -> list[Message]:
     """Repair function calls and remove sparse-stream placeholders from replay."""
     normalized_messages: list[Message] = []

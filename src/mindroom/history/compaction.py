@@ -1124,11 +1124,27 @@ def _strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
         if msg.role != "assistant":
             continue
         pd = msg.provider_data
-        if not isinstance(pd, dict) or "signature" not in pd:
+        if not isinstance(pd, dict):
+            continue
+        has_replay_fields = "signature" in pd
+        content_blocks = pd.get("content_blocks")
+        if isinstance(content_blocks, list):
+            retained_blocks = [
+                block
+                for block in content_blocks
+                if not (
+                    isinstance(block, dict)
+                    and block.get("type") in {"thinking", "redacted_thinking", "redacted_reasoning_content"}
+                )
+            ]
+            if len(retained_blocks) != len(content_blocks):
+                pd["content_blocks"] = retained_blocks
+                has_replay_fields = True
+        if not has_replay_fields:
             continue
         msg.reasoning_content = None
         msg.redacted_reasoning_content = None
-        del pd["signature"]
+        pd.pop("signature", None)
         modified += 1
     return modified
 

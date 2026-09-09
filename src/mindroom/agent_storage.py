@@ -209,8 +209,7 @@ class _ConversationSqliteDb(SqliteDb):
     :func:`replace_runs` are the two module-level helpers callers use when they
     edit or drop runs of a loaded session. The overrides here only adjust what
     agno already does: prompt-role stripping and append-only indexing in
-    ``upsert_run``, a full read in ``get_session``, an owner guard on bulk
-    session writes, and an atomic ``delete_runs``.
+    ``upsert_run``, a full read in ``get_session``, and an atomic ``delete_runs``.
 
     Until background migration retires a 2.x ``runs`` blob, Agno merges it into
     every read and ``delete_runs`` scrubs deleted ids from both stores in one
@@ -322,50 +321,8 @@ class _ConversationSqliteDb(SqliteDb):
                 if len(kept) == len(legacy_runs):
                     continue
                 sess.execute(
-                    sessions_table.update()
-                    .where(sessions_table.c.session_id == session_id)
-                    .values(runs=json.dumps(kept)),
+                    sessions_table.update().where(sessions_table.c.session_id == session_id).values(runs=kept),
                 )
-
-    def upsert_sessions(
-        self,
-        sessions: list[Session],
-        deserialize: bool | None = True,
-        preserve_updated_at: bool = False,
-    ) -> list[Session | dict[str, Any]]:
-        """Write sessions one at a time so every row keeps the owner guard.
-
-        Agno's bulk statement updates on conflict without checking the stored
-        ``user_id``, so a batch could hand another user's session to a new
-        owner. Nothing in MindRoom or Agno's runtime calls this in bulk, so the
-        per-row path costs nothing.
-
-        Upstream: agno-agi/agno#9935, fixed by agno-agi/agno#9937. Once the
-        pinned agno includes it, delete this override and ``_restore_updated_at``.
-        """
-        accepted: list[Session | dict[str, Any]] = []
-        for session in sessions:
-            result = self.upsert_session(session, deserialize=deserialize)
-            if result is None:
-                continue
-            if preserve_updated_at and session.updated_at is not None:
-                self._restore_updated_at(session.session_id, session.updated_at)
-                if isinstance(result, dict):
-                    cast("dict[str, Any]", result)["updated_at"] = session.updated_at
-                else:
-                    result.updated_at = session.updated_at
-            accepted.append(result)
-        return accepted
-
-    def _restore_updated_at(self, session_id: str, updated_at: int) -> None:
-        """Put back the caller's ``updated_at`` that the single-row upsert stamps with now."""
-        sessions_table = self._get_table(table_type="sessions")
-        if sessions_table is None:
-            return
-        with self.Session() as sess, sess.begin():
-            sess.execute(
-                sessions_table.update().where(sessions_table.c.session_id == session_id).values(updated_at=updated_at),
-            )
 
 
 # --- 2.x legacy blob helpers used by the safe fallback in ``delete_runs`` above.

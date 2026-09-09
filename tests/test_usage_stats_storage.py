@@ -259,7 +259,8 @@ def test_reader_extracts_runs_written_by_mindroom_agno_storage(tmp_path: Path) -
     assert row.runs[0].model == "gpt-5.6"
 
 
-def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_encoding", [False, True])
+def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path, legacy_encoding: bool) -> None:
     """Admin totals use Agno's member-inclusive team session aggregate."""
     session = TeamSession(
         session_id="session-1",
@@ -295,6 +296,10 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path) ->
         storage.close()
 
     source = _source(tmp_path / "sessions" / "engineering.db", table="engineering_sessions")
+    if legacy_encoding:
+        with sqlite3.connect(source.path) as connection:
+            (session_data,) = connection.execute("SELECT session_data FROM engineering_sessions").fetchone()
+            connection.execute("UPDATE engineering_sessions SET session_data = ?", (json.dumps(session_data),))
     result = list(iter_usage_storage_rows(source, mode="session_metrics"))
 
     assert len(result) == 1

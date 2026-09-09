@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.summary import SessionSummary
+from agno.utils.models.claude import format_messages as format_claude_messages
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
@@ -1301,6 +1303,71 @@ def test_private_strip_stale_anthropic_replay_fields_strips_old_assistants_and_p
     assert current_assistant.provider_data == {"signature": "sig-current"}
     assert current_assistant.reasoning_content == "current thinking"
     assert current_assistant.redacted_reasoning_content == "current redacted"
+
+
+@pytest.mark.parametrize(("top_level_signature", "signed_thinking"), [(False, False), (False, True), (True, True)])
+def test_strip_stale_anthropic_content_blocks_preserves_provider_replay(
+    top_level_signature: bool,
+    signed_thinking: bool,
+) -> None:
+    """Compaction drops stale signed blocks without losing text/tools or changing the current turn."""
+    replay_blocks = [
+        {"type": "text", "text": "old answer"},
+        {"type": "server_tool_use", "id": "search-1", "name": "web_search", "input": {"query": "weather"}},
+        {"type": "web_search_tool_result", "tool_use_id": "search-1", "content": []},
+        {"type": "tool_use", "id": "call-1", "name": "get_status", "input": {}},
+    ]
+    old_assistant = Message(
+        role="assistant",
+        content="old answer",
+        reasoning_content="old thinking",
+        redacted_reasoning_content="old redacted",
+        tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "get_status", "arguments": "{}"}}],
+        provider_data={
+            "keep": "yes",
+            "content_blocks": [
+                *(
+                    [{"type": "thinking", "thinking": "old thinking", "signature": "sig-old"}]
+                    if signed_thinking
+                    else []
+                ),
+                *deepcopy(replay_blocks[:2]),
+                {"type": "redacted_thinking", "data": "old redacted"},
+                *deepcopy(replay_blocks[2:]),
+            ],
+            **({"signature": "sig-old"} if top_level_signature else {}),
+        },
+    )
+    current_blocks = [
+        {"type": "thinking", "thinking": "current thinking", "signature": "sig-current"},
+        {"type": "redacted_thinking", "data": "current redacted"},
+        {"type": "text", "text": "current answer"},
+    ]
+    current_assistant = Message(
+        role="assistant",
+        content="current answer",
+        reasoning_content="current thinking",
+        provider_data={"signature": "sig-current", "content_blocks": deepcopy(current_blocks)},
+    )
+    messages = [
+        Message(role="user", content="old question"),
+        old_assistant,
+        Message(role="tool", content="ready", tool_call_id="call-1"),
+        Message(role="user", content="current question"),
+        current_assistant,
+        Message(role="user", content="queued notice", provider_data={"mindroom_queued_message_notice": True}),
+    ]
+
+    assert _strip_stale_anthropic_replay_fields(messages) == 1
+    assert old_assistant.provider_data == {"keep": "yes", "content_blocks": replay_blocks}
+    assert old_assistant.reasoning_content is None
+    assert old_assistant.redacted_reasoning_content is None
+    formatted, _system = format_claude_messages(messages)
+    assistant_turns = [message["content"] for message in formatted if message["role"] == "assistant"]
+    assert assistant_turns == [replay_blocks, current_blocks]
+    assert current_assistant.provider_data == {"signature": "sig-current", "content_blocks": current_blocks}
+    assert current_assistant.reasoning_content == "current thinking"
+    assert _strip_stale_anthropic_replay_fields(messages) == 0
 
 
 def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_last_user() -> None:

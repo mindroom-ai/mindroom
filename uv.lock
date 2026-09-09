@@ -44,7 +44,7 @@ wheels = [
 
 [[package]]
 name = "agno"
-version = "3.0.5"
+version = "3.0.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agnoctl" },
@@ -58,9 +58,9 @@ dependencies = [
     { name = "rich" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/24/74/3ab694e4d5106def289c61dc569aedeea4e822c9b0fed32452c6905ca645/agno-3.0.5.tar.gz", hash = "sha256:52425d2e731b09badfdf64a50cb6fd7b580111ec1788e4a072de475578ad77a5", size = 3402397, upload-time = "2026-09-01T09:06:59.936Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/88/64f8ca8e5e590d4c637732e76faf8aa9521363951f3503995b5f220a8095/agno-3.0.9.tar.gz", hash = "sha256:046540cee29aa1e24fb00a87bc8a7e749291c22c1c02a16a8e3e7c7df24162d0", size = 3475772, upload-time = "2026-09-08T22:54:49.771Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e2/0c/72ce37e3a9a928a82c2c57f0e29ba1b294fde14ad466c1da5c3054245359/agno-3.0.5-py3-none-any.whl", hash = "sha256:14daedb4548d7c189eaf9922a722c790c506ff26bd6fd39d842111567a522f1d", size = 3875863, upload-time = "2026-09-01T09:06:55.89Z" },
+    { url = "https://files.pythonhosted.org/packages/6e/86/75a7b4f0598d372c3823672aa1f80f88eb260fce8ca44e9f0981e0a75914/agno-3.0.9-py3-none-any.whl", hash = "sha256:21b5b8694089140db8bd8c5105b4b19546f99d6a9f61216220523066ddeb1a73", size = 3955783, upload-time = "2026-09-08T22:54:46.553Z" },
 ]
 
 [package.optional-dependencies]
@@ -4506,7 +4506,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agentql", marker = "extra == 'agentql'" },
-    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = "==3.0.5" },
+    { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = "==3.0.9" },
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "anthropic", specifier = ">=0.120.2" },
@@ -4628,7 +4628,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.10.1" },
     { name = "pygithub", marker = "extra == 'github'", specifier = ">=2.5,<2.9" },
     { name = "pygments", specifier = ">=2.20" },
-    { name = "pyjwt", specifier = ">=2.13.0" },
+    { name = "pyjwt", specifier = ">=2.13" },
     { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
     { name = "pypdf", marker = "extra == 'arxiv'" },
