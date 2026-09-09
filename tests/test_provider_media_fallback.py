@@ -11,7 +11,11 @@ from agno.exceptions import ModelProviderError, ModelRateLimitError, RetryableMo
 from agno.media import Audio, File, Image, Video
 from agno.models.anthropic import Claude
 from agno.models.base import Model
+from agno.models.cerebras import Cerebras
+from agno.models.groq import Groq
 from agno.models.message import Message
+from agno.models.ollama import Ollama
+from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.response import ModelResponse
 
 from mindroom import claude_stream_retry
@@ -19,7 +23,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.model_loading import get_model_instance
-from mindroom.provider_media_fallback import reset_model_media_capability_cache
+from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
+from mindroom.provider_media_fallback import install_provider_media_fallback, reset_model_media_capability_cache
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -147,6 +152,55 @@ async def test_loaded_model_retries_once_without_inline_media_and_preserves_atta
     assert retry_messages[-1].temporary is True
     assert "Inline media unavailable for this model" in str(retry_messages[-1].content)
     assert original == original_snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_class", "removed"),
+    [
+        (OpenAIResponses, {"audio", "video"}),
+        (OpenAIChat, {"video"}),
+        (Claude, {"audio", "video"}),
+        (Ollama, {"audio", "file", "video"}),
+        (Groq, {"audio", "file", "video"}),
+        (Cerebras, {"audio", "image", "file", "video"}),
+    ],
+)
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_adapter_omissions_are_visible_to_the_model(
+    model_class: type[Model],
+    removed: set[str],
+    streaming: bool,
+) -> None:
+    """Adapters that silently omit a media kind must instead send fallback guidance."""
+    model = model_class(id="adapter-test")
+    provider_calls: list[list[Message]] = []
+
+    async def invoke(messages: list[Message]) -> ModelResponse:
+        provider_calls.append(messages)
+        return ModelResponse(content="use another tool")
+
+    async def stream(messages: list[Message]) -> AsyncIterator[ModelResponse]:
+        yield await invoke(messages)
+
+    model.ainvoke = invoke
+    model.ainvoke_stream = stream
+    install_provider_media_fallback(model, fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT)
+    original = _media_message()
+    if streaming:
+        _ = [chunk async for chunk in model.ainvoke_stream(messages=[original])]
+    else:
+        await model.ainvoke(messages=[original])
+
+    assert len(provider_calls) == 1
+    sent, guidance = provider_calls[0]
+    sent_media = {"audio": sent.audio, "image": sent.images, "file": sent.files, "video": sent.videos}
+    assert {kind for kind, media in sent_media.items() if media is None} == removed
+    assert "Inline media unavailable" in str(guidance.content)
+    assert "att_123" in str(sent.content)
+    assert original.audio
+    assert original.videos
+    assert original.files
 
 
 @pytest.mark.asyncio

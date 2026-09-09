@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-from agno.media import Image
+from agno.media import Audio, File, Image, Video
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 _LocalAttachmentKind = Literal["audio", "file", "image", "video"]
 _ResolvedSendAttachment = Path | RuntimeEncryptedMediaAttachment
-_VIEW_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+_VIEW_MEDIA_MAX_BYTES = 20 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -183,26 +183,46 @@ def _read_attachment_bytes(
     return payload, None
 
 
-def _view_attachment(context: ToolRuntimeContext, attachment_id: str, content: str) -> str | ToolResult:
-    """Read a scoped image off-loop and return its bytes as model-facing media."""
+def _view_attachment(context: ToolRuntimeContext, attachment_id: str, content: str) -> str | ToolResult:  # noqa: PLR0911
+    """Read scoped attachment bytes off-loop and return native model media."""
     attachment, error = _resolve_context_attachment_record(context, attachment_id)
     if error is not None or attachment is None:
         return _attachment_tool_payload("error", attachment_id=attachment_id, message=error)
     payload, error = _read_attachment_bytes(
         attachment,
-        byte_limit=_VIEW_IMAGE_MAX_BYTES,
-        limit_label="image viewing",
+        byte_limit=_VIEW_MEDIA_MAX_BYTES,
+        limit_label="media viewing",
     )
     if error is not None or payload is None:
         return _attachment_tool_payload("error", attachment_id=attachment_id, message=error)
+    if not payload:
+        return _attachment_tool_payload("error", attachment_id=attachment_id, message="Attachment file is empty.")
     mime_type = resolve_image_mime_type(payload, attachment.mime_type).detected_mime_type
-    if mime_type not in {"image/png", "image/jpeg", "image/gif", "image/webp"}:
+    if mime_type in {"image/png", "image/jpeg", "image/gif", "image/webp"}:
+        return ToolResult(content=content, images=[Image(content=payload, mime_type=mime_type)])
+    if attachment.kind == "image":
         return _attachment_tool_payload(
             "error",
             attachment_id=attachment_id,
             message="view requires a PNG, JPEG, GIF, or WebP image.",
         )
-    return ToolResult(content=content, images=[Image(content=payload, mime_type=mime_type)])
+    mime_type = attachment.mime_type
+    filename = attachment.filename or attachment.local_path.name
+    media_format = Path(filename).suffix.lstrip(".").lower()
+    if attachment.kind == "audio":
+        return ToolResult(content=content, audios=[Audio(content=payload, mime_type=mime_type, format=media_format)])
+    if attachment.kind == "video":
+        return ToolResult(content=content, videos=[Video(content=payload, mime_type=mime_type, format=media_format)])
+    if mime_type in File.valid_mime_types():
+        return ToolResult(
+            content=content,
+            files=[File(content=payload, mime_type=mime_type, filename=filename, format=media_format)],
+        )
+    return _attachment_tool_payload(
+        "error",
+        attachment_id=attachment_id,
+        message="This file type cannot be sent as model media. Use get_attachment without view to inspect or save it.",
+    )
 
 
 def _resolve_attachment_ids(
@@ -540,13 +560,14 @@ class AttachmentTools(Toolkit):
         mindroom_output_path: str | None = None,
         view: bool = False,
     ) -> str | ToolResult:
-        """Inspect attachment metadata, save a file, or view an image with the model.
+        """Inspect metadata, save a file, or send attachment content to the model.
 
         Args:
             attachment_id: Context-scoped ID from list_attachments or register_attachment.
             mindroom_output_path: Save bytes to a workspace-relative file instead of returning metadata.
-            view: Send image pixels to the model for visual analysis (PNG, JPEG, GIF, WebP; up to 20 MiB).
-                Use this to inspect local or earlier conversation images. Requires an image-capable model.
+            view: Send image, audio, video, or document content (including PDF) to the model; up to 20 MiB.
+                Requires a model that supports the media type. If inline media is unavailable, use
+                get_attachment without view to get metadata or save the file, then use other available tools.
                 Cannot be combined with mindroom_output_path.
 
         """
