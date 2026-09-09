@@ -24,6 +24,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 
 if TYPE_CHECKING:
+    from _collections_abc import dict_values
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
@@ -65,6 +66,99 @@ async def _reload_ledger(
     """Simulate a process restart: drop shared state, reload from the database."""
     _reset_handled_turn_ledger_runtime()
     return await _open_ledger(journal_store, agent_name, legacy_responses_file=legacy_responses_file)
+
+
+class _ScanCountingRecords(dict[str, TurnRecord]):
+    """Measure full-ledger traversal without machine-dependent timing assertions."""
+
+    scanned_records: int = 0
+
+    def values(self) -> dict_values[str, TurnRecord]:
+        """Count records exposed by a whole-map traversal."""
+        self.scanned_records += len(self)
+        return super().values()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reloaded", [False, True])
+@pytest.mark.parametrize("lookup", ["conversation", "cleanup"])
+async def test_scoped_lookup_does_not_scan_unrelated_history(
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+    reloaded: bool,
+    lookup: str,
+) -> None:
+    """Ordinary lookups must visit relevant records only, including after restart."""
+    ledger = await _open_ledger(journal_store, "scoped_lookup")
+    for ordinal in range(25):
+        event_id = f"$unrelated-{ordinal}"
+        await ledger.record_handled_turn(
+            TurnRecord.create(
+                [event_id],
+                conversation_target=MessageTarget.resolve("!other:example.org", event_id, event_id),
+            ),
+        )
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$one")
+    await ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$one", "$two"],
+            discovery_event_ids=["$alias"],
+            redacted_source_event_ids=["$one"],
+            pending_redaction_cleanup_event_ids=["$one"],
+            conversation_target=target,
+            completed=False,
+        ),
+    )
+    if reloaded:
+        ledger = await _reload_ledger(journal_store, "scoped_lookup")
+    counted = _ScanCountingRecords(ledger._responses)
+    monkeypatch.setattr(ledger._state, "responses", counted)
+
+    if lookup == "conversation":
+        records = ledger.turn_records_for_conversation(session_id=target.session_id)
+        assert len(records) == 1
+        assert records[0].source_event_ids == ("$one", "$two")
+    else:
+        assert ledger.pending_redaction_cleanup_event_ids() == ("$one",)
+    assert counted.scanned_records == 0
+
+
+@pytest.mark.asyncio
+async def test_scoped_lookup_tracks_updates_and_retention(journal_store: EventJournalStore) -> None:
+    """Moving a turn and clearing cleanup must reach siblings, reloads, and eviction."""
+    ledger = await _open_ledger(journal_store, "scoped_updates")
+    sibling = await _open_ledger(journal_store, "scoped_updates")
+    original = MessageTarget.resolve("!room:example.org", "$old-thread", "$one")
+    moved = MessageTarget.resolve("!room:example.org", "$new-thread", "$one")
+    await ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$one", "$two"],
+            redacted_source_event_ids=["$one"],
+            pending_redaction_cleanup_event_ids=["$one"],
+            conversation_target=original,
+            completed=False,
+        ),
+    )
+    assert sibling.pending_redaction_cleanup_event_ids() == ("$one",)
+    await ledger.update_handled_turn(
+        ("$one",),
+        lambda current: replace(
+            current["$one"],
+            conversation_target=moved,
+            pending_redaction_cleanup_event_ids=(),
+            response_event_id="$reply",
+            completed=True,
+            timestamp=0,
+        ),
+    )
+    for reader in (sibling, await _reload_ledger(journal_store, "scoped_updates")):
+        assert reader.turn_records_for_conversation(session_id=original.session_id) == ()
+        assert reader.pending_redaction_cleanup_event_ids() == ()
+        records = reader.turn_records_for_conversation(session_id=moved.session_id)
+        assert len(records) == 1
+        assert records[0].response_event_id == "$reply"
+        await reader._cleanup_old_events(max_events=0)
+        assert reader.turn_records_for_conversation(session_id=moved.session_id) == ()
 
 
 def _write_legacy_ledger(path: Path, records: dict[str, dict[str, object]]) -> Path:
@@ -1012,6 +1106,64 @@ class _DelayedFirstWriteStore(TurnRecordStore):
             anchor_event_id=anchor_event_id,
             record_json=record_json,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_scoped_lookup_tracks_provisional_write_outcome(
+    journal_store: EventJournalStore,
+    fail: bool,
+    cancel: bool,
+) -> None:
+    """A failed or cancelled write must leave lookups agreeing with durable ownership."""
+    agent = "scoped_write_outcome"
+    original = MessageTarget.resolve("!room:example.org", "$old-thread", "$slow")
+    moved = MessageTarget.resolve("!room:example.org", "$new-thread", "$slow")
+    sibling = await _open_ledger(journal_store, agent)
+    await sibling.record_handled_turn(
+        TurnRecord.create(["$slow", "$survivor"], completed=False, conversation_target=original),
+    )
+    records = _DelayedFirstWriteStore(_backend=journal_store.backend, _agent_name=agent, fail=fail)
+    ledger = HandledTurnLedger(agent, records=records)
+    await ledger.load()
+    writing = asyncio.create_task(
+        ledger.update_handled_turn(
+            ("$slow",),
+            lambda current: replace(
+                current["$slow"],
+                conversation_target=moved,
+                redacted_source_event_ids=("$slow",),
+                pending_redaction_cleanup_event_ids=("$slow",),
+                timestamp=0,
+            ),
+        ),
+    )
+    try:
+        await asyncio.wait_for(records.started.wait(), timeout=5)
+        assert sibling.turn_records_for_conversation(session_id=original.session_id) == ()
+        assert len(sibling.turn_records_for_conversation(session_id=moved.session_id)) == 1
+        assert sibling.pending_redaction_cleanup_event_ids() == ("$slow",)
+        if cancel:
+            writing.cancel()
+            await asyncio.sleep(0)
+        records.released.set()
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await writing
+        elif fail:
+            with pytest.raises(RuntimeError, match="selected write failed before commit"):
+                await writing
+        else:
+            await writing
+        for reader in (sibling, await _reload_ledger(journal_store, agent)):
+            kept, removed = (original, moved) if fail else (moved, original)
+            assert reader.turn_records_for_conversation(session_id=removed.session_id) == ()
+            assert len(reader.turn_records_for_conversation(session_id=kept.session_id)) == 1
+            assert reader.pending_redaction_cleanup_event_ids() == (() if fail else ("$slow",))
+    finally:
+        records.released.set()
+        await asyncio.gather(writing, return_exceptions=True)
 
 
 @dataclass(frozen=True, slots=True)

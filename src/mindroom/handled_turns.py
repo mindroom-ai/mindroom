@@ -372,6 +372,8 @@ class _LedgerState:
     """In-memory canonical records shared by every ledger for one agent."""
 
     responses: dict[str, TurnRecord] = field(default_factory=dict)
+    conversation_responses: dict[str, dict[str, TurnRecord]] = field(default_factory=dict)
+    cleanup_responses: dict[str, TurnRecord] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     # Reserve conflicting identities briefly; cleanup holds this mutex while
     # draining active writes. Unrelated updates may await persistence together.
@@ -441,7 +443,39 @@ class HandledTurnLedger:
 
     @_responses.setter
     def _responses(self, responses: dict[str, TurnRecord]) -> None:
-        self._state.responses = responses
+        self._state.responses = {}
+        self._state.conversation_responses.clear()
+        self._state.cleanup_responses.clear()
+        for event_id, record in responses.items():
+            self._set_response(event_id, record)
+
+    def _set_response(self, event_id: str, record: TurnRecord | None) -> None:
+        """Publish or restore one alias and its read indexes with the state lock held.
+
+        Index the actual aliases, including partially superseded owners, so the
+        scoped views agree with the primary map during provisional writes too.
+        Startup and retention rebuild these derived indexes from that same map.
+        """
+        previous = self._responses.get(event_id)
+        previous_session = (
+            previous.conversation_target.session_id if previous is not None and previous.conversation_target else None
+        )
+        session = record.conversation_target.session_id if record is not None and record.conversation_target else None
+        if previous_session is not None and previous_session != session:
+            conversation = self._state.conversation_responses[previous_session]
+            del conversation[event_id]
+            if not conversation:
+                del self._state.conversation_responses[previous_session]
+        if record is None:
+            self._responses.pop(event_id, None)
+        else:
+            self._responses[event_id] = record
+            if session is not None:
+                self._state.conversation_responses.setdefault(session, {})[event_id] = record
+        if record is not None and record.pending_redaction_cleanup_event_ids:
+            self._state.cleanup_responses[event_id] = record
+        else:
+            self._state.cleanup_responses.pop(event_id, None)
 
     async def load(self) -> None:
         """Read every stored record into memory, once per process.
@@ -557,7 +591,7 @@ class HandledTurnLedger:
                             )
                             self._state.pending_writes.update(dict.fromkeys(keys, pending.settled))
                             for key in record.indexed_event_ids:
-                                self._responses[key] = record
+                                self._set_response(key, record)
                             return pending
             await asyncio.gather(*(asyncio.shield(blocker) for blocker in blockers))
 
@@ -665,7 +699,7 @@ class HandledTurnLedger:
         record = TurnRecordCodec._from_ledger_record(raw_record["source_event_ids"][0], raw_record)
         assert record is not None, "Corrupt committed turn record"
         for key in record.indexed_event_ids:
-            self._responses[key] = record
+            self._set_response(key, record)
         return record
 
     def has_responded(self, event_id: str) -> bool:
@@ -772,10 +806,7 @@ class HandledTurnLedger:
             for event_id, previous in superseded.items():
                 if self._responses.get(event_id) is not published:
                     continue
-                if previous is None:
-                    self._responses.pop(event_id, None)
-                else:
-                    self._responses[event_id] = previous
+                self._set_response(event_id, previous)
 
     def _require_loaded(self) -> None:
         """Fail loudly if a reader arrives before the records are in memory.
@@ -826,7 +857,7 @@ class HandledTurnLedger:
             return canonical_source_event_ids(
                 tuple(
                     event_id
-                    for record in self._responses.values()
+                    for record in self._state.cleanup_responses.values()
                     for event_id in record.pending_redaction_cleanup_event_ids
                 ),
             )
@@ -845,13 +876,8 @@ class HandledTurnLedger:
         """Return unique records that can identify persisted scopes for one conversation."""
         with self._state.lock:
             self._require_loaded()
-            unique_records: dict[tuple[str, ...], TurnRecord] = {}
-            for record in self._responses.values():
-                target = record.conversation_target
-                if target is None or target.session_id != session_id:
-                    continue
-                unique_records[record.indexed_event_ids] = record
-            return tuple(unique_records.values())
+            records = self._state.conversation_responses.get(session_id, {})
+            return tuple({record.indexed_event_ids: record for record in records.values()}.values())
 
     def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:
         """Return the sole turn whose visible response has this Matrix event ID."""

@@ -263,6 +263,10 @@ Import publication waits for conflicting provisional writes, rechecks the reques
 An occupied recovered physical source remains authoritative, while any collision confined to a recovered discovery alias declines the historical import.
 `TurnStore` immediately writes an imported record into the ledger, so every later load uses journal authority.
 One runtime process owns each ledger's semantic ordering, and nothing defines cross-process turn precedence.
+Conversation and pending-cleanup lookups use indexes derived from the ledger's shared in-memory records, so ordinary response preparation does not scan unrelated retained history.
+Each alias publication, committed replacement, and rollback updates those indexes under the same lock as the primary record map; startup and retention rebuild them from that map.
+The indexes retain references to existing records and add no durable schema or separate recovery state.
+Preparation still scales with the selected conversation's retained records and outstanding cleanup work.
 Terminal records live in the journal database rather than a per-agent JSON file, so the advisory file lock that used to make the file update atomic is gone; the database serializes the write itself.
 One process must own one agent's records; the database merges delivery acknowledgements with ledger writes for that owner, without coordinating independent runtimes against the same storage path.
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
