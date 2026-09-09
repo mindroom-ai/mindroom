@@ -63,7 +63,7 @@ def _strip_vertex_claude_tool_strict(
 ) -> list[dict[str, Any]] | None:
     """Return Vertex-compatible tool definitions without mutating the caller's list.
 
-    Agno 2.5.13 can emit OpenAI-style ``strict`` flags on tool definitions.
+    Agno 3.0.9 still emits ``strict`` flags on Vertex Claude tool definitions.
     Anthropic-on-Vertex rejects those provider-level fields with a 400 error
     (``tools.0.custom.strict``), while schema properties named ``strict`` are
     valid user data and must be preserved. Strip only the provider metadata here

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.summary import SessionSummary
+from agno.utils.models.claude import format_messages as format_claude_messages
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
@@ -26,6 +28,7 @@ from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafegu
 from mindroom.history.compaction import (
     _build_summary_input,
     _emit_compaction_hook,
+    _messages_for_runs,
     _rewrite_working_session_for_compaction,
     _strip_stale_anthropic_replay_fields,
     compact_scope_history,
@@ -1303,6 +1306,87 @@ def test_private_strip_stale_anthropic_replay_fields_strips_old_assistants_and_p
     assert current_assistant.redacted_reasoning_content == "current redacted"
 
 
+@pytest.mark.parametrize(("top_level_signature", "signed_thinking"), [(False, False), (False, True), (True, True)])
+@pytest.mark.parametrize("split_runs", [False, True])
+def test_strip_stale_anthropic_content_blocks_preserves_provider_replay(
+    top_level_signature: bool,
+    signed_thinking: bool,
+    split_runs: bool,
+) -> None:
+    """Compaction drops stale signed blocks without losing text/tools or changing the current turn."""
+    replay_blocks = [
+        {"type": "text", "text": "old answer"},
+        {"type": "server_tool_use", "id": "search-1", "name": "web_search", "input": {"query": "weather"}},
+        {"type": "web_search_tool_result", "tool_use_id": "search-1", "content": []},
+        {"type": "tool_use", "id": "call-1", "name": "get_status", "input": {}},
+    ]
+    old_assistant = Message(
+        role="assistant",
+        content="old answer",
+        reasoning_content="old thinking",
+        redacted_reasoning_content="old redacted",
+        tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "get_status", "arguments": "{}"}}],
+        provider_data={
+            "keep": "yes",
+            "content_blocks": [
+                *(
+                    [{"type": "thinking", "thinking": "old thinking", "signature": "sig-old"}]
+                    if signed_thinking
+                    else []
+                ),
+                *deepcopy(replay_blocks[:2]),
+                {"type": "redacted_thinking", "data": "old redacted"},
+                *deepcopy(replay_blocks[2:]),
+            ],
+            **({"signature": "sig-old"} if top_level_signature else {}),
+        },
+    )
+    current_blocks = [
+        {"type": "thinking", "thinking": "current thinking", "signature": "sig-current"},
+        {"type": "redacted_thinking", "data": "current redacted"},
+        {"type": "text", "text": "current answer"},
+    ]
+    current_assistant = Message(
+        role="assistant",
+        content="current answer",
+        reasoning_content="current thinking",
+        provider_data={"signature": "sig-current", "content_blocks": deepcopy(current_blocks)},
+    )
+    messages = [
+        Message(role="user", content="old question"),
+        old_assistant,
+        Message(role="tool", content="ready", tool_call_id="call-1"),
+        Message(role="user", content="current question"),
+        current_assistant,
+        Message(role="user", content="queued notice", provider_data={"mindroom_queued_message_notice": True}),
+    ]
+
+    if split_runs:
+        original_messages = deepcopy(messages)
+        replay_messages = _messages_for_runs(
+            [
+                _completed_run("old-run", messages=messages[:3]),
+                _completed_run("current-run", messages=messages[3:]),
+            ],
+            _ALL_HISTORY_SETTINGS,
+        )
+        assert messages == original_messages
+        messages = replay_messages
+        old_assistant = messages[1]
+        current_assistant = messages[4]
+    else:
+        assert _strip_stale_anthropic_replay_fields(messages) == 1
+    assert old_assistant.provider_data == {"keep": "yes", "content_blocks": replay_blocks}
+    assert old_assistant.reasoning_content is None
+    assert old_assistant.redacted_reasoning_content is None
+    formatted, _system = format_claude_messages(messages)
+    assistant_turns = [message["content"] for message in formatted if message["role"] == "assistant"]
+    assert assistant_turns == [replay_blocks, current_blocks]
+    assert current_assistant.provider_data == {"signature": "sig-current", "content_blocks": current_blocks}
+    assert current_assistant.reasoning_content == "current thinking"
+    assert _strip_stale_anthropic_replay_fields(messages) == 0
+
+
 def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_last_user() -> None:
     tool_assistant = Message(
         role="assistant",
@@ -1544,7 +1628,8 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
 
 
 @pytest.mark.asyncio
-async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path: Path) -> None:
+@pytest.mark.parametrize("split_runs", [False, True])
+async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path: Path, split_runs: bool) -> None:
     """Final compaction persist should copy sanitized remaining runs onto the latest session."""
     config, _runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, _runtime_paths, execution_identity=None)
@@ -1570,6 +1655,10 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             ),
         ],
     )
+    remaining_runs = [remaining_run]
+    if split_runs:
+        remaining_runs.append(_completed_run("run-3", messages=remaining_run.messages[2:]))
+        remaining_run.messages = remaining_run.messages[:2]
     session = _session(
         "session-1",
         runs=[
@@ -1580,7 +1669,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
                     Message(role="assistant", content="a" * 200),
                 ],
             ),
-            remaining_run,
+            *remaining_runs,
         ],
     )
     seed_session(storage, session)
@@ -1632,8 +1721,8 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
     assert outcome is not None
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
-    assert [run.run_id for run in persisted.runs or []] == ["run-2"]
-    remaining_messages = (persisted.runs or [])[0].messages or []
+    assert [run.run_id for run in persisted.runs or []] == [run.run_id for run in remaining_runs]
+    remaining_messages = [message for run in persisted.runs or [] for message in run.messages or []]
     assert remaining_messages[1].provider_data == {"keep": "yes"}
     assert remaining_messages[1].reasoning_content is None
     assert remaining_messages[1].redacted_reasoning_content is None
