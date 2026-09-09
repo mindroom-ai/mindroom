@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
+from agno.media import Audio, File, Image, Video
 from agno.tools import Toolkit
+from agno.tools.function import ToolResult
 
 from mindroom.attachments import (
     AttachmentRecord,
@@ -20,6 +22,7 @@ from mindroom.attachments import (
 )
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.matrix.client_delivery import send_file_message, send_runtime_encrypted_media_message
+from mindroom.matrix.media import resolve_image_mime_type
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
@@ -50,6 +53,7 @@ if TYPE_CHECKING:
 
 _LocalAttachmentKind = Literal["audio", "file", "image", "video"]
 _ResolvedSendAttachment = Path | RuntimeEncryptedMediaAttachment
+_VIEW_MEDIA_MAX_BYTES = 20 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -152,13 +156,13 @@ def _resolve_context_attachment_record(
     return attachment, None
 
 
-def _attachment_bytes_for_save(
+def _read_attachment_bytes(
     attachment: AttachmentRecord,
     *,
     byte_limit: int,
     limit_label: str,
 ) -> tuple[bytes | None, str | None]:
-    """Read attachment bytes after enforcing the selected destination cap."""
+    """Read attachment bytes with a bounded read and the selected destination cap."""
     try:
         size_bytes = attachment.local_path.stat().st_size
     except OSError:
@@ -170,10 +174,55 @@ def _attachment_bytes_for_save(
             f"({size_bytes} bytes > {byte_limit} bytes).",
         )
     try:
-        payload = attachment.local_path.read_bytes()
+        with attachment.local_path.open("rb") as attachment_file:
+            payload = attachment_file.read(byte_limit + 1)
     except OSError:
         return None, f"Attachment file is missing on disk: {attachment.attachment_id}"
+    if len(payload) > byte_limit:
+        return None, f"Attachment {attachment.attachment_id} exceeds {limit_label} size limit ({byte_limit} bytes)."
     return payload, None
+
+
+def _view_attachment(context: ToolRuntimeContext, attachment_id: str, content: str) -> str | ToolResult:  # noqa: PLR0911
+    """Read scoped attachment bytes off-loop and return native model media."""
+    attachment, error = _resolve_context_attachment_record(context, attachment_id)
+    if error is not None or attachment is None:
+        return _attachment_tool_payload("error", attachment_id=attachment_id, message=error)
+    payload, error = _read_attachment_bytes(
+        attachment,
+        byte_limit=_VIEW_MEDIA_MAX_BYTES,
+        limit_label="media viewing",
+    )
+    if error is not None or payload is None:
+        return _attachment_tool_payload("error", attachment_id=attachment_id, message=error)
+    if not payload:
+        return _attachment_tool_payload("error", attachment_id=attachment_id, message="Attachment file is empty.")
+    mime_type = resolve_image_mime_type(payload, attachment.mime_type).detected_mime_type
+    if mime_type in {"image/png", "image/jpeg", "image/gif", "image/webp"}:
+        return ToolResult(content=content, images=[Image(content=payload, mime_type=mime_type)])
+    if attachment.kind == "image":
+        return _attachment_tool_payload(
+            "error",
+            attachment_id=attachment_id,
+            message="view requires a PNG, JPEG, GIF, or WebP image.",
+        )
+    mime_type = attachment.mime_type
+    filename = attachment.filename or attachment.local_path.name
+    media_format = Path(filename).suffix.lstrip(".").lower()
+    if attachment.kind == "audio":
+        return ToolResult(content=content, audios=[Audio(content=payload, mime_type=mime_type, format=media_format)])
+    if attachment.kind == "video":
+        return ToolResult(content=content, videos=[Video(content=payload, mime_type=mime_type, format=media_format)])
+    if mime_type in File.valid_mime_types():
+        return ToolResult(
+            content=content,
+            files=[File(content=payload, mime_type=mime_type, filename=filename, format=media_format)],
+        )
+    return _attachment_tool_payload(
+        "error",
+        attachment_id=attachment_id,
+        message="This file type cannot be sent as model media. Use get_attachment without view to inspect or save it.",
+    )
 
 
 def _resolve_attachment_ids(
@@ -509,8 +558,19 @@ class AttachmentTools(Toolkit):
         self,
         attachment_id: str,
         mindroom_output_path: str | None = None,
-    ) -> str:
-        """Return one context attachment record, or save its bytes to a workspace path."""
+        view: bool = False,
+    ) -> str | ToolResult:
+        """Inspect metadata, save a file, or send attachment content to the model.
+
+        Args:
+            attachment_id: Context-scoped ID from list_attachments or register_attachment.
+            mindroom_output_path: Save bytes to a workspace-relative file instead of returning metadata.
+            view: Send image, audio, video, or document content (including PDF) to the model; up to 20 MiB.
+                Requires a model that supports the media type. If inline media is unavailable, use
+                get_attachment without view to get metadata or save the file, then use other available tools.
+                Cannot be combined with mindroom_output_path.
+
+        """
         context = get_tool_runtime_context()
         if context is None:
             return _attachment_tool_payload(
@@ -519,6 +579,8 @@ class AttachmentTools(Toolkit):
             )
         if not isinstance(attachment_id, str) or not attachment_id.strip():
             return _attachment_tool_payload("error", message="attachment_id must be a non-empty string.")
+        if view and mindroom_output_path is not None:
+            return _attachment_tool_payload("error", message="view cannot be combined with mindroom_output_path.")
 
         requested_attachment_id = attachment_id.strip()
         output_path, output_path_error = self._resolve_output_path_argument(
@@ -551,11 +613,14 @@ class AttachmentTools(Toolkit):
                 output_path=output_path,
             )
 
-        return _attachment_tool_payload(
+        content = _attachment_tool_payload(
             "ok",
             attachment_id=requested_attachment_ids[0],
             attachment=attachments[0],
         )
+        if view:
+            return await asyncio.to_thread(_view_attachment, context, requested_attachment_ids[0], content)
+        return content
 
     def _resolve_output_path_argument(
         self,
@@ -633,7 +698,7 @@ class AttachmentTools(Toolkit):
                 attachment_id=requested_attachment_id,
                 message="mindroom_output_path requires an agent workspace in this runtime path.",
             )
-        payload_bytes, read_error = _attachment_bytes_for_save(
+        payload_bytes, read_error = _read_attachment_bytes(
             attachment,
             byte_limit=byte_limit,
             limit_label=limit_label,

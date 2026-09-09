@@ -1325,6 +1325,7 @@ depends_on = [
 path = "mindroom.custom_tools.attachments"
 depends_on = [
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix.media",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.sandbox_proxy",

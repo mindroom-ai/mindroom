@@ -216,8 +216,12 @@ QUEUED_MESSAGE_NOTICE_TEXT = (
     "intend to resume it on the next turn, subject to the newer message's instructions."
 )
 INLINE_MEDIA_FALLBACK_PROMPT = (
-    "The model rejected inline attachments for this turn. "
-    "Use available attachment IDs and tools to inspect files instead."
+    "The model or provider adapter could not accept some inline attachments for this request. "
+    "Their content was not inspected. Do not claim to have seen, heard, or read the removed media. "
+    "Do not repeat get_attachment(view=True) for it on this model. "
+    "Use get_attachment without view to inspect metadata or save the file with mindroom_output_path. "
+    "Then use other available tools to extract or interpret its content. "
+    "If no suitable tool is available, explain the limitation to the user."
 )
 
 ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE = """Decide which agent or team should respond to this message.

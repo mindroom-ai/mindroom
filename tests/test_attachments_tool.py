@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import hashlib
 import json
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agno.tools.function import FunctionCall, ToolResult
 
 from mindroom.attachments import load_attachment, register_local_attachment
 from mindroom.config.agent import AgentConfig
@@ -173,7 +175,8 @@ async def test_attachments_tool_get_attachment_returns_local_path(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_path: Path) -> None:
+@pytest.mark.parametrize("view", [False, True])
+async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_path: Path, view: bool) -> None:
     """Tool should reject attachment IDs not present in runtime context."""
     tool = AttachmentTools()
     sample_file = tmp_path / "sample.txt"
@@ -187,11 +190,138 @@ async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_pa
     assert attachment is not None
 
     with tool_runtime_context(_tool_context(tmp_path, attachment_ids=())):
-        payload = json.loads(await tool.get_attachment("att_sample"))
+        payload = json.loads(await tool.get_attachment("att_sample", view=view))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "attachments"
     assert "not available in this context" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
+    """Registered images reach the model as media, not just a path in JSON."""
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+    )
+    image_path = tmp_path / "plot.jpg"  # Byte detection must win over the extension.
+    image_path.write_bytes(image_bytes)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
+    with tool_runtime_context(_tool_context(tmp_path)):
+        registered = json.loads(await tool.register_attachment("plot.jpg"))
+        attachment_id = registered["attachment_id"]
+        metadata = await tool.get_attachment(attachment_id)
+        execution = await FunctionCall(
+            function=tool.async_functions["get_attachment"],
+            arguments={"attachment_id": attachment_id, "view": True},
+        ).aexecute()
+
+    assert execution.status == "success"
+    result = execution.result
+    assert isinstance(result, ToolResult)
+    assert result.content == metadata
+    assert result.images is not None
+    assert len(result.images) == 1
+    assert result.images[0].content == image_bytes
+    assert result.images[0].mime_type == "image/png"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "payload_bytes", "media_field", "mime_type"),
+    [
+        ("recording.mp3", b"ID3 audio bytes", "audios", "audio/mpeg"),
+        ("document.pdf", b"%PDF-1.4 document bytes", "files", "application/pdf"),
+        ("notes.txt", b"Read these notes", "files", "text/plain"),
+        ("clip.mp4", b"video bytes", "videos", "video/mp4"),
+    ],
+)
+async def test_get_attachment_view_returns_other_media(
+    tmp_path: Path,
+    filename: str,
+    payload_bytes: bytes,
+    media_field: str,
+    mime_type: str,
+) -> None:
+    """Audio, documents, and video use their native model media fields."""
+    (tmp_path / filename).write_bytes(payload_bytes)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
+    with tool_runtime_context(_tool_context(tmp_path)):
+        registered = json.loads(await tool.register_attachment(filename))
+        result = await tool.get_attachment(registered["attachment_id"], view=True)
+
+    assert isinstance(result, ToolResult)
+    media = {"audios": result.audios, "files": result.files, "videos": result.videos}[media_field]
+    assert media is not None
+    assert len(media) == 1
+    assert media[0].content == payload_bytes
+    assert media[0].mime_type == mime_type
+    if result.audios:
+        assert result.audios[0].format == "mp3"
+    if result.files:
+        assert result.files[0].filename == filename
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("filename", "data"), [("empty.pdf", b""), ("archive.zip", b"PK archive bytes")])
+async def test_get_attachment_view_rejects_unusable_documents(tmp_path: Path, filename: str, data: bytes) -> None:
+    """Empty and unsupported documents give a recoverable tool error, not an exception."""
+    (tmp_path / filename).write_bytes(data)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
+    with tool_runtime_context(_tool_context(tmp_path)):
+        registered = json.loads(await tool.register_attachment(filename))
+        result = await tool.get_attachment(registered["attachment_id"], view=True)
+
+    assert isinstance(result, str)
+    assert json.loads(result)["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_get_attachment_view_uses_local_filename_when_metadata_has_none(tmp_path: Path) -> None:
+    """Older attachment records need not carry an explicit filename."""
+    local_path = tmp_path / "document.pdf"
+    local_path.write_bytes(b"%PDF-1.4 document bytes")
+    attachment = register_local_attachment(tmp_path, local_path, kind="file", mime_type="application/pdf")
+    assert attachment is not None
+    assert attachment.filename is None
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+        result = await AttachmentTools().get_attachment(attachment.attachment_id, view=True)
+
+    assert isinstance(result, ToolResult)
+    assert result.files is not None
+    assert result.files[0].filename == "document.pdf"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["non_image", "oversized", "missing", "save_and_view"])
+async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case: str) -> None:
+    """Viewing must fail explicitly rather than forward unusable media or silently save."""
+    image_path = tmp_path / "plot.png"
+    image_path.write_bytes(b"not an image")
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
+    with tool_runtime_context(_tool_context(tmp_path)):
+        registered = json.loads(await tool.register_attachment("plot.png"))
+        if case == "oversized":
+            with image_path.open("r+b") as image_file:
+                image_file.truncate(20 * 1024 * 1024 + 1)
+        elif case == "missing":
+            image_path.unlink()
+        result = await tool.get_attachment(
+            registered["attachment_id"],
+            view=True,
+            mindroom_output_path="copy.png" if case == "save_and_view" else None,
+        )
+
+    assert isinstance(result, str)
+    payload = json.loads(result)
+    assert payload["status"] == "error"
+    expected = {
+        "non_image": "PNG, JPEG, GIF, or WebP",
+        "oversized": "size limit",
+        "missing": "missing on disk",
+        "save_and_view": "cannot be combined",
+    }
+    assert expected[case] in payload["message"]
+    assert not (tmp_path / "copy.png").exists()
 
 
 @pytest.mark.asyncio

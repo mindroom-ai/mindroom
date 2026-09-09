@@ -88,10 +88,21 @@ agents:
 | Operation | Description |
 |-----------|-------------|
 | `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, event_timestamp, created_at) |
-| `get_attachment(attachment_id, mindroom_output_path?)` | Return one context attachment record, or save its bytes to a workspace-relative path and return a save receipt |
+| `get_attachment(attachment_id, mindroom_output_path?, view=False)` | Return metadata, save bytes to a workspace-relative path, or send media/document content to the model with `view=True` |
 | `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
 
-When `mindroom_output_path` is omitted, `get_attachment()` returns the attachment metadata response, including the runtime-local `local_path`.
+By default, `get_attachment()` returns the attachment metadata response, including the runtime-local `local_path`.
+Use `get_attachment("att_...", view=True)` to inspect media from earlier in the conversation or a local file registered with `register_attachment(file_path)`.
+This sends the attachment bytes to the configured model, using native image, audio, video, or document inputs rather than putting binary data in tool text.
+It supports PNG, JPEG, GIF, and WebP images, audio, video, and Agno-supported document types including PDF and plain text, with a 20 MiB limit per attachment.
+Image format is detected from the bytes; other media uses the attachment's MIME type and filename.
+The selected model and its provider adapter must support the media type and may impose stricter format or size limits.
+The attachment must be available in the current context and have a readable local file.
+`view=True` cannot be combined with `mindroom_output_path`.
+If the provider rejects inline media, MindRoom retries the request without it and explicitly tells the agent that the removed content was not inspected.
+Known adapter omissions use the same guidance, so unsupported media is not silently dropped.
+The agent can then call `get_attachment` without `view` to obtain metadata or save the file, and use other available extraction, transcription, or analysis tools.
+This does not provision another model, grant credentials, or automatically delegate the task.
 For worker-routed agents, prefer `get_attachment("att_...", mindroom_output_path="incoming/file.ext")` before processing an attachment with `file`, `coding`, `python`, or `shell`, because the runtime-local path may not exist inside the worker workspace.
 `mindroom_output_path` must be a file path relative to the agent workspace.
 It must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.

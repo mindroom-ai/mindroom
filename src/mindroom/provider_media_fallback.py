@@ -68,6 +68,18 @@ _REQUEST_STATES: ContextVar[dict[int, _MediaFallbackRequestState] | None] = Cont
 # Learned negative capabilities intentionally live only for this process lifetime.
 _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE: dict[_ModelMediaRoute, set[MediaKind]] = {}
 
+# These Agno adapters omit these inputs instead of rejecting them. Keep their
+# limitations separate from model capabilities learned from provider errors.
+# Module names avoid importing optional provider SDKs here; MRO covers our wrappers.
+_ADAPTER_OMITTED_MEDIA: dict[str, frozenset[MediaKind]] = {
+    "agno.models.openai.responses": frozenset({"audio", "video"}),
+    "agno.models.openai.chat": frozenset({"video"}),
+    "agno.models.anthropic.claude": frozenset({"audio", "video"}),
+    "agno.models.ollama.chat": frozenset({"audio", "file", "video"}),
+    "agno.models.groq.groq": frozenset({"audio", "file", "video"}),
+    "agno.models.cerebras.cerebras": frozenset({"audio", "image", "file", "video"}),
+}
+
 
 @runtime_checkable
 class _AsyncClosableIterator(Protocol):
@@ -158,7 +170,7 @@ async def _ainvoke_with_fallback(
     route = _model_media_route(model)
     present_kinds = _media_kinds(messages)
     request_state = _request_state(model) or _MediaFallbackRequestState()
-    known_unsupported = _known_unsupported_media_kinds(route) & present_kinds
+    known_unsupported = (_known_unsupported_media_kinds(route) | _adapter_omitted_media(model)) & present_kinds
     removed_kinds = known_unsupported | (request_state.removed_kinds & present_kinds)
     initial_args, initial_kwargs = _call_without_media_kinds(
         args,
@@ -226,7 +238,7 @@ async def _stream_with_fallback(
     route = _model_media_route(model)
     present_kinds = _media_kinds(messages)
     request_state = _request_state(model) or _MediaFallbackRequestState()
-    known_unsupported = _known_unsupported_media_kinds(route) & present_kinds
+    known_unsupported = (_known_unsupported_media_kinds(route) | _adapter_omitted_media(model)) & present_kinds
     removed_kinds = known_unsupported | (request_state.removed_kinds & present_kinds)
     initial_args, initial_kwargs = _call_without_media_kinds(
         args,
@@ -341,6 +353,14 @@ def _without_inline_media(message: Message, removed_kinds: frozenset[MediaKind])
 
 def _known_unsupported_media_kinds(route: _ModelMediaRoute) -> frozenset[MediaKind]:
     return frozenset(_UNSUPPORTED_MEDIA_KINDS_BY_ROUTE.get(route, set()))
+
+
+def _adapter_omitted_media(model: Model) -> frozenset[MediaKind]:
+    """Find the nearest known adapter without guessing a model's capabilities."""
+    for adapter in type(model).__mro__:
+        if (omitted := _ADAPTER_OMITTED_MEDIA.get(adapter.__module__)) is not None:
+            return omitted
+    return frozenset()
 
 
 def _record_unsupported_media_kinds(
