@@ -13,8 +13,13 @@ from fastapi import HTTPException
 
 from mindroom.api import sandbox_exec
 from mindroom.logging_config import get_logger
+from mindroom.private_instance_identity_store import (
+    historical_private_instance_worker_key,
+    load_private_instance_identity,
+)
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
+    private_instance_scope_root_path,
     requires_explicit_private_agent_visibility,
     visible_state_roots_for_worker_key,
     worker_dir_name,
@@ -244,6 +249,21 @@ def _resolve_worker_base_dir(
         raise ValueError(msg)
 
     allowed_roots = (paths.root.resolve(), *visible_state_roots)
+    canonical_scope = private_instance_scope_root_path(shared_root, worker_key)
+    if candidate.is_relative_to(canonical_scope.parent) and not any(
+        candidate.is_relative_to(root) for root in allowed_roots
+    ):
+        owner = load_private_instance_identity(shared_root, canonical_scope)
+        if owner is not None and owner.worker_key == worker_key:
+            legacy_scope = private_instance_scope_root_path(
+                shared_root,
+                historical_private_instance_worker_key(worker_key, owner.requester_id),
+            )
+            try:
+                if candidate.is_relative_to(legacy_scope) and legacy_scope.samefile(canonical_scope):
+                    candidate = (canonical_scope / candidate.relative_to(legacy_scope)).resolve()
+            except FileNotFoundError:
+                pass
     if not any(candidate.is_relative_to(root) for root in allowed_roots):
         msg = f"base_dir must stay inside the allowed state roots or worker root: {requested_base_dir}"
         raise ValueError(msg)

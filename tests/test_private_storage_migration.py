@@ -24,7 +24,11 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadEx
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, resolve_session_state_root
 from mindroom.file_locks import file_lock_is_held
-from mindroom.private_instance_identity_store import load_private_instance_identity
+from mindroom.private_instance_identity_store import (
+    ensure_private_instance_identity,
+    load_private_instance_identity,
+    reconstruct_private_instance_worker_key,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_export.workspace_sync import _private_targets
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, private_instance_scope_root_path
@@ -97,16 +101,21 @@ async def test_startup_moves_every_owner_and_preserves_contents(tmp_path: Path, 
         ),
     ]
     sources = [_seed(paths, old, requester) for old, requester, _new in fixtures]
+    database_inodes = [
+        (resolve_session_state_root(source, paths) / "writer/sessions/writer.db").stat().st_ino for source in sources
+    ]
     primary = [_files(source) for source in sources]
     secondary = [_files(resolve_session_state_root(source, paths)) for source in sources]
     migration = importlib.import_module("mindroom.private_storage_migration")
     await migration.migrate_private_storage(paths)
     for index, (_old, requester, current) in enumerate(fixtures):
         target = private_instance_scope_root_path(paths.storage_root, current)
-        assert not sources[index].exists()
+        assert sources[index].is_symlink()
+        assert sources[index].samefile(target)
         assert _files(target) == primary[index]
         session_target = resolve_session_state_root(target, paths)
         assert _files(session_target) == secondary[index]
+        assert (session_target / "writer/sessions/writer.db").stat().st_ino == database_inodes[index]
         assert load_private_instance_identity(paths.storage_root, target).requester_id == requester
         # Remove the deliberately opaque companion before SQLite opens the database.
         (session_target / "writer/sessions/writer.db-wal").unlink()
@@ -124,7 +133,7 @@ async def test_every_filesystem_mutation_boundary_resumes(tmp_path: Path, monkey
     """Crashes around actual fsync, replace, rename and unlink never lose scope contents."""
     migration = importlib.import_module("mindroom.private_storage_migration")
     observed: list[str] = []
-    originals = {name: getattr(os, name) for name in ("fsync", "replace", "rename", "unlink")}
+    originals = {name: getattr(os, name) for name in ("fsync", "replace", "rename", "unlink", "symlink")}
 
     def instrument(name: str, crash_at: int | None, after: bool) -> Callable:
         def call(*args: object, **kwargs: object) -> object:
@@ -148,7 +157,7 @@ async def test_every_filesystem_mutation_boundary_resumes(tmp_path: Path, monkey
             faults.setattr(os, name, instrument(name, None, False))
         await migration.migrate_private_storage(paths)
     checkpoints = len(observed)
-    assert {"fsync", "replace", "rename", "unlink"} <= set(observed)
+    assert {"fsync", "replace", "rename", "unlink", "symlink"} <= set(observed)
     for checkpoint in range(1, checkpoints + 1):
         for after in (False, True):
             base = tmp_path / f"crash-{checkpoint}-{after}"
@@ -163,6 +172,11 @@ async def test_every_filesystem_mutation_boundary_resumes(tmp_path: Path, monkey
                     await migration.migrate_private_storage(paths)
             await migration.migrate_private_storage(paths)
             target = private_instance_scope_root_path(paths.storage_root, _NEW)
+            old = private_instance_scope_root_path(paths.storage_root, _OLD)
+            assert old.is_symlink()
+            assert old.samefile(target)
+            assert resolve_session_state_root(old, paths).samefile(resolve_session_state_root(target, paths))
+            assert not (target / _INTENT).exists()
             assert _files(target) == expected_primary
             assert _files(resolve_session_state_root(target, paths)) == expected_sessions
             assert load_private_instance_identity(paths.storage_root, target).worker_key == _NEW
@@ -322,7 +336,7 @@ async def test_recovery_accepts_remount_with_same_inodes(tmp_path: Path, monkeyp
     monkeypatch.setattr(os, "stat", remounted(os.stat))
     monkeypatch.setattr(os, "fstat", remounted(os.fstat))
     await migration.migrate_private_storage(paths)
-    assert not source.exists()
+    assert source.is_symlink()
     assert load_private_instance_identity(
         paths.storage_root,
         private_instance_scope_root_path(paths.storage_root, _NEW),
@@ -332,7 +346,7 @@ async def test_recovery_accepts_remount_with_same_inodes(tmp_path: Path, monkeyp
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["absolute_old", "absolute_new", "relative_escape", "safe_absolute", "safe_relative"])
 async def test_relocation_checks_links_without_rewriting_them(tmp_path: Path, kind: str) -> None:
-    """Links whose targets change after relocation stop the batch; stable links retain their bytes."""
+    """Historical aliases keep opaque link targets unchanged, including absolute references."""
     migration = importlib.import_module("mindroom.private_storage_migration")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
@@ -345,14 +359,9 @@ async def test_relocation_checks_links_without_rewriting_them(tmp_path: Path, ki
         "safe_relative": "writer/workspace/notes.txt",
     }
     link.symlink_to(targets[kind])
-    if kind in {"absolute_old", "absolute_new", "relative_escape"}:
-        with pytest.raises(ValueError, match="symlink"):
-            await migration.migrate_private_storage(paths)
-        assert source.exists()
-    else:
-        await migration.migrate_private_storage(paths)
-        target = private_instance_scope_root_path(paths.storage_root, _NEW)
-        assert str((target / "link").readlink()) == targets[kind]
+    await migration.migrate_private_storage(paths)
+    target = private_instance_scope_root_path(paths.storage_root, _NEW)
+    assert str((target / "link").readlink()) == targets[kind]
 
 
 @pytest.mark.asyncio
@@ -384,7 +393,7 @@ async def test_cancellation_keeps_locks_until_blocking_migration_drains(
         release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert not source.exists()
+    assert source.is_symlink()
     assert not file_lock_is_held(paths.storage_root / ".mindroom-storage-upgrade.lock")
 
 
@@ -441,6 +450,7 @@ async def test_nested_mounts_fail_before_any_move(
         "namespace": source.parent,
         "file": source / "writer/workspace/notes.txt",
     }[location]
+    monkeypatch.setattr(migration.sys, "platform", "darwin")
     original = os.stat
 
     def mounted_stat(path: str | Path, *args: object, **kwargs: object) -> os.stat_result:
@@ -543,10 +553,11 @@ async def test_recovery_rejects_boolean_owner_version(tmp_path: Path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_unreadable_pending_tree_stops_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failed metadata scan cannot silently skip relocation-dependent links or mounts."""
+    """The non-Linux mount scan fails closed when directory metadata is unreadable."""
     migration = importlib.import_module("mindroom.private_storage_migration")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
+    monkeypatch.setattr(migration.sys, "platform", "darwin")
     original = os.scandir
 
     def unreadable(path: Path | str) -> object:
@@ -617,7 +628,7 @@ async def test_abrupt_process_exit_leaves_harmless_partial_temporary(
     assert temporary.read_bytes() == b'{"partial":'
     await migration.migrate_private_storage(paths)
     target = private_instance_scope_root_path(paths.storage_root, _NEW)
-    assert not source.exists()
+    assert source.is_symlink()
     assert (target / temporary.name).read_bytes() == b'{"partial":'
     assert load_private_instance_identity(paths.storage_root, target).worker_key == _NEW
 
@@ -658,11 +669,45 @@ async def test_current_runtime_export_and_mounts_find_migrated_contents(tmp_path
         allow_unknown_worker_key=False,
     )
     private_mounts = [mount for mount in mounts if mount.local_path == runtime.state_root.parent]
-    assert len(private_mounts) == 1
+    assert {(mount.local_path, mount.worker_visible_path) for mount in private_mounts} == {
+        (runtime.state_root.parent, Path("/app/worker/private_instances") / runtime.state_root.parent.name),
+        (runtime.state_root.parent, Path("/app/worker/private_instances") / source.name),
+    }
     assert (
         private_mounts[0].local_path / "writer/workspace/notes.txt"
     ).read_bytes() == b"private workspace\x00retained"
-    assert not source.exists()
+    assert source.is_symlink()
+
+
+@pytest.mark.parametrize("state", ["fresh", "ownerless", "owned_without_alias", "foreign_collision"])
+def test_worker_mount_plan_never_infers_historical_access(tmp_path: Path, state: str) -> None:
+    """Canonical-only scopes remain usable without granting unverified historical destinations."""
+    worker_key = "v1:default:user:~alice_bob"
+    canonical = private_instance_scope_root_path(tmp_path, worker_key)
+    if state == "ownerless":
+        canonical.mkdir(parents=True)
+        (canonical / "notes.txt").write_text("existing unowned workspace")
+    elif state in {"owned_without_alias", "foreign_collision"}:
+        ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="alice_bob")
+    if state == "foreign_collision":
+        historical_key = "v1:default:user:alice_bob"
+        foreign_key = reconstruct_private_instance_worker_key(historical_key, "alice/bob")
+        ensure_private_instance_identity(tmp_path, worker_key=foreign_key, requester_id="alice/bob")
+        foreign = private_instance_scope_root_path(tmp_path, foreign_key)
+        private_instance_scope_root_path(tmp_path, historical_key).symlink_to(foreign.name)
+
+    mounts = plan_scoped_visible_state_roots(
+        worker_key=worker_key,
+        local_shared_storage_root=tmp_path,
+        worker_visible_shared_storage_root=Path("/app/worker"),
+        private_agent_names=frozenset(),
+        allow_unknown_worker_key=False,
+    )
+
+    assert {(mount.local_path, mount.worker_visible_path) for mount in mounts} == {
+        (tmp_path / "agents", Path("/app/worker/agents")),
+        (canonical, Path("/app/worker/private_instances") / canonical.name),
+    }
 
 
 @pytest.mark.asyncio
@@ -723,15 +768,15 @@ async def test_retry_durably_publishes_existing_intent_before_any_move(
     else:
         assert events.index("intent directory synced") < events.index("rename")
     await migration.migrate_private_storage(paths)
-    assert not source.exists()
+    assert source.is_symlink()
     target = private_instance_scope_root_path(paths.storage_root, _NEW)
     assert (target / "writer/workspace/notes.txt").read_bytes() == b"private workspace\x00retained"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("indirect", [False, True])
-async def test_relative_link_chain_escape_blocks_entire_batch(tmp_path: Path, indirect: bool) -> None:
-    """Filesystem traversal through an absolute directory link must not escape then reenter the old scope."""
+async def test_relative_link_chain_keeps_old_absolute_paths(tmp_path: Path, indirect: bool) -> None:
+    """Links through external directories can still return to retained historical names."""
     migration = importlib.import_module("mindroom.private_storage_migration")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
@@ -745,10 +790,9 @@ async def test_relative_link_chain_escape_blocks_entire_batch(tmp_path: Path, in
         target = "intermediate"
     (source / "link").symlink_to(target)
     assert (source / "link").read_bytes() == b"private workspace\x00retained"
-    with pytest.raises(ValueError, match="relative symlink"):
-        await migration.migrate_private_storage(paths)
+    await migration.migrate_private_storage(paths)
     for original in (source, other):
-        assert original.is_dir()
+        assert original.is_symlink()
         assert resolve_session_state_root(original, paths).is_dir()
         assert not (original / _INTENT).exists()
     assert (source / "link").read_bytes() == b"private workspace\x00retained"
@@ -757,24 +801,333 @@ async def test_relative_link_chain_escape_blocks_entire_batch(tmp_path: Path, in
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["contained_chain", "dangling", "cycle"])
 async def test_relative_link_chain_policy(tmp_path: Path, kind: str) -> None:
-    """Contained relative chains and dangling targets stay intact; cyclic chains fail closed."""
+    """Contained, dangling and cyclic workspace links remain opaque and unchanged."""
     migration = importlib.import_module("mindroom.private_storage_migration")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     targets = {"contained_chain": "writer/workspace", "dangling": "missing", "cycle": "link"}
     (source / "intermediate").symlink_to(targets[kind], target_is_directory=True)
     (source / "link").symlink_to("intermediate" if kind == "cycle" else "intermediate/notes.txt")
-    if kind == "cycle":
-        with pytest.raises(ValueError, match="relative symlink"):
-            await migration.migrate_private_storage(paths)
-        assert source.is_dir()
-        assert not (source / _INTENT).exists()
-    else:
+    await migration.migrate_private_storage(paths)
+    target = private_instance_scope_root_path(paths.storage_root, _NEW)
+    assert str((target / "intermediate").readlink()) == targets[kind]
+    assert str((target / "link").readlink()) == ("intermediate" if kind == "cycle" else "intermediate/notes.txt")
+    if kind == "contained_chain":
+        assert (target / "link").read_bytes() == b"private workspace\x00retained"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("separate", [False, True])
+async def test_historical_absolute_shebang_survives_migration(tmp_path: Path, separate: bool) -> None:
+    """Executable bytes and both absolute names remain usable after relocation."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path, separate=separate)
+    old = _seed(paths, _OLD, _REQUESTER)
+    command = old / "writer/workspace/example-cli"
+    interpreter = old / "writer/workspace/python"
+    interpreter.symlink_to(sys.executable)
+    command.write_text(f'#!{interpreter}\nprint("preserved")\n')
+    command.chmod(0o700)
+    before = command.read_bytes()
+    inode = old.stat().st_ino
+    old_sessions = resolve_session_state_root(old, paths)
+    assert (await asyncio.to_thread(subprocess.check_output, [str(command)], text=True)).strip() == "preserved"
+    await migration.migrate_private_storage(paths)
+    new = private_instance_scope_root_path(paths.storage_root, _NEW)
+    assert old.is_symlink()
+    assert old.readlink() == Path(new.name)
+    assert old.samefile(new)
+    assert new.stat().st_ino == inode
+    assert (new / "writer/workspace/example-cli").read_bytes() == before
+    assert (await asyncio.to_thread(subprocess.check_output, [str(command)], text=True)).strip() == "preserved"
+    assert (
+        await asyncio.to_thread(subprocess.check_output, [str(new / "writer/workspace/example-cli")], text=True)
+    ).strip() == "preserved"
+    new_sessions = resolve_session_state_root(new, paths)
+    assert old_sessions.samefile(new_sessions)
+    assert old_sessions.readlink() == Path(new_sessions.name)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["scope", "nested", "namespace", "file", "session", "destination"])
+@pytest.mark.parametrize("escaped", [False, True])
+async def test_linux_bind_mounts_fail_before_moves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+    escaped: bool,
+) -> None:
+    """The mount table detects same-device binds, including kernel-escaped mountpoints."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    base = tmp_path / "space tab\t slash\\" if escaped else tmp_path
+    base.mkdir(exist_ok=True)
+    paths = _paths(base)
+    source = _seed(paths, _OLD, _REQUESTER)
+    mounted = {
+        "scope": source,
+        "nested": source / "writer/workspace",
+        "namespace": source.parent,
+        "file": source / "writer/workspace/notes.txt",
+        "session": resolve_session_state_root(source, paths),
+        "destination": private_instance_scope_root_path(paths.storage_root, _NEW),
+    }[location]
+    mount_text = str(mounted).replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011")
+    table = f"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 / {mount_text} rw shared:1 - ext4 /dev/root rw\n"
+    original = Path.read_text
+
+    def read(path: Path, *args: object, **kwargs: object) -> str:
+        return table if str(path) == "/proc/self/mountinfo" else original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(migration.sys, "platform", "linux")
+    with pytest.raises(ValueError, match="mount"):
         await migration.migrate_private_storage(paths)
-        target = private_instance_scope_root_path(paths.storage_root, _NEW)
-        assert str((target / "intermediate").readlink()) == targets[kind]
-        assert str((target / "link").readlink()) == "intermediate/notes.txt"
-        if kind == "contained_chain":
-            assert (target / "link").read_bytes() == b"private workspace\x00retained"
+    assert not source.is_symlink()
+    assert not (source / _INTENT).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "table",
+    ["", "garbage", "1 0 8:1 / relative rw - ext4 root rw", "1 0 8:1 / /bad\\999 rw - ext4 root rw", None],
+)
+async def test_linux_unavailable_mount_table_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    table: str | None,
+) -> None:
+    """Missing or malformed Linux mount evidence cannot authorize a rename."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path)
+    source = _seed(paths, _OLD, _REQUESTER)
+    original = Path.read_text
+
+    def read(path: Path, *args: object, **kwargs: object) -> str:
+        if str(path) != "/proc/self/mountinfo":
+            return original(path, *args, **kwargs)
+        if table is None:
+            message = "mount table unavailable"
+            raise PermissionError(message)
+        return table
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(migration.sys, "platform", "linux")
+    with pytest.raises(ValueError, match="mount"):
+        await migration.migrate_private_storage(paths)
+    assert not source.is_symlink()
+    assert not (source / _INTENT).exists()
+
+
+@pytest.mark.asyncio
+async def test_linux_reads_mount_table_once_without_walking_workspaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured volume mounts are allowed and preflight work is bounded by mount count."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path)
+    source = _seed(paths, _OLD, _REQUESTER)
+    roots = [paths.storage_root, resolve_session_state_root(paths.storage_root, paths)]
+    table = "1 0 8:1 / / rw - ext4 /dev/root rw\n9 1 0:4 net:[123] /run/netns/test rw - nsfs nsfs rw\n" + "".join(
+        f"{index} 1 8:{index} / {root} rw - ext4 /dev/volume rw\n" for index, root in enumerate(roots, 2)
+    )
+    original = Path.read_text
+    reads = []
+
+    def read(path: Path, *args: object, **kwargs: object) -> str:
+        if str(path) == "/proc/self/mountinfo":
+            reads.append(path)
+            assert len(reads) == 1
+            return table
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(migration.sys, "platform", "linux")
+    monkeypatch.setattr(os, "walk", Mock(side_effect=AssertionError("workspace traversal")))
+    await migration.migrate_private_storage(paths)
+    assert source.is_symlink()
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", ["foreign", "missing", "chain", "absolute", "owner", "mirror", "orphan_mirror"])
+async def test_completed_aliases_reject_tampering(tmp_path: Path, damage: str) -> None:
+    """Completed aliases are accepted only at their exact owner-bound primary and mirror names."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path)
+    old = _seed(paths, _OLD, _REQUESTER)
+    old_mirror = resolve_session_state_root(old, paths)
+    await migration.migrate_private_storage(paths)
+    new = private_instance_scope_root_path(paths.storage_root, _NEW)
+    if damage == "foreign":
+        old.rename(old.with_name("foreign"))
+    elif damage == "missing":
+        shutil.rmtree(new)
+    elif damage == "chain":
+        old.unlink()
+        (old.parent / "chain").symlink_to(new.name)
+        old.symlink_to("chain")
+    elif damage == "absolute":
+        old.unlink()
+        old.symlink_to(new)
+    elif damage == "owner":
+        payload = json.loads((new / _RECORD).read_text())
+        payload["requester_id"] = "@other:example.org"
+        (new / _RECORD).write_text(json.dumps(payload))
+    elif damage == "mirror":
+        old_mirror.unlink()
+        old_mirror.symlink_to("different")
+    else:
+        old.unlink()
+    with pytest.raises(ValueError, match=r"[Pp]rivate"):
+        await migration.migrate_private_storage(paths)
+
+
+@pytest.mark.asyncio
+async def test_current_scope_without_alias_is_not_given_historical_provenance(tmp_path: Path) -> None:
+    """A current owner record alone cannot authorize creating an old path."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path)
+    current = _seed(paths, _NEW, _REQUESTER)
+    await migration.migrate_private_storage(paths)
+    assert current.is_dir()
+    assert not current.is_symlink()
+    assert not private_instance_scope_root_path(paths.storage_root, _OLD).exists()
+
+
+@pytest.mark.asyncio
+async def test_empty_orphan_session_placeholder_remains_tolerated(tmp_path: Path) -> None:
+    """Empty real placeholders keep prior startup tolerance without gaining alias authority."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path)
+    old = _seed(paths, _OLD, _REQUESTER)
+    mirror = resolve_session_state_root(old, paths)
+    placeholder = mirror.parent / "unowned"
+    placeholder.mkdir()
+    await migration.migrate_private_storage(paths)
+    await migration.migrate_private_storage(paths)
+    assert old.is_symlink()
+    assert placeholder.is_dir()
+    assert not placeholder.is_symlink()
+    assert list(placeholder.iterdir()) == []
+    assert not (old / _INTENT).exists()
+
+
+@pytest.mark.asyncio
+async def test_later_session_data_gets_no_guessed_alias(tmp_path: Path) -> None:
+    """A mirror absent at migration may later hold legitimate current-key data."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path)
+    old = _seed(paths, _OLD, _REQUESTER)
+    old_mirror = resolve_session_state_root(old, paths)
+    shutil.rmtree(old_mirror)
+    await migration.migrate_private_storage(paths)
+    current = private_instance_scope_root_path(paths.storage_root, _NEW)
+    current_mirror = resolve_session_state_root(current, paths)
+    current_mirror.mkdir()
+    (current_mirror / "session.db").write_bytes(b"later session")
+    await migration.migrate_private_storage(paths)
+    assert old.is_symlink()
+    assert not old_mirror.exists()
+    assert not old_mirror.is_symlink()
+    assert (current_mirror / "session.db").read_bytes() == b"later session"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "damage",
+    ["early_session_alias", "absolute_session_alias", "primary_before_session", "changed_owner"],
+)
+async def test_recovery_aliases_require_recorded_publication_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+) -> None:
+    """An exact link target cannot excuse a wrong owner or impossible publication order."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path)
+    old = _seed(paths, _OLD, _REQUESTER)
+    old_mirror = resolve_session_state_root(old, paths)
+    new = private_instance_scope_root_path(paths.storage_root, _NEW)
+    new_mirror = resolve_session_state_root(new, paths)
+    if damage in {"early_session_alias", "absolute_session_alias"}:
+        await _interrupt_after_session_move(paths, monkeypatch)
+        old_mirror.symlink_to(new_mirror if damage == "absolute_session_alias" else new_mirror.name)
+    else:
+        original = os.unlink
+
+        def interrupt(path: str | Path, *args: object, **kwargs: object) -> None:
+            if Path(path).name == _INTENT:
+                message = "retain intent"
+                raise OSError(message)
+            original(path, *args, **kwargs)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(os, "unlink", interrupt)
+            with pytest.raises(OSError, match="retain intent"):
+                await migration.migrate_private_storage(paths)
+        if damage == "primary_before_session":
+            old_mirror.unlink()
         else:
-            assert not (target / "link").exists()
+            payload = json.loads((new / _RECORD).read_text())
+            payload["worker_key"] = _OLD
+            (new / _RECORD).write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match=r"[Pp]rivate"):
+        await migration.migrate_private_storage(paths)
+    assert (new if new.exists() else old).joinpath(_INTENT).is_file()
+
+
+@pytest.mark.asyncio
+async def test_alias_publication_does_not_overwrite_new_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A namespace conflict appearing after preflight remains intact with recovery evidence."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path, separate=False)
+    old = _seed(paths, _OLD, _REQUESTER)
+    original = os.symlink
+
+    def conflict(target: str, link: str | Path, *args: object, **kwargs: object) -> None:
+        Path(link).mkdir()
+        (Path(link) / "foreign.txt").write_text("keep me")
+        original(target, link, *args, **kwargs)
+
+    monkeypatch.setattr(os, "symlink", conflict)
+    with pytest.raises(FileExistsError):
+        await migration.migrate_private_storage(paths)
+    assert (old / "foreign.txt").read_text() == "keep me"
+    new = private_instance_scope_root_path(paths.storage_root, _NEW)
+    assert (new / _INTENT).is_file()
+    assert (new / "writer/workspace/notes.txt").read_bytes() == b"private workspace\x00retained"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+async def test_separate_volumes_may_use_distinct_devices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+) -> None:
+    """Each scope rename stays on its own device; workspace symlinks are never traversed."""
+    migration = importlib.import_module("mindroom.private_storage_migration")
+    paths = _paths(tmp_path)
+    old = _seed(paths, _OLD, _REQUESTER)
+    old_mirror = resolve_session_state_root(old, paths)
+    sessions = old_mirror.parent.parent
+    (old / "external").symlink_to(sys.executable)
+    (old / "dangling").symlink_to("missing")
+    original = os.stat
+
+    def separate_device(path: str | Path, *args: object, **kwargs: object) -> os.stat_result:
+        info = original(path, *args, **kwargs)
+        if Path(path).is_relative_to(sessions):
+            fields = list(info)
+            fields[2] += 1000
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(os, "stat", separate_device)
+    monkeypatch.setattr(migration.sys, "platform", platform)
+    await migration.migrate_private_storage(paths)
+    assert old.is_symlink()
+    assert old_mirror.is_symlink()
+    assert os.readlink(old / "external") == sys.executable  # noqa: PTH115 - Compare literal link bytes.
+    assert os.readlink(old / "dangling") == "missing"  # noqa: PTH115 - Compare literal link bytes.

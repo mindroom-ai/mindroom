@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 import stat
-from collections import deque
+import sys
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,11 +19,14 @@ from mindroom.durable_write import fsync_directory_durable, write_json_file_dura
 from mindroom.file_locks import advisory_file_lock
 from mindroom.private_instance_identity_store import (
     PrivateInstanceIdentity,
+    historical_private_instance_worker_key,
+    load_private_instance_identity,
+    load_private_instance_legacy_alias,
     load_private_instance_record_payload,
     parse_private_instance_identity_payload,
     reconstruct_private_instance_worker_key,
 )
-from mindroom.tool_system.worker_routing import normalize_worker_key_part, private_instance_scope_root_path
+from mindroom.tool_system.worker_routing import private_instance_scope_root_path
 
 if TYPE_CHECKING:
     from typing import Any
@@ -78,14 +81,7 @@ def _roots(runtime_paths: RuntimePaths) -> tuple[Path, Path]:
 
 def _keys(identity: PrivateInstanceIdentity) -> tuple[str, str]:
     current = reconstruct_private_instance_worker_key(identity.worker_key, identity.requester_id)
-    parts = current.split(":")
-    requester = re.sub(r"[^a-zA-Z0-9._:@+-]+", "_", identity.requester_id.strip()).strip("_") or "default"
-    historical = f"v1:{normalize_worker_key_part(parts[1])}:{parts[2]}:{requester}"
-    if parts[2] == "user_agent":
-        historical += ":" + normalize_worker_key_part(parts[-1])
-    if identity.worker_key not in {historical, current}:
-        _reject("owner does not match the historical or current requester encoding")
-    return historical, current
+    return historical_private_instance_worker_key(identity.worker_key, identity.requester_id), current
 
 
 def _locations(root: Path, intent: _Intent) -> tuple[Path, Path]:
@@ -96,12 +92,16 @@ def _locations(root: Path, intent: _Intent) -> tuple[Path, Path]:
 
 
 def _recorded_location(root: Path, intent: _Intent, inode: int | None) -> Path | None:
-    locations = [path for path in _locations(root, intent) if _directory(path) is not None]
+    old, new = _locations(root, intent)
+    alias = old.is_symlink()
+    if alias and os.readlink(old) != new.name:  # noqa: PTH115 - Preserve the literal target text.
+        _reject("recorded alias does not name its canonical sibling")
+    locations = [path for path in (old, new) if not (path == old and alias) and _directory(path) is not None]
     if inode is None:
-        if locations:
+        if locations or alias:
             _reject("unexpected session data for a scope recorded without a session mirror")
         return None
-    if len(locations) != 1 or locations[0].lstat().st_ino != inode:
+    if len(locations) != 1 or locations[0].lstat().st_ino != inode or (alias and locations[0] != new):
         _reject("recorded scope must exist at exactly one location with its original inode")
     return locations[0]
 
@@ -146,7 +146,22 @@ def _read_intent(payload: object, roots: tuple[Path, Path], scope: Path) -> _Int
             _reject("primary moved before its session mirror")
     if payload not in allowed or (roots[0] == roots[1] and intent.session_inode is not None):
         _reject("owner record conflicts with migration intent")
+    _validate_recorded_aliases(
+        roots,
+        intent,
+        primary == new and payload == _owner_payload(intent.new_key, intent.requester_id),
+    )
     return intent
+
+
+def _validate_recorded_aliases(roots: tuple[Path, Path], intent: _Intent, current_owner: bool) -> None:
+    primary_alias = _locations(roots[0], intent)[0].is_symlink()
+    session_alias = roots[0] != roots[1] and _locations(roots[1], intent)[0].is_symlink()
+    if primary_alias or session_alias:
+        if not current_owner:
+            _reject("alias publication requires both moves and the current owner")
+        if primary_alias and roots[0] != roots[1] and intent.session_inode is not None and not session_alias:
+            _reject("primary alias appeared before the recorded session alias")
 
 
 def _owner_payload(key: str, requester: str) -> dict[str, object]:
@@ -159,7 +174,8 @@ def _scopes(root: Path) -> list[Path]:
         return []
     scopes = sorted(namespace.iterdir())
     for scope in scopes:
-        _directory(scope)
+        if not scope.is_symlink():
+            _directory(scope)
     return scopes
 
 
@@ -189,7 +205,10 @@ def _discover(roots: tuple[Path, Path]) -> list[_Intent]:
     primary = roots[0]
     pending = []
     known_names: set[str] = set()
-    for scope in _scopes(primary):
+    scopes = _scopes(primary)
+    for scope in scopes:
+        if scope.is_symlink():
+            continue
         payload = load_private_instance_record_payload(scope / _INTENT)
         if payload is not None or (scope / _INTENT).exists():
             intent = _read_intent(payload, roots, scope)
@@ -211,18 +230,29 @@ def _discover(roots: tuple[Path, Path]) -> list[_Intent]:
         intent = _fresh_intent(scope, owner, roots)
         pending.append(intent)
         known_names.add(_locations(primary, intent)[1].name)
+    pending_aliases = {_locations(primary, intent)[0] for intent in pending}
+    for alias in scopes:
+        if not alias.is_symlink() or alias in pending_aliases:
+            continue
+        _validate_completed_alias(primary, alias)
+        known_names.add(alias.name)
     _validate_batch(roots, pending, known_names)
     return pending
+
+
+def _validate_completed_alias(primary: Path, alias: Path) -> None:
+    target_name = os.readlink(alias)  # noqa: PTH115 - Preserve the literal target text.
+    if target_name in {"", ".", ".."} or "/" in target_name:
+        _reject("alias must name its canonical sibling")
+    owner = load_private_instance_identity(primary, alias.parent / target_name)
+    if owner is None or load_private_instance_legacy_alias(primary, owner.worker_key) != alias:
+        _reject("alias has no matching current owner")
 
 
 def _validate_batch(roots: tuple[Path, Path], pending: list[_Intent], known_names: set[str]) -> None:
     primary, sessions = roots
     if sessions != primary:
-        for scope in _scopes(sessions):
-            if (scope / _INTENT).exists() or (scope / _INTENT).is_symlink():
-                _reject("session mirror contains an unrelated migration intent")
-            if scope.name not in known_names and any(scope.iterdir()):
-                _reject("session-only private data has no authoritative primary owner")
+        _validate_session_scopes(roots, pending, known_names)
     if pending:
         if any(_directory(root) is None for root in roots):
             _reject("configured migration volume is missing")
@@ -233,49 +263,109 @@ def _validate_batch(roots: tuple[Path, Path], pending: list[_Intent], known_name
             _reject("multiple old scopes claim the same current owner")
 
 
+def _validate_session_scopes(roots: tuple[Path, Path], pending: list[_Intent], known_names: set[str]) -> None:
+    primary, sessions = roots
+    pending_aliases = {_locations(sessions, intent)[0] for intent in pending if intent.session_inode is not None}
+    for scope in _scopes(sessions):
+        if scope.is_symlink():
+            if scope in pending_aliases:
+                continue  # _read_intent already checked the mirror and publication order.
+            counterpart = primary / "private_instances" / scope.name
+            if (
+                not counterpart.is_symlink()
+                or os.readlink(scope) != os.readlink(counterpart)  # noqa: PTH115 - Preserve the literal target text.
+                or _directory(scope.parent / os.readlink(scope)) is None  # noqa: PTH115 - Preserve the literal target text.
+            ):
+                _reject("session alias does not match its verified primary alias")
+            continue
+        if (scope / _INTENT).exists() or (scope / _INTENT).is_symlink():
+            _reject("session mirror contains an unrelated migration intent")
+        if scope.name not in known_names and any(scope.iterdir()):
+            _reject("session-only private data has no authoritative primary owner")
+        counterpart = primary / "private_instances" / scope.name
+        if counterpart.is_symlink():
+            _reject("session directory conflicts with a completed primary alias")
+
+
 def _raise_scan_error(error: OSError) -> NoReturn:
     raise error
 
 
-def _check_relative_link(entry: Path, scope: Path, target: Path) -> None:
-    """Follow each relative component without allowing intermediate links to leave the scope."""
-    remaining = deque(target.parts)
-    cursor = entry.parent
-    links = 0
-    while remaining:
-        part = remaining.popleft()
-        cursor = cursor.parent if part == ".." else cursor / part
-        if not cursor.is_relative_to(scope):
-            _reject("relative symlink leaves its relocated scope")
-        if cursor.is_symlink():
-            links += 1
-            target = cursor.readlink()
-            if target.is_absolute() or links > 40:
-                _reject("relative symlink traverses an absolute link or a cyclic chain")
-            remaining.extendleft(reversed(target.parts))
-            cursor = cursor.parent
+def _linux_mountpoints() -> list[Path]:
+    """Read one complete Linux mount snapshot, rejecting unusable kernel metadata."""
+    try:
+        lines = Path("/proc/self/mountinfo").read_text().splitlines()
+    except (OSError, UnicodeError) as error:
+        message = "Private storage migration: mount table is unreadable"
+        raise ValueError(message) from error
+    if not lines:
+        _reject("mount table is empty")
+    mountpoints = []
+    for line in lines:
+        fields = line.split()
+        if (
+            len(fields) < 10
+            or not fields[0].isdigit()
+            or not fields[1].isdigit()
+            or re.fullmatch(r"[0-9]+:[0-9]+", fields[2]) is None
+            or not fields[4].startswith("/")
+            or fields.count("-") != 1
+            or fields.index("-") < 6
+            or len(fields) - fields.index("-") != 4
+            or re.search(r"\\(?![0-7]{3})", fields[4])
+        ):
+            _reject("mount table is malformed")
+        mountpoint = Path(re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4]))
+        if ".." in mountpoint.parts:
+            _reject("mount table contains an unnormalized path")
+        mountpoints.append(mountpoint)
+    return mountpoints
 
 
-def _check_tree(scope: Path, moving: tuple[Path, ...]) -> None:
-    """Inspect directory mounts and links without reading opaque file contents."""
-    device = scope.parent.parent.lstat().st_dev
-    if any(path.lstat().st_dev != device for path in (scope, scope.parent)):
+def _check_tree(scope: Path) -> None:
+    """On non-Linux systems inspect mounts without following workspace symlinks."""
+    device = scope.lstat().st_dev
+    if os.path.ismount(scope) or os.path.ismount(scope.parent):
         _reject("nested scope or namespace mounts cannot be renamed safely")
     for directory, subdirectories, files in os.walk(scope, followlinks=False, onerror=_raise_scan_error):
-        path = Path(directory)
         for name in (*subdirectories, *files):
-            entry = path / name
+            entry = Path(directory) / name
             info = entry.lstat()
-            if info.st_dev != device:
-                _reject("nested mounts cannot be renamed safely")
-            if not stat.S_ISLNK(info.st_mode):
+            if stat.S_ISLNK(info.st_mode):
                 continue
-            target = entry.readlink()
-            if target.is_absolute():
-                if any(target.is_relative_to(old) or entry.resolve().is_relative_to(old) for old in moving):
-                    _reject("absolute symlink depends on a relocated scope")
-            else:
-                _check_relative_link(entry, scope, target)
+            if info.st_dev != device or os.path.ismount(entry):
+                _reject("nested mounts cannot be renamed safely")
+
+
+def _check_mounts(roots: tuple[Path, Path], pending: list[_Intent]) -> None:
+    """Validate each rename on its own device and reject mounts at either name."""
+    locations = tuple(path for root in set(roots) for intent in pending for path in _locations(root, intent))
+    if sys.platform == "linux":
+        for mountpoint in _linux_mountpoints():
+            if any(mountpoint == scope.parent or mountpoint.is_relative_to(scope) for scope in locations):
+                _reject("nested mounts cannot be renamed safely")
+    for intent in pending:
+        for root, inode in ((roots[0], intent.primary_inode), (roots[1], intent.session_inode)):
+            if inode is None:
+                continue
+            scope = _recorded_location(root, intent, inode)
+            assert scope is not None
+            device = root.lstat().st_dev
+            if any(path.lstat().st_dev != device for path in (scope, scope.parent)):
+                _reject("nested scope or namespace mounts cannot be renamed safely")
+            if sys.platform != "linux":
+                _check_tree(scope)
+
+
+def _publish_alias(root: Path, intent: _Intent) -> None:
+    old, new = _locations(root, intent)
+    if old.is_symlink():
+        if os.readlink(old) != new.name:  # noqa: PTH115 - Preserve the literal target text.
+            _reject("alias changed before publication")
+    else:
+        # symlink creation never overwrites an entry that appeared after discovery.
+        old.symlink_to(new.name, target_is_directory=True)
+    fsync_directory_durable(old.parent)
 
 
 def _move(source: Path, destination: Path) -> None:
@@ -310,6 +400,9 @@ def _apply(roots: tuple[Path, Path], intent: _Intent) -> None:
         _owner_payload(intent.new_key, intent.requester_id),
         strict_atomic_replace=True,
     )
+    if primary != sessions and intent.session_inode is not None:
+        _publish_alias(sessions, intent)
+    _publish_alias(primary, intent)
     (destination / _INTENT).unlink()
     fsync_directory_durable(destination)
 
@@ -332,13 +425,7 @@ def _migrate(runtime_paths: RuntimePaths) -> None:
 
         check_workers_absent_for_storage_upgrade(runtime_paths, timeout_seconds=120.0)
         pending = _discover(_roots(runtime_paths))
-        moving = tuple(path for root in set(roots) for intent in pending for path in _locations(root, intent))
-        for intent in pending:
-            for root, inode in ((roots[0], intent.primary_inode), (roots[1], intent.session_inode)):
-                if inode is not None:
-                    scope = _recorded_location(root, intent, inode)
-                    assert scope is not None
-                    _check_tree(scope, moving)
+        _check_mounts(roots, pending)
         for intent in pending:
             _apply(roots, intent)
 

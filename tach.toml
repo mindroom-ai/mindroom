@@ -108,6 +108,8 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
+    "mindroom.api.sandbox_worker_prep",
+    "mindroom.workers.backends._dedicated_worker_common",
     "mindroom.private_storage_migration",
     "mindroom.private_instance_identity",
     "mindroom.runtime_resolution",
@@ -1265,6 +1267,7 @@ path = "mindroom.api.sandbox_worker_prep"
 depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.logging_config",
+    "mindroom.private_instance_identity_store",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backend",

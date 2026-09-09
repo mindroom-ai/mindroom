@@ -1167,40 +1167,32 @@ class DockerWorkerBackend:
         worker_key: str | None = None,
         private_agent_names: frozenset[str] | None = None,
         state_scope_worker_key: str | None = None,
-    ) -> dict[str, dict[str, str]]:
-        volumes = {
-            str(paths.root): {"bind": self.config.storage_mount_path, "mode": "rw"},
-        }
+    ) -> list[str]:
+        volumes = [f"{paths.root}:{self.config.storage_mount_path}:rw"]
         if worker_key is not None:
             for host_path, container_path, read_only in self._scoped_storage_mount_specs(
                 worker_key,
                 private_agent_names=private_agent_names,
                 state_scope_worker_key=state_scope_worker_key,
             ):
-                volumes[str(host_path)] = {
-                    "bind": container_path,
-                    "mode": "ro" if read_only else "rw",
-                }
+                volumes.append(f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}")
         mount_specs, _projection = self._projection_manager.config_mount_specs(
             paths,
             worker_key=worker_key,
         )
         for host_path, container_path, read_only in mount_specs:
-            volumes[str(host_path)] = {
-                "bind": container_path,
-                "mode": "ro" if read_only else "rw",
-            }
+            volumes.append(f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}")
         return volumes
 
     def _prepare_nested_storage_mount_targets(
         self,
         paths: LocalWorkerStatePaths,
-        volumes: dict[str, dict[str, str]],
+        volumes: list[str],
     ) -> None:
         """Create nested bind targets before the Docker daemon can create them as root."""
         storage_root = PurePosixPath(self.config.storage_mount_path)
-        for mount in volumes.values():
-            container_path = PurePosixPath(mount["bind"])
+        for mount in volumes:
+            container_path = PurePosixPath(mount.rsplit(":", 2)[1])
             if container_path == storage_root or storage_root not in container_path.parents:
                 continue
             relative_path = container_path.relative_to(storage_root)

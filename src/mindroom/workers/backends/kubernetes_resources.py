@@ -1839,7 +1839,7 @@ class KubernetesResourceManager:
             {
                 "name": WORKER_STORAGE_VOLUME_NAME,
                 "mountPath": str(planned_root.worker_visible_path),
-                "subPath": str(planned_root.worker_visible_path.relative_to(mounted_storage_root)),
+                "subPath": str(planned_root.local_path.relative_to(self.storage_root)),
             }
             for planned_root in plan_scoped_visible_state_roots(
                 worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
