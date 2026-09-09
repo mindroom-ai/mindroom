@@ -1009,7 +1009,10 @@ depends_on = [
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.routing",
+    "mindroom.requester_identity",
     "mindroom.teams",
+    "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -3436,6 +3439,7 @@ depends_on = [
 path = "mindroom.tool_system.context_bound_streams"
 depends_on = []
 visibility = [
+    "mindroom.api.openai_compat",
     "mindroom.llm_request_logging",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
@@ -4753,6 +4757,9 @@ expose = [
     "WorkerProgressEvent",
     "WorkerProgressPump",
     "ToolRuntimeContext",
+    "DetachedRequesterContext",
+    "detached_requester_context",
+    "get_detached_requester_context",
     "ToolRuntimeModelBinding",
     "ToolRuntimeHookBindings",
     "ToolRuntimeSupport",
