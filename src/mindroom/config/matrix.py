@@ -38,6 +38,16 @@ class MatrixSyncConfig(BaseModel):
             " connection-scoped, so this also bounds how many per-room events a restarted connection can replay."
         ),
     )
+    max_response_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        ge=1,
+        description="Maximum HTTP response size in bytes for each durable Matrix sync session.",
+    )
+    max_pending_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1,
+        description="Maximum encoded pending output size in bytes for each durable Matrix sync session.",
+    )
 
 
 class MindRoomUserConfig(BaseModel):

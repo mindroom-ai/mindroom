@@ -54,4 +54,10 @@ def bot_ingestion_config(
                 "account_data": {"enabled": True},
             },
         )
-    return DurableSyncConfig(sync_timeout_ms=timeout_ms, sync_filter=sync_filter, sliding=sliding)
+    return DurableSyncConfig(
+        max_response_bytes=config.matrix_sync.max_response_bytes,
+        max_pending_bytes=config.matrix_sync.max_pending_bytes,
+        sync_timeout_ms=timeout_ms,
+        sync_filter=sync_filter,
+        sliding=sliding,
+    )
