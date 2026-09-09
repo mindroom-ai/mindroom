@@ -751,15 +751,27 @@ class MCPServerManager:
                 provider_id=provider.id,
                 server_id=state.server_id,
             )
-            raise oauth_connection_required(context, reason=OAUTH_RESET_REQUIRED_REASON) from exc
+            raise await asyncio.to_thread(
+                oauth_connection_required,
+                context,
+                reason=OAUTH_RESET_REQUIRED_REASON,
+            ) from exc
         except OAuthProviderError as exc:
             failed_credentials = (await load_oauth_credentials_snapshot(context)).credentials
             self._log_oauth_refresh_failure(state, provider.id, failed_credentials or {}, exc)
             if isinstance(exc, OAuthRefreshRejectedError):
-                raise oauth_connection_required(context, reason=OAUTH_REFRESH_REJECTED_REASON) from exc
-            raise oauth_connection_required(context, reason=OAUTH_REFRESH_FAILED_REASON) from None
+                raise await asyncio.to_thread(
+                    oauth_connection_required,
+                    context,
+                    reason=OAUTH_REFRESH_REJECTED_REASON,
+                ) from exc
+            raise await asyncio.to_thread(
+                oauth_connection_required,
+                context,
+                reason=OAUTH_REFRESH_FAILED_REASON,
+            ) from None
         if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
-            raise oauth_connection_required(context)
+            raise await asyncio.to_thread(oauth_connection_required, context)
         assert credentials is not None
         if refresh_result.refreshed:
             logger.info(
@@ -770,7 +782,7 @@ class MCPServerManager:
             )
         token = credentials.get("token") or credentials.get("access_token")
         if not isinstance(token, str) or not token:
-            raise oauth_connection_required(context)
+            raise await asyncio.to_thread(oauth_connection_required, context)
         return token, refresh_result.generation
 
     async def _request_state_and_headers(
@@ -870,7 +882,7 @@ class MCPServerManager:
                         state.last_error = None
                         state.stale = True
                         state.oauth_lease_version = lease_version
-        except OAuthConnectionRequired:
+        except (OAuthConnectionRequired, asyncio.CancelledError):
             await run_coroutine_until_complete(self._disconnect_rejected_oauth_scope_state(key, state))
             raise
         return state, _MCPAuthorizationLease(

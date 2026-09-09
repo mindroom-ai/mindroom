@@ -23,6 +23,7 @@ from authlib.integrations.base_client.errors import OAuthError
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
 import mindroom.mcp.manager as mcp_manager_module
+import mindroom.oauth.service as oauth_service_module
 from mindroom.agents import create_agent
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -78,6 +79,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.manager import _MCPAuthorizationLease
     from mindroom.mcp.types import MCPServerCatalog
+    from mindroom.oauth.credential_lifecycle import OAuthCredentialsSnapshot
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 
@@ -589,6 +591,93 @@ async def test_mcp_manager_enforces_call_filters_before_remote_dispatch(
         )
 
     assert _FakeClientSession.call_tool_invocation_count == 0
+
+
+@pytest.mark.asyncio
+async def test_mcp_reconnect_link_does_not_block_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A blocked credential snapshot must not stop unrelated loop callbacks."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    loop = asyncio.get_running_loop()
+    snapshot = oauth_service_module.load_oauth_credentials_snapshot_sync
+
+    def snapshot_waiting_for_loop(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
+        loop_progress = threading.Event()
+        loop.call_soon_threadsafe(loop_progress.set)
+        assert loop_progress.wait(timeout=1), "Reconnect link blocked the event loop"
+        return snapshot(context)
+
+    monkeypatch.setattr(oauth_service_module, "load_oauth_credentials_snapshot_sync", snapshot_waiting_for_loop)
+    try:
+        with pytest.raises(OAuthConnectionRequired) as exc_info:
+            await manager.get_request_catalog(
+                "demo",
+                credentials_manager=get_runtime_credentials_manager(runtime_paths),
+                worker_target=_worker_target("@alice:example.test"),
+            )
+        payload = oauth_connection_required_payload(exc_info.value)
+        assert payload["provider"] == "mcp_demo"
+        assert "connect_token=" in str(payload["connect_url"])
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reconnect_link_evicts_rejected_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation during link construction still closes the rejected bearer session."""
+    _patch_manager(monkeypatch)
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "stale-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+    await manager.get_request_catalog(
+        "demo",
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    cached_session = _FakeClientSession.sessions[-1]
+    loop = asyncio.get_running_loop()
+    link_started = asyncio.Event()
+    release_link = threading.Event()
+    build_link = mcp_manager_module.oauth_connection_required
+
+    async def reject_refresh(_context: OAuthCredentialContext) -> object:
+        message = "dead refresh grant"
+        raise OAuthRefreshRejectedError(message, oauth_error=INVALID_GRANT)
+
+    def blocked_link(context: OAuthCredentialContext, *, reason: str) -> OAuthConnectionRequired:
+        loop.call_soon_threadsafe(link_started.set)
+        assert release_link.wait(timeout=5)
+        return build_link(context, reason=reason)
+
+    monkeypatch.setattr(mcp_manager_module, "refresh_oauth_credentials_with_result", reject_refresh)
+    monkeypatch.setattr(mcp_manager_module, "oauth_connection_required", blocked_link)
+    request = asyncio.create_task(
+        manager.get_request_catalog(
+            "demo",
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        ),
+    )
+    try:
+        await asyncio.wait_for(link_started.wait(), timeout=5)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert cached_session.closed
+        assert not manager._scoped_states
+    finally:
+        release_link.set()
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio
