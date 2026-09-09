@@ -187,11 +187,13 @@ def test_retry_finishes_cleanup_without_sending_another_edit() -> None:
         "newer_edit_later_page",
         "repeated_cursor",
         "missing_media",
+        "missing_preview",
+        "invalid_preview",
         "oversized_media",
         "third_layer",
     ],
 )
-def test_unsafe_or_unreadable_targets_cause_no_writes(problem: str) -> None:
+def test_unsafe_or_unreadable_targets_cause_no_writes(problem: str) -> None:  # noqa: C901
     """Refuse unsafe source mutations before publishing or redacting anything."""
     from scripts.utilities.repair_nested_sidecars import repair  # noqa: PLC0415
 
@@ -209,11 +211,18 @@ def test_unsafe_or_unreadable_targets_cause_no_writes(problem: str) -> None:
         api.repeat_cursor = True
     elif problem == "missing_media":
         del api.media["inner"]
+    elif problem in {"missing_preview", "invalid_preview"}:
+        intermediate = json.loads(api.media["outer"])
+        if problem == "missing_preview":
+            del intermediate["m.new_content"]["body"]
+        else:
+            intermediate["m.new_content"]["body"] = 42
+        api.media["outer"] = json.dumps(intermediate).encode()
     elif problem == "oversized_media":
         api.media["inner"] = b"x" * (2 * 1024 * 1024 + 1)
     elif problem == "third_layer":
         api.media["inner"] = api.media["outer"]
-    with api.client() as client, pytest.raises((ValueError, httpx.HTTPStatusError)):
+    with api.client() as client, pytest.raises((TypeError, ValueError, httpx.HTTPStatusError)):
         repair(client, ROOM, "$broken", apply=True)
     assert api.writes == []
 

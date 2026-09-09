@@ -93,7 +93,7 @@ def _latest(client: httpx.Client, room_id: str, original: dict[str, Any]) -> dic
     raise ValueError(msg)
 
 
-def repair(client: httpx.Client, room_id: str, event_id: str, *, apply: bool = False) -> dict[str, str]:  # noqa: C901, PLR0915
+def repair(client: httpx.Client, room_id: str, event_id: str, *, apply: bool = False) -> dict[str, str]:  # noqa: C901, PLR0912, PLR0915
     """Replace one current nested edit, verify its source content, then retire it."""
     room_path = f"/_matrix/client/v3/rooms/{quote(room_id, safe='')}"
     event_path = f"{room_path}/event/{quote(event_id, safe='')}"
@@ -135,8 +135,12 @@ def repair(client: httpx.Client, room_id: str, event_id: str, *, apply: bool = F
     ):
         msg = "Expected exactly two layers ending in complete replacement text"
         raise ValueError(msg)
+    preview_body = inner.get("body")
+    if not isinstance(preview_body, str):
+        msg = "Expected the inner sidecar to contain a text preview"
+        raise TypeError(msg)
     replacement = build_matrix_edit_content(logical_id, inner)
-    replacement["body"] = f"* {inner['body']}"
+    replacement["body"] = f"* {preview_body}"
     replacement["m.mentions"] = {}
     encoded = json.dumps(replacement, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     if len(encoded) > 60_000:
