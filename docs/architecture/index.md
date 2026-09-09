@@ -58,7 +58,7 @@ MindRoom's architecture consists of several key components working together.
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
-| `legacy_session_migration.py` | Post-readiness retirement of Agno 2 session run blobs |
+| `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |

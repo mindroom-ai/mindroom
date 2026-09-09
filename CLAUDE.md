@@ -153,7 +153,7 @@ Matrix sync callback
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
-| `legacy_session_migration.py` | Background retirement of Agno 2 session run blobs |
+| `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |

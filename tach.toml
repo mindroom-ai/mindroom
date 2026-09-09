@@ -505,6 +505,7 @@ depends_on = [
     "mindroom.agno_session_persistence_patch",
     "mindroom.constants",
     "mindroom.runtime_resolution",
+    "mindroom.session_storage_preflight",
 ]
 visibility = [
     "mindroom.agents",
@@ -5258,3 +5259,8 @@ depends_on = [
     "mindroom.workers.backends.kubernetes",
 ]
 visibility = ["mindroom.private_storage_migration"]
+
+[[modules]]
+path = "mindroom.session_storage_preflight"
+depends_on = ["mindroom.durable_write", "mindroom.file_locks"]
+visibility = ["mindroom.agent_storage"]

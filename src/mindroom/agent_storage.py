@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
@@ -20,6 +21,7 @@ from mindroom import agno_session_persistence_patch
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage_preflight import session_storage_preflight
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -108,24 +110,35 @@ def _create_sqlite_state_storage(
     prompt_roles: frozenset[str] | None = None,
 ) -> SqliteDb:
     """Create a persistent SQLite database from an already-resolved state root."""
-    db_dir = state_root / subdir
-    db_dir.mkdir(parents=True, exist_ok=True)
-    db_file = str(db_dir / f"{storage_name}.db")
-    # Both: the engine is what the database is reached through, and the path
-    # is what it reports itself as. Handing over an engine alone leaves
-    # ``db_file`` empty on a store that is very much file-backed.
-    database = _ConversationSqliteDb(
-        prompt_roles=prompt_roles or frozenset(),
-        session_table=session_table,
-        db_file=db_file,
-        db_engine=create_state_engine(db_file),
+    preflight = (
+        session_storage_preflight(
+            state_root,
+            storage_name=storage_name,
+            session_table=session_table,
+            timeout_seconds=_BUSY_TIMEOUT_SECONDS,
+        )
+        if subdir == "sessions"
+        else nullcontext()
     )
-    agno_session_persistence_patch._register_sync_session_storage(
-        database,
-        db_file=db_file,
-        session_table=session_table,
-    )
-    return database
+    with preflight:
+        db_dir = state_root / subdir
+        db_dir.mkdir(parents=True, exist_ok=True)
+        db_file = str(db_dir / f"{storage_name}.db")
+        # Both: the engine is what the database is reached through, and the path
+        # is what it reports itself as. Handing over an engine alone leaves
+        # ``db_file`` empty on a store that is very much file-backed.
+        database = _ConversationSqliteDb(
+            prompt_roles=prompt_roles or frozenset(),
+            session_table=session_table,
+            db_file=db_file,
+            db_engine=create_state_engine(db_file),
+        )
+        agno_session_persistence_patch._register_sync_session_storage(
+            database,
+            db_file=db_file,
+            session_table=session_table,
+        )
+        return database
 
 
 _AGNO_CONNECT_LISTENER_NAME = "_set_sqlite_pragmas"
@@ -212,9 +225,9 @@ class _ConversationSqliteDb(SqliteDb):
     ``upsert_run``, a full read in ``get_session``, an owner guard on bulk
     session writes, and an atomic ``delete_runs``.
 
-    Until background migration retires a 2.x ``runs`` blob, Agno merges it into
-    every read and ``delete_runs`` scrubs deleted ids from both stores in one
-    transaction. A blob that cannot be migrated keeps using this safe fallback.
+    Agno merges compatible 2.x ``runs`` blobs into every read alongside current
+    run rows. ``delete_runs`` scrubs deleted ids from both stores in one
+    transaction so removed history cannot reappear after reopening.
     """
 
     def __init__(
