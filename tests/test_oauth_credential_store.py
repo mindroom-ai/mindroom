@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 import mindroom.durable_write as durable_write_module
+import mindroom.oauth.credential_compat as credential_compat_module
 import mindroom.oauth.credential_store as credential_store_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
@@ -741,7 +742,7 @@ async def test_legacy_adoption_logs_only_safe_metadata(
         worker_target=context.worker_target,
     )
     logger = _CapturingLogger()
-    monkeypatch.setattr(credential_store_module, "logger", logger)
+    monkeypatch.setattr(credential_compat_module, "logger", logger)
 
     async with oauth_credential_transaction(context) as transaction:
         assert transaction.snapshot().credentials == {"token": credential_value}
@@ -791,7 +792,7 @@ async def test_legacy_cleanup_failure_logs_only_safe_metadata(
 
     logger = _CapturingLogger()
     monkeypatch.setattr(Path, "unlink", fail_credential_cleanup)
-    monkeypatch.setattr(credential_store_module, "logger", logger)
+    monkeypatch.setattr(credential_compat_module, "logger", logger)
 
     async with oauth_credential_transaction(context) as transaction:
         assert transaction.snapshot().credentials == {"token": credential_value}
@@ -1050,14 +1051,14 @@ async def test_legacy_cleanup_decision_is_made_inside_initialization_transaction
 ) -> None:
     """Legacy cleanup must not open an unprotected read window after initialization commits."""
     context = _context(tmp_path)
-    original_cleanup_decision = credential_store_module._legacy_cleanup_must_be_deferred
+    original_cleanup_decision = credential_compat_module._legacy_cleanup_must_be_deferred
 
     def require_transaction(connection: sqlite3.Connection) -> bool:
         assert connection.in_transaction
         return original_cleanup_decision(connection)
 
     monkeypatch.setattr(
-        credential_store_module,
+        credential_compat_module,
         "_legacy_cleanup_must_be_deferred",
         require_transaction,
     )

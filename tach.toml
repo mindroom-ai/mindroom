@@ -752,13 +752,32 @@ visibility = [
 [[modules]]
 path = "mindroom.oauth.credential_store"
 depends_on = [
-    "mindroom.credential_policy",
-    "mindroom.tool_system.worker_routing",
     "mindroom.credentials",
-    "mindroom.logging_config",
+    "mindroom.oauth.credential_compat",
+    "mindroom.oauth.credential_store_types",
     "mindroom.oauth.providers",
 ]
 visibility = ["mindroom.oauth.credential_lifecycle"]
+
+[[modules]]
+path = "mindroom.oauth.credential_compat"
+depends_on = [
+    "mindroom.credential_policy",
+    "mindroom.credentials",
+    "mindroom.logging_config",
+    "mindroom.oauth.credential_store_types",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.oauth.credential_store"]
+
+[[modules]]
+path = "mindroom.oauth.credential_store_types"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.oauth.providers",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.oauth.credential_store", "mindroom.oauth.credential_compat"]
 
 [[modules]]
 path = "mindroom.oauth.credential_lifecycle"
