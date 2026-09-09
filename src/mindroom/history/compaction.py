@@ -500,8 +500,9 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
 
     if total_compacted_run_count == 0:
         return None
-    for run in scope_visible_runs(working_session, scope):
-        _strip_stale_anthropic_replay_fields(run.messages or [])
+    _strip_stale_anthropic_replay_fields(
+        [message for run in scope_visible_runs(working_session, scope) for message in run.messages or []],
+    )
     return _CompactionRewriteResult(
         summary_text=final_summary_text,
         compacted_run_count=total_compacted_run_count,
@@ -970,6 +971,7 @@ def _messages_for_runs(
     messages: list[Message] = []
     for run in runs:
         messages.extend(_compaction_replay_messages(run, history_settings))
+    _strip_stale_anthropic_replay_fields(messages)
     return messages
 
 
