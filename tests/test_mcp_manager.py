@@ -7,6 +7,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import sqlite3
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Generator, Mapping
@@ -31,8 +32,6 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
-    save_scoped_credentials,
-    scoped_credentials_path,
 )
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.mcp.config import MCPServerConfig
@@ -49,6 +48,7 @@ from mindroom.mcp.manager import (
     _MCPAuthorizationChangedError,
     _MCPConfigurationChangedError,
 )
+from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, bind_mcp_server_manager
 from mindroom.mcp.transports import _MCPTransportHandle
 from mindroom.mcp.types import MCPServerState
@@ -57,7 +57,7 @@ from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot,
     refresh_oauth_credentials,
 )
-from mindroom.oauth.credential_store import oauth_credential_transaction
+from mindroom.oauth.credential_store import _oauth_credential_database_path, oauth_credential_transaction
 from mindroom.oauth.providers import (
     OAuthClientConfig,
     OAuthConnectionRequired,
@@ -69,6 +69,7 @@ from mindroom.tool_system import dynamic_toolkits as dynamic_toolkits_module
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.identity_helpers import persist_entity_accounts
+from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
     from datetime import timedelta
@@ -453,8 +454,8 @@ def _save_mcp_oauth_credentials(
         credentials["refresh_token"] = refresh_token
     if expires_at is not None:
         credentials["expires_at"] = expires_at
-    save_scoped_credentials(
-        "mcp_demo_oauth",
+    publish_oauth_credentials(
+        mcp_oauth_provider("demo", _oauth_mcp_config()),
         credentials,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
@@ -475,8 +476,8 @@ def _save_expiring_mcp_oauth_credentials(
 ) -> None:
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     credentials_manager.save_credentials("mcp_demo_oauth_client", {"client_id": "public-client"})
-    save_scoped_credentials(
-        "mcp_demo_oauth",
+    publish_oauth_credentials(
+        mcp_oauth_provider("demo", _oauth_mcp_config()),
         {
             "token": token,
             "refresh_token": refresh_token,
@@ -772,14 +773,14 @@ async def test_unscoped_mcp_oauth_uses_installation_credential_and_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """An unscoped MCP server adopts and uses its installation-level OAuth credential."""
+    """An unscoped MCP server uses its installation-level SQLite OAuth credential."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     runtime_paths = _runtime_paths(tmp_path)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     credentials_manager.save_credentials("mcp_demo_oauth_client", {"client_id": "public-client"})
-    credentials_manager.save_credentials(
-        "mcp_demo_oauth",
+    publish_oauth_credentials(
+        mcp_oauth_provider("demo", _oauth_mcp_config()),
         {
             "token": "installation-token",
             "client_id": "public-client",
@@ -787,6 +788,8 @@ async def test_unscoped_mcp_oauth_uses_installation_credential_and_session(
             "_source": "oauth",
             "_oauth_provider": "mcp_demo",
         },
+        credentials_manager=credentials_manager,
+        worker_target=None,
     )
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
@@ -1210,27 +1213,41 @@ async def test_mcp_bridge_returns_reset_guidance_for_unreadable_credentials(
         "_source": "oauth",
         "_oauth_provider": "mcp_demo",
     }
+    server_config = _oauth_mcp_config()
+    provider = mcp_oauth_provider("demo", server_config)
     if unreadable_kind == "wrong_key":
         wrong_key_manager = CredentialsManager(
             credentials_manager.base_path,
             shared_base_path=credentials_manager.shared_base_path,
             encryption_key=wrong_key,
         )
-        save_scoped_credentials(
-            "mcp_demo_oauth",
+        publish_oauth_credentials(
+            provider,
             credentials,
             credentials_manager=wrong_key_manager,
             worker_target=worker_target,
         )
     else:
-        credential_path = scoped_credentials_path(
-            "mcp_demo_oauth",
+        publish_oauth_credentials(
+            provider,
+            credentials,
             credentials_manager=credentials_manager,
             worker_target=worker_target,
         )
-        credential_path.write_bytes(b"corrupt-plaintext-secret")
+        context = OAuthCredentialContext(
+            provider=provider,
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        connection = sqlite3.connect(_oauth_credential_database_path(context))
+        connection.execute(
+            "UPDATE oauth_credential_state SET credential_payload = ? WHERE singleton = 1",
+            (b"corrupt-plaintext-secret",),
+        )
+        connection.commit()
+        connection.close()
 
-    server_config = _oauth_mcp_config()
     manager = MCPServerManager(runtime_paths)
     await manager.sync_servers(_ConfigStub({"demo": server_config}))
     toolkit = MindRoomMCPToolkit(
@@ -2608,8 +2625,13 @@ async def test_mcp_provider_move_retires_current_provider_owner_not_old_server_i
 
     def save_provider_credentials(provider_id: str, token: str) -> None:
         credentials_manager.save_credentials(f"{provider_id}_oauth_client", {"client_id": "public-client"})
-        save_scoped_credentials(
-            f"{provider_id}_oauth",
+        provider = replace(
+            mcp_oauth_provider("demo", _oauth_mcp_config()),
+            id=provider_id,
+            credential_service=f"{provider_id}_oauth",
+        )
+        publish_oauth_credentials(
+            provider,
             {
                 "token": token,
                 "client_id": "public-client",
@@ -5152,8 +5174,8 @@ async def test_oauth_catalog_ignores_unreachable_local_collisions(
     if catalog_scope is None:
         worker_target = None
         credentials_manager.save_credentials("mcp_demo_oauth_client", {"client_id": "public-client"})
-        credentials_manager.save_credentials(
-            "mcp_demo_oauth",
+        publish_oauth_credentials(
+            mcp_oauth_provider("demo", _oauth_mcp_config()),
             {
                 "token": "installation-token",
                 "client_id": "public-client",
@@ -5161,6 +5183,8 @@ async def test_oauth_catalog_ignores_unreachable_local_collisions(
                 "_source": "oauth",
                 "_oauth_provider": "mcp_demo",
             },
+            credentials_manager=credentials_manager,
+            worker_target=None,
         )
     else:
         worker_target = _worker_target(

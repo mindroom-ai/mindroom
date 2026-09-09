@@ -586,11 +586,11 @@ def test_mcp_oauth_credentials_are_primary_runtime_scoped_for_user_agents(tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("worker_scope", ["shared", "user_agent"])
-async def test_mcp_oauth_scope_policy_recovers_legacy_credentials_after_empty_requester_store(
+async def test_mcp_oauth_scope_policy_ignores_json_credentials_after_empty_requester_store(
     tmp_path: Path,
     worker_scope: WorkerScope,
 ) -> None:
-    """Correct-scope legacy credentials remain adoptable after a requester store was created."""
+    """A matching JSON connection remains inert after a requester store was created."""
     runtime_paths = _runtime_paths(tmp_path)
     manager = get_runtime_credentials_manager(runtime_paths)
     identity = ToolExecutionIdentity(
@@ -606,18 +606,18 @@ async def test_mcp_oauth_scope_policy_recovers_legacy_credentials_after_empty_re
     )
     worker_target = resolve_worker_target(worker_scope, "code", identity)
     provider = mcp_oauth_provider("demo", _oauth_mcp_server_config())
-    legacy_credentials = {
-        "token": "legacy-token",
+    json_credentials = {
+        "token": "json-token",
         "_source": "oauth",
         "_oauth_provider": provider.id,
     }
     save_scoped_credentials(
         provider.credential_service,
-        legacy_credentials,
+        json_credentials,
         credentials_manager=manager,
         worker_target=worker_target,
     )
-    legacy_path = scoped_credentials_path(
+    json_path = scoped_credentials_path(
         provider.credential_service,
         credentials_manager=manager,
         worker_target=worker_target,
@@ -640,5 +640,5 @@ async def test_mcp_oauth_scope_policy_recovers_legacy_credentials_after_empty_re
     snapshot = await load_oauth_credentials_snapshot(scope_context)
 
     assert scope_context.worker_target == worker_target
-    assert snapshot.credentials == legacy_credentials
-    assert not legacy_path.exists()
+    assert snapshot.credentials is None
+    assert json_path.exists()

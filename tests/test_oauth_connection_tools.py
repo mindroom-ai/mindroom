@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 from urllib.parse import parse_qs, urlparse
@@ -14,8 +15,6 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import (
     get_runtime_credentials_manager,
-    save_scoped_credentials,
-    scoped_credentials_path,
 )
 from mindroom.custom_tools.oauth_connections import OAuthConnectionTools
 from mindroom.message_target import MessageTarget
@@ -37,6 +36,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, write_config_yaml
+from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -122,8 +122,8 @@ def _save_credentials(
     refresh_token: str,
 ) -> dict[str, str]:
     credentials = {"refresh_token": refresh_token}
-    save_scoped_credentials(
-        provider.credential_service,
+    publish_oauth_credentials(
+        provider,
         credentials,
         credentials_manager=get_runtime_credentials_manager(context.runtime_paths),
         worker_target=worker_target,
@@ -176,24 +176,31 @@ async def test_reset_oauth_connection_issues_browser_confirmation_for_unreadable
     tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
     provider = google_drive_oauth_provider()
     credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
-    credentials_path = scoped_credentials_path(
-        provider.credential_service,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    )
-    corrupt_payload = b"not-a-readable-credential"
-    credentials_path.write_bytes(corrupt_payload)
-
-    with tool_runtime_context(context):
-        result = await tool.reset_oauth_connection(provider.id)
-
-    intent = _reset_intent(result, provider=provider, context=context)
     lifecycle_context = OAuthCredentialContext(
         provider=provider,
         runtime_paths=context.runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+    publish_oauth_credentials(
+        provider,
+        {"refresh_token": "unreadable"},
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    corrupt_payload = b"not-a-readable-credential"
+    connection = sqlite3.connect(_oauth_credential_database_path(lifecycle_context))
+    connection.execute(
+        "UPDATE oauth_credential_state SET credential_payload = ? WHERE singleton = 1",
+        (corrupt_payload,),
+    )
+    connection.commit()
+    connection.close()
+
+    with tool_runtime_context(context):
+        result = await tool.reset_oauth_connection(provider.id)
+
+    intent = _reset_intent(result, provider=provider, context=context)
     assert intent.connection_generation == await load_oauth_reset_connection_generation(lifecycle_context)
     with pytest.raises(OAuthProviderError, match="could not be loaded"):
         await load_oauth_credentials_snapshot(lifecycle_context)

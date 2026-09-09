@@ -20,7 +20,6 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
-from mindroom.memory import build_memory_enhanced_prompt as public_build_memory_enhanced_prompt
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
 from mindroom.memory import delete_agent_memory as public_delete_agent_memory
 from mindroom.memory import get_agent_memory as public_get_agent_memory
@@ -167,22 +166,6 @@ async def delete_agent_memory(
     await public_delete_agent_memory(
         memory_id,
         caller_context,
-        storage_path,
-        config,
-        runtime_paths_for(config),
-        get_tool_execution_identity(),
-    )
-
-
-async def _build_memory_enhanced_prompt(
-    prompt: str,
-    agent_name: str,
-    storage_path: Path,
-    config: Config,
-) -> str:
-    return await public_build_memory_enhanced_prompt(
-        prompt,
-        agent_name,
         storage_path,
         config,
         runtime_paths_for(config),
@@ -645,16 +628,16 @@ async def test_file_backend_user_scoped_workers_share_agent_memory_across_reques
     with tool_execution_identity(alice_identity):
         await add_agent_memory("Alice-authored shared agent memory", "general", storage_path, config)
         alice_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
-        alice_prompt = await _build_memory_enhanced_prompt("What do you remember?", "general", storage_path, config)
+        alice_parts = await build_memory_prompt_parts("What do you remember?", "general", storage_path, config)
 
     with tool_execution_identity(bob_identity):
         bob_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
-        bob_prompt = await _build_memory_enhanced_prompt("What do you remember?", "general", storage_path, config)
+        bob_parts = await build_memory_prompt_parts("What do you remember?", "general", storage_path, config)
 
     assert any(result.get("memory") == "Alice-authored shared agent memory" for result in alice_results)
     assert any(result.get("memory") == "Alice-authored shared agent memory" for result in bob_results)
-    assert "Alice-authored shared agent memory" in alice_prompt
-    assert "Alice-authored shared agent memory" in bob_prompt
+    assert "Alice-authored shared agent memory" in alice_parts.session_preamble
+    assert "Alice-authored shared agent memory" in bob_parts.session_preamble
 
     memory_file = agent_workspace_root_path(storage_path, "general") / "MEMORY.md"
     assert memory_file.exists()
@@ -682,9 +665,9 @@ async def test_file_backend_worker_scope_prompt_reads_daily_memory_from_base_sto
 
     with tool_execution_identity(alice_identity):
         append_agent_daily_memory("Worker daily note", "general", storage_path, config)
-        prompt = await _build_memory_enhanced_prompt("daily note", "general", storage_path, config)
+        prompt_parts = await build_memory_prompt_parts("daily note", "general", storage_path, config)
 
-    assert "Worker daily note" in prompt
+    assert "Worker daily note" in prompt_parts.transient_turn_context
 
 
 @pytest.mark.asyncio
@@ -1183,7 +1166,7 @@ async def test_private_template_file_memory_is_visible_on_first_prompt(
     )
 
     with tool_execution_identity(identity):
-        prompt = await _build_memory_enhanced_prompt(
+        prompt_parts = await build_memory_prompt_parts(
             "What do you remember?",
             "general",
             storage_path,
@@ -1203,7 +1186,7 @@ async def test_private_template_file_memory_is_visible_on_first_prompt(
         / "MEMORY.md"
     )
     assert memory_file.exists()
-    assert "First-turn memory." in prompt
+    assert "First-turn memory." in prompt_parts.session_preamble
     assert any(result.get("memory") == "Private note." for result in note_results)
 
 
@@ -1245,7 +1228,7 @@ async def test_private_file_memory_only_reads_memory_files(
         soul_results = await search_agent_memories("Template soul", "general", storage_path, config, limit=5)
         runbook_results = await search_agent_memories("Runbook secret", "general", storage_path, config, limit=5)
         note_results = await search_agent_memories("Private note", "general", storage_path, config, limit=5)
-        prompt = await _build_memory_enhanced_prompt(
+        prompt_parts = await build_memory_prompt_parts(
             "What should I remember about the runbook and private note?",
             "general",
             storage_path,
@@ -1255,9 +1238,9 @@ async def test_private_file_memory_only_reads_memory_files(
     assert not any(result.get("memory") == "Template soul secret." for result in soul_results)
     assert not any(result.get("memory") == "Runbook secret." for result in runbook_results)
     assert any(result.get("memory") == "Private note." for result in note_results)
-    assert "Private note." in prompt
-    assert "Template soul secret." not in prompt
-    assert "Runbook secret." not in prompt
+    assert "Private note." in prompt_parts.transient_turn_context
+    assert "Template soul secret." not in prompt_parts.transient_turn_context
+    assert "Runbook secret." not in prompt_parts.transient_turn_context
 
 
 @pytest.mark.asyncio
@@ -1498,7 +1481,7 @@ async def test_file_backend_mixed_private_team_member_crud_is_rejected(
 
 
 @pytest.mark.asyncio
-async def test_file_backend_prompt_includes_entrypoint(storage_path: Path, config: Config) -> None:
+async def test_file_backend_prompt_parts_include_entrypoint(storage_path: Path, config: Config) -> None:
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
 
@@ -1506,10 +1489,9 @@ async def test_file_backend_prompt_includes_entrypoint(storage_path: Path, confi
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nKey facts:\n- Project uses FastAPI.\n", encoding="utf-8")
 
-    enhanced = await _build_memory_enhanced_prompt("How do we build the API?", "general", storage_path, config)
-    assert "[File memory entrypoint (agent)]" in enhanced
-    assert "Project uses FastAPI." in enhanced
-    assert "How do we build the API?" in enhanced
+    prompt_parts = await build_memory_prompt_parts("How do we build the API?", "general", storage_path, config)
+    assert "[File memory entrypoint (agent)]" in prompt_parts.session_preamble
+    assert "Project uses FastAPI." in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio
@@ -1546,9 +1528,9 @@ async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_struc
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nCurated fact.\n- [id=m1] Structured fact.\n", encoding="utf-8")
 
-    enhanced = await _build_memory_enhanced_prompt("What should I remember?", "general", storage_path, config)
-    assert "Curated fact." in enhanced
-    assert "- [id=m1] Structured fact." in enhanced
+    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", storage_path, config)
+    assert "Curated fact." in prompt_parts.session_preamble
+    assert "- [id=m1] Structured fact." in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio
@@ -1564,10 +1546,10 @@ async def test_file_backend_prompt_respects_max_entrypoint_lines(storage_path: P
         encoding="utf-8",
     )
 
-    enhanced = await _build_memory_enhanced_prompt("What should I remember?", "general", storage_path, config)
-    assert "# Memory\nCurated fact." in enhanced
-    assert "Structured fact." not in enhanced
-    assert "Trailing fact." not in enhanced
+    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", storage_path, config)
+    assert "# Memory\nCurated fact." in prompt_parts.session_preamble
+    assert "Structured fact." not in prompt_parts.session_preamble
+    assert "Trailing fact." not in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio
@@ -2044,13 +2026,13 @@ async def test_worker_scoped_file_memory_uses_canonical_agent_workspace(
 
     with tool_execution_identity(alice_identity):
         await add_agent_memory("New worker memory", "general", storage_path, config)
-        prompt = await _build_memory_enhanced_prompt("worker memory", "general", storage_path, config)
+        prompt_parts = await build_memory_prompt_parts("worker memory", "general", storage_path, config)
 
     content = (canonical_workspace / "MEMORY.md").read_text(encoding="utf-8")
 
     assert "Existing worker memory." in content
     assert "New worker memory" in content
-    assert "Existing worker memory." in prompt
+    assert "Existing worker memory." in prompt_parts.session_preamble
     assert not (storage_path / "memory_files" / "agent_general").exists()
 
 
@@ -2063,8 +2045,8 @@ async def test_workspace_entrypoint_loaded_in_prompt(storage_path: Path, config:
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
 
-    enhanced = await _build_memory_enhanced_prompt("What language?", "general", storage_path, config)
-    assert "I prefer Python over JavaScript." in enhanced
+    prompt_parts = await build_memory_prompt_parts("What language?", "general", storage_path, config)
+    assert "I prefer Python over JavaScript." in prompt_parts.session_preamble
     assert (workspace / "MEMORY.md").read_text(encoding="utf-8").startswith("# Memory")
 
 

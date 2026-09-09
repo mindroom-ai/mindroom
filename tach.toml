@@ -4323,7 +4323,6 @@ expose = [
     "add_agent_memory",
     "append_agent_daily_memory",
     "auto_flush_enabled",
-    "build_memory_enhanced_prompt",
     "build_memory_prompt_parts",
     "delete_agent_memory",
     "get_agent_memory",

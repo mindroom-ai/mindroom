@@ -275,38 +275,6 @@ def _contains_thread_export_file(room_fd: int) -> bool:
     return any(_is_thread_export_filename(name) and _regular_file_at(room_fd, name) for name in names)
 
 
-def _is_thread_export_payload(room_fd: int, filename: str) -> bool:
-    """Return whether one file parses as a MindRoom thread export document."""
-    text = _read_text_at(room_fd, filename)
-    if text is None:
-        return False
-    try:
-        payload = yaml_io.safe_load(text)
-    except yaml.YAMLError:
-        return False
-    if not isinstance(payload, dict) or not isinstance(payload.get("room"), dict):
-        return False
-    if not isinstance(payload.get("messages"), list):
-        return False
-    thread = payload.get("thread")
-    return isinstance(thread, dict) and isinstance(thread.get("id"), str)
-
-
-def _contains_valid_thread_export(room_fd: int) -> bool:
-    """Return whether one pinned directory holds a thread export with MindRoom's own payload.
-
-    Ownership evidence reads the document instead of trusting the filename, because a
-    percent-encoded name like ``%24notes.yaml`` is something an unrelated directory can hold.
-    """
-    names = os.listdir(room_fd)
-    return any(
-        _is_thread_export_filename(name)
-        and _regular_file_at(room_fd, name)
-        and _is_thread_export_payload(room_fd, name)
-        for name in names
-    )
-
-
 def _open_canonical_room_directory(root_fd: int, output_dir: Path, name: str) -> int | None:
     """Open one canonically named, non-symlinked room directory below a pinned root."""
     if not _is_encoded_room_segment(name):
@@ -337,33 +305,6 @@ def _recognizable_room_directory(root_fd: int, output_dir: Path, name: str) -> b
         os.close(room_fd)
 
 
-def _room_directory_with_thread_exports(root_fd: int, output_dir: Path, name: str) -> bool:
-    """Return whether one root entry is a canonically named room holding a real thread export."""
-    room_fd = _open_canonical_room_directory(root_fd, output_dir, name)
-    if room_fd is None:
-        return False
-    try:
-        return _contains_valid_thread_export(room_fd)
-    finally:
-        os.close(room_fd)
-
-
-def _root_has_export_evidence(root_fd: int, output_dir: Path) -> bool:
-    """Return whether an empty root, or one holding a thread export, proves exporter ownership.
-
-    Evidence is a percent-encoded room directory holding a document that parses as one of this
-    exporter's thread exports. Neither a generic ``index.json`` nor a thread-shaped filename is
-    enough on its own, because a build directory can hold the former and any directory can hold
-    a file named ``%24notes.yaml``; adopting on either would expose unrelated data to
-    reconciliation.
-    Unrelated entries beside real evidence do not veto ownership, because a stray ``.DS_Store``,
-    ``.git`` directory, or operator note must not strand a real corpus, and every destructive
-    path is independently scoped to exporter-owned entries.
-    """
-    names = os.listdir(root_fd)
-    return not names or any(_room_directory_with_thread_exports(root_fd, output_dir, name) for name in names)
-
-
 def _has_valid_export_root_marker(root_fd: int) -> bool:
     """Return whether the marker contains the exact supported ownership text."""
     try:
@@ -383,20 +324,20 @@ def _unowned_export_root(path: Path) -> _UnsafeThreadExportPathError:
     """Return a failure for a root without MindRoom ownership proof."""
     return _UnsafeThreadExportPathError(
         f"Refusing unowned thread export root: {path}; "
-        f"the root must be empty, already contain an exported room directory, or contain a "
+        f"the root must be empty or contain a "
         f"{_ROOT_MARKER_FILENAME} file whose only line is {_ROOT_MARKER_TEXT.strip()}",
     )
 
 
 def _claim_export_root(root_fd: int, output_dir: Path) -> None:
-    """Install the marker on an empty root or one that already holds an exported room."""
+    """Install the marker on an empty root."""
     if _has_valid_export_root_marker(root_fd):
         return
-    if _root_has_export_evidence(root_fd, output_dir):
+    if not os.listdir(root_fd):
         _atomic_write_at(root_fd, _ROOT_MARKER_FILENAME, _ROOT_MARKER_TEXT)
         return
     logger.warning(
-        "Refusing to mark unrecognized thread export root",
+        "Refusing to mark populated thread export root",
         output_dir=str(output_dir),
     )
     raise _unowned_export_root(output_dir)
@@ -419,7 +360,7 @@ def prepare_export_root(
     *,
     trusted_root: Path | None = None,
 ) -> None:
-    """Create an export root if needed and install its marker when recognizable."""
+    """Create an export root if needed and install its marker when empty."""
     canonical_output_dir = canonicalize_output_dir(output_dir)
     root_fd = _open_export_root(
         canonical_output_dir,
@@ -439,7 +380,7 @@ def _open_owned_export_root(
     create: bool,
     trusted_root: Path | None = None,
 ) -> int | None:
-    """Open an owned root, claiming recognizable storage only for write creation."""
+    """Open an owned root, claiming empty storage only for write creation."""
     canonical_output_dir = canonicalize_output_dir(output_dir)
     root_fd = _open_export_root(
         canonical_output_dir,

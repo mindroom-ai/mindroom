@@ -122,7 +122,7 @@ Matrix sync callback
 | `approval_manager.py` | Matrix-backed tool approval runtime state |
 | `oauth/credential_binding.py` | Canonical OAuth provider and worker-target bindings for browser workflows |
 | `oauth/credential_lifecycle.py` | Single transaction owner for scoped OAuth load, refresh, callback publication, invalidation, and reset state |
-| `oauth/credential_store.py` | Per-scope SQLite OAuth credential storage, revisions, legacy adoption, and reset receipts |
+| `oauth/credential_store.py` | Per-scope SQLite OAuth credential storage, revisions, and reset receipts |
 | `oauth/reset.py` | OAuth reset target resolution and requester-bound browser intents |
 | `oauth/reset_execution.py` | MCP retirement and durable reset execution |
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |

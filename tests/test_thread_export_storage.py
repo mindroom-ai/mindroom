@@ -170,102 +170,20 @@ def test_exporter_marks_a_new_empty_root_automatically(tmp_path: Path) -> None:
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
 
 
-def test_exporter_marks_a_recognizable_legacy_root_automatically(tmp_path: Path) -> None:
-    """A markerless tree containing only known export shapes should be claimed."""
+def test_exporter_refuses_populated_unmarked_root_and_preserves_content(tmp_path: Path) -> None:
+    """A populated markerless root must remain untouched until explicitly marked."""
     output_dir = tmp_path / "thread_exports"
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)
     (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
-    _write_thread_export(room_dir)
+    existing_export = _write_thread_export(room_dir)
+    before = existing_export.read_bytes()
 
-    prepare_export_root(output_dir)
+    with pytest.raises(RuntimeError, match="unowned thread export root"):
+        prepare_export_root(output_dir)
 
-    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
-
-
-def test_exporter_replaces_an_invalid_marker_on_a_recognizable_legacy_root(tmp_path: Path) -> None:
-    """An invalid reserved marker should not prevent adoption of an otherwise recognizable tree."""
-    output_dir = tmp_path / "thread_exports"
-    room_dir = output_dir / "lobby"
-    room_dir.mkdir(parents=True)
-    (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
-    _write_thread_export(room_dir)
-    (output_dir / _ROOT_MARKER_FILENAME).write_text("invalid\n", encoding="utf-8")
-
-    prepare_export_root(output_dir)
-
-    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
-
-
-def test_exporter_ignores_its_atomic_write_residue_when_claiming_a_legacy_root(tmp_path: Path) -> None:
-    """Exact exporter temp files should not strand an otherwise recognizable legacy tree."""
-    output_dir = tmp_path / "thread_exports"
-    room_dir = output_dir / "lobby"
-    room_dir.mkdir(parents=True)
-    (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
-    _write_thread_export(room_dir)
-    room_temp = room_dir / f".index.json.{'a' * 32}.tmp"
-    root_temp = output_dir / f".{_ROOT_MARKER_FILENAME}.{'b' * 32}.tmp"
-    room_temp.write_text('{"version":', encoding="utf-8")
-    root_temp.write_text('{"format":', encoding="utf-8")
-
-    prepare_export_root(output_dir)
-
-    assert room_temp.read_text(encoding="utf-8") == '{"version":'
-    assert root_temp.read_text(encoding="utf-8") == '{"format":'
-    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
-
-
-@pytest.mark.parametrize(
-    "foreign_entry",
-    [
-        pytest.param(".DS_Store", id="finder-metadata"),
-        pytest.param("README.md", id="operator-note"),
-    ],
-)
-def test_exporter_claims_a_legacy_root_beside_a_foreign_file(tmp_path: Path, foreign_entry: str) -> None:
-    """A stray file next to a real corpus must not strand the whole target."""
-    output_dir = tmp_path / "thread_exports"
-    room_dir = output_dir / "lobby"
-    room_dir.mkdir(parents=True)
-    (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
-    _write_thread_export(room_dir)
-    foreign = output_dir / foreign_entry
-    foreign.write_text("unrelated", encoding="utf-8")
-
-    prepare_export_root(output_dir)
-
-    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
-    assert foreign.read_text(encoding="utf-8") == "unrelated"
-
-
-def test_exporter_claims_a_legacy_root_beside_a_foreign_directory(tmp_path: Path) -> None:
-    """A version-control directory beside a real corpus must not strand the target."""
-    output_dir = tmp_path / "thread_exports"
-    room_dir = output_dir / "lobby"
-    room_dir.mkdir(parents=True)
-    (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
-    _write_thread_export(room_dir)
-    keep = output_dir / ".git" / "HEAD"
-    keep.parent.mkdir()
-    keep.write_text("ref: refs/heads/main\n", encoding="utf-8")
-
-    prepare_export_root(output_dir)
-
-    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
-    assert keep.read_text(encoding="utf-8") == "ref: refs/heads/main\n"
-
-
-def test_exporter_claims_a_room_left_without_an_index_by_an_interrupted_pass(tmp_path: Path) -> None:
-    """Thread YAML written before an interrupted index write still proves ownership."""
-    output_dir = tmp_path / "thread_exports"
-    room_dir = output_dir / "lobby"
-    room_dir.mkdir(parents=True)
-    _write_thread_export(room_dir)
-
-    prepare_export_root(output_dir)
-
-    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+    assert existing_export.read_bytes() == before
+    assert not (output_dir / _ROOT_MARKER_FILENAME).exists()
 
 
 def test_a_stray_index_json_does_not_make_a_project_directory_adoptable(tmp_path: Path) -> None:
@@ -320,7 +238,7 @@ def test_unrecognized_root_is_not_marked(tmp_path: Path) -> None:
 def test_markerless_destructive_operations_fail_closed(
     tmp_path: Path,
 ) -> None:
-    """Recognizable legacy contents still require the marker before deletion."""
+    """Populated markerless contents still require the marker before deletion."""
     output_dir = tmp_path / "thread_exports"
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)

@@ -8,6 +8,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import sqlite3
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -65,6 +66,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_target,
 )
 from tests.api.conftest import trusted_upstream_headers
+from tests.oauth_test_utils import publish_oauth_credentials
 
 
 @pytest.fixture(autouse=True)
@@ -97,15 +99,14 @@ def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) ->
     return runtime_paths
 
 
-def _stored_oauth_credentials(
+def _oauth_credential_context(
     provider: OAuthProvider,
     runtime_paths: constants.RuntimePaths,
     *,
     worker_scope: WorkerScope | None = "user_agent",
     requester_id: str | None = "@alice:example.org",
     agent_name: str | None = "general",
-) -> dict[str, Any] | None:
-    """Read one authoritative OAuth scope through its lifecycle owner."""
+) -> oauth_lifecycle.OAuthCredentialContext:
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,
@@ -122,13 +123,55 @@ def _stored_oauth_credentials(
         if worker_scope is not None
         else None
     )
-    context = oauth_lifecycle.resolve_oauth_credential_context(
+    return oauth_lifecycle.resolve_oauth_credential_context(
         provider,
         runtime_paths,
         get_runtime_credentials_manager(runtime_paths),
         worker_target,
     )
+
+
+def _stored_oauth_credentials(
+    provider: OAuthProvider,
+    runtime_paths: constants.RuntimePaths,
+    *,
+    worker_scope: WorkerScope | None = "user_agent",
+    requester_id: str | None = "@alice:example.org",
+    agent_name: str | None = "general",
+) -> dict[str, Any] | None:
+    """Read one authoritative OAuth scope through its lifecycle owner."""
+    context = _oauth_credential_context(
+        provider,
+        runtime_paths,
+        worker_scope=worker_scope,
+        requester_id=requester_id,
+        agent_name=agent_name,
+    )
     return oauth_lifecycle.load_oauth_credentials_snapshot_sync(context).credentials
+
+
+def _publish_stored_oauth_credentials(
+    provider: OAuthProvider,
+    runtime_paths: constants.RuntimePaths,
+    credentials: dict[str, Any],
+    *,
+    worker_scope: WorkerScope | None = "user_agent",
+    requester_id: str | None = "@alice:example.org",
+    agent_name: str | None = "general",
+) -> None:
+    context = _oauth_credential_context(
+        provider,
+        runtime_paths,
+        worker_scope=worker_scope,
+        requester_id=requester_id,
+        agent_name=agent_name,
+    )
+    publish_oauth_credentials(
+        provider,
+        credentials,
+        credentials_manager=context.credentials_manager,
+        worker_target=context.worker_target,
+    )
 
 
 def _config_payload(
@@ -2264,12 +2307,9 @@ def test_browser_reset_get_is_non_mutating_and_post_resets_then_authorizes(tmp_p
         runtime_paths=runtime_paths,
         execution_identity=identity,
     )
-    scoped_manager = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_scope(
-        "@alice:example.org",
-        "general",
-    )
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
@@ -2373,8 +2413,9 @@ def test_shared_browser_reset_uses_one_time_credential_manager_link_without_dash
         _config_payload(worker_scope="shared", allowed_users=["@alice:example.org"]),
     )
     provider, target = _general_agent_reset_target(api_app, runtime_paths)
-    get_runtime_credentials_manager(runtime_paths).for_primary_runtime_agent_scope("general").save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
@@ -2383,6 +2424,7 @@ def test_shared_browser_reset_uses_one_time_credential_manager_link_without_dash
             "_source": "oauth",
             "_oauth_provider": provider.id,
         },
+        worker_scope="shared",
     )
     reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
 
@@ -2555,12 +2597,9 @@ def test_browser_reset_rejects_stale_connection_generation(tmp_path: Path) -> No
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     provider, target = _general_agent_reset_target(api_app, runtime_paths)
-    scoped_manager = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_scope(
-        "@alice:example.org",
-        "general",
-    )
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
@@ -2637,12 +2676,9 @@ def test_browser_reset_rejects_target_removed_by_config_reload(tmp_path: Path) -
         runtime_paths=runtime_paths,
         execution_identity=identity,
     )
-    scoped_manager = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_scope(
-        "@alice:example.org",
-        "general",
-    )
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
@@ -2750,23 +2786,26 @@ def test_disconnect_deletes_mcp_credentials_encrypted_with_unreadable_key(tmp_pa
     )
     api_app = _make_test_app(runtime_paths, _mcp_oauth_config_payload())
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    scoped_manager = credentials_manager.for_primary_runtime_scope("@alice:example.org", "general")
+    provider = _fake_provider(provider_id="mcp_demo", credential_service="mcp_demo_oauth")
+    context = _oauth_credential_context(provider, runtime_paths)
     wrong_key_manager = CredentialsManager(
-        scoped_manager.base_path,
-        shared_base_path=scoped_manager.shared_base_path,
+        credentials_manager.base_path,
+        shared_base_path=credentials_manager.shared_base_path,
         encryption_key=wrong_key,
     )
-    wrong_key_manager.save_credentials(
-        "mcp_demo_oauth",
+    publish_oauth_credentials(
+        provider,
         {
             "access_token": "unreadable-access-token",
             "refresh_token": "unreadable-refresh-token",
             "_source": "oauth",
             "_oauth_provider": "mcp_demo",
         },
+        credentials_manager=wrong_key_manager,
+        worker_target=context.worker_target,
     )
-    credentials_path = scoped_manager.get_credentials_path("mcp_demo_oauth")
-    assert scoped_manager.load_credentials("mcp_demo_oauth") is None
+    with pytest.raises(OAuthProviderError, match="could not be loaded"):
+        oauth_lifecycle.load_oauth_credentials_snapshot_sync(context)
     mcp_manager = MCPServerManager(runtime_paths)
     bind_mcp_server_manager(mcp_manager)
     try:
@@ -2777,7 +2816,7 @@ def test_disconnect_deletes_mcp_credentials_encrypted_with_unreadable_key(tmp_pa
         bind_mcp_server_manager(None)
 
     assert response.status_code == 200
-    assert not credentials_path.exists()
+    assert _stored_oauth_credentials(provider, runtime_paths) is None
 
 
 @pytest.mark.parametrize("unreadable_kind", ["corrupt_plaintext", "wrong_key"])
@@ -2799,27 +2838,35 @@ def test_unreadable_oauth_status_can_be_reset_and_reconnected(
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     provider = _fake_provider()
-    scoped_manager = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_scope(
-        "@alice:example.org",
-        "general",
-    )
+    context = _oauth_credential_context(provider, runtime_paths)
+    credentials = {
+        "token": "unreadable-access-token",
+        "refresh_token": "unreadable-refresh-token",
+        "_source": "oauth",
+        "_oauth_provider": provider.id,
+    }
     if unreadable_kind == "wrong_key":
+        credentials_manager = get_runtime_credentials_manager(runtime_paths)
         wrong_key_manager = CredentialsManager(
-            scoped_manager.base_path,
-            shared_base_path=scoped_manager.shared_base_path,
+            credentials_manager.base_path,
+            shared_base_path=credentials_manager.shared_base_path,
             encryption_key=wrong_key,
         )
-        wrong_key_manager.save_credentials(
-            provider.credential_service,
-            {
-                "token": "unreadable-access-token",
-                "refresh_token": "unreadable-refresh-token",
-                "_source": "oauth",
-                "_oauth_provider": provider.id,
-            },
+        publish_oauth_credentials(
+            provider,
+            credentials,
+            credentials_manager=wrong_key_manager,
+            worker_target=context.worker_target,
         )
     else:
-        scoped_manager.get_credentials_path(provider.credential_service).write_bytes(b"corrupt-plaintext-secret")
+        _publish_stored_oauth_credentials(provider, runtime_paths, credentials)
+        connection = sqlite3.connect(oauth_credential_store._oauth_credential_database_path(context))
+        connection.execute(
+            "UPDATE oauth_credential_state SET credential_payload = ? WHERE singleton = 1",
+            (b"corrupt-plaintext-secret",),
+        )
+        connection.commit()
+        connection.close()
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
@@ -3352,9 +3399,11 @@ def test_bridge_alias_reset_link_authorizes_and_callback_stores_canonical_scope(
     assert context.worker_target is not None
     assert context.worker_target.execution_identity is not None
     assert context.worker_target.execution_identity.requester_id == canonical
-    context.credentials_manager.for_primary_runtime_scope(canonical, None).save_credentials(
-        provider.credential_service,
+    publish_oauth_credentials(
+        provider,
         {"refresh_token": "old-refresh-token"},
+        credentials_manager=context.credentials_manager,
+        worker_target=context.worker_target,
     )
     asyncio.run(oauth_lifecycle.reset_oauth_credentials(context))
     connect_url = urlparse(
@@ -3527,9 +3576,9 @@ def test_callback_preserves_old_refresh_token_when_provider_omits_new_one(tmp_pa
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
-    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
@@ -3749,10 +3798,9 @@ def test_disconnect_cleanup_failure_preserves_credentials(tmp_path: Path, monkey
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     provider = _fake_provider(credential_service="test_drive_oauth")
-    manager = get_runtime_credentials_manager(runtime_paths)
-    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "stored-token",
             "refresh_token": "stored-refresh-token",
@@ -3800,9 +3848,9 @@ def test_callback_drops_old_refresh_token_when_identity_changes(tmp_path: Path) 
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
-    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
@@ -3848,9 +3896,9 @@ def test_callback_replaces_old_refresh_token_when_provider_returns_new_one(tmp_p
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
-    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "old-access-token",
             "refresh_token": "old-refresh-token",
@@ -4315,9 +4363,9 @@ def test_agent_oauth_management_allows_authorized_requester(tmp_path: Path) -> N
     )
     _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
-    manager = get_runtime_credentials_manager(runtime_paths)
-    manager.for_primary_runtime_agent_scope("general").save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "stored-token",
             "refresh_token": "stored-refresh-token",
@@ -4327,6 +4375,7 @@ def test_agent_oauth_management_allows_authorized_requester(tmp_path: Path) -> N
             "_oauth_claims": {"email": "alice@example.com", "hd": "example.com"},
             "_oauth_claims_verified": True,
         },
+        worker_scope="shared",
     )
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
@@ -4357,9 +4406,9 @@ def test_agent_oauth_management_rejects_requester_not_allowed_for_agent(tmp_path
     )
     _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
-    manager = get_runtime_credentials_manager(runtime_paths)
-    manager.shared_manager().save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "stored-token",
             "refresh_token": "stored-refresh-token",
@@ -4367,6 +4416,9 @@ def test_agent_oauth_management_rejects_requester_not_allowed_for_agent(tmp_path
             "scopes": list(provider.scopes),
             "_source": "oauth",
         },
+        worker_scope=None,
+        requester_id=None,
+        agent_name=None,
     )
     bob_headers = trusted_upstream_headers(
         user_id="bob",
@@ -5227,8 +5279,9 @@ def test_status_and_disconnect_use_same_scoped_target(tmp_path: Path) -> None:
     manager = get_runtime_credentials_manager(runtime_paths)
     owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
     scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "stored-token",
             "refresh_token": "stored-refresh-token",
@@ -5288,8 +5341,9 @@ def test_disconnect_preserves_tool_config_settings(tmp_path: Path) -> None:
     manager = get_runtime_credentials_manager(runtime_paths)
     owner_worker_key = _worker_key_for_matrix_user("@alice:example.org")
     scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "stored-token",
             "refresh_token": "stored-refresh-token",
@@ -5600,10 +5654,9 @@ def test_status_refreshes_expired_access_token_with_refresh_token(
         credential_service="google_drive_oauth",
         tool_config_service="google_drive",
     )
-    manager = get_runtime_credentials_manager(runtime_paths)
-    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "expired-access-token",
             "refresh_token": "stored-refresh-token",
@@ -5672,10 +5725,9 @@ def test_status_keeps_connected_when_proactive_refresh_fails_for_still_valid_tok
         credential_service="google_drive_oauth",
         tool_config_service="google_drive",
     )
-    manager = get_runtime_credentials_manager(runtime_paths)
-    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "still-valid-access-token",
             "refresh_token": "stored-refresh-token",
@@ -5739,10 +5791,9 @@ def test_status_disconnects_after_terminal_refresh_rejection(
         credential_service="google_drive_oauth",
         tool_config_service="google_drive",
     )
-    manager = get_runtime_credentials_manager(runtime_paths)
-    scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "expired-access-token",
             "refresh_token": "revoked-refresh-token",
@@ -5802,10 +5853,9 @@ def test_status_does_not_refresh_credentials_missing_required_scopes(
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     provider = _fake_provider()
-    manager = get_runtime_credentials_manager(runtime_paths)
-    scoped_manager = manager.for_worker(_worker_key_for_matrix_user("@alice:example.org"))
-    scoped_manager.save_credentials(
-        provider.credential_service,
+    _publish_stored_oauth_credentials(
+        provider,
+        runtime_paths,
         {
             "token": "expired-access-token",
             "refresh_token": "stored-refresh-token",
@@ -5845,7 +5895,7 @@ def test_status_does_not_refresh_credentials_missing_required_scopes(
     assert status_response.status_code == 200
     assert status_response.json()["connected"] is False
     assert "created" not in seen
-    stored_credentials = scoped_manager.load_credentials(provider.credential_service)
+    stored_credentials = _stored_oauth_credentials(provider, runtime_paths)
     assert stored_credentials is not None
     assert stored_credentials["token"] == "expired-access-token"
     assert stored_credentials["scopes"] == ["different.scope"]
