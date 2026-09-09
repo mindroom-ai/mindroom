@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="thread_resolution",
     display_name="Thread Resolution",
-    description="Explicitly resolve or reopen the active Matrix thread",
+    description="Explicitly resolve or reopen Matrix threads in the current room",
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

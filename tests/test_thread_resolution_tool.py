@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from nio import RoomGetEventError
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
@@ -135,6 +137,109 @@ async def test_reopen_thread_removes_lifecycle_tag(tmp_path: Path) -> None:
         RESOLVED_THREAD_TAG,
         requester_user_id=context.requester_id,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reopen", [False, True])
+@pytest.mark.parametrize("active_thread_id", [THREAD_ID, None])
+@pytest.mark.parametrize("target_id", ["$other-root:localhost", "$other-reply:localhost"])
+async def test_thread_resolution_targets_explicit_thread(
+    tmp_path: Path,
+    reopen: bool,
+    active_thread_id: str | None,
+    target_id: str,
+) -> None:
+    """An explicit root or reply must mutate its canonical thread, even from the room timeline."""
+    context = _context(tmp_path, thread_id=active_thread_id)
+    context.client.room_get_event = AsyncMock(return_value=RoomGetEventError("missing", status_code="M_NOT_FOUND"))
+    context = replace(
+        context,
+        relations=make_relation_lookup(
+            threads={
+                "$other-root:localhost": "$other-root:localhost",
+                "$other-reply:localhost": "$other-root:localhost",
+            },
+            client=context.client,
+        ),
+    )
+    tool = ThreadResolutionTools()
+    method = tool.reopen_thread if reopen else tool.resolve_thread
+    dependency = "remove_thread_tag" if reopen else "set_thread_tag"
+    requester_kwarg = "requester_user_id" if reopen else "set_by"
+
+    with (
+        patch(f"mindroom.custom_tools.thread_resolution.{dependency}", new=AsyncMock()) as mock_write,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await method(thread_id=target_id))
+
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] == "$other-root:localhost"
+    assert payload["room_id"] == ROOM_ID
+    assert payload["resolved"] is not reopen
+    mock_write.assert_awaited_once_with(
+        context.client,
+        ROOM_ID,
+        "$other-root:localhost",
+        RESOLVED_THREAD_TAG,
+        **{requester_kwarg: context.requester_id},
+    )
+    context.client.room_get_event.assert_awaited_once_with(ROOM_ID, target_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reopen", [False, True])
+@pytest.mark.parametrize("target_id", ["", "   ", "$missing-or-other-room:localhost"])
+async def test_thread_resolution_rejects_unresolved_explicit_target(
+    tmp_path: Path,
+    reopen: bool,
+    target_id: str,
+) -> None:
+    """An invalid explicit target must fail without changing the active thread."""
+    context = _context(tmp_path)
+    context.client.room_get_event = AsyncMock(return_value=RoomGetEventError("missing", status_code="M_NOT_FOUND"))
+    context = replace(context, relations=make_relation_lookup(client=context.client))
+    tool = ThreadResolutionTools()
+    method = tool.reopen_thread if reopen else tool.resolve_thread
+
+    with (
+        patch("mindroom.custom_tools.thread_resolution.set_thread_tag", new=AsyncMock()) as mock_set,
+        patch("mindroom.custom_tools.thread_resolution.remove_thread_tag", new=AsyncMock()) as mock_remove,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await method(thread_id=target_id))
+
+    assert payload["status"] == "error"
+    assert payload["thread_id"] == target_id
+    assert "canonical thread root" in payload["message"]
+    mock_set.assert_not_awaited()
+    mock_remove.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reopen", [False, True])
+async def test_thread_resolution_returns_error_when_target_lookup_raises(tmp_path: Path, reopen: bool) -> None:
+    """Lookup failures must return a structured error without changing lifecycle state."""
+    context = _context(tmp_path)
+    tool = ThreadResolutionTools()
+    method = tool.reopen_thread if reopen else tool.resolve_thread
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_resolution.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(side_effect=RuntimeError("lookup failed")),
+        ),
+        patch("mindroom.custom_tools.thread_resolution.set_thread_tag", new=AsyncMock()) as mock_set,
+        patch("mindroom.custom_tools.thread_resolution.remove_thread_tag", new=AsyncMock()) as mock_remove,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await method(thread_id="$other-root:localhost"))
+
+    assert payload["status"] == "error"
+    assert payload["thread_id"] == "$other-root:localhost"
+    assert "canonical thread root" in payload["message"]
+    mock_set.assert_not_awaited()
+    mock_remove.assert_not_awaited()
 
 
 @pytest.mark.asyncio

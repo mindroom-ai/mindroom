@@ -836,7 +836,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Explicitly resolve or reopen the active Matrix thread",
+      "description": "Explicitly resolve or reopen Matrix threads in the current room",
       "display_name": "Thread Resolution",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
