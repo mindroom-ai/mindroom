@@ -24,7 +24,11 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadEx
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, resolve_session_state_root
 from mindroom.file_locks import file_lock_is_held
-from mindroom.private_instance_identity_store import load_private_instance_identity
+from mindroom.private_instance_identity_store import (
+    ensure_private_instance_identity,
+    load_private_instance_identity,
+    reconstruct_private_instance_worker_key,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_export.workspace_sync import _private_targets
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, private_instance_scope_root_path
@@ -665,11 +669,45 @@ async def test_current_runtime_export_and_mounts_find_migrated_contents(tmp_path
         allow_unknown_worker_key=False,
     )
     private_mounts = [mount for mount in mounts if mount.local_path == runtime.state_root.parent]
-    assert len(private_mounts) == 1
+    assert {(mount.local_path, mount.worker_visible_path) for mount in private_mounts} == {
+        (runtime.state_root.parent, Path("/app/worker/private_instances") / runtime.state_root.parent.name),
+        (runtime.state_root.parent, Path("/app/worker/private_instances") / source.name),
+    }
     assert (
         private_mounts[0].local_path / "writer/workspace/notes.txt"
     ).read_bytes() == b"private workspace\x00retained"
     assert source.is_symlink()
+
+
+@pytest.mark.parametrize("state", ["fresh", "ownerless", "owned_without_alias", "foreign_collision"])
+def test_worker_mount_plan_never_infers_historical_access(tmp_path: Path, state: str) -> None:
+    """Canonical-only scopes remain usable without granting unverified historical destinations."""
+    worker_key = "v1:default:user:~alice_bob"
+    canonical = private_instance_scope_root_path(tmp_path, worker_key)
+    if state == "ownerless":
+        canonical.mkdir(parents=True)
+        (canonical / "notes.txt").write_text("existing unowned workspace")
+    elif state in {"owned_without_alias", "foreign_collision"}:
+        ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="alice_bob")
+    if state == "foreign_collision":
+        historical_key = "v1:default:user:alice_bob"
+        foreign_key = reconstruct_private_instance_worker_key(historical_key, "alice/bob")
+        ensure_private_instance_identity(tmp_path, worker_key=foreign_key, requester_id="alice/bob")
+        foreign = private_instance_scope_root_path(tmp_path, foreign_key)
+        private_instance_scope_root_path(tmp_path, historical_key).symlink_to(foreign.name)
+
+    mounts = plan_scoped_visible_state_roots(
+        worker_key=worker_key,
+        local_shared_storage_root=tmp_path,
+        worker_visible_shared_storage_root=Path("/app/worker"),
+        private_agent_names=frozenset(),
+        allow_unknown_worker_key=False,
+    )
+
+    assert {(mount.local_path, mount.worker_visible_path) for mount in mounts} == {
+        (tmp_path / "agents", Path("/app/worker/agents")),
+        (canonical, Path("/app/worker/private_instances") / canonical.name),
+    }
 
 
 @pytest.mark.asyncio

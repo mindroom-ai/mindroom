@@ -27,11 +27,13 @@ from mindroom.constants import (
     resolve_runtime_paths,
     runtime_paths_with_storage_root,
 )
+from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
+    private_instance_scope_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
@@ -207,17 +209,16 @@ class _FakeContainersApi:
             labels=dict(labels) if isinstance(labels, dict) else {},
             user=str(kwargs["user"]) if kwargs.get("user") is not None else None,
         )
-        if isinstance(volumes, dict):
+        if isinstance(volumes, list):
             container.attrs["Mounts"] = [
                 {
                     "Type": "bind",
                     "Source": source,
-                    "Destination": str(spec.get("bind", "")),
-                    "Mode": str(spec.get("mode", "")),
-                    "RW": str(spec.get("mode", "rw")) != "ro",
+                    "Destination": destination,
+                    "Mode": mode,
+                    "RW": mode != "ro",
                 }
-                for source, spec in volumes.items()
-                if isinstance(source, str) and isinstance(spec, dict)
+                for source, destination, mode in (volume.rsplit(":", 2) for volume in volumes)
             ]
         self.by_name[container.name] = container
         self.created_containers.append(container)
@@ -520,6 +521,15 @@ models:
     provider: openai
     id: test-model
 """.lstrip()
+
+
+def _volumes_by_source(volumes: object) -> dict[str, dict[str, str]]:
+    """Index single-destination fixtures; alias tests inspect the full mount list."""
+    assert isinstance(volumes, list)
+    return {
+        source: {"bind": destination, "mode": mode}
+        for source, destination, mode in (volume.rsplit(":", 2) for volume in volumes)
+    }
 
 
 def _projection_root(volumes: dict[str, dict[str, str]]) -> Path:
@@ -1440,7 +1450,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert env["HOME"] == "/app/worker/agents/code/workspace"
     assert env["EXTRA_ENV"] == "present"
 
-    volumes = run_call["volumes"]
+    volumes = _volumes_by_source(run_call["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _assert_projected_worker_mounts(tmp_path, volumes, projected_paths)
     _assert_projected_config_snapshot(projection_root, tmp_path)
@@ -1572,8 +1582,8 @@ models:
     narrow_root = worker_root_path(tmp_path, narrow_key)
     assert broad.debug_metadata["state_root"] == str(broad_root)
     assert narrow.debug_metadata["state_root"] == str(narrow_root)
-    broad_volumes = fake_client.containers.run_calls[0]["volumes"]
-    narrow_volumes = fake_client.containers.run_calls[1]["volumes"]
+    broad_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
+    narrow_volumes = _volumes_by_source(fake_client.containers.run_calls[1]["volumes"])
     assert isinstance(broad_volumes, dict)
     assert isinstance(narrow_volumes, dict)
     assert str(broad_root) in broad_volumes
@@ -1647,7 +1657,7 @@ models:
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
@@ -2163,7 +2173,7 @@ def test_docker_backend_redacts_projected_config_secrets_and_support_state(
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
@@ -3127,7 +3137,7 @@ models:
 
     backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
@@ -3439,7 +3449,7 @@ def test_docker_backend_recreates_container_when_projected_file_asset_changes(
 
     handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
-    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    first_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(first_volumes, dict)
     first_projection_root = _projection_root(first_volumes)
 
@@ -3454,7 +3464,7 @@ def test_docker_backend_recreates_container_when_projected_file_asset_changes(
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
 
-    second_volumes = fake_client.containers.run_calls[-1]["volumes"]
+    second_volumes = _volumes_by_source(fake_client.containers.run_calls[-1]["volumes"])
     assert isinstance(second_volumes, dict)
     second_projection_root = _projection_root(second_volumes)
     assert second_projection_root != first_projection_root
@@ -3474,7 +3484,7 @@ def test_docker_backend_recreates_container_when_projected_directory_asset_chang
 
     handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
-    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    first_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(first_volumes, dict)
     first_projection_root = _projection_root(first_volumes)
 
@@ -3503,7 +3513,7 @@ def test_docker_backend_recreates_container_when_projected_directory_asset_chang
     assert removal_checks == [True]
     assert len(fake_client.containers.run_calls) == 2
 
-    second_volumes = fake_client.containers.run_calls[-1]["volumes"]
+    second_volumes = _volumes_by_source(fake_client.containers.run_calls[-1]["volumes"])
     assert isinstance(second_volumes, dict)
     second_projection_root = _projection_root(second_volumes)
     assert second_projection_root != first_projection_root
@@ -3525,7 +3535,7 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
 
     backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
@@ -3586,7 +3596,7 @@ models:
 
     backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_readme = (
@@ -3621,7 +3631,7 @@ def test_docker_backend_projects_only_private_user_agent_assets_for_private_agen
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config_data = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
@@ -3689,7 +3699,7 @@ models:
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
@@ -3743,7 +3753,7 @@ def test_docker_backend_shared_worker_mounts_canonical_agent_root(
 
     backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     expected_agent_root = (tmp_path / "agents" / "alpha").resolve()
     assert volumes[str(expected_agent_root)] == {
@@ -3905,7 +3915,7 @@ def test_docker_backend_projects_shared_agent_for_narrower_user_agent_worker(
         now=10.0,
     )
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     projected_config = yaml.safe_load((_projection_root(volumes) / "config.yaml").read_text(encoding="utf-8"))
     assert list(projected_config["agents"]) == ["alpha"]
     assert str(agent_state_root_path(tmp_path, "alpha")) in volumes
@@ -4048,7 +4058,7 @@ models:
 
     backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config_data = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
@@ -4114,7 +4124,7 @@ def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
 
     backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key)).resolve()
     assert volumes[str(expected_private_root)] == {
@@ -4125,6 +4135,42 @@ def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
     env = fake_client.containers.run_calls[0]["environment"]
     assert isinstance(env, dict)
     assert env["HOME"] == "/app/worker"
+
+
+def test_docker_backend_mounts_verified_historical_scope_twice(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Both historical and canonical destinations retain the same source, including on worker reuse."""
+    config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:default:user_agent:~@alice:example.org:alpha"
+    ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="@alice:example.org")
+    canonical = private_instance_scope_root_path(tmp_path, worker_key)
+    legacy = private_instance_scope_root_path(tmp_path, "v1:default:user_agent:@alice:example.org:alpha")
+    legacy.symlink_to(canonical.name, target_is_directory=True)
+    worker_root = worker_root_path(tmp_path, worker_key)
+    original_run = fake_client.containers.run
+
+    def run_with_prepared_alias_targets(image: str, **kwargs: object) -> _FakeContainer:
+        for scope in (canonical, legacy):
+            assert (worker_root / "private_instances" / scope.name).is_dir()
+        return original_run(image, **kwargs)
+
+    monkeypatch.setattr(fake_client.containers, "run", run_with_prepared_alias_targets)
+    spec = WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"}))
+    backend.ensure_worker(spec, now=10.0)
+    backend.ensure_worker(spec, now=11.0)
+
+    assert len(fake_client.containers.run_calls) == 1
+    mounts = fake_client.containers.created_containers[0].attrs["Mounts"]
+    assert {
+        (mount["Source"], mount["Destination"], mount["RW"]) for mount in mounts if mount["Source"] == str(canonical)
+    } == {
+        (str(canonical), f"/app/worker/private_instances/{canonical.name}", True),
+        (str(canonical), f"/app/worker/private_instances/{legacy.name}", True),
+    }
+    assert all(mount["Destination"] != "/app/worker/private_instances" for mount in mounts)
 
 
 def test_docker_script_worker_mounts_the_owning_private_state_scope(
@@ -4146,7 +4192,7 @@ def test_docker_script_worker_mounts_the_owning_private_state_scope(
         now=10.0,
     )
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     expected_private_root = (tmp_path / "private_instances" / worker_dir_name(state_scope_worker_key)).resolve()
     expected_run_root = worker_root_path(tmp_path, worker_key)
@@ -4186,7 +4232,7 @@ def test_docker_backend_rejects_private_user_agent_container_without_target_visi
 
     handle = backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=20.0)
     assert len(fake_client.containers.run_calls) == 1
-    second_volumes = fake_client.containers.run_calls[0]["volumes"]
+    second_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(second_volumes, dict)
     expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key)).resolve()
     assert second_volumes[str(expected_private_root)] == {
@@ -4224,7 +4270,7 @@ models:
 
     backend.ensure_worker(WorkerSpec("v1:default:shared:code"), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
@@ -4481,7 +4527,7 @@ def test_docker_backend_rebuilds_incomplete_projection_snapshot(
 
     handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
-    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    first_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(first_volumes, dict)
     projection_root = _projection_root(first_volumes)
 
@@ -4490,7 +4536,7 @@ def test_docker_backend_rebuilds_incomplete_projection_snapshot(
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
-    second_volumes = fake_client.containers.run_calls[-1]["volumes"]
+    second_volumes = _volumes_by_source(fake_client.containers.run_calls[-1]["volumes"])
     assert isinstance(second_volumes, dict)
     second_projection_root = _projection_root(second_volumes)
     replacement_container = fake_client.containers.by_name[handle.worker_id]
@@ -4514,7 +4560,7 @@ def test_docker_backend_rebuilds_corrupted_ready_projection_snapshot(
 
     handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
-    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    first_volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(first_volumes, dict)
     projection_root = _projection_root(first_volumes)
 
@@ -4546,7 +4592,7 @@ def test_docker_backend_disambiguates_colliding_projected_knowledge_base_ids(
 
     backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
 
-    volumes = fake_client.containers.run_calls[0]["volumes"]
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_knowledge_root = projection_root / ".mindroom-worker-assets" / "knowledge_bases"

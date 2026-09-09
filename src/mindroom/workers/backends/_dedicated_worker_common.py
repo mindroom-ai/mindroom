@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.constants import RuntimePaths, deserialize_runtime_paths, serialize_public_runtime_paths
+from mindroom.private_instance_identity_store import load_private_instance_identity, load_private_instance_legacy_alias
 from mindroom.runtime_env_policy import CONTROL_STATE_PATH_ENV, SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
@@ -283,13 +284,25 @@ def plan_scoped_visible_state_roots(
     for local_root in local_roots:
         local_root.mkdir(parents=True, exist_ok=True)
 
-    return tuple(
+    planned_roots = [
         ScopedVisibleStateRoot(
             local_path=local_root,
             worker_visible_path=worker_visible_root,
         )
         for local_root, worker_visible_root in zip(local_roots, worker_visible_roots, strict=True)
-    )
+    ]
+    canonical_scope = private_instance_scope_root_path(local_shared_storage_root, worker_key)
+    if canonical_scope in local_roots and load_private_instance_identity(local_shared_storage_root, canonical_scope):
+        legacy = load_private_instance_legacy_alias(local_shared_storage_root, worker_key)
+        if legacy is not None:
+            planned_roots.append(
+                ScopedVisibleStateRoot(
+                    local_path=canonical_scope,
+                    worker_visible_path=worker_visible_shared_storage_root
+                    / legacy.relative_to(local_shared_storage_root),
+                ),
+            )
+    return tuple(planned_roots)
 
 
 def validate_unique_worker_visible_paths(

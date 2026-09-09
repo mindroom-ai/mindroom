@@ -26,11 +26,13 @@ from mindroom.constants import (
     sandbox_startup_manifest_path,
     startup_manifest_sha256,
 )
+from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     descriptive_worker_id_for_key,
+    private_instance_scope_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
@@ -2705,6 +2707,32 @@ def test_kubernetes_backend_user_agent_mounts_private_root_from_worker_spec() ->
     assert mount_paths[expected_private_root] == expected_private_subpath
     assert "/app/worker/agents/mind" not in mount_paths
     assert f"{expected_private_root}/mind" not in mount_paths
+
+
+def test_kubernetes_backend_historical_mount_uses_canonical_pvc_source(tmp_path: Path) -> None:
+    """Both worker destinations bind the real canonical directory on the PVC."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = "v1:default:user_agent:~@alice:example.org:mind"
+    ensure_private_instance_identity(backend.storage_root, worker_key=worker_key, requester_id="@alice:example.org")
+    canonical = private_instance_scope_root_path(backend.storage_root, worker_key)
+    legacy = private_instance_scope_root_path(backend.storage_root, "v1:default:user_agent:@alice:example.org:mind")
+    legacy.symlink_to(canonical.name, target_is_directory=True)
+
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    assert {
+        (mount["mountPath"], mount["subPath"]) for mount in mounts if "/private_instances/" in mount["mountPath"]
+    } == {
+        (f"/app/worker/private_instances/{canonical.name}", f"private_instances/{canonical.name}"),
+        (f"/app/worker/private_instances/{legacy.name}", f"private_instances/{canonical.name}"),
+    }
+    assert all(mount["mountPath"] != "/app/worker/private_instances" for mount in mounts)
 
 
 def test_kubernetes_script_worker_mounts_the_owning_private_state_scope() -> None:

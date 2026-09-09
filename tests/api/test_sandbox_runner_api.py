@@ -48,6 +48,7 @@ from mindroom.credentials import (
     save_scoped_credentials,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
@@ -62,6 +63,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
     agent_workspace_root_path,
+    private_instance_scope_root_path,
     resolve_worker_key,
     worker_dir_name,
 )
@@ -2631,6 +2633,110 @@ def test_resolve_worker_base_dir_does_not_create_directories_during_validation(t
 
     assert resolved == (storage_root / requested_base_dir).resolve()
     assert not resolved.exists()
+
+
+def test_resolve_worker_base_dir_keeps_worker_root_paths_independent_of_alias_metadata(tmp_path: Path) -> None:
+    """Paths already allowed by worker-root containment do not consult optional alias metadata."""
+    worker_key = "v1:default:user_agent:~@alice:example.org:writer"
+    canonical = private_instance_scope_root_path(tmp_path, worker_key)
+    canonical.mkdir(parents=True)
+    (canonical / ".mindroom-private-instance.json").write_text("invalid owner")
+    requested = tmp_path / "private_instances" / "scratch"
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path)
+
+    assert (
+        sandbox_worker_prep_module._resolve_worker_base_dir(
+            paths,
+            tmp_path,
+            worker_key,
+            str(requested),
+            frozenset({"writer"}),
+        )
+        == requested
+    )
+
+
+@pytest.mark.parametrize("layout", ["symlink", "duplicate_mount"])
+def test_resolve_worker_base_dir_translates_verified_historical_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    layout: str,
+) -> None:
+    """Historical cwd resolves to canonical state on the primary and duplicate worker mounts."""
+    worker_key = "v1:default:user_agent:~@alice:example.org:writer"
+    ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="@alice:example.org")
+    canonical = private_instance_scope_root_path(tmp_path, worker_key)
+    legacy = private_instance_scope_root_path(tmp_path, "v1:default:user_agent:@alice:example.org:writer")
+    if layout == "symlink":
+        legacy.symlink_to(canonical.name, target_is_directory=True)
+    else:
+        legacy.mkdir()
+        original_samefile = Path.samefile
+        monkeypatch.setattr(
+            Path,
+            "samefile",
+            lambda path, other: (path == legacy and other == canonical) or original_samefile(path, other),
+        )
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "workers" / "current")
+
+    result = sandbox_worker_prep_module._resolve_worker_base_dir(
+        paths,
+        tmp_path,
+        worker_key,
+        str(legacy / "writer/workspace/project"),
+        frozenset({"writer"}),
+    )
+
+    assert result == canonical / "writer/workspace/project"
+    assert not result.exists()
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["missing_owner", "missing_alias", "different_directory", "foreign_alias", "traversal", "symlink_escape"],
+)
+def test_resolve_worker_base_dir_rejects_unverified_historical_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid: str,
+) -> None:
+    """Historical spelling grants neither foreign scope access nor an escape from canonical state."""
+    worker_key = "v1:default:user_agent:~@alice:example.org:writer"
+    ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="@alice:example.org")
+    canonical = private_instance_scope_root_path(tmp_path, worker_key)
+    legacy = private_instance_scope_root_path(tmp_path, "v1:default:user_agent:@alice:example.org:writer")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    requested = legacy / "writer/workspace"
+    if invalid in {"different_directory", "missing_owner", "symlink_escape"}:
+        legacy.mkdir()
+    elif invalid == "foreign_alias":
+        legacy.symlink_to(outside, target_is_directory=True)
+    elif invalid != "missing_alias":
+        legacy.symlink_to(canonical.name, target_is_directory=True)
+    if invalid == "missing_owner":
+        (canonical / ".mindroom-private-instance.json").unlink()
+    elif invalid == "traversal":
+        requested = legacy / ".." / "foreign" / "writer/workspace"
+    elif invalid == "symlink_escape":
+        (canonical / "writer").symlink_to(outside, target_is_directory=True)
+    if invalid in {"missing_owner", "symlink_escape"}:
+        original_samefile = Path.samefile
+        monkeypatch.setattr(
+            Path,
+            "samefile",
+            lambda path, other: (path == legacy and other == canonical) or original_samefile(path, other),
+        )
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "workers" / "current")
+
+    with pytest.raises(ValueError, match="allowed state roots"):
+        sandbox_worker_prep_module._resolve_worker_base_dir(
+            paths,
+            tmp_path,
+            worker_key,
+            str(requested),
+            frozenset({"writer"}),
+        )
 
 
 def test_sandbox_runner_healthz(runner_client: TestClient) -> None:
