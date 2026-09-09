@@ -11,6 +11,7 @@ import pytest
 
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
+from scripts.utilities.repair_nested_sidecars import repair
 from tests.test_conversation_hydration import ALICE, ROOM, FakeClient, admit_all, raw
 from tests.test_conversation_hydration import TestSidecarResolution as SidecarTests
 
@@ -130,8 +131,6 @@ class MatrixAPI:
 @pytest.mark.asyncio
 async def test_repair_survives_a_fresh_database_without_nested_reader_support(journal_store: EventJournalStore) -> None:
     """Repair source history rather than an existing projection or resolver cache."""
-    from scripts.utilities.repair_nested_sidecars import repair  # noqa: PLC0415
-
     api = MatrixAPI()
     unresolved = await resolve_event_source_content(api.events["$broken"], api.history_client())
     assert holds_unresolved_sidecar(unresolved["content"])
@@ -163,8 +162,6 @@ async def test_repair_survives_a_fresh_database_without_nested_reader_support(jo
 
 def test_retry_finishes_cleanup_without_sending_another_edit() -> None:
     """Resume a failed redaction after the replacement is already visible."""
-    from scripts.utilities.repair_nested_sidecars import repair  # noqa: PLC0415
-
     api = MatrixAPI()
     api.refuse_redaction = True
     with api.client() as client:
@@ -195,8 +192,6 @@ def test_retry_finishes_cleanup_without_sending_another_edit() -> None:
 )
 def test_unsafe_or_unreadable_targets_cause_no_writes(problem: str) -> None:  # noqa: C901
     """Refuse unsafe source mutations before publishing or redacting anything."""
-    from scripts.utilities.repair_nested_sidecars import repair  # noqa: PLC0415
-
     api = MatrixAPI()
     if problem == "wrong_owner":
         api.owner = "@someone_else:example.org"
@@ -229,8 +224,6 @@ def test_unsafe_or_unreadable_targets_cause_no_writes(problem: str) -> None:  # 
 
 def test_failed_replacement_verification_never_redacts_the_source() -> None:
     """An acknowledged but unverified replacement cannot justify deleting the old edit."""
-    from scripts.utilities.repair_nested_sidecars import repair  # noqa: PLC0415
-
     api = MatrixAPI()
     api.corrupt_readback = True
     with api.client() as client, pytest.raises(ValueError, match="verification"):
