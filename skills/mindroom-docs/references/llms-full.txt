@@ -742,6 +742,12 @@ The sync status indicator in the header shows:
 - **Sync Error** - Sync failed
 - **Disconnected** - Lost connection to backend
 
+If another dashboard tab or a server-side edit changes the configuration, saving an older draft can return HTTP 409.
+The dashboard keeps your draft and shows persistent recovery guidance, including in the raw configuration recovery editor.
+Copy any changes you want to keep, refresh the page to load the current configuration, then reapply and save your changes.
+Further save attempts are rejected locally while the conflict remains; editing the draft or refreshing agent policies does not resolve it.
+The dashboard does not automatically reload and retry a full replacement, because that could overwrite another writer's changes.
+
 ### Theme and Responsive Design
 
 Toggle between dark and light themes. The dashboard adapts to desktop and mobile devices.
