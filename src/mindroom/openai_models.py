@@ -139,7 +139,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
     def _using_reasoning_model(self) -> bool:
         """Enable Responses continuation independently of the model's name.
 
-        Agno 3.0.5 gates response chaining and encrypted reasoning retrieval on
+        Agno 3.0.9 gates response chaining and encrypted reasoning retrieval on
         this predicate, although both belong to the API rather than a model list.
         This does not enable reasoning or override ``store=False``.
         """

@@ -296,6 +296,7 @@ def _migrate_table(db_file: Path, session_table: str) -> _MigrationResult:
                     failed_sessions=result.failed_sessions,
                 )
         if result.failed_sessions == 0:
+            # Run-table schema revision; Agno package releases use a separate version.
             database.upsert_schema_version(session_table, "3.0.0")
     finally:
         database.close()
