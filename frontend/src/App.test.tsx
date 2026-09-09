@@ -12,11 +12,6 @@ vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
 }));
 
-vi.mock("@/components/ui/toaster", () => ({
-  toast: vi.fn(),
-  Toaster: () => null,
-}));
-
 describe("resolveCurrentTab", () => {
   it("defaults to dashboard for empty and unknown paths", () => {
     expect(resolveCurrentTab("/")).toBe("dashboard");
@@ -174,13 +169,65 @@ describe("App recovery mode", () => {
       screen.getByRole("button", { name: "Save Replacement Config" }),
     );
 
-    const { toast } = await import("@/components/ui/toaster");
     await waitFor(() => {
-      expect(toast).toHaveBeenCalledWith({
-        title: "Save Failed",
-        description: "Save was superseded by newer recovery edits.",
-        variant: "destructive",
-      });
+      expect(
+        screen.getByText("Save was superseded by newer recovery edits."),
+      ).toBeInTheDocument();
     });
+  });
+
+  it("shows conflict recovery guidance alongside existing validation issues", () => {
+    const state = useConfigStore();
+    state.diagnostics = [
+      {
+        kind: "global",
+        message:
+          "Configuration changed elsewhere. Copy your changes, then refresh this page.",
+        blocking: true,
+      },
+      {
+        kind: "global",
+        message: "Configuration validation failed",
+        blocking: true,
+      },
+      {
+        kind: "validation",
+        issue: {
+          loc: ["agents", "helper", "role"],
+          msg: "role is required",
+          type: "value_error",
+        },
+      },
+    ];
+    render(<App />);
+
+    expect(
+      screen.getByText(/Configuration changed elsewhere/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/role is required/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toHaveValue(state.recoveryConfigSource);
+  });
+
+  it("shows authentication recovery even when an earlier conflict remains", () => {
+    useConfigStore().diagnostics = [
+      {
+        kind: "global",
+        code: "config_conflict",
+        message: "Configuration changed elsewhere.",
+        blocking: true,
+      },
+      {
+        kind: "global",
+        message:
+          "Authentication required. Please log in to access this instance.",
+        blocking: true,
+      },
+    ];
+    render(<App />);
+
+    expect(
+      screen.getByRole("heading", { name: "Access Required" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
 });

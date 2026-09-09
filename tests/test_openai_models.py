@@ -33,7 +33,7 @@ _CHAT_WIRE_PAIRS = [
 
 
 def _assistant_with_argumentless_tool_call() -> Message:
-    """Anthropic saves zero-argument tool calls without a function.arguments field."""
+    """Older Agno histories contain Anthropic calls without a function.arguments field."""
     return Message(
         role="assistant",
         tool_calls=[
