@@ -425,18 +425,27 @@ class PendingEventWorker:
         retry = self._room_retries.get(event.room_id)
         if retry is not None and retry.event.event_id == event.event_id:
             del self._room_retries[event.room_id]
+            # A wrapped scan may have skipped the tail before finding this head.
+            self._wake.set()
 
-    async def _forget_settled_room_retries(self) -> None:
-        """An externally settled failed head must not block its room forever."""
+    async def _forget_ineligible_room_retries(self) -> None:
+        """A settled or approval-owned failed head no longer fences replay."""
         for room_id, retry in tuple(self._room_retries.items()):
             if not retry.task.done() or room_id in self._lanes:
                 continue
             try:
-                pending = await self.store.is_pending(retry.event.event_id)
+                # Use the journal's replay eligibility, which excludes sources
+                # transferred to approvals even while they remain unsettled.
+                page = await self.store.pending(
+                    limit=1,
+                    after_receipt_order=retry.event.receipt_order - 1,
+                    runtime_generation=self.runtime_generation,
+                )
             except Exception:
                 if self._room_retries.get(room_id) is retry and room_id not in self._lanes:
                     self._schedule_room_retry(retry.event)
                 continue
+            pending = any(event.event_id == retry.event.event_id for event in page)
             if not pending and self._room_retries.get(room_id) is retry and room_id not in self._lanes:
                 del self._room_retries[room_id]
 
@@ -499,7 +508,7 @@ class PendingEventWorker:
         pages earlier -- and a room's lane is handed that list verbatim, so a
         handler that defers rather than settling runs twice on one source.
         """
-        await self._forget_settled_room_retries()
+        await self._forget_ineligible_room_retries()
         by_room = self._reclaim_lost_deferrals()
         reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
         origin = self._scan_cursor
@@ -539,7 +548,7 @@ class PendingEventWorker:
         stops moving, and it is that loop, not one pass of it, that has to see
         every event.
         """
-        await self._forget_settled_room_retries()
+        await self._forget_ineligible_room_retries()
         by_room = self._reclaim_lost_deferrals()
         reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
         cursor: int | None = None
