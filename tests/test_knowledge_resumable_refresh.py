@@ -23,10 +23,10 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
-from agno.vectordb import chroma as agno_chroma
 from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
+import mindroom.knowledge.chroma_client as knowledge_chroma_client
 import mindroom.knowledge.collections as knowledge_collections_module
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.registry as knowledge_registry
@@ -226,6 +226,9 @@ class _FakeVectorDb:
         self.collection_name = collection
         self.embedder = embedder
         self.client = _FakeClient()
+
+    def close(self) -> None:
+        """The in-memory fake has no external resources to release."""
 
     def exists(self) -> bool:
         with self.lock:
@@ -504,7 +507,7 @@ def fake_vector_store(
     monkeypatch.setattr(knowledge_manager_module, "Knowledge", _FakeKnowledge)
     monkeypatch.setattr(knowledge_collections_module, "Knowledge", _FakeKnowledge)
     monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", lambda *_a, **_k: embedder)
-    monkeypatch.setattr(agno_chroma, "ChromaDb", _FakeVectorDb)
+    monkeypatch.setattr(knowledge_chroma_client, "ChromaDb", _FakeVectorDb)
     monkeypatch.setattr(knowledge_registry, "StrictSearchKnowledge", _FakeKnowledge)
     monkeypatch.setattr(knowledge_registry, "create_configured_embedder", lambda *_a, **_k: embedder)
 

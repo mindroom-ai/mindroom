@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
-from agno.vectordb import chroma as agno_chroma
 
+import mindroom.knowledge.chroma_client as knowledge_chroma_client
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
@@ -182,6 +182,9 @@ class _VectorDb:
         self.collection_name = collection
         self.client = _Client()
 
+    def close(self) -> None:
+        """The in-memory fake has no external resources to release."""
+
     def delete(self) -> bool:
         with self.lock:
             self.collections.pop(self.collection_name, None)
@@ -290,7 +293,7 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "mindroom.knowledge.manager.create_configured_embedder",
         lambda *_args, **_kwargs: _FakeEmbedder(),
     )
-    monkeypatch.setattr(agno_chroma, "ChromaDb", _VectorDb)
+    monkeypatch.setattr(knowledge_chroma_client, "ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.registry.StrictSearchKnowledge", _Knowledge)
     monkeypatch.setattr("mindroom.knowledge.registry.create_configured_embedder", lambda *_args, **_kwargs: object())
     knowledge_registry._published_indexes.clear()

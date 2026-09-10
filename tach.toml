@@ -4046,8 +4046,19 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.knowledge.chroma_client"
+depends_on = []
+visibility = [
+    "mindroom.knowledge.collections",
+    "mindroom.knowledge.indexing_config",
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.registry",
+]
+
+[[modules]]
 path = "mindroom.knowledge.collections"
 depends_on = [
+    "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.indexing_config",
     "mindroom.logging_config",
     "mindroom.strict_knowledge",
@@ -4089,6 +4100,7 @@ path = "mindroom.knowledge.registry"
 depends_on = [
     "mindroom.embedding_factory",
     "mindroom.knowledge.availability",
+    "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
     "mindroom.runtime_resolution",
@@ -4100,6 +4112,7 @@ depends_on = [
 path = "mindroom.knowledge.indexing_config"
 depends_on = [
     "mindroom.embeddings",
+    "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.legacy_metadata",
     "mindroom.knowledge.redaction",
 ]
@@ -4120,6 +4133,7 @@ depends_on = [
     "mindroom.embedding_errors",
     "mindroom.embedding_factory",
     "mindroom.knowledge.candidate_checkpoint",
+    "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.collections",
     "mindroom.knowledge.embedding_batch",
     "mindroom.knowledge.file_listing",

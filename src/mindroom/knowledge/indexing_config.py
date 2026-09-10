@@ -8,6 +8,7 @@ across refactors.
 from __future__ import annotations
 
 import hashlib
+from contextlib import closing
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple, cast
@@ -227,7 +228,7 @@ class IndexingSettings:
 
 def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
     """Check collection existence without constructing Agno Knowledge."""
-    from agno.vectordb.chroma import ChromaDb  # noqa: PLC0415
+    from mindroom.knowledge.chroma_client import ChromaDb  # noqa: PLC0415
 
     vector_db = ChromaDb(
         collection=collection_name,
@@ -236,7 +237,8 @@ def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
         # The base Embedder raises on every embed call, so a probe can never embed content.
         embedder=Embedder(),
     )
-    return vector_db.exists()
+    with closing(vector_db):
+        return vector_db.exists()
 
 
 def _safe_identifier(value: str) -> str:

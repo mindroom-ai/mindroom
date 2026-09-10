@@ -8,7 +8,7 @@ import json
 import os
 import time
 import uuid
-from contextlib import suppress
+from contextlib import closing, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -20,7 +20,6 @@ from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.json_reader import JSONReader
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
-from agno.vectordb.chroma import ChromaDb
 from chromadb.errors import InternalError
 
 from mindroom.chunking import SafeFixedSizeChunking
@@ -47,6 +46,7 @@ from mindroom.knowledge.candidate_checkpoint import (
     load_candidate_checkpoint,
     save_candidate_checkpoint,
 )
+from mindroom.knowledge.chroma_client import ChromaDb
 from mindroom.knowledge.collections import (
     SOURCE_DIGEST_KEY,
     SOURCE_MTIME_NS_KEY,
@@ -1350,11 +1350,12 @@ class KnowledgeManager:
         bounded by the in-flight file rather than the whole copied corpus.
         """
         vector_db = build_vector_db(self._collections, checkpoint.collection, embedder=embedder)
-        if not vector_db.exists():
-            return False
-        collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        has_rows = bool(collection.get(limit=1, include=[])["ids"])
-        return not checkpoint.completed and has_rows
+        with closing(vector_db):
+            if not vector_db.exists():
+                return False
+            collection = vector_db.client.get_collection(name=vector_db.collection_name)
+            has_rows = bool(collection.get(limit=1, include=[])["ids"])
+            return not checkpoint.completed and has_rows
 
     async def _inspect_candidate_shape(
         self,
