@@ -43,6 +43,29 @@ def _settings(base_id: str = "docs") -> IndexingSettings:
     )
 
 
+def _legacy_metadata() -> dict[str, str]:
+    return {
+        "base_id": "docs",
+        "storage_root": "storage",
+        "knowledge_path": "knowledge/docs",
+        "mode": "semantic",
+        "embedder_provider": "openai",
+        "embedder_model": "text-embedding-3-small",
+        "embedder_host": "",
+        "embedder_dimensions": "",
+        "chunk_size": "5000",
+        "chunk_overlap": "0",
+        "repo_identity": "",
+        "git_branch": "",
+        "git_lfs": "",
+        "git_skip_hidden": "",
+        "git_include_patterns": "",
+        "git_exclude_patterns": "",
+        "include_extensions": "",
+        "exclude_extensions": "()",
+    }
+
+
 def test_storage_key_for_base_is_deterministic(tmp_path: Path) -> None:
     """Same base ID and path must always produce the same persisted key."""
     knowledge_path = tmp_path / "docs"
@@ -107,17 +130,15 @@ def test_indexing_settings_from_metadata_rejects_invalid_payloads() -> None:
 
 def test_indexing_settings_from_metadata_normalizes_legacy_empty_filter_keys() -> None:
     """Older semantic payloads normalize absent or empty filter tuples at the parse boundary."""
-    metadata = _settings().to_metadata()
-    del metadata["include_patterns"]
-    metadata["exclude_patterns"] = ""
-    del metadata["extra_extensions"]
-    del metadata["skip_hidden"]
+    metadata = _legacy_metadata()
+    original = dict(metadata)
     parsed = IndexingSettings.from_metadata(metadata)
+
     assert parsed is not None
-    assert parsed.include_patterns == "()"
-    assert parsed.exclude_patterns == "()"
-    assert parsed.extra_extensions == "()"
-    assert parsed.skip_hidden == ""
+    assert (parsed.include_patterns, parsed.exclude_patterns, parsed.extra_extensions) == ("()", "()", "()")
+    assert (parsed.skip_hidden, parsed.require_content_before_publish) == ("", "")
+    assert metadata == original
+    assert IndexingSettings.from_metadata(parsed.to_metadata()) == parsed
 
 
 def test_files_mode_legacy_empty_patterns_normalize_without_semantic_extensions() -> None:
@@ -137,7 +158,20 @@ def test_files_mode_legacy_empty_patterns_normalize_without_semantic_extensions(
 
 def test_skip_hidden_changes_corpus_key_but_not_query_key() -> None:
     """Indexes published before hidden-path filtering ('' from old metadata) must rebuild, not stay queryable."""
-    legacy = _settings()
+    legacy = IndexingSettings.from_metadata(
+        {
+            **_legacy_metadata(),
+            "include_patterns": "('docs/**',)",
+            "exclude_patterns": "('drafts/**',)",
+            "extra_extensions": "('.mdx',)",
+        },
+    )
+    assert legacy is not None
+    assert (legacy.include_patterns, legacy.exclude_patterns, legacy.extra_extensions) == (
+        "('docs/**',)",
+        "('drafts/**',)",
+        "('.mdx',)",
+    )
     current = replace(legacy, skip_hidden="True")
     assert legacy.corpus_compatibility_key() != current.corpus_compatibility_key()
     assert legacy.query_compatibility_key() == current.query_compatibility_key()
@@ -145,7 +179,10 @@ def test_skip_hidden_changes_corpus_key_but_not_query_key() -> None:
 
 def test_content_publication_gate_round_trips_and_changes_corpus_key() -> None:
     """The runtime-overlay publication gate must persist and invalidate ungated empty indexes."""
-    ungated = _settings()
+    ungated = IndexingSettings.from_metadata({**_legacy_metadata(), "skip_hidden": "True"})
+    assert ungated is not None
+    assert ungated.skip_hidden == "True"
+    assert ungated.require_content_before_publish == ""
     gated = replace(ungated, require_content_before_publish="True")
 
     assert IndexingSettings.from_metadata(gated.to_metadata()) == gated

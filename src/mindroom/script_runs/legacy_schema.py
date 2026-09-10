@@ -7,6 +7,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import sqlite3
 
+# Legacy format: Script-run rows lacked resource_profile, resource_requests_json, and resource_limits_json.
+# Last legacy release: v2026.8.96; replacement: v2026.8.97 added all three resource snapshot columns.
+# Handling: Add absent columns in place, preserving old rows and defaulting their resource snapshots to empty.
+# Coverage: tests/test_script_run_store.py::test_run_store_migrates_existing_table_for_resource_snapshots.
+
 _SCRIPT_RUN_COLUMN_MIGRATIONS = (
     ("resource_profile", "ALTER TABLE script_runs ADD COLUMN resource_profile TEXT"),
     (

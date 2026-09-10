@@ -8,8 +8,16 @@ if TYPE_CHECKING:
     from agno.models.message import Message
 
 
-# Agno 3.0.7 includes agno-agi/agno#8970, preserving empty Anthropic tool arguments.
-# Keep repairing histories written before that fix until they are migrated or dropped.
+# Legacy format: Agno writers omitted the arguments field for empty Anthropic tool calls.
+# Last legacy release: v2026.9.43; replacement: v2026.9.44 included the upstream Agno 3.0.7 writer fix.
+# Handling: Supply `{}` arguments in copies of affected calls until those histories are migrated or dropped.
+# Coverage: tests/test_openai_models.py::test_chat_models_supply_missing_tool_arguments_without_mutating_history.
+
+
+# Legacy format: Streamed OpenAI history retained id-only tool placeholders and their orphan tool results.
+# Last legacy release: v2026.7.172; replacement: v2026.7.173 filtered sparse placeholders during writes.
+# Handling: Remove each placeholder and its matching result while preserving unchanged message identities.
+# Coverage: tests/test_openai_models.py::test_chat_models_remove_persisted_sparse_placeholder_and_orphan_result.
 def repair_legacy_openai_tool_replay(messages: list[Message]) -> list[Message]:
     """Repair function calls and remove sparse-stream placeholders from replay."""
     normalized_messages: list[Message] = []

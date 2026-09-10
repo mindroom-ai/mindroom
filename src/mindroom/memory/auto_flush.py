@@ -109,6 +109,10 @@ def _resolve_flush_scope(
     )
 
 
+# Legacy format: File-memory auto-flush session entries persisted room_id and thread_id location fields.
+# Last legacy release: v2026.3.93; replacement: v2026.3.94 stopped writing both fields.
+# Handling: Drop only the retired locations when reading state; the next public mutation rewrites it durably.
+# Coverage: tests/test_memory_auto_flush.py::test_reprioritize_rewrites_legacy_location_fields_only.
 def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
     if not isinstance(raw_entry, dict):
         return None

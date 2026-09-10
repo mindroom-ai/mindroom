@@ -11,6 +11,11 @@ if TYPE_CHECKING:
     from sqlalchemy import Table
     from sqlalchemy.orm import Session
 
+# Legacy format: Agno 2 sessions stored run history in single- or double-encoded JSON `runs` blobs.
+# Last legacy release: v2026.9.11; replacement: v2026.9.12 wrote first-class Agno 3 run rows.
+# Handling: Merge retained blob runs with current rows and scrub deletions and descendants transactionally.
+# Coverage: tests/test_agent_storage_runs.py::test_legacy_runs_blob_is_merged_into_reads_and_deletions_stick.
+
 
 def scrub_legacy_run_blobs(
     session: Session,
