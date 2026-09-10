@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 # Legacy format: Semantic knowledge-index metadata omitted extra_extensions.
 # Last legacy release: v2026.6.127; replacement: v2026.6.128 persisted the extension identity.
 # Handling: Normalize absence to the semantic empty-filter identity; file-mode absence remains empty.
-# Coverage: tests/test_knowledge_indexing_config.py::test_files_mode_legacy_empty_patterns_normalize_without_semantic_extensions.
+# Coverage: tests/test_knowledge_indexing_config.py::test_indexing_settings_from_metadata_normalizes_legacy_empty_filter_keys.
 
 # Legacy format: Knowledge-index metadata omitted the effective non-Git skip_hidden gate.
 # Last legacy release: v2026.7.162; replacement: v2026.7.163 persisted the gate in the corpus identity.

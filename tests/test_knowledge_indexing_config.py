@@ -179,8 +179,21 @@ def test_skip_hidden_changes_corpus_key_but_not_query_key() -> None:
 
 def test_content_publication_gate_round_trips_and_changes_corpus_key() -> None:
     """The runtime-overlay publication gate must persist and invalidate ungated empty indexes."""
-    ungated = IndexingSettings.from_metadata({**_legacy_metadata(), "skip_hidden": "True"})
+    ungated = IndexingSettings.from_metadata(
+        {
+            **_legacy_metadata(),
+            "include_patterns": "('published/**',)",
+            "exclude_patterns": "('drafts/**',)",
+            "extra_extensions": "('.mdx',)",
+            "skip_hidden": "True",
+        },
+    )
     assert ungated is not None
+    assert (ungated.include_patterns, ungated.exclude_patterns, ungated.extra_extensions) == (
+        "('published/**',)",
+        "('drafts/**',)",
+        "('.mdx',)",
+    )
     assert ungated.skip_hidden == "True"
     assert ungated.require_content_before_publish == ""
     gated = replace(ungated, require_content_before_publish="True")
