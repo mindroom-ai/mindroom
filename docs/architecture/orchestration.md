@@ -77,16 +77,17 @@ main() entry
 - **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; `matrix_sync.mode: classic` uses Classic `/v3/sync`, while `sliding` uses MSC4186 Simplified Sliding Sync on a homeserver advertising `org.matrix.simplified_msc3575`
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
-## Session Storage Upgrades
+## Session Storage Recovery
 
-After the runtime becomes ready, MindRoom checks session databases for Agno 2 run blobs off the event loop.
-A child process starts only when legacy data exists, then migrates and verifies each session in its own transaction.
-The runtime remains available throughout.
-Logs report each table's total, progress every 100 sessions, and completion.
-Invalid or conflicting blobs stay intact on the compatibility read path and are reported for a later retry.
+Before opening an owned session database, `session_storage_preflight.py` checks any existing session table for the required Agno columns.
+If required columns are missing, it renames the entire `sessions/` directory to a unique `sessions.incompatible-*` sibling, including SQLite journals and sidecars, then recreates `sessions/` with its original permissions.
+The archive stays available for manual recovery, and logs report its path and the missing columns.
+Only session storage is archived; learning, authored files, credentials, and Matrix encryption keys remain separate.
+Permission failures, corruption, unexpected schema objects, and unsafe paths still raise errors rather than triggering an archive.
 
-The legacy column is cleared for successfully migrated sessions and retained for compatibility reads when migration fails.
-Removing the column is a separate explicit cleanup because changing a live SQLite table can block writes.
+Compatible Agno 2 and mixed-schema session data remains readable through Agno's compatibility reads.
+MindRoom no longer schedules background conversion or clears legacy run blobs.
+Run upgrades while MindRoom is stopped so recovery cannot overlap active session writers.
 
 ## Runtime Replacement Admission
 

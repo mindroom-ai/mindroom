@@ -108,8 +108,8 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
-    "mindroom.api.sandbox_worker_prep",
-    "mindroom.workers.backends._dedicated_worker_common",
+    "mindroom.private_storage_compat",
+    "mindroom.private_storage_paths",
     "mindroom.private_storage_migration",
     "mindroom.private_instance_identity",
     "mindroom.runtime_resolution",
@@ -753,13 +753,25 @@ visibility = [
 [[modules]]
 path = "mindroom.oauth.credential_store"
 depends_on = [
-    "mindroom.credential_policy",
-    "mindroom.tool_system.worker_routing",
     "mindroom.credentials",
-    "mindroom.logging_config",
+    "mindroom.oauth.credential_compat",
     "mindroom.oauth.providers",
 ]
 visibility = ["mindroom.oauth.credential_lifecycle"]
+
+[[modules]]
+path = "mindroom.oauth.credential_compat"
+depends_on = [
+    "mindroom.credential_policy",
+    "mindroom.credentials",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.oauth.credential_store"]
+
+[[modules]]
+path = "mindroom.oauth.credential_store_types"
+depends_on = []
+visibility = ["mindroom.oauth.credential_store", "mindroom.oauth.credential_compat"]
 
 [[modules]]
 path = "mindroom.oauth.credential_lifecycle"
@@ -1010,7 +1022,10 @@ depends_on = [
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.routing",
+    "mindroom.requester_identity",
     "mindroom.teams",
+    "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -1264,7 +1279,7 @@ path = "mindroom.api.sandbox_worker_prep"
 depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.logging_config",
-    "mindroom.private_instance_identity_store",
+    "mindroom.private_storage_paths",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backend",
@@ -3437,6 +3452,7 @@ depends_on = [
 path = "mindroom.tool_system.context_bound_streams"
 depends_on = []
 visibility = [
+    "mindroom.api.openai_compat",
     "mindroom.llm_request_logging",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
@@ -4753,6 +4769,9 @@ expose = [
     "WorkerProgressEvent",
     "WorkerProgressPump",
     "ToolRuntimeContext",
+    "DetachedRequesterContext",
+    "detached_requester_context",
+    "get_detached_requester_context",
     "ToolRuntimeModelBinding",
     "ToolRuntimeHookBindings",
     "ToolRuntimeSupport",
@@ -5016,6 +5035,7 @@ depends_on = [
     "mindroom.mcp_gateway.admission",
     "mindroom.mcp_gateway.accounts",
     "mindroom.mcp_gateway.consent",
+    "mindroom.mcp_gateway.external_auth",
     "mindroom.mcp_gateway.oauth",
     "mindroom.mcp_gateway.server",
     "mindroom.mcp_gateway.store",
@@ -5057,6 +5077,10 @@ depends_on = ["mindroom.mcp_gateway.accounts"]
 [[modules]]
 path = "mindroom.mcp_gateway.accounts"
 depends_on = []
+
+[[modules]]
+path = "mindroom.mcp_gateway.external_auth"
+depends_on = ["mindroom.matrix.identity"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.lifecycle"
@@ -5239,6 +5263,7 @@ depends_on = [
     "mindroom.durable_write",
     "mindroom.file_locks",
     "mindroom.private_instance_identity_store",
+    "mindroom.private_storage_compat",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.storage_preflight",
 ]
@@ -5258,3 +5283,20 @@ visibility = ["mindroom.private_storage_migration"]
 path = "mindroom.session_storage_preflight"
 depends_on = ["mindroom.durable_write", "mindroom.file_locks"]
 visibility = ["mindroom.agent_storage"]
+
+[[modules]]
+path = "mindroom.private_storage_compat"
+depends_on = [
+    "mindroom.private_instance_identity_store",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.private_storage_migration", "mindroom.private_storage_paths"]
+
+[[modules]]
+path = "mindroom.private_storage_paths"
+depends_on = [
+    "mindroom.private_instance_identity_store",
+    "mindroom.private_storage_compat",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.api.sandbox_worker_prep", "mindroom.workers.backends._dedicated_worker_common"]

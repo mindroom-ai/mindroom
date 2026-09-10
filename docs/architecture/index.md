@@ -101,6 +101,20 @@ MindRoom's architecture consists of several key components working together.
 | `topic_generator.py` | AI-generated room topics |
 | `background_tasks.py` | Non-blocking async task management with GC protection |
 
+## Storage upgrade boundaries
+
+Historical formats stay with their storage or lifecycle owners, while current callers consume canonical identities and paths.
+`private_storage_compat.py` owns historical requester spellings and verified aliases; only startup migration and `private_storage_paths.py` can import it.
+Worker mount planning and sandbox path validation use `private_storage_paths.py`, while `private_instance_identity_store.py` validates current identities.
+
+`oauth/credential_compat.py` owns publication-field normalization and lossless historical requester bindings.
+Only `oauth/credential_store.py` can import it; the store retains schema, scope validation, current credential state, transaction locks, retries, and commit ownership.
+OAuth credentials stored only in legacy JSON files require reconnection; those files and their obsolete sidecars remain untouched.
+
+Existing lifecycle adapters remain at their focused entry points: `private_storage_migration.py` at startup, `config/access_migration.py` during config loading, and Nio journal and crypto adapters when their stores open.
+`session_storage_preflight.py` checks owned session databases before opening them and archives session directories whose tables lack required columns; see [Session Storage Recovery](orchestration.md#session-storage-recovery).
+Tach visibility rules keep compatibility internals behind their owning boundaries.
+
 ## Data Flow
 
 1. **Message arrives** from the Matrix homeserver and is committed by `matrix/journal_ingress.py` before nio is told it was accepted; `journal_dispatch.py` then hands it through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome

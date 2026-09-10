@@ -32,6 +32,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp_gateway.accounts import GatewayAccounts
 from mindroom.mcp_gateway.admission import OnboardingRateLimiter
 from mindroom.mcp_gateway.consent import render_consent_page
+from mindroom.mcp_gateway.external_auth import ExternalAuth, ExternalAuthSettings
 from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 from mindroom.mcp_gateway.server import GatewayServer, read_gateway_body, replay_gateway_body
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
 
     from mindroom.api.personal_agent import PersonalAgentContext
     from mindroom.constants import RuntimePaths
+    from mindroom.mcp_gateway.external_auth import ExternalIdentity
     from mindroom.mcp_gateway.oauth import GatewayAccessToken
     from mindroom.mcp_gateway.types import GatewayToolResponse
 
@@ -124,6 +126,11 @@ class GatewayRuntime:
     """Own client grants, lazy upstream sessions and one stateless MCP server."""
 
     def __init__(self, paths: RuntimePaths) -> None:
+        self.external_settings = ExternalAuthSettings.from_paths(paths)
+        if self.external_settings is not None and not paths.env_value("MINDROOM_MCP_SCIM_TOKEN"):
+            msg = "External MCP authentication requires account provisioning"
+            raise ValueError(msg)
+        self.external_auth = ExternalAuth(self.external_settings) if self.external_settings is not None else None
         self._onboarding_limiter = OnboardingRateLimiter(
             int(paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT") or "60"),
             int(paths.env_value("MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT") or "10"),
@@ -161,21 +168,42 @@ class GatewayRuntime:
         """Return the configured public origin, independent of forwarded headers."""
         return self.provider.resource_url.removesuffix("/mcp")
 
-    async def principal(self, request: Request) -> tuple[GatewayAccessToken, PersonalAgentContext]:
-        """Resolve only a gateway bearer against current personal access policy."""
+    async def principal(self, request: Request) -> tuple[GatewayPrincipal, PersonalAgentContext]:
+        """Resolve verified MCP authority against current account and personal access policy."""
+        _runtime(request)
+        scopes = self.external_settings.required_scopes if self.external_settings is not None else ("mcp:tools",)
+        challenge = f'Bearer resource_metadata="{self.origin}/.well-known/oauth-protected-resource/mcp"'
+        if scopes:
+            challenge += f', scope="{" ".join(scopes)}"'
+        headers = {"WWW-Authenticate": challenge}
+        if self.external_auth is not None:
+            try:
+                identity: ExternalIdentity = await self.external_auth.verify(request)
+            except HTTPException as exc:
+                if exc.status_code == 403:
+                    headers["WWW-Authenticate"] += ', error="insufficient_scope"'
+                raise HTTPException(exc.status_code, exc.detail, headers=headers) from exc
+            if await self.accounts.resolve_external(identity.email, identity.issued_at) is None:
+                raise HTTPException(401, "An active provisioned account is required", headers=headers)
+            snapshot = rebind_current_request_snapshot(request)
+            _runtime(request, paths=snapshot.runtime_paths)
+            try:
+                context = resolve_personal_agent(snapshot, identity.matrix_user_id)
+            except HTTPException as exc:
+                raise HTTPException(401, "External principal is no longer authorized", headers=headers) from exc
+            return GatewayPrincipal(grant_id=identity.token_digest, requester_id=context.requester_id), context
         value = request.headers.get("authorization", "")
         scheme, _, raw = value.partition(" ")
-        token = (
+        token: GatewayAccessToken | None = (
             await self.provider.load_access_token(raw) if scheme.lower() == "bearer" and 0 < len(raw) <= 256 else None
         )
-        headers = {
-            "WWW-Authenticate": f'Bearer resource_metadata="{self.origin}/.well-known/oauth-protected-resource/mcp", scope="mcp:tools"',
-        }
         if token is None:
             raise HTTPException(401, "Gateway bearer required", headers=headers)
+        snapshot = rebind_current_request_snapshot(request)
+        _runtime(request, paths=snapshot.runtime_paths)
         try:
             context = resolve_personal_agent(
-                rebind_current_request_snapshot(request),
+                snapshot,
                 token.authenticated_user_id,
                 expected_agent_name=token.agent_name,
             )
@@ -183,15 +211,17 @@ class GatewayRuntime:
             raise HTTPException(401, "Gateway grant is no longer authorized", headers=headers) from exc
         if context.requester_id != token.requester_id:
             raise HTTPException(401, "Gateway principal changed", headers=headers)
-        return token, context
+        return GatewayPrincipal(grant_id=token.grant_id, requester_id=token.requester_id), context
 
     async def authenticate(self, request: Request) -> GatewayPrincipal:
         """Authenticate every HTTP message, including discovery and cancellation."""
-        token, _ = await self.principal(request)
-        return GatewayPrincipal(grant_id=token.grant_id, requester_id=token.requester_id)
+        principal, _ = await self.principal(request)
+        return principal
 
     async def _record_activity(self, request: Request) -> None:
         """Record successful use without turning completed provider actions into retryable failures."""
+        if self.external_auth is not None:
+            return
         _, _, raw = request.headers.get("authorization", "").partition(" ")
         try:
             token = await self.provider.load_access_token(raw)
@@ -239,7 +269,7 @@ async def gateway_lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         runtime = GatewayRuntime(paths)
     except ValueError:
-        logger.warning("MCP gateway disabled: configure a valid public origin and limits")
+        logger.warning("MCP gateway disabled: check public origin, limits, authentication, and account provisioning")
         yield
         return
     state.mcp_gateway_runtime = runtime
@@ -252,16 +282,29 @@ async def gateway_lifespan(app: FastAPI) -> AsyncIterator[None]:
         await runtime.manager.shutdown()
 
 
-def _runtime(request: Request) -> GatewayRuntime:
+def _runtime(request: Request, *, paths: RuntimePaths | None = None) -> GatewayRuntime:
     runtime = app_state(request.app).mcp_gateway_runtime
-    paths = require_api_state(request.app).snapshot.runtime_paths
+    if paths is None:
+        paths = require_api_state(request.app).snapshot.runtime_paths
+    try:
+        external_settings = ExternalAuthSettings.from_paths(paths)
+    except ValueError as exc:
+        raise HTTPException(404, "MCP gateway is disabled", headers=PERSONAL_RESPONSE_HEADERS) from exc
     if (
         runtime is None
+        or runtime.external_settings != external_settings
         or not _enabled(paths)
         or (paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/") != runtime.origin
         or (paths.env_value("MINDROOM_MCP_SCIM_TOKEN") or "") != runtime.scim_token
     ):
         raise HTTPException(404, "MCP gateway is disabled", headers=PERSONAL_RESPONSE_HEADERS)
+    return runtime
+
+
+def _local_runtime(request: Request) -> GatewayRuntime:
+    runtime = _runtime(request)
+    if runtime.external_settings is not None:
+        raise HTTPException(404, "Built-in MCP authorization is disabled", headers=PERSONAL_RESPONSE_HEADERS)
     return runtime
 
 
@@ -316,7 +359,7 @@ def _oauth_admission(request: Request, runtime: GatewayRuntime, operation: str) 
 
 
 async def _oauth(request: Request) -> Response:
-    runtime = _runtime(request)
+    runtime = _local_runtime(request)
     operation = request.scope["path"].rsplit("/", 1)[-1]
     admission = _oauth_admission(request, runtime, operation)
     if admission is not None:
@@ -363,13 +406,15 @@ async def _metadata(request: Request) -> Response:
     runtime = _runtime(request)
     provider = runtime.provider
     if "oauth-protected-resource" in request.scope["path"]:
+        external = runtime.external_settings
         payload = {
             "resource": provider.resource_url,
-            "authorization_servers": [provider.issuer_url],
-            "scopes_supported": ["mcp:tools"],
+            "authorization_servers": [external.authorization_server if external is not None else provider.issuer_url],
+            "scopes_supported": list(external.required_scopes) if external is not None else ["mcp:tools"],
             "bearer_methods_supported": ["header"],
         }
     else:
+        _local_runtime(request)
         payload = {
             "issuer": provider.issuer_url,
             "authorization_endpoint": provider.issuer_url + "/authorize",
@@ -387,7 +432,7 @@ async def _metadata(request: Request) -> Response:
 
 
 async def _consent(request: Request) -> Response:
-    runtime = _runtime(request)
+    runtime = _local_runtime(request)
     user = await require_personal_connections_user(request)
     context = resolve_personal_agent(rebind_current_request_snapshot(request), user["matrix_user_id"], channel="matrix")
     account_id = None
@@ -475,7 +520,7 @@ def install_gateway_routes(app: FastAPI) -> None:
     """Register exact machine and browser routes before the frontend catch-all."""
     app.router.routes.extend(
         [
-            *client_routes(_runtime),
+            *client_routes(_local_runtime),
             *scim_routes(_runtime),
             Route("/mcp", _MCPEndpoint(), methods=["GET", "POST", "DELETE"]),
             Route("/.well-known/oauth-authorization-server/mcp/oauth", _metadata, methods=["GET"]),

@@ -4,57 +4,35 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import secrets
 import sqlite3
 import stat
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from cryptography.exceptions import InvalidTag
 
-from mindroom.credential_policy import is_oauth_token_service
 from mindroom.credentials import scoped_credentials_path
 from mindroom.durable_write import fsync_directory_durable
+from mindroom.oauth import credential_compat
 from mindroom.oauth.providers import OAuthProviderError
-from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
+    from pathlib import Path
 
-    from mindroom.constants import RuntimePaths
-    from mindroom.credentials import CredentialsManager
-    from mindroom.oauth.providers import OAuthProvider
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.oauth.credential_store_types import OAuthCredentialStoreContext
 
 
 _SCHEMA_VERSION = 1
 _LOCK_RETRY_SECONDS = 0.05
 _LOCK_WAIT_TIMEOUT_SECONDS = 30.0
-_LEGACY_PUBLICATION_KEY = "_mindroom_oauth_publication"
 _T = TypeVar("_T")
 
 
 class OAuthCredentialUnreadableError(OAuthProviderError):
     """Signal that a stored OAuth credential exists but cannot be decoded."""
-
-
-class _OAuthCredentialStoreContext(Protocol):
-    """Fields the store needs from the lifecycle's canonical scope."""
-
-    @property
-    def runtime_paths(self) -> RuntimePaths: ...
-
-    @property
-    def provider(self) -> OAuthProvider: ...
-
-    @property
-    def credentials_manager(self) -> CredentialsManager: ...
-
-    @property
-    def worker_target(self) -> ResolvedWorkerTarget | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +55,7 @@ class _OAuthStoredCredentialSnapshot:
 class _OAuthCredentialReader:
     """One read-only view of a committed per-scope credential state."""
 
-    def __init__(self, context: _OAuthCredentialStoreContext, connection: sqlite3.Connection) -> None:
+    def __init__(self, context: OAuthCredentialStoreContext, connection: sqlite3.Connection) -> None:
         self._context = context
         self._connection = connection
 
@@ -104,7 +82,7 @@ class OAuthCredentialTransaction:
 
     def __init__(
         self,
-        context: _OAuthCredentialStoreContext,
+        context: OAuthCredentialStoreContext,
         connection: sqlite3.Connection,
     ) -> None:
         self._context = context
@@ -136,7 +114,7 @@ class OAuthCredentialTransaction:
         connection_generation = (
             secrets.token_hex(32) if advance_connection_generation else generations.connection_generation
         )
-        published = _without_legacy_publication(credentials)
+        published = credential_compat.without_legacy_publication(credentials)
         payload = self._context.credentials_manager.encode_credentials(
             self._context.provider.credential_service,
             published,
@@ -243,7 +221,7 @@ def _reset_operation_result(connection: sqlite3.Connection, operation_id: str) -
 
 
 def _decode_credentials(
-    context: _OAuthCredentialStoreContext,
+    context: OAuthCredentialStoreContext,
     row: sqlite3.Row,
 ) -> dict[str, Any] | None:
     """Decode and normalize one stored payload without mutating its transaction."""
@@ -261,10 +239,10 @@ def _decode_credentials(
     except (OSError, TypeError, ValueError, InvalidTag) as exc:
         msg = "Stored OAuth credentials could not be loaded"
         raise OAuthCredentialUnreadableError(msg) from exc
-    return _without_legacy_publication(credentials)
+    return credential_compat.without_legacy_publication(credentials)
 
 
-def _oauth_credential_database_path(context: _OAuthCredentialStoreContext) -> Path:
+def _oauth_credential_database_path(context: OAuthCredentialStoreContext) -> Path:
     """Return the private SQLite path for one canonical OAuth credential scope."""
     credential_path = scoped_credentials_path(
         context.provider.credential_service,
@@ -276,7 +254,7 @@ def _oauth_credential_database_path(context: _OAuthCredentialStoreContext) -> Pa
 
 @asynccontextmanager
 async def oauth_credential_transaction(
-    context: _OAuthCredentialStoreContext,
+    context: OAuthCredentialStoreContext,
 ) -> AsyncIterator[OAuthCredentialTransaction]:
     """Acquire one cancellable cross-process transaction for a credential scope."""
     database_path = _oauth_credential_database_path(context)
@@ -299,7 +277,7 @@ async def oauth_credential_transaction(
 
 @asynccontextmanager
 async def oauth_credential_reader(
-    context: _OAuthCredentialStoreContext,
+    context: OAuthCredentialStoreContext,
 ) -> AsyncIterator[_OAuthCredentialReader]:
     """Read the last committed state without contending with an admitted writer."""
     database_path = _oauth_credential_database_path(context)
@@ -320,7 +298,7 @@ async def oauth_credential_reader(
 
 
 async def _initialize_store(
-    context: _OAuthCredentialStoreContext,
+    context: OAuthCredentialStoreContext,
     connection: sqlite3.Connection,
 ) -> None:
     """Create and bind one authoritative SQLite credential database."""
@@ -388,7 +366,7 @@ async def _initialize_store(
 
 
 async def _reader_requires_write_preparation(
-    context: _OAuthCredentialStoreContext,
+    context: OAuthCredentialStoreContext,
     database_path: Path,
 ) -> bool:
     """Return whether a reader needs store creation."""
@@ -415,7 +393,7 @@ async def _reader_requires_write_preparation(
 
 
 def _validate_initialized_store(
-    context: _OAuthCredentialStoreContext,
+    context: OAuthCredentialStoreContext,
     connection: sqlite3.Connection,
     *,
     row: sqlite3.Row | None = None,
@@ -439,7 +417,7 @@ def _validate_initialized_store(
 
 
 def _validate_scope_binding(
-    context: _OAuthCredentialStoreContext,
+    context: OAuthCredentialStoreContext,
     connection: sqlite3.Connection,
     row: sqlite3.Row,
 ) -> None:
@@ -447,65 +425,12 @@ def _validate_scope_binding(
     actual_binding = {key: str(row[key]) for key in expected_binding}
     if actual_binding == expected_binding:
         return
-    legacy_key = _compatible_legacy_worker_key(context, connection)
+    legacy_key = credential_compat.compatible_legacy_worker_key(context, connection)
     if legacy_key is not None:
         expected_binding["worker_key"] = legacy_key
     if actual_binding != expected_binding:
         msg = "OAuth credential store belongs to a different credential scope"
         raise OAuthProviderError(msg)
-
-
-def _compatible_legacy_worker_key(
-    context: _OAuthCredentialStoreContext,
-    connection: sqlite3.Connection,
-) -> str | None:
-    """Read legacy requester bindings at stable raw-identity paths without migrating them.
-
-    The requester encoding upgrade changed worker keys but left these stores in place.
-    Accept only lossless legacy spellings and retain the stored binding for rollback.
-    """
-    target = context.worker_target
-    manager = context.credentials_manager
-    if (
-        target is None
-        or target.worker_scope not in {"user", "user_agent"}
-        or not is_oauth_token_service(context.provider.credential_service)
-        or manager.current_worker_key is not None
-        or manager.storage_root != context.runtime_paths.storage_root
-    ):
-        return None
-    identity = target.execution_identity
-    if identity is None or not identity.requester_id:
-        return None
-    requester = identity.requester_id
-    legacy_requester = re.sub(r"[^a-zA-Z0-9._:@+-]+", "_", requester.strip()).strip("_") or "default"
-    if legacy_requester != requester:
-        return None
-    canonical_target = resolve_worker_target(
-        target.worker_scope,
-        target.routing_agent_name,
-        execution_identity=identity,
-        private_agent_names=target.private_agent_names,
-    )
-    if canonical_target != target:
-        return None
-    # Raw requester/agent hashes own legacy stores; never search or adopt worker directories.
-    # Old bindings cannot distinguish a misfiled database from a colliding legacy identity.
-    credential_path = scoped_credentials_path(
-        context.provider.credential_service,
-        credentials_manager=context.credentials_manager,
-        worker_target=context.worker_target,
-    )
-    canonical_path = credential_path.with_name(f"{credential_path.stem}.sqlite3")
-    database_path = next(row[2] for row in connection.execute("PRAGMA database_list") if row[1] == "main")
-    if Path(database_path).absolute() != canonical_path.absolute():
-        return None
-    assert canonical_target.worker_key is not None
-    return canonical_target.worker_key.replace(
-        f":{target.worker_scope}:~{requester}",
-        f":{target.worker_scope}:{requester}",
-        1,
-    )
 
 
 async def _commit_connection(connection: sqlite3.Connection) -> None:
@@ -608,7 +533,7 @@ def _validate_existing_database_path(database_path: Path) -> os.stat_result:
     return database_stat
 
 
-def _scope_binding(context: _OAuthCredentialStoreContext) -> dict[str, str]:
+def _scope_binding(context: OAuthCredentialStoreContext) -> dict[str, str]:
     worker_target = context.worker_target
     worker_scope = (
         worker_target.worker_scope if worker_target is not None and worker_target.worker_scope else "unscoped"
@@ -625,12 +550,6 @@ def _scope_binding(context: _OAuthCredentialStoreContext) -> dict[str, str]:
         "worker_key": worker_target.worker_key if worker_target is not None and worker_target.worker_key else "",
         "routing_agent_name": routing_agent_name,
     }
-
-
-def _without_legacy_publication(credentials: Mapping[str, Any]) -> dict[str, Any]:
-    result = dict(credentials)
-    result.pop(_LEGACY_PUBLICATION_KEY, None)
-    return result
 
 
 def _sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:

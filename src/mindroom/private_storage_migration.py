@@ -19,12 +19,14 @@ from mindroom.durable_write import fsync_directory_durable, write_json_file_dura
 from mindroom.file_locks import advisory_file_lock
 from mindroom.private_instance_identity_store import (
     PrivateInstanceIdentity,
-    historical_private_instance_worker_key,
     load_private_instance_identity,
-    load_private_instance_legacy_alias,
     load_private_instance_record_payload,
     parse_private_instance_identity_payload,
     reconstruct_private_instance_worker_key,
+)
+from mindroom.private_storage_compat import (
+    historical_private_instance_worker_key,
+    load_private_instance_legacy_alias,
 )
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
 
