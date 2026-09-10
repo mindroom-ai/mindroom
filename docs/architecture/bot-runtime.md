@@ -270,7 +270,7 @@ Fallback eligibility and edits share the delivery lock with cleanup, and the tra
 Cleanup preserves the INITIAL identity for surviving sources, and stale history for a surviving request retries canonical preparation with a refreshed payload.
 An approval continuation retains its response INITIAL even when all source messages are deleted; the approval card remains the explicit consent surface.
 Approval creation and source-redaction admission serialize on the existing room-membership row, so creation cannot acquire a source that deletion already settled.
-Recovery can finish a failing approval whose INITIAL was already retired only after card expiration, with no FINAL debt and exact tombstones for its acknowledged response and every owned source.
+Recovery can finish a failing approval whose INITIAL was already retired only after card expiration; `event_journal/legacy_approval_recovery.py` proves no FINAL debt and exact tombstones for its acknowledged response and every owned source inside the current owner's transaction.
 That cleanup settles journal ownership without sending replacement text or recording tool success.
 Saved run metadata remains intentionally redundant so older turns removed by ledger compaction can still be restored for edits.
 `TurnStore` returns any present ledger record unchanged without opening model session storage.

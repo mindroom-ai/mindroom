@@ -1594,6 +1594,7 @@ class ResponseRunner:
             stage=DeliveryStage.INITIAL,
         )
         if initial is not None and initial.retired:
+            # The legacy approval-recovery boundary proves deletion during settlement.
             return await self._approval_responses.settle_failure(failing, reason)
         update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
         if update is None:
@@ -2619,6 +2620,7 @@ class ResponseRunner:
                 stage=DeliveryStage.INITIAL,
             )
             if initial is not None and initial.retired:
+                # Fence old retired owners; legacy_approval_recovery owns the terminal proof.
                 failing = await self._approval_responses.request_failure(
                     owned,
                     "Tool approval response was removed. Please send a new request.",

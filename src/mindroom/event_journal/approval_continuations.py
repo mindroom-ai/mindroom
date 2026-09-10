@@ -13,8 +13,8 @@ from mindroom.legacy_approval_payloads import resolve_legacy_visibility
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import journal, membership_state, outbox
+from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .models import DeliveryStage
-from .projection import is_tombstoned
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -732,30 +732,6 @@ def request_failure(
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 
 
-def _deleted_delivery_is_terminal(
-    transaction: Transaction,
-    principal_id: str,
-    continuation: ApprovalContinuation,
-) -> bool:
-    """Recognize failed approval state left behind by deleted INITIAL cleanup."""
-    if continuation.state != "failing":
-        return False
-    delivery_id = continuation.source_event_ids[0]
-    if outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL) is not None:
-        return False
-    initial = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
-    return (
-        initial is not None
-        and initial.retired
-        and initial.room_id == continuation.room_id
-        and initial.acknowledged_event_id == continuation.response_event_id
-        and all(
-            is_tombstoned(transaction, principal_id, room_id=continuation.room_id, event_id=event_id)
-            for event_id in (*continuation.source_event_ids, continuation.response_event_id)
-        )
-    )
-
-
 def finish(
     transaction: Transaction,
     principal_id: str,
@@ -774,7 +750,7 @@ def finish(
         """,
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
     )
-    if delivered is None and not _deleted_delivery_is_terminal(transaction, principal_id, continuation):
+    if delivered is None and not deleted_delivery_is_terminal(transaction, principal_id, continuation):
         return False
     journal.settle_many(transaction, principal_id, continuation.source_event_ids)
     transaction.execute(
