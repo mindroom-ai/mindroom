@@ -57,6 +57,7 @@ from mindroom.history.storage import has_pending_force_compaction_scope, read_sc
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
+from mindroom.legacy_approval_payloads import restore_legacy_approval_origin
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     fetch_latest_visible_body,
@@ -131,7 +132,6 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
-from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
@@ -1694,19 +1694,7 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> ResponseRequest:
         """Rebuild the original response identity for resumed hooks and post-effects."""
-        transport_sender_id = continuation.transport_sender_id or continuation.requester_id
-        relayed = transport_sender_id != continuation.requester_id
-        origin = continuation.origin or TurnOrigin(
-            transport_sender_id=transport_sender_id,
-            requester_id=continuation.requester_id,
-            sender_entity_name=ROUTER_AGENT_NAME if relayed else None,
-            requester_entity_name=None,
-            sender_kind=SenderKind.MANAGED_ENTITY if relayed else SenderKind.USER,
-            requester_kind=SenderKind.USER,
-            intent=TurnIntent.ROUTER_HANDOFF if relayed else TurnIntent.USER_MESSAGE,
-            source_kind=continuation.source_kind,
-            trust=TurnTrust.TRUSTED_INTERNAL if relayed else TurnTrust.EXTERNAL,
-        )
+        origin = restore_legacy_approval_origin(continuation)
         envelope = MessageEnvelope(
             source_event_id=continuation.source_event_ids[0],
             target=target,

@@ -140,6 +140,8 @@ path = "mindroom.event_journal"
 depends_on = [
     "mindroom.history.types",
     "mindroom.interactive_models",
+    "mindroom.legacy_approval_payloads",
+    "mindroom.legacy_delivery_payloads",
     "mindroom.logging_config",
     "mindroom.matrix.sidecar_content",
 ]
@@ -547,6 +549,29 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.legacy_delivery_payloads"
+depends_on = ["mindroom.constants"]
+visibility = [
+    "mindroom.delivery_gateway",
+    "mindroom.event_journal",
+    "mindroom.event_journal.outbox",
+    "mindroom.matrix.large_messages",
+]
+
+[[modules]]
+path = "mindroom.legacy_approval_payloads"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.turn_origin",
+]
+visibility = [
+    "mindroom.approval_events",
+    "mindroom.event_journal",
+    "mindroom.event_journal.approval_continuations",
+    "mindroom.response_runner",
+]
+
+[[modules]]
 path = "mindroom.agno_session_persistence_patch"
 depends_on = ["mindroom.background_tasks"]
 visibility = ["mindroom.agent_storage"]
@@ -666,6 +691,7 @@ visibility = [
 [[modules]]
 path = "mindroom.approval_events"
 depends_on = [
+    "mindroom.legacy_approval_payloads",
     "mindroom.matrix.event_info",
     "mindroom.matrix.visible_body",
 ]
@@ -1475,6 +1501,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.hooks",
+    "mindroom.legacy_delivery_payloads",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.event_info",
     "mindroom.matrix.room_history_reads",
@@ -1884,6 +1911,7 @@ depends_on = [
     "mindroom.history.turn_recorder",
     "mindroom.history.types",
     "mindroom.hooks",
+    "mindroom.legacy_approval_payloads",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.typing",
     "mindroom.message_target",
@@ -2331,10 +2359,16 @@ path = "mindroom.matrix.sync_continuity"
 depends_on = [
     "mindroom.durable_write",
     "mindroom.file_locks",
+    "mindroom.matrix.legacy_sync_continuity",
 ]
 visibility = [
     "mindroom.bot",
 ]
+
+[[modules]]
+path = "mindroom.matrix.legacy_sync_continuity"
+depends_on = []
+visibility = ["mindroom.matrix.sync_continuity"]
 
 [[modules]]
 path = "mindroom.bot_runtime_view"

@@ -16,7 +16,7 @@ import nio
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
-from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY, DURABLE_FINAL_OUTCOME_VERSION, SKIP_MENTIONS_KEY
+from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     MatrixDelivery,
@@ -48,6 +48,7 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
+from mindroom.legacy_delivery_payloads import add_legacy_final_outcome_marker
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
     MatrixDeliveryFailure,
@@ -1662,10 +1663,7 @@ class DeliveryGateway:
             delivery_result = {"prepared_edit_record": TurnRecordCodec._to_ledger_record(request.prepared_edit_record)}
         if request.defer_source_handoff:
             metadata = interactive_response.interactive_metadata
-            # Older readers recognize any mapping here as a successful FINAL.
-            # Keep that rolling-read signal bounded; the complete result is
-            # local outbox state and cannot make the Matrix event impossible.
-            delivery_extra_content[DURABLE_FINAL_OUTCOME_KEY] = {"version": DURABLE_FINAL_OUTCOME_VERSION}
+            add_legacy_final_outcome_marker(delivery_extra_content)
             delivery_result = {
                 **(delivery_result or {}),
                 "body": display_text,

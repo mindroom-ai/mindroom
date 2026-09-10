@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
+from mindroom.matrix.legacy_sync_continuity import normalize_legacy_sync_continuity_payload
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
 _RECORD_VERSION = "mindroom-sync-continuity-v4"
-_LEGACY_RECORD_VERSIONS = ("mindroom-sync-continuity-v2", "mindroom-sync-continuity-v3")
 
 
 @dataclass(frozen=True)
@@ -91,12 +91,16 @@ class SyncContinuityStore:
             raise _format_error(self._path, "invalid JSON") from exc
         if not isinstance(payload, dict):
             raise _format_error(self._path, "unsupported version")
-        version = payload.get("version")
-        legacy = version in _LEGACY_RECORD_VERSIONS
+        normalized_legacy = normalize_legacy_sync_continuity_payload(
+            payload,
+            path=self._path,
+            current_version=_RECORD_VERSION,
+        )
+        legacy = normalized_legacy is not None
+        if normalized_legacy is not None:
+            payload = normalized_legacy
         expected_fields = {"pending_join_decrypt_fences", "revision", "version"}
-        if legacy:
-            expected_fields.add("checkpoint")
-        elif version != _RECORD_VERSION:
+        if payload.get("version") != _RECORD_VERSION:
             raise _format_error(self._path, "unsupported version")
 
         revision = payload.get("revision")
@@ -112,7 +116,7 @@ class SyncContinuityStore:
         ):
             raise _format_error(self._path, "invalid join fences")
         record = SyncContinuityRecord(
-            revision=revision + int(legacy),
+            revision=revision,
             pending_join_decrypt_fences=frozenset(cast("list[str]", raw_fences)),
         )
         if legacy:

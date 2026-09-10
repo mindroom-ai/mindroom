@@ -30,6 +30,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
+from mindroom.legacy_delivery_payloads import decode_delivery_result
 
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership_state import claim_membership_epoch
@@ -44,7 +45,6 @@ _OUTBOX_COLUMNS = """
     attempted, retired, permanent_failure_reason, sending_device_id
 """
 _DELIVERY_STAGE_VALUES = frozenset(item.value for item in DeliveryStage)
-_LEGACY_FINAL_OUTCOME_KEY = "io.mindroom.final_delivery"
 
 
 def matrix_delivery_payload(
@@ -89,23 +89,6 @@ def _delivery_result_json(result: Mapping[str, object] | None) -> str | None:
     if result is None:
         return None
     return json.dumps(dict(result), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
-
-
-def _legacy_delivery_result(payload: Mapping[str, object]) -> dict[str, object] | None:
-    """Read the local result older writers placed inside Matrix content."""
-    replacement = payload.get("m.new_content")
-    legacy_result = (
-        cast("Mapping[str, object]", replacement).get(_LEGACY_FINAL_OUTCOME_KEY)
-        if isinstance(replacement, dict)
-        else payload.get(_LEGACY_FINAL_OUTCOME_KEY)
-    )
-    return dict(cast("Mapping[str, object]", legacy_result)) if isinstance(legacy_result, dict) else None
-
-
-def _is_local_result_compatibility_marker(result: Mapping[str, object]) -> bool:
-    """Return whether a version-only mapping is the bounded old-reader signal."""
-    version = result.get("version")
-    return set(result) == {"version"} and isinstance(version, int) and not isinstance(version, bool)
 
 
 def _delivery_identity(content: Mapping[str, object] | None) -> tuple[str, str, DeliveryStage] | None:
@@ -854,16 +837,11 @@ def _delivery(row: Row) -> MatrixDelivery:
     if not isinstance(payload, dict):
         msg = f"Outbox payload for delivery {row['delivery_id']!r} is not an object"
         raise TypeError(msg)
-    legacy_result = _legacy_delivery_result(payload)
-    raw_result = row["result_json"]
-    if (legacy_result is not None and not _is_local_result_compatibility_marker(legacy_result)) or raw_result is None:
-        result = legacy_result
-    else:
-        decoded_result = json.loads(raw_result)
-        if not isinstance(decoded_result, dict):
-            msg = f"Outbox result for delivery {row['delivery_id']!r} is not an object"
-            raise TypeError(msg)
-        result = decoded_result
+    result = decode_delivery_result(
+        payload,
+        cast("str | None", row["result_json"]),
+        delivery_id=str(row["delivery_id"]),
+    )
     return MatrixDelivery(
         delivery_id=row["delivery_id"],
         stage=DeliveryStage(row["stage"]),
