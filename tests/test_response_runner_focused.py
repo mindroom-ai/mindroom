@@ -1849,6 +1849,100 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["ready", "failing"])
+@pytest.mark.parametrize("cards_expired", [True, False])
+async def test_deleted_approval_recovery_expires_cards_without_editing_or_executing(
+    tmp_path: Path,
+    state: str,
+    *,
+    cards_expired: bool,
+) -> None:
+    """A retired deleted response settles only after cards, and never resumes tools."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    store = runner.deps.approval_store
+    await _admit_approval_source(store)
+    await store.enqueue_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.INITIAL,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        payload={"body": "Waiting"},
+    )
+    await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+    await store.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.INITIAL,
+        event_id="$waiting",
+        delivered_projections=(),
+    )
+    continuation = ApprovalContinuation(
+        approval_id="deleted-approval",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state=state,
+    )
+    assert await store.create_approval_continuation(continuation) is not None
+    await bot._journal_store.backend.write(
+        lambda tx: tx.execute(
+            "UPDATE matrix_delivery_outbox SET retired = 1 WHERE delivery_id = ? AND stage = 'initial'",
+            ("$source",),
+        ),
+    )
+    for index, event_id in enumerate(("$source", "$waiting")):
+        await store.admit(
+            InboundEvent(
+                event_id=f"$redact-{index}",
+                room_id=continuation.room_id,
+                thread_id=None,
+                kind=EventKind.REDACTION,
+                event_class=EventClass.CONTEXT_ONLY,
+                sender="@user:localhost",
+                origin_server_ts=2 + index,
+                source={"event_id": f"$redact-{index}", "redacts": event_id, "content": {}},
+            ),
+            ProjectedEvent(
+                event_id=f"$redact-{index}",
+                room_id=continuation.room_id,
+                thread_id=None,
+                sender="@user:localhost",
+                origin_server_ts=2 + index,
+                content={},
+                replaces_event_id=None,
+                redacts_event_id=event_id,
+            ),
+        )
+    expire = AsyncMock(return_value=cards_expired)
+    manager = SimpleNamespace(expire_continuation_cards=expire)
+    edit = AsyncMock(side_effect=AssertionError("deleted response edited"))
+    with (
+        patch("mindroom.approval_response.approval_manager.get_approval_store", return_value=manager),
+        patch.object(DeliveryGateway, "edit_text", new=edit),
+    ):
+        handled, _ = await runner._recover_nonready_approval(
+            continuation,
+            target=MessageTarget.resolve(continuation.room_id, "$thread", "$source"),
+        )
+
+    assert handled
+    expire.assert_awaited_once_with(continuation.approval_id)
+    edit.assert_not_awaited()
+    assert await store.is_pending("$source") is not cards_expired
+    remaining = await store.approval_continuation(continuation.approval_id)
+    assert (remaining is None) is cards_expired
+    if remaining is not None:
+        assert remaining.state == "failing"
+
+
+@pytest.mark.asyncio
 async def test_failing_continuation_recovers_frozen_success_before_failure_settlement(tmp_path: Path) -> None:
     """A failure fence racing a generated answer cannot retire that answer as a denial."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)

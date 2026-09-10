@@ -448,6 +448,7 @@ class ResponseRecoveryState:
     redacted_sources: tuple[bool, ...]
     turn_records: tuple[TurnRecord | None, ...]
     source_tombstones: tuple[bool, ...] = ()
+    approval_owned: bool = False
 
 
 @dataclass(frozen=True, slots=True)

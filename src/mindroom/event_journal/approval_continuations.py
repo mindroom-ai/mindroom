@@ -14,6 +14,7 @@ from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import journal, membership_state, outbox
 from .models import DeliveryStage
+from .projection import is_tombstoned
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -378,13 +379,25 @@ def create(
     """Create one paused-run owner only while all of its sources remain pending."""
     if not continuation.source_event_ids:
         return None
+    # Admission and approval creation must agree which owner receives a
+    # concurrent source redaction, on PostgreSQL as well as SQLite.
+    if membership_state.claim_active_membership_epoch(transaction, principal_id, room_id=continuation.room_id) is None:
+        return None
+    initial = outbox.load(
+        transaction,
+        principal_id,
+        delivery_id=continuation.source_event_ids[0],
+        stage=DeliveryStage.INITIAL,
+    )
+    if initial is not None and initial.retired:
+        return None
     for event_id in continuation.source_event_ids:
         row = transaction.fetchone(
             """
             SELECT 1 AS present FROM journal_events
-            WHERE principal_id = ? AND event_id = ? AND state = 'pending'
+            WHERE principal_id = ? AND event_id = ? AND room_id = ? AND state = 'pending'
             """,
-            (principal_id, event_id),
+            (principal_id, event_id, continuation.room_id),
         )
         if row is None:
             return None
@@ -719,13 +732,37 @@ def request_failure(
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 
 
+def _deleted_delivery_is_terminal(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+) -> bool:
+    """Recognize failed approval state left behind by deleted INITIAL cleanup."""
+    if continuation.state != "failing":
+        return False
+    delivery_id = continuation.source_event_ids[0]
+    if outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL) is not None:
+        return False
+    initial = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+    return (
+        initial is not None
+        and initial.retired
+        and initial.room_id == continuation.room_id
+        and initial.acknowledged_event_id == continuation.response_event_id
+        and all(
+            is_tombstoned(transaction, principal_id, room_id=continuation.room_id, event_id=event_id)
+            for event_id in (*continuation.source_event_ids, continuation.response_event_id)
+        )
+    )
+
+
 def finish(
     transaction: Transaction,
     principal_id: str,
     *,
     approval_id: str,
 ) -> bool:
-    """Release sources after the continuation's FINAL reaches a terminal outcome."""
+    """Release sources after terminal FINAL delivery or proven failed-response deletion."""
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return False
@@ -737,7 +774,7 @@ def finish(
         """,
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
     )
-    if delivered is None:
+    if delivered is None and not _deleted_delivery_is_terminal(transaction, principal_id, continuation):
         return False
     journal.settle_many(transaction, principal_id, continuation.source_event_ids)
     transaction.execute(

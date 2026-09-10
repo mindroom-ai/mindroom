@@ -255,6 +255,10 @@ class PrincipalStore:
                 )
             )
             return ResponseRecoveryState(
+                approval_owned=any(
+                    outbox.approval_owns_delivery(transaction, self._principal_id, event_id)
+                    for event_id in source_event_ids
+                ),
                 pending_sources=pending,
                 redacted_sources=tuple(
                     not is_pending

@@ -608,6 +608,17 @@ def response_delivery_id(transaction: Transaction, principal_id: str, *, room_id
     return None if row is None else str(row["delivery_id"])
 
 
+def approval_owns_delivery(transaction: Transaction, principal_id: str, delivery_id: str) -> bool:
+    """Read approval ownership without loading its persisted run payload."""
+    return (
+        transaction.fetchone(
+            "SELECT 1 FROM approval_continuation_sources WHERE principal_id = ? AND event_id = ?",
+            (principal_id, delivery_id),
+        )
+        is not None
+    )
+
+
 def deleted_initials(
     transaction: Transaction,
     principal_id: str,
@@ -635,6 +646,10 @@ def deleted_initials(
             WHERE final.principal_id = delivery.principal_id AND final.delivery_id = delivery.delivery_id
               AND final.stage = 'final' AND (final.acknowledged_event_id IS NOT NULL
                 OR (final.retired = 0 AND final.permanent_failure_reason IS NULL))
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM approval_continuation_sources AS source
+            WHERE source.principal_id = delivery.principal_id AND source.event_id = delivery.delivery_id
           ){cursor_clause}
         ORDER BY created_at_ns, delivery_id/*bytes*/ LIMIT 100
         """,  # noqa: S608 - fixed column list and cursor clause
@@ -646,6 +661,9 @@ def deleted_initials(
 def retire_deleted_initial(transaction: Transaction, principal_id: str, delivery_id: str) -> None:
     """Retain exact ACK identity while fencing sends after proven disappearance."""
     _lock_delivery_stages(transaction, principal_id, delivery_id)
+    if approval_owns_delivery(transaction, principal_id, delivery_id):
+        msg = "An approval continuation still owns this INITIAL"
+        raise RuntimeError(msg)
     final = load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL)
     if final is not None and (
         final.acknowledged_event_id is not None or not (final.retired or final.permanently_failed)

@@ -74,7 +74,8 @@ class ResponseDeliveryRecovery:
         """Only genuinely orphaned work may acquire synthetic startup continuation."""
         state = await self.state(delivery)
         return not (
-            any(state.source_tombstones)
+            state.approval_owned
+            or any(state.source_tombstones)
             or self._final_owned(state)
             or any(state.pending_sources)
             or state.sources_settled_by_departure
@@ -91,7 +92,7 @@ class ResponseDeliveryRecovery:
     async def permits_supersession(self, delivery: MatrixDelivery) -> bool:
         """Only terminal or revoked INITIAL work may lose its canonical replay."""
         state = await self.state(delivery)
-        return (
+        return not state.approval_owned and (
             self.deleted(state)
             or self._final_owned(state)
             or state.sources_settled_by_departure
@@ -109,7 +110,7 @@ class ResponseDeliveryRecovery:
         if initial is None or initial.retired:
             return False
         state = await self.state(initial)
-        if not self.deleted(state) or self._final_owned(state):
+        if state.approval_owned or not self.deleted(state) or self._final_owned(state):
             return False
         for source_id, deleted in zip(
             (self.turn_store().get_turn_record(turn_id) or TurnRecord.create([turn_id])).source_event_ids,

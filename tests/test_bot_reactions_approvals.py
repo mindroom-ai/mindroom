@@ -1633,6 +1633,15 @@ class TestAgentBot(AgentBotTestBase):
             )
             assert conversation.messages == ()
             assert await first.approval_store.approval_continuation_for_source("$source") == persisted
+            # Startup delivery recovery must preserve the approval's response,
+            # including when the redaction callback has already settled.
+            await first._delivery_gateway.recover_deliveries()
+            initial = await first.approval_store.load_matrix_delivery(
+                delivery_id="$source",
+                stage=DeliveryStage.INITIAL,
+            )
+            assert initial is not None
+            assert not initial.retired
         if first_agent.db is not None:
             first_agent.db.close()
 
