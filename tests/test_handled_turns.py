@@ -165,7 +165,7 @@ async def test_scoped_lookup_tracks_updates_and_retention(journal_store: EventJo
 def _write_legacy_ledger(path: Path, records: dict[str, dict[str, object]]) -> Path:
     """Write one pre-database JSON ledger exactly as the retired writer left it."""
     path.write_text(
-        json.dumps({"schema_version": TurnRecordCodec.schema_version(), "records": records}),
+        json.dumps({"schema_version": 1, "records": records}),
         encoding="utf-8",
     )
     return path
