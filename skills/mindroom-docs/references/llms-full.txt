@@ -17843,7 +17843,7 @@ The journal migration retires unfinished old requests, deliveries, approvals, an
 An interrupted transaction rolls back; the next startup retries the upgrade.
 After that transaction commits, subsequent startups preserve new pending work normally.
 Recognized older `sync_continuity` records are converted atomically, retaining pending join/decrypt fences while discarding checkpoints now owned by Nio.
-Before Nio first adopts an existing crypto store, MindRoom also retires obsolete transport recovery rows under the store's exclusive lease without changing crypto keys.
+Before Nio first adopts an existing crypto store, MindRoom validates the retained account pickle, then retires obsolete transport recovery rows and legacy sync tokens in one transaction under the store's exclusive lease without changing crypto keys.
 An already durable Nio store is never reset by this migration.
 
 ## What does not continue
@@ -17874,6 +17874,20 @@ If the device store is missing, restore the deployment's matching storage backup
 Hard logout, a deleted server device, a changed returned identity, corrupt storage, or an unknown storage format still requires operator recovery.
 An existing Nio 1.0 session is bound to its journal consumer; clearing the journal or crypto directory is not a supported repair.
 Preserve the failed deployment's state when recovering it, because retained input and attempted deliveries may still need reconciliation.
+
+## Rolling back
+
+Changing only the image back to an older release is unsafe after the new version has opened persistent storage.
+Older versions can write to upgraded crypto stores and do not reliably reject newer continuity records.
+The journal upgrade and individual crypto upgrades use separate transactions; successful rollback of one database does not roll back the others.
+
+Before the upgrade, stop all primary, worker, script, and background writers and capture a coordinated backup of configuration, credentials, workspaces, memories, the journal and installation binding, every Matrix device store and trust sidecar, continuity files, and session storage.
+Include separately mounted session and state volumes in that recovery point.
+Verify that these backups can be restored before proceeding.
+
+To roll back, stop all writers and hold ingress closed, preserve the failed upgraded state separately, and restore the complete coordinated recovery point before starting the previous release.
+Restore the journal and device stores together; restoring only one can invalidate their consumer binding.
+Keep the preserved upgraded state for reconciliation because post-upgrade user work or external tool actions may not exist in the restored backup.
 
 # Private storage migration
 

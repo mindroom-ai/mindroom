@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 from nio import LocalProtocolError
 from nio.crypto import InboundGroupSession, OlmAccount, OutboundGroupSession
-from nio.durable import DurableSyncConfig
+from nio.durable import DurableSyncConfig, SlidingSyncConfig
 from nio.store import DefaultStore
 from nio.store._sqlite_lease import FileLease
 
@@ -26,10 +26,15 @@ DEVICE = "DEVICE"
 _SCHEMA = Path(__file__).parent / "fixtures" / "pre_nio1_recovery.sql"
 
 
-def _legacy_crypto(path: Path, recovery: str) -> tuple[dict[str, str], InboundGroupSession, str]:
+def _legacy_crypto(
+    path: Path,
+    recovery: str,
+    *,
+    pickle_key: str = "DEFAULT_KEY",
+) -> tuple[dict[str, str], InboundGroupSession, str]:
     """Persist real Olm/Megolm keys beside frozen released recovery tables."""
     path.mkdir(parents=True, exist_ok=True)
-    store = DefaultStore(ACCOUNT, DEVICE, str(path), pickle_key="DEFAULT_KEY")
+    store = DefaultStore(ACCOUNT, DEVICE, str(path), pickle_key=pickle_key)
     account = OlmAccount()
     store.save_account(account)
     outbound = OutboundGroupSession()
@@ -152,9 +157,119 @@ async def test_durable_crypto_store_is_never_migrated_again(tmp_path: Path) -> N
                 INSERT INTO syncrecoverygaps VALUES (
                     1, '!room:example.org', 2, 'target', NULL, 0, (SELECT id FROM accounts LIMIT 1))
             """)
+            connection.execute("UPDATE NioDurableMeta SET cursor = 'retained-durable-checkpoint'")
             connection.commit()
         retire_legacy_crypto_recovery(database_path, user_id=ACCOUNT, device_id=DEVICE)
         with closing(sqlite3.connect(database_path)) as connection:
             assert connection.execute("SELECT COUNT(*) FROM syncrecoverygaps").fetchone() == (1,)
+            assert connection.execute("SELECT cursor FROM NioDurableMeta").fetchone() == (
+                "retained-durable-checkpoint",
+            )
     finally:
         await journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sliding", [False, True])
+async def test_legacy_sync_checkpoint_is_not_adopted(tmp_path: Path, sliding: bool) -> None:
+    """Retired checkpoints cannot select the wrong transport or skip the fresh baseline."""
+    runtime = _runtime_paths(tmp_path)
+    path = olm_store_dir(ACCOUNT, runtime)
+    keys, _, _ = _legacy_crypto(path, "pending")
+    store = DefaultStore(ACCOUNT, DEVICE, str(path), pickle_key="DEFAULT_KEY")
+    store.save_sync_token("obsolete-checkpoint")
+    store.database.close()
+    journal = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    try:
+        for _ in range(2):
+            opened = await open_owned_matrix_session(
+                "https://example.org",
+                MatrixCredentials(ACCOUNT, DEVICE, "test-token"),
+                runtime,
+                consumer_store=journal.principal(ACCOUNT),
+                new_consumer_generation=uuid4(),
+                config=DurableSyncConfig(sliding=SlidingSyncConfig() if sliding else None),
+            )
+            try:
+                assert opened.client.olm is not None
+                assert opened.client.olm.account.identity_keys == keys
+                with closing(sqlite3.connect(path / f"{ACCOUNT}_{DEVICE}.db")) as connection:
+                    assert connection.execute("SELECT cursor FROM NioDurableMeta").fetchone() == (None,)
+                    assert connection.execute("SELECT COUNT(*) FROM synctokens").fetchone() == (0,)
+            finally:
+                await opened.session.close()
+                await opened.client.close()
+    finally:
+        await journal.close()
+
+
+def test_invalid_crypto_account_keeps_legacy_recovery(tmp_path: Path) -> None:
+    """A failed key preflight must leave all recovery rows available for operator repair."""
+    _legacy_crypto(tmp_path, "pending")
+    path = tmp_path / f"{ACCOUNT}_{DEVICE}.db"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE accounts SET account = ?", (b"invalid-pickle",))
+        connection.commit()
+    with pytest.raises(ValueError, match=r"(?i)pickle"):
+        retire_legacy_crypto_recovery(path, user_id=ACCOUNT, device_id=DEVICE)
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pendingtimelineevents").fetchone() == (1,)
+        assert connection.execute("SELECT account FROM accounts").fetchone() == (b"invalid-pickle",)
+
+
+def test_empty_crypto_store_without_transport_state_needs_no_preflight(tmp_path: Path) -> None:
+    """A schema-only store remains adoptable when no legacy transport rows exist."""
+    store = DefaultStore(ACCOUNT, DEVICE, str(tmp_path), pickle_key="DEFAULT_KEY")
+    store.database.close()
+
+    retire_legacy_crypto_recovery(
+        tmp_path / f"{ACCOUNT}_{DEVICE}.db",
+        user_id=ACCOUNT,
+        device_id=DEVICE,
+    )
+
+
+def test_missing_crypto_account_keeps_legacy_recovery(tmp_path: Path) -> None:
+    """A missing retained identity must block destructive transport cleanup."""
+    _legacy_crypto(tmp_path, "pending")
+    path = tmp_path / f"{ACCOUNT}_{DEVICE}.db"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("DELETE FROM accounts")
+        connection.commit()
+    with pytest.raises(LocalProtocolError, match="account is missing"):
+        retire_legacy_crypto_recovery(path, user_id=ACCOUNT, device_id=DEVICE)
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pendingtimelineevents").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("correct_key", [False, True])
+def test_crypto_retirement_authenticates_the_configured_pickle_key(tmp_path: Path, correct_key: bool) -> None:
+    """Only the actual configured key permits retirement; wrong keys retain recovery."""
+    _legacy_crypto(tmp_path, "pending", pickle_key="custom-pickle-key")
+    path = tmp_path / f"{ACCOUNT}_{DEVICE}.db"
+    if correct_key:
+        retire_legacy_crypto_recovery(path, user_id=ACCOUNT, device_id=DEVICE, pickle_key="custom-pickle-key")
+    else:
+        with pytest.raises(ValueError, match="pickle couldn't be decrypted"):
+            retire_legacy_crypto_recovery(path, user_id=ACCOUNT, device_id=DEVICE, pickle_key="wrong-key")
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pendingtimelineevents").fetchone() == (0 if correct_key else 1,)
+
+
+def test_sync_token_retirement_failure_rolls_back_recovery(tmp_path: Path) -> None:
+    """Failure in the last retired table cannot leave earlier recovery partially cleared."""
+    _legacy_crypto(tmp_path, "pending")
+    store = DefaultStore(ACCOUNT, DEVICE, str(tmp_path), pickle_key="DEFAULT_KEY")
+    store.save_sync_token("obsolete-checkpoint")
+    store.database.close()
+    path = tmp_path / f"{ACCOUNT}_{DEVICE}.db"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.executescript("""
+            CREATE TRIGGER fail_token_retirement BEFORE DELETE ON synctokens
+            BEGIN SELECT RAISE(ABORT, 'interrupted token retirement'); END;
+        """)
+    with pytest.raises(sqlite3.IntegrityError, match="interrupted token retirement"):
+        retire_legacy_crypto_recovery(path, user_id=ACCOUNT, device_id=DEVICE)
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pendingtimelineevents").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM synctokens").fetchone() == (1,)

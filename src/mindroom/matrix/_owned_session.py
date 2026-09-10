@@ -225,6 +225,7 @@ async def open_owned_matrix_session(
                     store_path / database_name,
                     user_id=credentials.user_id,
                     device_id=credentials.device_id,
+                    pickle_key=client.config.pickle_key,
                 ),
             ),
         )
