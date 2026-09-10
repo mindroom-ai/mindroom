@@ -802,6 +802,24 @@ async def test_source_event_revisions_persist_across_restart_and_run_recovery(
     assert recovered.requester_id == "@user:example.com"
 
 
+def test_current_codec_restores_legacy_revision_replay_with_source_revision_timestamp() -> None:
+    """Legacy replay facts retain the edit timestamp rather than the turn timestamp."""
+    record = TurnRecord.create(
+        ["$source"],
+        source_event_prompts={"$source": "edited"},
+        source_event_revisions={"$source": (1_000_022, "$edit")},
+        timestamp=1_000_011,
+    )
+    raw = TurnRecordCodec._to_ledger_record(record)
+    raw.pop("revision_replay")
+
+    restored = TurnRecordCodec._from_ledger_record("$source", raw)
+
+    assert restored is not None
+    assert restored.revision_replay["$edit"].timestamp_ms == 1_000_022
+    assert restored.revision_replay["$edit"].legacy_summary_provenance
+
+
 @pytest.mark.asyncio
 async def test_user_stop_state_persists_across_restart(journal_store: EventJournalStore) -> None:
     """Durable STOP order and visible completion survive outside run metadata."""

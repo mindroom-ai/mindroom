@@ -536,6 +536,17 @@ depends_on = []
 visibility = ["mindroom.openai_models"]
 
 [[modules]]
+path = "mindroom.legacy_handled_turns"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.turn_record",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.handled_turns",
+]
+
+[[modules]]
 path = "mindroom.agno_session_persistence_patch"
 depends_on = ["mindroom.background_tasks"]
 visibility = ["mindroom.agent_storage"]
@@ -3087,6 +3098,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.event_journal_open",
     "mindroom.handled_turns",
+    "mindroom.legacy_handled_turns",
     "mindroom.hooks",
     "mindroom.inbound_turn_normalizer",
     "mindroom.journal_dispatch",
