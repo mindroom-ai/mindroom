@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from .backend import Transaction
 
 # Legacy format: A live approval owns a retired INITIAL whose sources and response were deleted.
-# Last legacy release: v2026.9.63; replacement: unreleased approval-aware INITIAL cleanup.
+# Last legacy release: v2026.9.63; replacement: v2026.9.64 added approval-aware INITIAL cleanup.
 # Handling: Recognize terminal deletion inside the caller's transaction; current owners expire cards,
 # fence failure, settle sources, and delete the continuation without replaying tools or sending text.
 # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_deleted_approval_failure_settles_only_proven_terminal_delivery
