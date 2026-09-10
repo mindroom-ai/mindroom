@@ -196,6 +196,8 @@ class PrincipalStore:
         self,
         *,
         limit: int = _DEFAULT_PENDING_LIMIT,
+        room_id: str | None = None,
+        event_id: str | None = None,
         after_receipt_order: int | None = None,
         runtime_generation: str = "unmanaged",
     ) -> PendingPage:
@@ -205,6 +207,8 @@ class PrincipalStore:
                 transaction,
                 self._principal_id,
                 limit=limit,
+                room_id=room_id,
+                event_id=event_id,
                 after_receipt_order=after_receipt_order,
                 runtime_generation=runtime_generation,
             ),

@@ -375,6 +375,11 @@ _INDEXES = (
     WHERE state = 'pending'
     """,
     """
+    CREATE INDEX IF NOT EXISTS journal_events_pending_room
+    ON journal_events (principal_id, room_id, receipt_order)
+    WHERE state = 'pending'
+    """,
+    """
     -- The replay guard asks whether one conversation holds newer unfinished
     -- work. `journal_events_pending` orders the principal's whole pending set
     -- by receipt, so answering from it means filtering every pending row in

@@ -1449,9 +1449,14 @@ class TestPendingEventWorker:
                 tracked_lane.cancel()
             await asyncio.gather(stopping, draining, *worker._lanes.values(), return_exceptions=True)
 
+    @pytest.mark.parametrize("retry_source", [False, True])
+    @pytest.mark.parametrize("read_fails", [False, True])
     async def test_a_pre_stop_recovery_drain_cannot_dispatch_after_restart(
         self,
         alice: PrincipalStore,
+        *,
+        retry_source: bool,
+        read_fails: bool,
     ) -> None:
         """Restarting does not make an old drain current again."""
         first_read_started = asyncio.Event()
@@ -1467,6 +1472,8 @@ class TestPendingEventWorker:
                 self,
                 *,
                 limit: int = 256,
+                room_id: str | None = None,
+                event_id: str | None = None,
                 after_receipt_order: int | None = None,
                 runtime_generation: str = "unmanaged",
             ) -> PendingPage:
@@ -1474,11 +1481,16 @@ class TestPendingEventWorker:
                 if self.pending_calls == 1:
                     page = await self.inner.pending(
                         limit=limit,
+                        room_id=room_id,
+                        event_id=event_id,
                         after_receipt_order=after_receipt_order,
                         runtime_generation=runtime_generation,
                     )
                     first_read_started.set()
                     await release_first_read.wait()
+                    if read_fails:
+                        msg = "stale read failed"
+                        raise RuntimeError(msg)
                     return page
                 return PendingPage((), resume_after=None, reached_end=True, unreadable_rows=0)
 
@@ -1495,6 +1507,8 @@ class TestPendingEventWorker:
 
         await self._admit(alice, text_event("$message"))
         worker = PendingEventWorker(store=BlockingFirstRead(alice), handle=handle)
+        if retry_source:
+            worker.wake(event_ids=("$message",))
         stale_drain = asyncio.create_task(worker.drain_once())
         await first_read_started.wait()
 
@@ -1502,10 +1516,16 @@ class TestPendingEventWorker:
         worker.start()
         try:
             release_first_read.set()
-            await asyncio.wait_for(stale_drain, timeout=1.0)
+            if read_fails and not retry_source:
+                with pytest.raises(RuntimeError, match="stale read failed"):
+                    await asyncio.wait_for(stale_drain, timeout=1.0)
+            else:
+                await asyncio.wait_for(stale_drain, timeout=1.0)
             await asyncio.sleep(0)
 
             assert not handled.is_set()
+            assert worker._rooms == {}
+            assert worker._retry_sources == set()
         finally:
             release_first_read.set()
             await worker.stop()
@@ -1653,7 +1673,7 @@ class TestPendingEventWorker:
         # because that note is the only thing that arranges the second look. A
         # bare yield cannot fail -- a second lane over one room is impossible
         # either way -- so it proved the wakeup without exercising it.
-        await _eventually(lambda: worker._rooms_with_more == {ROOM})
+        await _eventually(lambda: worker._ready_rooms == {ROOM})
         released.set()
 
         await _eventually(lambda: handled == ["$slow", "$late"])
@@ -1799,14 +1819,7 @@ class TestPendingEventWorker:
         self,
         alice: PrincipalStore,
     ) -> None:
-        """A lane runs its list verbatim, so the list has to be in receipt order.
-
-        Reclaimed deferrals seed the grouping before any page is read, and the
-        reclaim knows nothing about where they sit in the backlog. So a later
-        message taken back from a dead owner was handed to the room's lane
-        ahead of an earlier one that had simply never run -- the room answered
-        out of order, which is the one thing a lane exists to prevent.
-        """
+        """Reclaiming a later deferral still starts with the room's earliest work."""
         handled: list[str] = []
         owner_alive = True
 
@@ -1822,8 +1835,7 @@ class TestPendingEventWorker:
             deferral_is_live=lambda _event: owner_alive,
         )
 
-        # Seed a later deferred source, then reclaim it alongside the earlier
-        # pending row. The lane must merge both in receipt order.
+        # A lost owner requests replay; the room query determines its order.
         late = await alice.load_event("$late")
         assert late is not None
         worker._deferred["$late"] = late
@@ -1833,34 +1845,30 @@ class TestPendingEventWorker:
 
         assert handled == ["$early", "$late"]
 
-    async def test_a_wrapped_pass_does_not_run_its_tail_before_its_head(
+    async def test_a_wrapped_discovery_keeps_room_callbacks_in_receipt_order(
         self,
         alice: PrincipalStore,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The other way one room's list comes out inverted.
-
-        A pass that ran out of page budget resumes at its cursor, reads to the
-        end of the backlog, and only then wraps to the front. Those two blocks
-        arrive in the opposite order to the one they were received in, and the
-        room's lane is handed the concatenation.
-        """
+        """Discovery can start at the tail without handing that tail to the lane."""
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
         monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 3)
         for index in range(8):
             await self._admit(alice, text_event(f"$m{index}", ts=1_000 + index))
+        handled: list[str] = []
 
         async def handle(event: JournalEvent) -> bool:
-            del event
+            handled.append(event.event_id)
             return True
 
         worker = PendingEventWorker(store=alice, handle=handle)
-        # One budget-limited pass parks the cursor part way through the
-        # backlog; the next reads the tail, hits the end, and wraps.
-        await worker._collect_dispatchable()
-        by_room, _more = await worker._collect_dispatchable()
-
-        assert [event.event_id for event in by_room[ROOM]] == ["$m0", "$m1", "$m6", "$m7"]
+        worker._scan_cursor = (await alice.pending(limit=6))[-1].receipt_order
+        worker.start()
+        try:
+            await _eventually_async(alice.pending)
+            assert handled == ["$m0", "$m1", "$m2", "$m3", "$m4", "$m5", "$m6", "$m7"]
+        finally:
+            await worker.stop()
 
     async def test_a_lost_owner_is_noticed_without_any_further_admission(
         self,
@@ -1927,6 +1935,77 @@ async def _dispatch_worker_pass(worker: PendingEventWorker) -> None:
 class TestRoomRetryBackoff:
     """Only a room's own successful work resets its bounded retry delay."""
 
+    async def test_busy_room_keeps_work_skipped_by_discovery_in_order(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A busy lane cannot lose its earlier messages as discovery moves on."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$first":
+                entered.set()
+                await release.wait()
+            return True
+
+        for event_id in ("$first", "$second", "$third", "$fourth"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await worker._dispatch_ready_rooms()
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            await worker._dispatch_ready_rooms()
+            await worker._dispatch_ready_rooms()
+            release.set()
+            await asyncio.gather(*worker._lanes.values())
+            await asyncio.sleep(0)
+            await _dispatch_worker_pass(worker)
+            assert attempts[:2] == ["$first", "$second"]
+            for _ in range(4):
+                await _dispatch_worker_pass(worker)
+            assert attempts == ["$first", "$second", "$third", "$fourth"]
+        finally:
+            release.set()
+            await worker.stop()
+
+    async def test_ready_retry_runs_while_new_admissions_keep_discovery_advancing(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovery must not depend on reaching the end of a growing global scan."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if attempts == ["$head"]:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$head"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await worker._room_retries[ROOM].task
+            for index in range(8):
+                await TestPendingEventWorker._admit(alice, text_event(f"$later-{index}"))
+                await _dispatch_worker_pass(worker)
+            assert attempts[:2] == ["$head", "$head"]
+            assert not await alice.is_pending("$head")
+        finally:
+            await worker.stop()
+
     async def test_wrapped_retry_wakes_the_skipped_tail(
         self,
         alice: PrincipalStore,
@@ -1964,10 +2043,9 @@ class TestRoomRetryBackoff:
         finally:
             await worker.stop()
 
-    async def test_approval_owned_failed_source_releases_its_room(
+    async def test_room_read_respects_approval_handoff_after_discovery(
         self,
         alice: PrincipalStore,
-        retry_sleeps: list[tuple[float, asyncio.Event]],
     ) -> None:
         """A source transferred to an approval must not fence later room work."""
         for event_id in ("$source-1", "$source-2", "$later"):
@@ -1979,12 +2057,16 @@ class TestRoomRetryBackoff:
                 self,
                 *,
                 limit: int = 256,
+                room_id: str | None = None,
+                event_id: str | None = None,
                 after_receipt_order: int | None = None,
                 runtime_generation: str = "unmanaged",
             ) -> PendingPage:
                 nonlocal approval_created
                 page = await super().pending(
                     limit=limit,
+                    room_id=room_id,
+                    event_id=event_id,
                     after_receipt_order=after_receipt_order,
                     runtime_generation=runtime_generation,
                 )
@@ -2000,21 +2082,86 @@ class TestRoomRetryBackoff:
             return True
 
         worker = PendingEventWorker(
-            store=ApprovalDuringScan(alice, fail_is_pending={"$source-1"}),
+            store=ApprovalDuringScan(alice),
             handle=handle,
         )
         try:
-            await _dispatch_worker_pass(worker)
-            assert handled == []
-            assert [event.event_id for event in await alice.pending()] == ["$later"]
-            retry_sleeps[0][1].set()
-            await worker._room_retries[ROOM].task
             worker.start()
             await _eventually_async(alice.pending)
             assert handled == ["$later"]
             assert await alice.is_pending("$source-1")
             assert await alice.is_pending("$source-2")
         finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("lookup_race", ["ready", "stale", "failed"])
+    async def test_exact_approval_wake_rewinds_before_unstarted_tail(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        lookup_race: str,
+    ) -> None:
+        """Exact wakes survive stale or failed reads after approval ownership moves."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        generation = "runtime-a"
+        store = _ApprovalWakeReplayView(alice, lookup_race=lookup_race)
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id != "$source-1":
+                return True
+            if attempts.count("$source-1") == 1:
+                created = await alice.create_approval_continuation(
+                    replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation=generation),
+                )
+                assert created is not None
+                await _ApprovalContinuations.remember_card(alice)
+            else:
+                claimed = await alice.claim_approval_continuation("approval-1", runtime_generation=generation)
+                assert claimed is not None
+                assert claimed.state == "claimed"
+            return False
+
+        for event_id in ("$source-1", "$source-2", "$middle", "$tail"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        middle = (await alice.pending(event_id="$middle"))[0]
+        worker = PendingEventWorker(store=store, handle=handle, runtime_generation=generation)
+        try:
+            worker.start()
+            await asyncio.wait_for(store.tail_read_entered.wait(), timeout=5)
+            assert attempts == ["$source-1", "$middle"]
+            assert store.tail_read_after == middle.receipt_order
+            worker.release(("$source-1",))
+            assert await alice.pending(event_id="$source-1", runtime_generation=generation) == ()
+            if lookup_race == "stale":
+                worker.wake(event_ids=("$source-1",))
+                await asyncio.wait_for(store.empty_lookup_entered.wait(), timeout=5)
+            recorded = await alice.resolve_continuation_approval_card(
+                card_event_id="$approval",
+                requested_status="approved",
+                reason=None,
+                resolution={"status": "approved"},
+            )
+            assert recorded.continuation_ready
+            worker.wake(event_ids=("$source-1",))
+            store.release_empty_lookup.set()
+            if lookup_race == "failed":
+                await _eventually(lambda: len(retry_sleeps) == 1)
+                retry_sleeps[0][1].set()
+            await asyncio.wait_for(store.fresh_lookup_returned.wait(), timeout=5)
+            assert store.exact_reads == (1 if lookup_race == "ready" else 2)
+            assert attempts == ["$source-1", "$middle"]
+            store.release_tail_read.set()
+            await _eventually_async(lambda: alice.pending(runtime_generation=generation))
+            assert attempts == ["$source-1", "$middle", "$source-1", "$tail"]
+            assert await alice.is_pending("$source-1")
+            assert await alice.is_pending("$source-2")
+            assert not await alice.is_pending("$tail")
+        finally:
+            store.release_empty_lookup.set()
+            store.release_tail_read.set()
             await worker.stop()
 
     @pytest.mark.parametrize("drain", [False, True])
@@ -2277,32 +2424,37 @@ class TestRoomRetryBackoff:
         *,
         owner_dies_during_scan: bool,
     ) -> None:
-        """Cooldown expiry or owner death during I/O cannot hide an earlier deferral."""
+        """Owner loss before or during a room read preserves earlier work."""
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
         monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
         owner_live = True
-        block_page = False
+        block_next_room_page = False
         page_entered = asyncio.Event()
         release_page = asyncio.Event()
+        blocked_event_ids: list[str] = []
         attempts: list[str] = []
-        for event_id in ("$earlier", "$failed", "$later", "$last"):
-            await TestPendingEventWorker._admit(alice, text_event(event_id))
-        earlier = (await alice.pending())[0]
 
-        class BlockingRetryPage(_FlakyReplayView):
+        class BlockingRoomRead(_FlakyReplayView):
             async def pending(
                 self,
                 *,
                 limit: int = 256,
+                room_id: str | None = None,
+                event_id: str | None = None,
                 after_receipt_order: int | None = None,
                 runtime_generation: str = "unmanaged",
             ) -> PendingPage:
+                nonlocal block_next_room_page
                 page = await super().pending(
                     limit=limit,
+                    room_id=room_id,
+                    event_id=event_id,
                     after_receipt_order=after_receipt_order,
                     runtime_generation=runtime_generation,
                 )
-                if block_page and after_receipt_order == earlier.receipt_order:
+                if room_id == ROOM and block_next_room_page:
+                    block_next_room_page = False
+                    blocked_event_ids.extend(event.event_id for event in page)
                     page_entered.set()
                     await release_page.wait()
                 return page
@@ -2316,39 +2468,35 @@ class TestRoomRetryBackoff:
                 raise RuntimeError(msg)
             return True
 
+        for event_id in ("$earlier", "$failed", "$later", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
         worker = PendingEventWorker(
-            store=BlockingRetryPage(alice),
+            store=BlockingRoomRead(alice),
             handle=handle,
             deferral_is_live=lambda _event: owner_live,
         )
-        await _dispatch_worker_pass(worker)
-        await _dispatch_worker_pass(worker)
-        owner_live = owner_dies_during_scan
-        for _ in range(4):
-            await _dispatch_worker_pass(worker)
-        assert worker._scan_cursor == earlier.receipt_order
-        block_page = True
-        scanning = asyncio.create_task(_dispatch_worker_pass(worker))
         try:
-            await page_entered.wait()
-            owner_live = False
+            await asyncio.wait_for(worker.drain_once(), timeout=5)
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            assert attempts == ["$earlier", "$failed"]
+            owner_live = owner_dies_during_scan
+            block_next_room_page = True
+            worker.start()
             retry_sleeps[0][1].set()
-            await asyncio.sleep(0)
+            await asyncio.wait_for(page_entered.wait(), timeout=5)
+            assert blocked_event_ids == ["$failed" if owner_dies_during_scan else "$earlier"]
+            assert attempts == ["$earlier", "$failed"]
+            owner_live = False
             release_page.set()
-            await scanning
-            assert attempts == ["$earlier", "$failed", "$earlier", "$failed"]
-            for _ in range(4):
-                await _dispatch_worker_pass(worker)
+            await _eventually_async(alice.pending)
             assert attempts == ["$earlier", "$failed", "$earlier", "$failed", "$later", "$last"]
             assert await alice.unsettled_event_ids() == frozenset()
         finally:
             release_page.set()
-            scanning.cancel()
-            await asyncio.gather(scanning, return_exceptions=True)
             await worker.stop()
 
     @pytest.mark.parametrize("drain", [False, True])
-    async def test_stale_tail_cannot_overtake_head_that_failed_during_scan(
+    async def test_concurrent_drain_respects_room_read_ownership_and_failure(
         self,
         alice: PrincipalStore,
         retry_sleeps: list[tuple[float, asyncio.Event]],
@@ -2356,74 +2504,122 @@ class TestRoomRetryBackoff:
         *,
         drain: bool,
     ) -> None:
-        """Final lane admission rechecks failures that appeared during an awaited scan."""
+        """A reserved room read excludes another drain through head failure."""
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
-        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
-        entered_head = asyncio.Event()
-        fail_head = asyncio.Event()
-        entered_last_page = asyncio.Event()
-        release_last_page = asyncio.Event()
+        store = _ReservedRoomReplayView(alice)
         attempts: list[str] = []
-        for event_id in ("$head", "$tail", "$last"):
-            await TestPendingEventWorker._admit(alice, text_event(event_id))
-        admitted = await alice.pending()
-        tail = admitted[1]
-
-        class BlockingLastPage(_FlakyReplayView):
-            async def pending(
-                self,
-                *,
-                limit: int = 256,
-                after_receipt_order: int | None = None,
-                runtime_generation: str = "unmanaged",
-            ) -> PendingPage:
-                page = await super().pending(
-                    limit=limit,
-                    after_receipt_order=after_receipt_order,
-                    runtime_generation=runtime_generation,
-                )
-                if after_receipt_order == tail.receipt_order:
-                    entered_last_page.set()
-                    await release_last_page.wait()
-                return page
+        first_drain: asyncio.Task[int] | None = None
 
         async def handle(event: JournalEvent) -> bool:
             attempts.append(event.event_id)
-            if attempts == ["$head"]:
-                entered_head.set()
-                await fail_head.wait()
+            if event.event_id == "$head" and attempts.count("$head") == 1:
                 msg = "callback unavailable"
                 raise RuntimeError(msg)
             return True
 
-        worker = PendingEventWorker(store=BlockingLastPage(alice), handle=handle)
-        await worker._dispatch_ready_rooms()
-        await entered_head.wait()
-        head_lane = worker._lanes[ROOM]
-        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 2)
-        scanning = asyncio.create_task(worker._collect_dispatchable() if drain else worker._dispatch_ready_rooms())
+        for event_id in ("$head", "$tail", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=store, handle=handle)
         try:
-            await entered_last_page.wait()
-            fail_head.set()
-            await head_lane
-            await asyncio.sleep(0)
-            retry_sleeps[0][1].set()
-            await asyncio.sleep(0)
-            release_last_page.set()
-            await scanning
             if drain:
-                await worker._drain_room(ROOM, [tail], stop_generation=worker._stop_generation)
-            await asyncio.gather(*worker._lanes.values())
+                first_drain = asyncio.create_task(worker.drain_once())
+            else:
+                worker.start()
+            await asyncio.wait_for(store.page_entered.wait(), timeout=5)
+            store.competing_drain = asyncio.create_task(worker.drain_once())
+            await asyncio.wait_for(store.competing_discovered.wait(), timeout=5)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(store.overlapping_reads.wait(), timeout=0.1)
+            assert not store.overlapping_reads.is_set()
+            assert store.room_reads == 1
+            assert attempts == []
+            store.release_page.set()
+            await asyncio.wait_for(store.competing_drain, timeout=5)
+            if first_drain is not None:
+                await asyncio.wait_for(first_drain, timeout=5)
+            await _eventually(lambda: len(retry_sleeps) == 1)
             assert attempts == ["$head"]
-            for _ in range(4):
-                await _dispatch_worker_pass(worker)
+            assert store.room_reads == 1
+            assert await alice.unsettled_event_ids() == frozenset({"$head", "$tail", "$last"})
+            worker.start()
+            retry_sleeps[0][1].set()
+            await _eventually_async(alice.pending)
             assert attempts == ["$head", "$head", "$tail", "$last"]
-            assert await alice.unsettled_event_ids() == frozenset()
         finally:
-            fail_head.set()
-            release_last_page.set()
-            scanning.cancel()
-            await asyncio.gather(scanning, return_exceptions=True)
+            store.release_page.set()
+            drains = [task for task in (first_drain, store.competing_drain) if task is not None]
+            for task in drains:
+                task.cancel()
+            await asyncio.gather(*drains, return_exceptions=True)
+            await worker.stop()
+
+    @pytest.mark.parametrize("fails_first", [False, True])
+    async def test_room_progress_does_not_wait_for_stalled_discovery(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        fails_first: bool,
+    ) -> None:
+        """A discovered room owns page continuation and retry despite slow discovery."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        discovery_started = asyncio.Event()
+        release_discovery = asyncio.Event()
+        release_head = asyncio.Event()
+        attempts: list[str] = []
+        global_reads = 0
+
+        class SlowDiscovery(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                room_id: str | None = None,
+                event_id: str | None = None,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                nonlocal global_reads
+                if room_id is None and event_id is None:
+                    global_reads += 1
+                    if global_reads > 1:
+                        discovery_started.set()
+                        await release_discovery.wait()
+                return await super().pending(
+                    limit=limit,
+                    room_id=room_id,
+                    event_id=event_id,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if len(attempts) == 1:
+                if fails_first:
+                    msg = "callback unavailable"
+                    raise RuntimeError(msg)
+                await release_head.wait()
+            return True
+
+        for event_id in ("$head", "$tail", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=SlowDiscovery(alice), handle=handle)
+        worker.start()
+        try:
+            await asyncio.wait_for(discovery_started.wait(), timeout=5)
+            if fails_first:
+                await _eventually(lambda: len(retry_sleeps) == 1)
+                retry_sleeps[0][1].set()
+            else:
+                release_head.set()
+            await _eventually_async(alice.pending)
+            assert attempts == (["$head", "$head"] if fails_first else ["$head"]) + ["$tail", "$last"]
+        finally:
+            release_head.set()
+            release_discovery.set()
             await worker.stop()
 
     async def test_shutdown_cancels_room_cooldown_and_restart_replays_pending_work(
@@ -2888,65 +3084,32 @@ class TestABoundedScanIsFair:
         finally:
             await worker.stop()
 
-    async def test_a_wrapped_pass_stops_at_the_position_it_set_out_from(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """One revolution, not an unbounded lap of a circle.
-
-        A pass resumed part way through the backlog runs to the end and then
-        starts again at the front, and nothing stopped it running past its own
-        origin and collecting what it had already collected pages earlier. The
-        room's lane is handed that list as it stands, and a handler that defers
-        rather than settling is not saved by the pending recheck in front of
-        it: it runs a second time on one source.
-
-        Asked of the scan rather than of a lane, because the duplicate is in
-        the list the scan produces and reading it there is exact -- through a
-        lane it is a race between two dispatches of one event.
-
-        Five events, each once, is what the stop proves: a pass that ran past
-        its origin collects ``$e3`` and ``$e4`` twice, which no ordering of the
-        result can hide.
-        """
-        for index in range(5):
-            await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), ROOM)
-        admitted = await alice.pending(limit=5)
-        worker = PendingEventWorker(store=alice, handle=_never_called)
-        worker._scan_cursor = admitted[2].receipt_order
-
-        by_room, more_remains = await worker._collect_dispatchable()
-
-        assert [event.event_id for event in by_room[ROOM]] == ["$e0", "$e1", "$e2", "$e3", "$e4"]
-        assert not more_remains
-        assert worker._scan_cursor is None
-
-    async def test_a_lost_owner_behind_the_window_is_still_taken_back(
+    async def test_a_lost_owner_behind_discovery_still_runs_first(
         self,
         alice: PrincipalStore,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The reclaim's question is about the deferrals, not about the window.
-
-        A backlog too large for one pass keeps the scan's window ahead of a
-        deferral sitting behind it -- the pages stay full, so the pass never
-        reaches the end and never wraps to the front. Reclaiming only what the
-        window happens to cover then leaves that deferral's dead owner
-        unnoticed for as long as the overload lasts, which is the unbounded
-        outage the reclaim exists to replace.
-        """
+        """An abandoned source is reclaimed through its room, before later work."""
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
         monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
         for index in range(3):
             await self._admit(alice, text_event(f"$e{index}", ts=1_000 + index), ROOM)
         admitted = await alice.pending(limit=3)
-        worker = PendingEventWorker(store=alice, handle=_never_called, deferral_is_live=lambda _event: False)
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: False)
         worker._deferred[admitted[0].event_id] = admitted[0]
         worker._scan_cursor = admitted[0].receipt_order
-
-        by_room, _ = await worker._collect_dispatchable()
-
-        assert [event.event_id for event in by_room[ROOM]] == ["$e0", "$e1"]
+        worker.start()
+        try:
+            await _eventually_async(alice.pending)
+            assert handled == ["$e0", "$e1", "$e2"]
+        finally:
+            await worker.stop()
 
 
 class TestADrainSeesTheWholeBacklog:
@@ -3028,6 +3191,8 @@ class _FlakyReplayView:
         self,
         *,
         limit: int = 256,
+        room_id: str | None = None,
+        event_id: str | None = None,
         after_receipt_order: int | None = None,
         runtime_generation: str = "unmanaged",
     ) -> PendingPage:
@@ -3037,6 +3202,8 @@ class _FlakyReplayView:
             raise RuntimeError(msg)
         return await self.inner.pending(
             limit=limit,
+            room_id=room_id,
+            event_id=event_id,
             after_receipt_order=after_receipt_order,
             runtime_generation=runtime_generation,
         )
@@ -3054,6 +3221,94 @@ class _FlakyReplayView:
             msg = "the journal is unwritable"
             raise RuntimeError(msg)
         await self.inner.settle(event_id)
+
+
+@dataclass
+class _ReservedRoomReplayView(_FlakyReplayView):
+    """Hold the first room read while another drain finishes discovering it."""
+
+    page_entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release_page: asyncio.Event = field(default_factory=asyncio.Event)
+    competing_discovered: asyncio.Event = field(default_factory=asyncio.Event)
+    overlapping_reads: asyncio.Event = field(default_factory=asyncio.Event)
+    room_reads: int = 0
+    competing_drain: asyncio.Task[int] | None = None
+
+    async def pending(
+        self,
+        *,
+        limit: int = 256,
+        room_id: str | None = None,
+        event_id: str | None = None,
+        after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
+    ) -> PendingPage:
+        reading_room = room_id == ROOM
+        if reading_room:
+            self.room_reads += 1
+            if self.room_reads == 2:
+                self.overlapping_reads.set()
+        hold_this_read = reading_room and self.room_reads == 1
+        page = await super().pending(
+            limit=limit,
+            room_id=room_id,
+            event_id=event_id,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
+        if room_id is None and event_id is None and asyncio.current_task() is self.competing_drain and page.reached_end:
+            self.competing_discovered.set()
+        if hold_this_read:
+            self.page_entered.set()
+            await self.release_page.wait()
+        return page
+
+
+@dataclass
+class _ApprovalWakeReplayView(_FlakyReplayView):
+    """Hold one room snapshot while approval wake lookups race its eligibility."""
+
+    lookup_race: str = "ready"
+    tail_read_entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release_tail_read: asyncio.Event = field(default_factory=asyncio.Event)
+    empty_lookup_entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release_empty_lookup: asyncio.Event = field(default_factory=asyncio.Event)
+    fresh_lookup_returned: asyncio.Event = field(default_factory=asyncio.Event)
+    tail_read_after: int | None = None
+    exact_reads: int = 0
+
+    async def pending(
+        self,
+        *,
+        limit: int = 256,
+        room_id: str | None = None,
+        event_id: str | None = None,
+        after_receipt_order: int | None = None,
+        runtime_generation: str = "unmanaged",
+    ) -> PendingPage:
+        page = await super().pending(
+            limit=limit,
+            room_id=room_id,
+            event_id=event_id,
+            after_receipt_order=after_receipt_order,
+            runtime_generation=runtime_generation,
+        )
+        if event_id == "$source-1":
+            self.exact_reads += 1
+            if self.lookup_race == "failed" and self.exact_reads == 1:
+                msg = "retry source lookup failed"
+                raise RuntimeError(msg)
+            if self.lookup_race == "stale" and self.exact_reads == 1:
+                assert page == ()
+                self.empty_lookup_entered.set()
+                await self.release_empty_lookup.wait()
+            elif page:
+                self.fresh_lookup_returned.set()
+        if room_id == ROOM and not self.tail_read_entered.is_set() and any(event.event_id == "$tail" for event in page):
+            self.tail_read_after = after_receipt_order
+            self.tail_read_entered.set()
+            await self.release_tail_read.wait()
+        return page
 
 
 class TestStoreFailuresBelongToTheLane:

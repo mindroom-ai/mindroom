@@ -371,7 +371,7 @@ class JournalDispatcher:
     def retry_turn_sources(self, event_ids: tuple[str, ...]) -> None:
         """Return several undelivered turn sources to the worker."""
         self._release_sources(event_ids)
-        self._worker.wake()
+        self._worker.wake(event_ids=event_ids)
 
     def _release_sources(self, event_ids: tuple[str, ...]) -> None:
         """Release worker ownership and forget any deferred-reaction markers."""

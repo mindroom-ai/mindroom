@@ -1,14 +1,8 @@
-"""Turns committed journal events into semantic work.
+"""Discover rooms globally; let each reserved room lane own ordered replay.
 
-The journal decides what MindRoom owes. This decides when it runs. Nothing
-here is durable: a crash leaves every unsettled event exactly as pending as it
-was, which is why there is no ``running`` state to get stuck in.
-
-Every bound here is paired with a signal that more work remains. A pass that
-stops early — because a room is busy, because the scan hit its page budget, or
-because a lane failed — arranges to be woken again. A bound that silently drops
-the remainder is how durable work ends up abandoned while the process looks
-healthy.
+The journal owns durable work and replay eligibility. Discovery only finds
+rooms: its rotating cursor never decides which event in a room runs next.
+Each room keeps its own page position across bounded passes and cooldowns.
 """
 
 from __future__ import annotations
@@ -31,117 +25,72 @@ logger = get_logger(__name__)
 _INITIAL_RETRY_DELAY_SECONDS = 1.0
 _MAX_RETRY_DELAY_SECONDS = 30.0
 _BATCH_SIZE = 128
-# How long a deferral may sit before the worker looks at its owner again.
-#
-# This is a cadence, not a deadline. Nothing is declared dead because this
-# elapsed; the probe decides, and it is exact. So the value does not have to
-# exceed the longest legitimate turn the way a death timeout would — it only
-# bounds how long a lost owner goes unnoticed in a bot quiet enough that no
-# admission wakes the pump on its own.
-_DEFERRAL_SCAN_SECONDS = 30.0
-# How many pages one pass will read looking for events it can act on. Each is
-# bounded in rows by the store, so this bounds the pass in rows too. Reached
-# only when a very large backlog is in flight, or when a long stretch of it
-# cannot be read; either way the pass reports that more remains.
 _MAX_SCAN_PAGES = 16
+_DEFERRAL_SCAN_SECONDS = 30.0
 
-# Returning ``False`` means the handler started work that outlives it — a turn
-# that is still running — so the event stays pending and whoever owns that work
-# releases it. Returning ``True`` means the work is finished.
 type _EventHandler = Callable[[JournalEvent], Awaitable[bool]]
-
-# Whether the owner a deferring handler handed one event to still exists.
 type _DeferralLivenessProbe = Callable[[JournalEvent], bool]
 
 
-def _in_receipt_order(by_room: dict[str, list[JournalEvent]]) -> dict[str, list[JournalEvent]]:
-    """Put each room's collected events back into receipt order.
-
-    A lane runs its list verbatim, so the list is where a room's order is
-    decided -- and a collected list is segments concatenated, none of which is
-    placed by receipt order. Reclaimed deferrals are seeded before any page is
-    read, whatever their position in the backlog, and a wrapped pass reads the
-    events after its resume point before the ones in front of it. Either one
-    hands a lane a later message to answer before an earlier one, which is the
-    single thing a lane exists to prevent.
-
-    Sorted rather than merged, because there are not two ordered runs to merge.
-    Only the pages carry the store's ``ORDER BY``; the reclaim walks the
-    deferral map in insertion order, and an event released and deferred again
-    moves to the back of it, behind one that never moved. Sorting also costs
-    nothing to state: these lists are near-sorted and bounded by the page
-    budget, which is the case a sort is cheapest on.
-    """
-    for events in by_room.values():
-        events.sort(key=lambda event: event.receipt_order)
-    return by_room
-
-
 def _assume_owner_is_live(event: JournalEvent) -> bool:
-    """Treat every deferral as owned, which is all a worker alone can know.
-
-    ``pending`` conflates "never started" with "started, someone else owns it",
-    and only the caller that handed the event off can tell them apart. A worker
-    built without a probe therefore has to believe the handoff, exactly as it
-    did before probes existed. The opposite default would re-dispatch every
-    deferral on every scan.
-    """
+    """A worker without an owner probe must honor every deferred handoff."""
     del event
     return True
 
 
 @dataclass
+class _RoomProgress:
+    """The lane advances its cursor; outside notifications only request rewinds."""
+
+    cursor: int | None = None
+    rewind_before: int | None = None
+
+
+@dataclass
 class _RoomRetry:
-    """One room's failure history and independently owned cooldown."""
+    """Cooldown history; the failed receipt controls reset, never admission."""
 
     delay_seconds: float
     task: asyncio.Task[None]
-    event: JournalEvent
+    failed_receipt_order: int | None
+
+
+@dataclass(frozen=True)
+class _RoomPass:
+    """A drain observes this completed pass without borrowing its lane."""
+
+    attempted: int
+    more: bool = False
+    failed: bool = False
 
 
 @dataclass
 class PendingEventWorker:
-    """Drain pending journal events, in receipt order within each room.
-
-    Order is preserved per room rather than globally. A room's events are a
-    conversation and must be answered in the order they were received; two
-    different rooms are unrelated, and making one wait for the other would let
-    a single slow turn stall every other conversation the bot is in.
-    """
+    """Run one ordered lane per room while keeping unsettled work durable."""
 
     store: ReplayView
     handle: _EventHandler
     runtime_generation: str = "unmanaged"
-    # Asked about every deferred event on every scan. A deferral whose owner is
-    # gone is durable work nobody is left to release, so the scan takes it back
-    # rather than waiting for a restart to notice.
     deferral_is_live: _DeferralLivenessProbe = _assume_owner_is_live
     deferral_scan_seconds: float = _DEFERRAL_SCAN_SECONDS
-    _lanes: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
+    _lanes: dict[str, asyncio.Task[_RoomPass]] = field(default_factory=dict, init=False, repr=False)
+    _rooms: dict[str, _RoomProgress] = field(default_factory=dict, init=False, repr=False)
+    _ready_rooms: set[str] = field(default_factory=set, init=False, repr=False)
+    _retry_sources: set[str] = field(default_factory=set, init=False, repr=False)
+    _room_retries: dict[str, _RoomRetry] = field(default_factory=dict, init=False, repr=False)
+    _deferred: dict[str, JournalEvent] = field(default_factory=dict, init=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _pump: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _retry: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _deferral_scan: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _retry_delay_seconds: float = field(default=_INITIAL_RETRY_DELAY_SECONDS, init=False, repr=False)
+    _scan_cursor: int | None = field(default=None, init=False, repr=False)
     _stopped: bool = field(default=False, init=False, repr=False)
     _process_shutdown: bool = field(default=False, init=False, repr=False)
     _stop_generation: int = field(default=0, init=False, repr=False)
-    _retry_delay_seconds: float = field(default=_INITIAL_RETRY_DELAY_SECONDS, init=False, repr=False)
-    _room_retries: dict[str, _RoomRetry] = field(default_factory=dict, init=False, repr=False)
-    # Events handed to a turn that is still running, kept whole rather than by
-    # id. They stay pending durably so a crash replays them, but dispatching
-    # one again while its turn is alive would answer the same message twice --
-    # and asking whether that turn still exists is a question about this set,
-    # not about wherever the scan's window currently sits.
-    _deferred: dict[str, JournalEvent] = field(default_factory=dict, init=False, repr=False)
-    # Rooms a pass found work for but could not dispatch, because their lane
-    # was still busy. Their lane wakes the pump when it finishes.
-    _rooms_with_more: set[str] = field(default_factory=set, init=False, repr=False)
-    # Where the next bounded scan resumes, so a prefix of events this worker
-    # cannot act on cannot spend the whole page budget on every pass.
-    _scan_cursor: int | None = field(default=None, init=False, repr=False)
 
     def start(self) -> None:
-        """Begin draining, including anything a previous process left behind."""
+        """Start discovery, including work left pending by a previous process."""
         if self._pump is not None and not self._pump.done():
             return
         self._stopped = False
@@ -149,20 +98,22 @@ class PendingEventWorker:
         self._wake.set()
         self._pump = asyncio.create_task(self._run(), name="pending_event_worker")
 
-    def wake(self) -> None:
-        """Signal that new work was admitted."""
+    def wake(self, *, event_ids: tuple[str, ...] = ()) -> None:
+        """Signal admissions or exact sources made replayable by an owner handoff."""
+        self._retry_sources.update(event_ids)
         self._wake.set()
 
     def release(self, event_ids: Iterable[str]) -> None:
-        """Let events be dispatched again: their turn ended or is being retried.
+        """Forget downstream ownership after its durable handoff.
 
-        Callable from any thread, because a turn can become terminal on one.
-        It only mutates memory; the pump does the I/O on its own loop.
+        This remains an in-memory operation callable from terminal handoffs.
+        A retry additionally calls wake with the exact source IDs, allowing
+        replay to rewind even after an approval source left this cache.
         """
         for event_id in event_ids:
             self._deferred.pop(event_id, None)
 
-    def _owned_tasks(self) -> tuple[asyncio.Task[None], ...]:
+    def _owned_tasks(self) -> tuple[asyncio.Task[object], ...]:
         return tuple(
             task
             for task in (
@@ -177,11 +128,11 @@ class PendingEventWorker:
 
     @property
     def pending_task_count(self) -> int:
-        """Count callback and pump owners that still require runtime resources."""
+        """Count owners that still require runtime resources."""
         return sum(not task.done() for task in self._owned_tasks())
 
     def begin_shutdown(self, *, shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN) -> None:
-        """Close admission and mark every cancellation before teardown can yield."""
+        """Close admission and mark cancellations before teardown can yield."""
         process_shutdown = shutdown_intent.stop_reason == "shutdown"
         if self._stopped and (not process_shutdown or self._process_shutdown):
             return
@@ -198,7 +149,7 @@ class PendingEventWorker:
                 )
 
     async def wait_stopped(self, *, timeout_seconds: float | None) -> bool:
-        """Wait within the caller's budget, retaining any unfinished owners."""
+        """Retain unfinished owners when the caller's shutdown budget expires."""
         tasks = self._owned_tasks()
         if tasks:
             done, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
@@ -211,89 +162,133 @@ class PendingEventWorker:
         self._retry = None
         self._deferral_scan = None
         self._lanes.clear()
+        self._rooms.clear()
+        self._ready_rooms.clear()
+        self._retry_sources.clear()
         self._room_retries.clear()
-        self._rooms_with_more.clear()
+        self._scan_cursor = None
         return True
 
     async def stop(self) -> None:
-        """Stop draining, leaving unfinished events pending for the next start."""
+        """Stop owners without settling their unfinished journal work."""
         self.begin_shutdown()
         await self.wait_stopped(timeout_seconds=None)
 
-    async def drain_once(self) -> int:
-        """Run currently eligible events and return the count, skipping room cooldowns.
+    def _queue_room(self, room_id: str, *, rewind_before: int | None = None) -> None:
+        progress = self._rooms.setdefault(room_id, _RoomProgress())
+        if rewind_before is not None:
+            previous = progress.rewind_before
+            progress.rewind_before = rewind_before if previous is None else min(previous, rewind_before)
+        self._ready_rooms.add(room_id)
 
-        Exists for startup recovery and for tests, where "the queue is empty"
-        has to be observable rather than eventually true. Unlike a pump pass,
-        this keeps scanning until nothing dispatchable is left, so its return
-        value is the whole backlog rather than one bounded slice of it.
+    async def _resolve_retry_sources(self) -> None:
+        """Resolve exact handoffs through the same replay policy as room reads."""
+        generation = self._stop_generation
+        failed = False
+        for event_id in tuple(self._retry_sources)[:_BATCH_SIZE]:
+            # Remove before awaiting: another wake for this ID during the read
+            # is a new obligation, including when this snapshot still says waiting.
+            self._retry_sources.discard(event_id)
+            try:
+                page = await self.store.pending(
+                    event_id=event_id,
+                    limit=1,
+                    runtime_generation=self.runtime_generation,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if self._stopped or generation != self._stop_generation:
+                    return
+                logger.exception("pending_event_retry_source_read_failed", event_id=event_id)
+                self._retry_sources.add(event_id)
+                failed = True
+                continue
+            if self._stopped or generation != self._stop_generation:
+                return
+            for event in page:
+                self._queue_room(event.room_id, rewind_before=event.receipt_order - 1)
+        if failed:
+            self._schedule_retry()
+        elif self._retry_sources:
+            self._wake.set()
 
-        Recovery runs while the pump is live rather than only before it starts,
-        so this drains through the room's lane instead of beside it. A second
-        lane over one room is not a faster drain: it puts two handlers inside
-        one event and lets event three overtake event two, which are the two
-        things a lane exists to make impossible.
+    def _queue_lost_owners(self) -> None:
+        """Probe globally, but leave reclamation to the room's reserved owner."""
+        for event in tuple(self._deferred.values()):
+            if not self.deferral_is_live(event):
+                self._queue_room(event.room_id)
 
-        It scans the whole backlog from the front and owns no resume point, and
-        both halves of that matter. Borrowing the pump's bounded, rotating
-        window gave consecutive passes different slices, so the comparison that
-        ends this loop -- the same events came back untouched -- could not
-        converge on a backlog larger than one pass with anything in it that
-        keeps failing: the drain never returned, and every later recovery for
-        every bot queued behind the one that was still going. Borrowing the
-        pump's cursor also moved it, so a drain rewound the pump's position or
-        skipped it forward past work the pump had not looked at yet.
-        """
-        drained = 0
-        attempted: frozenset[str] = frozenset()
-        stop_generation = self._stop_generation
-        while not self._stopped and stop_generation == self._stop_generation:
-            by_room = await self._collect_whole_backlog()
-            if self._stopped or stop_generation != self._stop_generation:
-                return drained
-            if not by_room:
-                return drained
-            ids = frozenset(event.event_id for events in by_room.values() for event in events)
-            if ids == attempted:
-                # Nothing moved: every remaining event failed or was refused.
-                # Looping again would only repeat the same failures forever.
-                return drained
-            attempted = ids
-            drained += len(ids)
-            await asyncio.gather(
-                *(
-                    self._drain_room(room_id, events, stop_generation=stop_generation)
-                    for room_id, events in by_room.items()
-                ),
+    async def _discover_rooms(self, *, whole_backlog: bool = False) -> tuple[set[str], bool]:
+        """Find rooms without passing global scan slices to their lanes."""
+        rooms: set[str] = set()
+        origin = None if whole_backlog else self._scan_cursor
+        cursor = origin
+        wrapped = origin is None
+        pages = 0
+        while whole_backlog or pages < _MAX_SCAN_PAGES:
+            page = await self.store.pending(
+                limit=_BATCH_SIZE,
+                after_receipt_order=cursor,
+                runtime_generation=self.runtime_generation,
             )
-        return drained
+            pages += 1
+            reached_origin = False
+            for event in page:
+                if wrapped and origin is not None and event.receipt_order > origin:
+                    reached_origin = True
+                    break
+                if event.event_id not in self._deferred:
+                    rooms.add(event.room_id)
+            if reached_origin or (page.reached_end and wrapped):
+                if not whole_backlog:
+                    self._scan_cursor = None
+                return rooms, False
+            if page.reached_end:
+                cursor, wrapped = None, True
+            else:
+                cursor = page.resume_after
+        self._scan_cursor = cursor
+        return rooms, True
 
-    async def _drain_room(
-        self,
-        room_id: str,
-        events: list[JournalEvent],
-        *,
-        stop_generation: int,
-    ) -> None:
-        """Run one room's events, once whatever lane owns that room is done.
+    async def drain_once(self) -> int:
+        """Drain eligible room work through the same owners, without waiting out cooldowns."""
+        generation = self._stop_generation
+        if self._stopped:
+            return 0
+        await self._resolve_retry_sources()
+        if self._stopped or generation != self._stop_generation:
+            return 0
+        rooms, _more = await self._discover_rooms(whole_backlog=True)
+        if self._stopped or generation != self._stop_generation:
+            return 0
+        self._queue_lost_owners()
+        rooms.update(self._ready_rooms)
+        return sum(
+            await asyncio.gather(
+                *(self._drain_room(room_id, stop_generation=generation) for room_id in rooms),
+            ),
+        )
 
-        Rechecked after each wait because the pump wakes on the same lane
-        completion, so the room can be claimed again before this resumes.
-        Someone else's lane is waited on rather than awaited: whether that one
-        was cancelled is the pump's business, and a drain must not inherit it.
-        """
-        while (active := self._lanes.get(room_id)) is not None and not active.done():
-            await asyncio.wait([active])
-        if self._stopped or stop_generation != self._stop_generation:
-            return
-        lane = self._start_lane(room_id, events)
-        if lane is None:
-            return
-        await asyncio.wait([lane])
-        # This lane is the drain's own, so whatever ended it is the drain's to
-        # report. A cancelled turn is not a failed one: it leaves its event
-        # pending and hands the cancellation to whoever asked for the drain.
-        lane.result()
+    async def _drain_room(self, room_id: str, *, stop_generation: int) -> int:
+        attempted = 0
+        while not self._stopped and stop_generation == self._stop_generation:
+            active = self._lanes.get(room_id)
+            if active is not None and not active.done():
+                await asyncio.wait([active])
+                continue
+            if self._room_is_backing_off(room_id):
+                return attempted
+            self._queue_room(room_id)
+            lane = self._start_lane(room_id)
+            if lane is None:
+                return attempted
+            await asyncio.wait([lane])
+            outcome = lane.result()
+            attempted += outcome.attempted
+            if outcome.failed or (not outcome.more and room_id not in self._ready_rooms):
+                return attempted
+        return attempted
 
     async def _run(self) -> None:
         while True:
@@ -308,157 +303,204 @@ class PendingEventWorker:
                 self._schedule_retry()
 
     async def _dispatch_ready_rooms(self) -> None:
-        by_room, more_remains = await self._collect_dispatchable()
+        started = self._start_ready_rooms()
+        await self._resolve_retry_sources()
+        started = self._start_ready_rooms() or started
+        rooms, more_remains = await self._discover_rooms()
         if self._stopped:
             return
-        started = False
-        for room_id, events in by_room.items():
-            if self._room_is_backing_off(room_id):
-                continue
-            active = self._lanes.get(room_id)
-            if active is not None and not active.done():
-                # Nothing else will look at this room again on its own, so its
-                # lane has to wake the pump when it finishes.
-                self._rooms_with_more.add(room_id)
-                continue
-            if self._start_lane(room_id, events) is not None:
-                started = True
+        self._queue_lost_owners()
+        for room_id in rooms:
+            self._queue_room(room_id)
+        started = self._start_ready_rooms() or started
         if more_remains:
-            self._continue_scanning(dispatched=started)
+            if started:
+                self._wake.set()
+            else:
+                self._schedule_retry()
         else:
             self._retry_delay_seconds = _INITIAL_RETRY_DELAY_SECONDS
-        if any(retry.task.done() and room_id not in self._lanes for room_id, retry in self._room_retries.items()):
-            # The scan may not have reached a ready room's failed head yet.
-            self._schedule_retry()
-        # A pass that found every deferral still owned starts no lane, so the
-        # lane-finished path cannot be the only thing that arms the next look.
         self._schedule_deferral_scan()
 
-    def _continue_scanning(self, *, dispatched: bool) -> None:
-        """Arm the pass that resumes where this one stopped short.
+    def _start_ready_rooms(self) -> bool:
+        started = False
+        for room_id in tuple(self._ready_rooms):
+            if self._start_lane(room_id) is not None:
+                started = True
+        return started
 
-        Where a pass stopped is the scan's own position, so the scan is what
-        has to carry it. Hung off the rooms a pass dispatched to instead, it
-        was simply lost whenever a pass dispatched to none -- and a window of
-        nothing but rows the store could not decode is exactly that. Those rows
-        yield no event and belong to no owner, so nothing would wake the pump
-        on their behalf and everything queued behind them stayed pending until
-        unrelated traffic happened to arrive, which in a quiet room is never.
-
-        A pass that dispatched something left the cursor past what it
-        dispatched, so the next one reads a different window and may run at
-        once. A pass that dispatched nothing would read the same window
-        immediately and spin on it, so that one waits out the backoff instead.
-        """
-        if dispatched:
-            self._wake.set()
-        else:
-            self._schedule_retry()
-
-    def _start_lane(self, room_id: str, events: list[JournalEvent]) -> asyncio.Task[None] | None:
-        """Admit a lane against current retry state after any scan or lane wait."""
-        if self._room_is_backing_off(room_id):
+    def _start_lane(self, room_id: str) -> asyncio.Task[_RoomPass] | None:
+        """Reserve before reading; every caller shares this admission boundary."""
+        active = self._lanes.get(room_id)
+        if self._stopped or self._room_is_backing_off(room_id) or (active is not None and not active.done()):
             return None
-        retry = self._room_retries.get(room_id)
-        if retry is not None and not any(event.event_id == retry.event.event_id for event in events):
-            events = [event for event in events if event.receipt_order < retry.event.receipt_order]
-        if not events:
-            return None
-        # Cooldown expiry or owner loss while a scan awaited I/O can expose
-        # an earlier deferral after its initial reclaim. Admission owns order.
-        event_ids = {event.event_id for event in events}
-        last_receipt = events[-1].receipt_order
-        reclaimed = (
-            event
-            for event in tuple(self._deferred.values())
-            if event.room_id == room_id
-            and event.receipt_order < last_receipt
-            and event.event_id not in event_ids
-            and not self.deferral_is_live(event)
-        )
-        events = sorted([*events, *reclaimed], key=lambda event: event.receipt_order)
-        self._rooms_with_more.discard(room_id)
-        lane = asyncio.create_task(self._run_lane(events), name=f"pending_event_lane_{room_id}")
+        self._rooms.setdefault(room_id, _RoomProgress())
+        self._ready_rooms.discard(room_id)
+        lane = asyncio.create_task(self._run_room(room_id), name=f"pending_event_lane_{room_id}")
         self._lanes[room_id] = lane
         lane.add_done_callback(lambda task: self._lane_finished(room_id, task))
         return lane
 
-    def _lane_finished(self, room_id: str, lane: asyncio.Task[None]) -> None:
-        if self._lanes.get(room_id) is lane:
-            del self._lanes[room_id]
+    def _lane_finished(self, room_id: str, lane: asyncio.Task[_RoomPass]) -> None:
+        if self._lanes.get(room_id) is not lane:
+            return
+        del self._lanes[room_id]
         if self._stopped or lane.cancelled():
             return
-        if room_id in self._rooms_with_more and not self._room_is_backing_off(room_id):
-            self._wake.set()
+        outcome = lane.result()
+        if outcome.more:
+            self._ready_rooms.add(room_id)
+        if room_id in self._ready_rooms:
+            if self._pump is not None and not self._pump.done():
+                self._start_lane(room_id)
+        elif room_id not in self._room_retries:
+            # An exhausted room starts a fresh scan on its next admission.
+            self._rooms.pop(room_id, None)
         self._schedule_deferral_scan()
 
     def _room_is_backing_off(self, room_id: str) -> bool:
         retry = self._room_retries.get(room_id)
         return retry is not None and not retry.task.done()
 
-    def _schedule_room_retry(self, event: JournalEvent) -> None:
-        """Keep each room's cooldown independent of admissions and other rooms."""
+    def _schedule_room_retry(self, room_id: str, event: JournalEvent | None) -> None:
         logger.exception(
             "pending_event_failed",
-            event_id=event.event_id,
-            kind=event.kind.value,
-            room_id=event.room_id,
+            room_id=room_id,
+            event_id=None if event is None else event.event_id,
+            kind=None if event is None else event.kind.value,
         )
         if self._stopped:
             return
-        room_id = event.room_id
         previous = self._room_retries.get(room_id)
         delay = (
             _INITIAL_RETRY_DELAY_SECONDS
             if previous is None
             else min(previous.delay_seconds * 2, _MAX_RETRY_DELAY_SECONDS)
         )
-        task = asyncio.create_task(self._retry_room_after_delay(delay), name=f"pending_event_room_retry_{room_id}")
-        self._room_retries[room_id] = _RoomRetry(delay, task, event)
+        failed_receipt = None if previous is None else previous.failed_receipt_order
+        if event is not None:
+            failed_receipt = event.receipt_order
+        task = asyncio.create_task(
+            asyncio.sleep(delay),
+            name=f"pending_event_room_retry_{room_id}",
+        )
+        self._room_retries[room_id] = _RoomRetry(delay, task, failed_receipt)
+        task.add_done_callback(lambda done: self._room_retry_finished(room_id, done))
 
-    async def _retry_room_after_delay(self, delay: float) -> None:
-        await asyncio.sleep(delay)
-        self._wake.set()
+    def _room_retry_finished(self, room_id: str, task: asyncio.Task[None]) -> None:
+        retry = self._room_retries.get(room_id)
+        if self._stopped or task.cancelled() or retry is None or retry.task is not task:
+            return
+        task.result()
+        self._queue_room(room_id)
+        if self._pump is not None and not self._pump.done():
+            self._start_lane(room_id)
 
-    def _clear_room_retry(self, event: JournalEvent) -> None:
-        """Only recovery of the failed event removes its room's ordering fence."""
-        retry = self._room_retries.get(event.room_id)
-        if retry is not None and retry.event.event_id == event.event_id:
-            del self._room_retries[event.room_id]
-            # A wrapped scan may have skipped the tail before finding this head.
-            self._wake.set()
+    def _record_room_progress(self, room_id: str, receipt_order: int | None) -> None:
+        retry = self._room_retries.get(room_id)
+        if retry is not None and (
+            retry.failed_receipt_order is None or receipt_order is None or receipt_order >= retry.failed_receipt_order
+        ):
+            del self._room_retries[room_id]
 
-    async def _forget_ineligible_room_retries(self) -> None:
-        """A settled or approval-owned failed head no longer fences replay."""
-        for room_id, retry in tuple(self._room_retries.items()):
-            if not retry.task.done() or room_id in self._lanes:
+    def _reclaim_room_deferrals(self, room_id: str, seen: set[str]) -> None:
+        """Only the reserved lane can replace a dead owner with room replay."""
+        progress = self._rooms[room_id]
+        for event in tuple(self._deferred.values()):
+            if event.room_id != room_id or event.event_id in seen or self.deferral_is_live(event):
                 continue
-            try:
-                # Use the journal's replay eligibility, which excludes sources
-                # transferred to approvals even while they remain unsettled.
+            rewind = event.receipt_order - 1
+            previous = progress.rewind_before
+            progress.rewind_before = rewind if previous is None else min(previous, rewind)
+            self._deferred.pop(event.event_id, None)
+            logger.warning(
+                "pending_event_deferral_owner_lost",
+                event_id=event.event_id,
+                kind=event.kind.value,
+                room_id=room_id,
+            )
+
+    @staticmethod
+    def _apply_rewind(progress: _RoomProgress) -> bool:
+        requested = progress.rewind_before
+        progress.rewind_before = None
+        if requested is None:
+            return False
+        if progress.cursor is not None:
+            progress.cursor = min(progress.cursor, requested)
+        # A request during an awaited read invalidates its snapshot even when
+        # the cursor was already before the newly eligible source.
+        return True
+
+    async def _run_room_event(self, event: JournalEvent, seen: set[str]) -> bool:
+        """Admit against current ownership; False requires a fresh room page."""
+        room_id = event.room_id
+        progress = self._rooms[room_id]
+        self._reclaim_room_deferrals(room_id, seen)
+        if self._apply_rewind(progress):
+            return False
+        if event.event_id in self._deferred:
+            progress.cursor = event.receipt_order
+            return True
+        self._record_room_progress(room_id, event.receipt_order - 1)
+        seen.add(event.event_id)
+        pending = await self.store.is_pending(event.event_id)
+        self._reclaim_room_deferrals(room_id, seen)
+        if self._apply_rewind(progress):
+            return False
+        if not pending:
+            self._deferred.pop(event.event_id, None)
+        elif not await self.handle(event):
+            self._deferred[event.event_id] = event
+        else:
+            self._deferred.pop(event.event_id, None)
+            await self.store.settle(event.event_id)
+        progress.cursor = event.receipt_order
+        self._record_room_progress(room_id, event.receipt_order)
+        return True
+
+    async def _run_room(self, room_id: str) -> _RoomPass:
+        """Own selection, callback order, and the continuation of one room."""
+        progress = self._rooms[room_id]
+        seen: set[str] = set()
+        event: JournalEvent | None = None
+        try:
+            for _ in range(_MAX_SCAN_PAGES):
+                event = None
+                self._reclaim_room_deferrals(room_id, seen)
+                self._apply_rewind(progress)
                 page = await self.store.pending(
-                    limit=1,
-                    after_receipt_order=retry.event.receipt_order - 1,
+                    room_id=room_id,
+                    limit=_BATCH_SIZE,
+                    after_receipt_order=progress.cursor,
                     runtime_generation=self.runtime_generation,
                 )
-            except Exception:
-                if self._room_retries.get(room_id) is retry and room_id not in self._lanes:
-                    self._schedule_room_retry(retry.event)
-                continue
-            pending = any(event.event_id == retry.event.event_id for event in page)
-            if not pending and self._room_retries.get(room_id) is retry and room_id not in self._lanes:
-                del self._room_retries[room_id]
+                if self._stopped:
+                    return _RoomPass(len(seen))
+                self._reclaim_room_deferrals(room_id, seen)
+                if self._apply_rewind(progress):
+                    continue
+                for event in page:
+                    if not await self._run_room_event(event, seen):
+                        return _RoomPass(len(seen), more=True)
+                progress.cursor = page.resume_after
+                self._reclaim_room_deferrals(room_id, seen)
+                if self._apply_rewind(progress):
+                    continue
+                if page.reached_end:
+                    progress.cursor = None
+                    self._record_room_progress(room_id, None)
+                    return _RoomPass(len(seen))
+            return _RoomPass(len(seen), more=True)
+        except Exception:
+            if event is not None:
+                self._deferred.pop(event.event_id, None)
+                progress.cursor = event.receipt_order - 1
+            self._schedule_room_retry(room_id, event)
+            return _RoomPass(len(seen), failed=True)
 
     def _schedule_deferral_scan(self) -> None:
-        """Arrange one later look while anything is deferred.
-
-        Every other wakeup here is caused by something: an admission, a lane
-        finishing, a failure backing off. An owner dying causes none of them,
-        so without this the reclaim would only run when unrelated traffic
-        happened to wake the pump — which is no bound at all in a quiet room.
-        The timer exists only while a deferral does.
-        """
-        if not self._deferred or (self._deferral_scan is not None and not self._deferral_scan.done()):
+        if self._stopped or not self._deferred or (self._deferral_scan is not None and not self._deferral_scan.done()):
             return
         self._deferral_scan = asyncio.create_task(
             self._scan_after_deferral_delay(),
@@ -470,8 +512,7 @@ class PendingEventWorker:
         self._wake.set()
 
     def _schedule_retry(self) -> None:
-        """Re-run a failed pass later, since nothing else will trigger one."""
-        if self._retry is not None and not self._retry.done():
+        if self._stopped or (self._retry is not None and not self._retry.done()):
             return
         self._retry = asyncio.create_task(self._retry_after_delay(), name="pending_event_worker_retry")
 
@@ -479,194 +520,3 @@ class PendingEventWorker:
         await asyncio.sleep(self._retry_delay_seconds)
         self._retry_delay_seconds = min(self._retry_delay_seconds * 2, _MAX_RETRY_DELAY_SECONDS)
         self._wake.set()
-
-    async def _collect_dispatchable(self) -> tuple[dict[str, list[JournalEvent]], bool]:
-        """Group pending events this worker may act on now, by room.
-
-        Returns the grouping and whether the scan stopped before the end of the
-        backlog. Events whose turn is still running are skipped rather than
-        stopping the scan, so a room full of in-flight turns cannot hide the
-        events queued behind it.
-
-        A pass that runs out of page budget leaves its position behind for the
-        next one, and a pass that reaches the end of the backlog starts again
-        from the front. Restarting at receipt order zero every time is what
-        made the budget a ceiling rather than a bound: enough events the worker
-        cannot act on -- a busy bot's in-flight turns, a room whose lane keeps
-        failing -- and every pass spends the whole budget on the same prefix
-        while the dispatchable events behind it are never reached at all.
-
-        Rows the store could not read are the same kind of prefix and get the
-        same treatment. They yield no event, so the resume point comes from the
-        page rather than from the last event on it: taken from the events, a
-        page that decoded nothing would leave the cursor where it was and every
-        later pass would spend its whole budget re-reading the same corruption.
-
-        Wrapping to the front is a revolution, not a fresh start, so the pass
-        ends where it began. Without that stop it kept spending budget past its
-        own origin and collected the events it had already collected a few
-        pages earlier -- and a room's lane is handed that list verbatim, so a
-        handler that defers rather than settling runs twice on one source.
-        """
-        await self._forget_ineligible_room_retries()
-        by_room = self._reclaim_lost_deferrals()
-        reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
-        origin = self._scan_cursor
-        cursor = origin
-        wrapped = origin is None
-        for _ in range(_MAX_SCAN_PAGES):
-            page = await self.store.pending(
-                limit=_BATCH_SIZE,
-                after_receipt_order=cursor,
-                runtime_generation=self.runtime_generation,
-            )
-            reached_origin = self._collect_page(
-                page,
-                by_room,
-                already_taken=reclaimed,
-                stop_after=origin if wrapped else None,
-            )
-            if reached_origin or (page.reached_end and wrapped):
-                self._scan_cursor = None
-                return _in_receipt_order(by_room), False
-            if not page.reached_end:
-                cursor = page.resume_after
-                continue
-            # The end of the backlog, reached from part way through it. What
-            # came before the resume point has not been looked at, so the rest
-            # of the budget goes on it rather than on another pass.
-            cursor, wrapped = None, True
-        self._scan_cursor = cursor
-        return _in_receipt_order(by_room), True
-
-    async def _collect_whole_backlog(self) -> dict[str, list[JournalEvent]]:
-        """Group every pending event this worker may act on, front to back.
-
-        What a drain asks for, and the reason it cannot borrow the pump's scan.
-        A page budget exists to bound how long one pump pass keeps the loop,
-        and a drain has no such need -- it already loops until the backlog
-        stops moving, and it is that loop, not one pass of it, that has to see
-        every event.
-        """
-        await self._forget_ineligible_room_retries()
-        by_room = self._reclaim_lost_deferrals()
-        reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
-        cursor: int | None = None
-        while True:
-            page = await self.store.pending(
-                limit=_BATCH_SIZE,
-                after_receipt_order=cursor,
-                runtime_generation=self.runtime_generation,
-            )
-            self._collect_page(page, by_room, already_taken=reclaimed, stop_after=None)
-            if page.reached_end:
-                return _in_receipt_order(by_room)
-            cursor = page.resume_after
-
-    def _collect_page(
-        self,
-        page: Iterable[JournalEvent],
-        by_room: dict[str, list[JournalEvent]],
-        *,
-        already_taken: frozenset[str],
-        stop_after: int | None,
-    ) -> bool:
-        """Group one page's dispatchable events by room, stopping at ``stop_after``.
-
-        Returns whether the page ran into that stop, which is how a wrapped
-        pass recognises the position it set out from.
-        """
-        for event in page:
-            if stop_after is not None and event.receipt_order > stop_after:
-                return True
-            if self._room_is_backing_off(event.room_id):
-                continue
-            retry = self._room_retries.get(event.room_id)
-            if (
-                retry is not None
-                and event.receipt_order > retry.event.receipt_order
-                and not any(prior.event_id == retry.event.event_id for prior in by_room.get(event.room_id, ()))
-            ):
-                # A rotating scan can reach the tail before the failed head.
-                # Wait for the contiguous segment starting at that head.
-                continue
-            if event.event_id in already_taken:
-                # The reclaim at the top of this pass already took it back.
-                continue
-            if event.event_id in self._deferred:
-                # Handed to an owner the reclaim found still alive.
-                continue
-            by_room.setdefault(event.room_id, []).append(event)
-        return False
-
-    def _reclaim_lost_deferrals(self) -> dict[str, list[JournalEvent]]:
-        """Take back every deferral whose owner is gone, wherever it sits.
-
-        Deferral is a promise that some owner will call ``release``. Nothing
-        makes that owner keep the promise, and the event is durably pending the
-        whole time, so an owner that dies quietly leaves work that no later
-        admission and no retry will ever reveal. Asking whether the owner still
-        exists turns that into a bounded outage instead of one that lasts until
-        the process restarts.
-
-        Asked of the deferrals themselves rather than of whatever the scan's
-        window happens to cover, because those are different sets. A backlog
-        too large for one pass keeps the window ahead of a deferral sitting
-        behind it for as long as the overload lasts, and the outage this is
-        supposed to bound then lasts exactly as long as the one it replaced.
-        """
-        by_room: dict[str, list[JournalEvent]] = {}
-        for event in tuple(self._deferred.values()):
-            if self._room_is_backing_off(event.room_id) or self.deferral_is_live(event):
-                continue
-            # Keep ownership until a lane actually handles the reclaimed event.
-            # A scan can still lose admission to a busy or newly cooling room.
-            logger.warning(
-                "pending_event_deferral_owner_lost",
-                event_id=event.event_id,
-                kind=event.kind.value,
-                room_id=event.room_id,
-            )
-            retry = self._room_retries.get(event.room_id)
-            if retry is None or event.receipt_order <= retry.event.receipt_order:
-                by_room.setdefault(event.room_id, []).append(event)
-        return by_room
-
-    async def _run_lane(self, events: list[JournalEvent]) -> None:
-        """Run one room's events in receipt order, stopping at the first failure.
-
-        Stopping matters: if event two fails and event three still ran, the
-        room's conversation would be answered out of order, and the retry of
-        event two would then arrive after its own reply.
-
-        The store reads and writes around the handler are inside the same
-        failure, because they fail for the same reasons it does and leave the
-        same work owed. Left outside, they would instead fault the lane task
-        itself: nothing retrieves that exception, no room is recorded as
-        failed, and no retry is scheduled -- so a failed settlement would sit
-        until some unrelated event woke the pump, and then run its handler a
-        second time.
-        """
-        for event in events:
-            if self._stopped:
-                return
-            try:
-                if not await self.store.is_pending(event.event_id):
-                    self._deferred.pop(event.event_id, None)
-                    self._clear_room_retry(event)
-                    continue
-                if not await self.handle(event):
-                    self._deferred[event.event_id] = event
-                    self._clear_room_retry(event)
-                    continue
-                self._deferred.pop(event.event_id, None)
-                await self.store.settle(event.event_id)
-                self._clear_room_retry(event)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # Retry ownership replaces deferral; the ordered journal scan
-                # must encounter this failed head before admitting its tail.
-                self._deferred.pop(event.event_id, None)
-                self._schedule_room_retry(event)
-                return

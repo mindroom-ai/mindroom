@@ -81,7 +81,13 @@ Operators can inspect growth by running `SELECT state, COUNT(*) FROM journal_eve
 Terminal rows must not be deleted unless duplicate callback execution after future Matrix redelivery is acceptable.
 Classic Sync tokens are opaque and may be invalidated, forcing a no-`since` sync whose limited timeline backfill can redeliver an older event, so there is no checkpoint-relative pruning frontier that preserves exact de-duplication.
 Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
-Callback failures remain autonomously retry-owned with capped exponential backoff until they settle or deterministic corruption parks them for operator repair.
+Global journal scans discover rooms; a reserved room lane reads its own pending pages in receipt order.
+The journal query remains authoritative for replay eligibility, including approval continuations, and the global scan cursor never selects the next callback within a room.
+Each room retains its page position across bounded passes, and its continuation runs independently of global discovery.
+Callback and room-read failures pause only that room with exponential retry delays from one to thirty seconds; other rooms continue, and admissions or recovery drains cannot bypass the cooldown.
+Successful progress past the failed receipt resets that room's retry delay.
+Downstream handoffs retain live ownership, while lost owners and exact retry wakeups rewind the room's query before later callbacks run.
+Shutdown cancels lane and retry owners without settling unfinished work, which remains available for startup recovery.
 Visible response paths persist `TurnStore` truth, while pure policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity settle their journal events directly instead of recording a turn.
 This keeps ignored high-volume traffic out of the handled-turn ledger without weakening exact callback de-duplication.
 An in-memory claim loser waits for the competing owner, then yields to durable terminal truth or retries ingress when that owner exits without a terminal outcome.
