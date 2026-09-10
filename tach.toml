@@ -5058,7 +5058,7 @@ depends_on = ["mindroom.mcp_gateway.store", "mindroom.mcp_gateway.accounts", "mi
 
 [[modules]]
 path = "mindroom.mcp_gateway.store"
-depends_on = ["mindroom.mcp_gateway.accounting", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.lifecycle"]
+depends_on = ["mindroom.mcp_gateway.migrations"]
 
 [[modules]]
 path = "mindroom.api.mcp_clients"
@@ -5087,8 +5087,9 @@ path = "mindroom.mcp_gateway.lifecycle"
 depends_on = []
 
 [[modules]]
-path = "mindroom.mcp_gateway.accounting"
+path = "mindroom.mcp_gateway.migrations"
 depends_on = []
+visibility = ["mindroom.mcp_gateway.store"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.server"

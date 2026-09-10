@@ -7,9 +7,7 @@ import os
 import sqlite3
 from typing import TYPE_CHECKING, TypeVar
 
-from mindroom.mcp_gateway.accounting import migrate_accounting, migrate_lifecycle_accounting
-from mindroom.mcp_gateway.accounts import migrate_accounts
-from mindroom.mcp_gateway.lifecycle import migrate_lifecycle
+from mindroom.mcp_gateway.migrations import migrate_schema
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -72,14 +70,7 @@ class GatewayOAuthStore:
                 CREATE INDEX IF NOT EXISTS pending_client ON pending(json_extract(payload, '$.client_id'));
                 CREATE INDEX IF NOT EXISTS pending_expiry ON pending(expires_at);
             """)
-            if "expires_at" not in {row["name"] for row in connection.execute("PRAGMA table_info(clients)")}:
-                connection.execute("ALTER TABLE clients ADD COLUMN expires_at REAL NOT NULL DEFAULT 0")
-                connection.execute("UPDATE clients SET expires_at = ?", (self.registration_expires_at(),))
-            connection.execute("CREATE INDEX IF NOT EXISTS clients_expiry ON clients(expires_at)")
-            migrate_accounting(connection, self._clock())
-            migrate_lifecycle(connection)
-            migrate_accounts(connection)
-            migrate_lifecycle_accounting(connection)
+            migrate_schema(connection, clock=self._clock, registration_expires_at=self.registration_expires_at)
             connection.execute("COMMIT")
         finally:
             connection.close()
