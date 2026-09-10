@@ -7,7 +7,7 @@ import contextvars
 import threading
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from functools import partial
 from importlib.metadata import version
@@ -16,6 +16,7 @@ from queue import SimpleQueue
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.agent import _session as agent_session
+from agno.session import AgentSession, TeamSession, WorkflowSession
 from agno.team import _session as team_session
 
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
-    from agno.session import AgentSession, TeamSession, WorkflowSession
     from agno.team import Team
 
     type _AgentSession = AgentSession | TeamSession | WorkflowSession
@@ -139,6 +139,11 @@ async def _offload_sync_save[Owner, Payload](
     worker: Future[object | None] = lane.executor.submit(_run_prepared_operation, operations)
     try:
         context = contextvars.copy_context()
+        if isinstance(payload, (AgentSession, TeamSession, WorkflowSession)):
+            # Agno 3 persists runs separately; snapshot only the session row.
+            # Clear history on a shallow copy so the live session stays intact.
+            payload = copy(payload)
+            payload.runs = None
         snapshot = deepcopy(payload)
         operation = partial(context.run, save, owner, snapshot, *save_args)
     except BaseException:
