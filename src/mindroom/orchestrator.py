@@ -45,7 +45,7 @@ from mindroom.hooks import (
 )
 from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
-from mindroom.legacy_session_migration import run_legacy_session_migration_after_ready
+from mindroom.legacy_private_storage import migrate_private_storage
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
@@ -68,7 +68,6 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
-from mindroom.private_storage_migration import migrate_private_storage
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
@@ -2960,24 +2959,6 @@ def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_p
     storage_path.mkdir(parents=True, exist_ok=True)
 
 
-def _schedule_legacy_session_migration(
-    orchestrator: _MultiAgentOrchestrator,
-    runtime_paths: RuntimePaths,
-    log_level: str,
-) -> asyncio.Task[None]:
-    """Schedule migration against the resolved session root behind readiness."""
-    session_storage_path = constants.resolve_session_state_root(runtime_paths.storage_root, runtime_paths)
-    return asyncio.create_task(
-        run_legacy_session_migration_after_ready(
-            orchestrator._runtime_ready_event,
-            session_storage_path,
-            log_level=log_level,
-            runtime_paths=runtime_paths,
-        ),
-        name="legacy_session_migration",
-    )
-
-
 async def main(
     log_level: str,
     runtime_paths: RuntimePaths,
@@ -3035,8 +3016,6 @@ async def main(
                     name=supervisor_name,
                 ),
             )
-
-        auxiliary_tasks.append(_schedule_legacy_session_migration(orchestrator, runtime_paths, log_level))
 
         if api:
             api_task = asyncio.create_task(

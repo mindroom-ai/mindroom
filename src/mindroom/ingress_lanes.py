@@ -103,7 +103,7 @@ class IngressLanes:
         self,
         *,
         deliver: Callable[[LaneSlot, LaneDelivery, ReadyPendingEvent], Awaitable[None]],
-        on_undelivered_source: Callable[[str], None] | None = None,
+        on_undelivered_source: Callable[[str, str], None] | None = None,
         on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._deliver = deliver
@@ -364,7 +364,7 @@ class IngressLanes:
         if callback is None or delivery.source_event_id is None:
             return
         try:
-            callback(delivery.source_event_id)
+            callback(delivery.key.room_id, delivery.source_event_id)
         except Exception:
             logger.exception(
                 "ingress_lane_undelivered_source_notification_failed",

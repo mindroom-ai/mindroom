@@ -488,6 +488,15 @@ class TestRoutingRegression:
     ) -> None:
         """Recover ready selections while retaining only an exact unready target."""
         router_bot, _healthy_bot, stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
+
+        async def recover_until_settled(event_id: str) -> None:
+            async with asyncio.timeout(5):
+                while await router_bot._journal_dispatcher.store.is_pending(event_id):
+                    await router_bot.recover_pending_turn_journal_events()
+                    await drain_coalescing(router_bot)
+                    assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
+                    await asyncio.sleep(0.01)
+
         room_id = room.room_id
         event = _router_readiness_event("$selective-recovery")
         router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
@@ -503,10 +512,7 @@ class TestRoutingRegression:
             EventClass.ACTIONABLE,
         )
 
-        await router_bot.recover_pending_turn_journal_events()
-        await drain_coalescing(router_bot)
-        assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
-        await router_bot.recover_pending_turn_journal_events()
+        await recover_until_settled(event.event_id)
 
         mock_suggest_responder.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
@@ -539,10 +545,7 @@ class TestRoutingRegression:
             {"event_id": "$stuck-router-response"},
             room_id=room_id,
         )
-        await router_bot.recover_pending_turn_journal_events()
-        await drain_coalescing(router_bot)
-        assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
-        await router_bot.recover_pending_turn_journal_events()
+        await recover_until_settled(blocked_event.event_id)
 
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_stuck:localhost could you help with this?"

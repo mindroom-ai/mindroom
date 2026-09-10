@@ -32,12 +32,6 @@ from mindroom.agent_policy import (
     unsupported_team_agent_message,
 )
 from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_user_ids
-from mindroom.config.access_migration import (
-    AccessMigrationError,
-    migrate_access_config_data,
-    persist_access_migration,
-    validate_access_migration_source,
-)
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -45,6 +39,12 @@ from mindroom.config.calls import CallsConfig, CascadedCallProfile
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.legacy_access import (
+    AccessMigrationError,
+    migrate_access_config_data,
+    persist_access_migration,
+    validate_access_migration_source,
+)
 from mindroom.config.matrix import (
     EventJournalConfig,
     MatrixSpaceConfig,

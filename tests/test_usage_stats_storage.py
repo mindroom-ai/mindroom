@@ -20,6 +20,7 @@ from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.legacy_session_storage import merge_legacy_run_payloads
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage_stats_storage import (
     UsageSessionRow,
@@ -259,7 +260,8 @@ def test_reader_extracts_runs_written_by_mindroom_agno_storage(tmp_path: Path) -
     assert row.runs[0].model == "gpt-6-astra"
 
 
-def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_encoding", [False, True])
+def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path, legacy_encoding: bool) -> None:
     """Admin totals use Agno's member-inclusive team session aggregate."""
     session = TeamSession(
         session_id="session-1",
@@ -295,6 +297,10 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path) ->
         storage.close()
 
     source = _source(tmp_path / "sessions" / "engineering.db", table="engineering_sessions")
+    if legacy_encoding:
+        with sqlite3.connect(source.path) as connection:
+            (session_data,) = connection.execute("SELECT session_data FROM engineering_sessions").fetchone()
+            connection.execute("UPDATE engineering_sessions SET session_data = ?", (json.dumps(session_data),))
     result = list(iter_usage_storage_rows(source, mode="session_metrics"))
 
     assert len(result) == 1
@@ -564,3 +570,23 @@ def test_reader_merges_legacy_blob_with_runs_table(tmp_path: Path) -> None:
     assert row.runs[0].metrics == {"total_tokens": 99}
     assert row.runs[1].metrics == {"input_tokens": 2, "output_tokens": 2, "total_tokens": 4}
     assert row.payload_bytes > 0
+
+
+def test_legacy_payload_merge_keeps_current_precedence_and_blob_duplicates() -> None:
+    """Current rows win, while repeated historical blob entries remain visible."""
+    current_runs = [{"run_id": "current", "metrics": {"total_tokens": 99}}]
+    legacy_payload = json.dumps(
+        json.dumps(
+            [
+                {"run_id": "current", "metrics": {"total_tokens": 1}},
+                {"run_id": "legacy", "metrics": {"total_tokens": 2}},
+                {"run_id": "legacy", "metrics": {"total_tokens": 3}},
+            ],
+        ),
+    )
+
+    assert merge_legacy_run_payloads(current_runs, legacy_payload) == [
+        {"run_id": "current", "metrics": {"total_tokens": 99}},
+        {"run_id": "legacy", "metrics": {"total_tokens": 2}},
+        {"run_id": "legacy", "metrics": {"total_tokens": 3}},
+    ]

@@ -19,6 +19,7 @@ from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.google_docs import GoogleDocsTools
 from mindroom.oauth.google_docs import google_docs_oauth_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -168,9 +169,11 @@ def test_google_docs_missing_credentials_returns_scoped_connect_instruction(tmp_
 def test_google_docs_tokens_stay_separate_from_dashboard_settings(tmp_path: Path) -> None:
     manager = CredentialsManager(tmp_path / "credentials")
     manager.save_credentials("google_docs", {"edit_document": False, "_source": "ui"})
-    manager.save_credentials(
-        "google_docs_oauth",
+    publish_oauth_credentials(
+        google_docs_oauth_provider(),
         {"token": "access-token", "refresh_token": "refresh-token", "_source": "oauth"},
+        credentials_manager=manager,
+        worker_target=None,
     )
     tool = GoogleDocsTools(
         runtime_paths=_runtime_paths(tmp_path),

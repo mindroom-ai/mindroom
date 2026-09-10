@@ -742,6 +742,12 @@ The sync status indicator in the header shows:
 - **Sync Error** - Sync failed
 - **Disconnected** - Lost connection to backend
 
+If another dashboard tab or a server-side edit changes the configuration, saving an older draft can return HTTP 409.
+The dashboard keeps your draft and shows persistent recovery guidance, including in the raw configuration recovery editor.
+Copy any changes you want to keep, refresh the page to load the current configuration, then reapply and save your changes.
+Further save attempts are rejected locally while the conflict remains; editing the draft or refreshing agent policies does not resolve it.
+The dashboard does not automatically reload and retry a full replacement, because that could overwrite another writer's changes.
+
 ### Theme and Responsive Design
 
 Toggle between dark and light themes. The dashboard adapts to desktop and mobile devices.
@@ -863,6 +869,9 @@ Ordinary Matrix transport silence still reaches the watchdog after 120 seconds a
 While Nio commits durable ingestion progress, the watchdog and `/api/health` consume the same monotonic progress snapshot and defer for up to `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` (default 600).
 Both stop deferring when that grace expires or progress stops advancing for their respective silence timeout.
 Successful sync completion refreshes both liveness clocks and clears the ingestion grace window.
+After 90 seconds without sync or durable ingestion progress, `matrix_sync_stall_diagnostics` logs bounded await chains for that agent's sync, ingestion runner, ingestion pump, and delivery recovery tasks, including during first-sync and restarted-sync startup grace.
+Reports repeat at most every 90 seconds and include sync age, time without progress, and ingestion generation without changing watchdog or readiness behavior.
+Snapshots contain at most four tasks and 32 code locations per task, with strings capped at 240 characters; they exclude locals, message content, and source text, and stop at opaque Future or Task await boundaries.
 Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ### Tools & Matrix
@@ -903,6 +912,7 @@ Large configs can be split across multiple files with Home-Assistant-style inclu
 | Tag | Result |
 |-----|--------|
 | `!include rel/path.yaml` | The parsed content of that YAML file, with nested include tags resolved recursively |
+| `!expand rel/path.yaml` | Splices the file's YAML list into the surrounding list at this item; a MindRoom extension for shared tools, instructions, and other lists |
 | `!include_text rel/path.md` | The file's raw text as a string (UTF-8, one trailing newline stripped); a MindRoom extension for long prompt or instruction blocks |
 | `!include_dir_list rel/dir` | A list with one item per YAML file in the directory |
 | `!include_dir_named rel/dir` | A mapping of filename-without-extension to each file's parsed content |
@@ -946,6 +956,31 @@ Files and directories whose name starts with `.` or `_` are skipped by directory
 Explicit include paths may not contain hidden components: any path component starting with `.` (other than the `.` and `..` navigation components) is rejected, so `!include_text .env` fails with a clear include error.
 The `_` convention gives shared snippet files a home inside included trees, such as `agents/_shared/web_tools.yaml` above, which is pulled in via an explicit `!include`.
 Use such snippets instead of YAML anchors when sharing values between files, because YAML anchors are scoped to a single file and cannot cross an include boundary.
+
+### Expanding Shared Lists
+
+Use `!expand` as a list item to reuse a shared list and add items for individual agents:
+
+```yaml
+# agents/researcher.yaml
+researcher:
+  role: Deep research and analysis
+  tools:
+    - !expand _shared/web_tools.yaml
+    - calculator
+```
+
+With the `agents/_shared/web_tools.yaml` file above, this resolves to `tools: [duckduckgo, website, browser, calculator]`.
+The compact form `tools: [!expand _shared/web_tools.yaml, calculator]` works too.
+You can place several expansions anywhere in a list, with ordinary items before, between, or after them.
+Shared files can themselves use `!expand` and other include tags recursively, with paths relative to each containing file.
+Expansion preserves order and duplicates and only splices one level; nested lists inside the shared list remain nested.
+An ordinary `- !include tools.yaml` still inserts the included value as one item, even when that value is a list.
+The expanded file must resolve to a YAML list: `[]` adds nothing, while an empty file, `null`, a scalar, or a mapping raises an error.
+`!expand` requires a relative file path and is only valid as a list item; use `tools: !include tools.yaml` to replace an entire list.
+Expanded files follow the same path restrictions, cycle checks, source tracking, and hot reload behavior as other included files.
+
+### Include Errors and Hot Reload
 
 Error handling is strict so a broken split fails loudly:
 
@@ -1579,9 +1614,10 @@ PY
 When this variable is configured, `CredentialsManager` writes encrypted credential files with mode `0600` and creates credential directories with mode `0700`.
 Encrypted mode refuses plaintext credential JSON files for every credential service.
 Existing non-OAuth plaintext credentials become unreadable and cannot be overwritten while encryption is enabled, so back them up and recreate them under encryption or remove the key before reading them again.
-Encrypted mode refuses to copy plaintext legacy OAuth credential bytes into the encrypted SQLite store.
-No OAuth plaintext-to-encrypted migration is performed automatically; the legacy file remains available for operator recovery until an explicit reset or replacement commits, so configure the key before saving credentials that must be encrypted.
-If encryption is disabled again before that commit, MindRoom re-adopts the retained plaintext legacy credential into the unencrypted SQLite store.
+OAuth credentials are read only from their authoritative SQLite stores and use the active encryption setting when published.
+Legacy OAuth JSON files and sidecars are ignored and left unchanged, and changing the encryption setting never imports them.
+An OAuth connection that exists only in JSON must be reconnected with the intended encryption setting.
+Current encrypted SQLite credentials become readable again when their correct key is restored.
 
 ## Debug Logging
 
@@ -13773,10 +13809,9 @@ Automatic discovery first checks protected-resource metadata at the resource ori
 Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
 OAuth token writes always resolve the provider's canonical credential target and publish through the OAuth credential lifecycle into that scope's private SQLite store.
-On first access, MindRoom adopts a scope's legacy `<credential_service>_credentials.json` token document into a sibling `<credential_service>_credentials.sqlite3` store and removes the legacy file only after its bytes are durably represented or an explicit reset or replacement commits.
-If enabling credential encryption leaves a plaintext legacy token unadopted, disabling encryption before reset or replacement lets MindRoom re-adopt that retained token into the unencrypted store.
-Back up both files during an upgrade if an immediate rollback may be necessary.
-Versions that predate the SQLite lifecycle ignore the new store, so downgrading can expose stale legacy state or require the user to reconnect rather than preserving changes made after adoption.
+The SQLite store is authoritative on every OAuth credential read.
+Legacy `<credential_service>_credentials.json` token documents and their sidecars are ignored and left unchanged.
+An OAuth connection that exists only in JSON must be reconnected to publish current SQLite state.
 Providers can declare that credentials follow the requester independently of agent worker reuse.
 GitHub uses that policy, so its managed token always lands in the requester's `user` scope and can never fall back to a shared or global token store.
 For providers without that policy, private-agent tokens follow the authenticated requester and the agent's saved `worker_scope`, shared-scope agent tokens use a per-agent primary-runtime store, and unscoped agents use the global credential store.
@@ -17002,6 +17037,30 @@ Client `system` / `developer` messages are prepended to the prompt. They augment
 
 The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY`; the browser dashboard uses a same-origin auth cookie, while CLI and curl clients can still send `Authorization: Bearer ...`. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
 
+### Requester identities and delegation
+
+Bind selected API keys to Matrix user IDs with a JSON object in `.env`:
+
+```dotenv
+OPENAI_COMPAT_API_KEYS=sk-astrbot,sk-legacy
+OPENAI_COMPAT_API_KEY_REQUESTERS='{"sk-astrbot":"@alice:example.org"}'
+```
+
+The key must still appear in `OPENAI_COMPAT_API_KEYS`; a mapping alone never authenticates a caller.
+Restart MindRoom after changing these environment settings.
+Mapped identities must be concrete human Matrix user IDs, and `authorization.aliases` resolves bridge identities to their canonical requester.
+The request body's `user` field and requester headers cannot override this identity.
+
+Mapped callers only see and invoke models allowed by the existing responder access policy, including every member of a selected team.
+Auto-routing uses the same permitted agents.
+`delegate_task` checks both the caller agent's `delegate_to` list and the requester's access to each target, and propagates the requester into nested runs and their metadata.
+Grant access with `agents.<name>.access.users`, administrator membership, or a ready managed `members_of_rooms` membership snapshot.
+There is no current Matrix room for `/v1`, so `current_room_members` cannot grant access, and missing or stale room membership fails closed.
+
+Unmapped keys retain their existing model access but cannot delegate.
+Mapped sessions also include the canonical requester in their namespace, preventing a reassigned key from inheriting the previous requester's session.
+Room-context tools and approval-gated tools remain unavailable in delegated API runs.
+
 ## Limitations
 
 - **Token usage is always zeros** — Agno doesn't expose token counts
@@ -17053,6 +17112,7 @@ MindRoom's architecture consists of several key components working together.
 - [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/) - How MindRoom connects to Matrix
 - [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/) - How agents are managed
 - [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) - The inbound turn pipeline and its module boundaries
+- [Migration and Compatibility Boundaries](https://docs.mindroom.chat/architecture/migrations/) - Current owners for historical formats, dependency migrations, and retained compatibility
 - [Matrix Event-Journal Security](https://docs.mindroom.chat/architecture/matrix-event-journal-security/) - Which decrypted plaintext is durable, who owns it, and what removes it
 - [Matrix Event-Journal Contracts](https://docs.mindroom.chat/dev/matrix-event-journal-contracts/) - What the journal guarantees, and the homeserver behaviour you would otherwise rediscover by debugging
 
@@ -17069,7 +17129,7 @@ MindRoom's architecture consists of several key components working together.
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
-| `legacy_session_migration.py` | Post-readiness retirement of Agno 2 session run blobs |
+| `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
@@ -17111,6 +17171,20 @@ MindRoom's architecture consists of several key components working together.
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `topic_generator.py` | AI-generated room topics |
 | `background_tasks.py` | Non-blocking async task management with GC protection |
+
+## Storage upgrade boundaries
+
+Historical formats stay with their storage or lifecycle owners, while current callers consume canonical identities and paths.
+`legacy_private_storage_aliases.py` owns historical requester spellings and verified aliases; only startup migration and `private_storage_paths.py` can import it.
+Worker mount planning and sandbox path validation use `private_storage_paths.py`, while `private_instance_identity_store.py` validates current identities.
+
+`oauth/legacy_credentials.py` owns publication-field normalization and lossless historical requester bindings.
+Only `oauth/credential_store.py` can import it; the store retains schema, scope validation, current credential state, transaction locks, retries, and commit ownership.
+OAuth credentials stored only in legacy JSON files require reconnection; those files and their obsolete sidecars remain untouched.
+
+Existing lifecycle adapters remain at their focused entry points: `legacy_private_storage.py` at startup, `config/legacy_access.py` during config loading, and Nio journal and crypto adapters when their stores open.
+`session_storage_preflight.py` checks owned session databases before opening them and archives session directories whose tables lack required columns; see [Session Storage Recovery](https://docs.mindroom.chat/architecture/orchestration/#session-storage-recovery).
+Tach visibility rules keep compatibility internals behind their owning boundaries.
 
 ## Data Flow
 
@@ -17221,7 +17295,8 @@ This provenance remains attached across recovery, restart, and decryption indepe
 `matrix/durable_ingestion.py` converts one trusted Nio batch and atomically commits its receipt, ordered membership effects, semantic events, and conversation projection in the MindRoom journal before acknowledging that batch to Nio.
 An admission failure leaves the batch unsettled for retry, and replay after a committed admission returns the original receipt without duplicating semantic work.
 Typing, presence and read receipts are excluded from durable admission.
-MindRoom requires `mindroom-nio>=1,<2`, and `uv.lock` pins the published 1.0.0 release.
+MindRoom requires `mindroom-nio>=1.0.1,<2`, and `uv.lock` pins the published 1.0.1 release.
+This release parses encrypted attachments in ordinary history events and treats a null room-avatar URL as unset, preventing those event shapes from blocking history hydration.
 Admission is fail-closed at every provenance, not only for recovery, because an event the journal never accepted is one no later process would see again.
 Silent schedules use the custom `io.mindroom.scheduled.trigger` timeline event so clients do not render the task body as a room message.
 Ingress admits that hidden event only from a managed sender, leaves it out of the visible-message projection, and classifies cold-history copies as context-only.
@@ -17496,16 +17571,17 @@ main() entry
 - **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; `matrix_sync.mode: classic` uses Classic `/v3/sync`, while `sliding` uses MSC4186 Simplified Sliding Sync on a homeserver advertising `org.matrix.simplified_msc3575`
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
-## Session Storage Upgrades
+## Session Storage Recovery
 
-After the runtime becomes ready, MindRoom checks session databases for Agno 2 run blobs off the event loop.
-A child process starts only when legacy data exists, then migrates and verifies each session in its own transaction.
-The runtime remains available throughout.
-Logs report each table's total, progress every 100 sessions, and completion.
-Invalid or conflicting blobs stay intact on the compatibility read path and are reported for a later retry.
+Before opening an owned session database, `session_storage_preflight.py` checks any existing session table for the required Agno columns.
+If required columns are missing, it renames the entire `sessions/` directory to a unique `sessions.incompatible-*` sibling, including SQLite journals and sidecars, then recreates `sessions/` with its original permissions.
+The archive stays available for manual recovery, and logs report its path and the missing columns.
+Only session storage is archived; learning, authored files, credentials, and Matrix encryption keys remain separate.
+Permission failures, corruption, unexpected schema objects, and unsafe paths still raise errors rather than triggering an archive.
 
-The legacy column is cleared for successfully migrated sessions and retained for compatibility reads when migration fails.
-Removing the column is a separate explicit cleanup because changing a live SQLite table can block writes.
+Compatible Agno 2 and mixed-schema session data remains readable through Agno's compatibility reads.
+MindRoom no longer schedules background conversion or clears legacy run blobs.
+Run upgrades while MindRoom is stopped so recovery cannot overlap active session writers.
 
 ## Runtime Replacement Admission
 
@@ -17623,6 +17699,326 @@ On `orchestrator.stop()`:
 
 Each response keeps one ownership record through terminal cleanup and recovery-proof consumption.
 A timeout preserves the record and any in-flight proof, so shared resources remain available for deferred cleanup.
+
+# Migration and compatibility boundaries
+
+MindRoom keeps substantive historical schemas and representations in named legacy modules.
+Historical-format production owners use `legacy_<subject>.py` beside their current owner, including one-time upgrades and recurring old-data readers.
+The current storage or lifecycle owner keeps its transaction, locking, validation, authorization, retry, and current-format processing.
+Small field defaults stay with their current model when extraction would add indirection without isolating a meaningful migration.
+Dependency-owned migrations and authoritative SaaS data remain under their existing owners.
+
+This page maps every item from the migration audit to its current owner and disposition.
+It describes the current source rather than promising support for every earlier release.
+
+## Status terms
+
+| Status | Meaning |
+| --- | --- |
+| Isolated | Historical input remains supported through a named boundary. |
+| Removed/superseded | The earlier reader is gone or a newer cutoff replaces it. |
+| Dependency-owned | An installed library owns the migration. |
+| Current behavior | The code serves a current format, protocol, safety rule, or authoring interface. |
+| Tiny retained default | A small default stays with its current owner because extraction would add complexity. |
+
+## Named boundaries
+
+The first twelve rows were created or renamed by the migration-boundary isolation work.
+The remaining rows were already focused boundaries and complete the current map.
+
+| Boundary | Trigger and current caller | Retained guarantees |
+| --- | --- | --- |
+| [`src/mindroom/mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | `GatewayOAuthStore` calls `migrate_schema` when opening SQLite. | The store retains its writer transaction, base DDL, and live processing; ordered expiry, accounting, lifecycle, account, and token-cutoff upgrades stay together. |
+| [`src/mindroom/legacy_session_storage.py`][legacy-session] | Run deletion and usage diagnostics encounter an Agno 2 `runs` blob. | Current rows win by `run_id`; descendant deletion, transaction ownership, diagnostics, and byte accounting remain with current owners. |
+| [`src/mindroom/legacy_openai_tool_replay.py`][legacy-openai] | OpenAI-family adapters replay histories written before empty tool arguments were preserved. | Repair copies changed messages, supplies empty arguments, and drops placeholder calls with their associated orphan tool results without mutating stored history. |
+| [`src/mindroom/legacy_handled_turns.py`][legacy-handled] | `HandledTurnLedger` finds `tracking/<agent>_responded.json`. | Insert-only adoption protects newer rows, fills absent indexes, retries interrupted work, and renames only after adoption. |
+| [`src/mindroom/event_journal/legacy_turn_records.py`][legacy-turn-records] | The handled-turn importer adopts missing journal indexes. | The journal transaction is retained and migration writes never use current upsert deletion semantics. |
+| [`src/mindroom/legacy_delivery_payloads.py`][legacy-delivery] | Outbox reads or Matrix writes encounter inline FINAL results and the bounded marker. | Old inline outcomes keep rolling-writer precedence, current local results remain authoritative otherwise, and full recovery data stays off the wire. |
+| [`src/mindroom/legacy_approval_payloads.py`][legacy-approval] | Approval claim or resume encounters missing historical context or the older card ID. | Current approval ownership, authorization, exact-call checks, transaction settlement, and failure handling remain with current owners. |
+| [`src/mindroom/matrix/legacy_sync_continuity.py`][legacy-sync] | `SyncContinuityStore` loads a valid v2 or v3 record. | The helper validates the old shape, discards its checkpoint, increments revision once, and lets the store rewrite v4 under lock. |
+| [`src/mindroom/script_runs/legacy_schema.py`][script-legacy-schema] | `ScriptRunStore` finds missing resource snapshot columns. | Schema creation and the transaction stay in the store; old rows receive the established null or empty-map values. |
+| [`src/mindroom/knowledge/legacy_metadata.py`][knowledge-legacy] | Knowledge parsing sees absent or empty optional filter fields. | Current parsing still rejects unknown fields; missing corpus settings retain empty historical sentinels and rebuild only when the corresponding current corpus-compatibility value differs. |
+| [`src/mindroom/matrix/legacy_state.py`][matrix-legacy-state] | Matrix state has accounts without a domain or a noncanonical serialized shape. | Runtime-domain resolution, parsing, caching, and atomic persistence stay in `matrix/state.py`; rewrites happen only when data differs. |
+| [`src/mindroom/config/legacy_fields.py`][config-legacy] | Agent or defaults validation sees a retired field. | Pydantic remains the strict validation boundary and the helper provides directed replacement errors. |
+| [`src/mindroom/event_journal/legacy_schema.py`][journal-legacy-schema] | A journal has `journal_events` but lacks Nio-owned `matrix_sync_consumers`. | One schema transaction preserves history, handled turns, generation, and visible projection while retiring obsolete pending execution. |
+| [`src/mindroom/config/legacy_access.py`][access-legacy] | Config loading or `mindroom config migrate` finds retired access fields. | Complete-source validation, concrete grants, a backup, and atomic membership-schema publication are retained. |
+| [`src/mindroom/legacy_private_storage.py`][private-legacy], [`legacy_private_storage_aliases.py`][private-legacy-aliases], and [`private_storage_paths.py`][private-paths] | Startup finds a verified private scope with the historical requester spelling. | Intent records, owner and inode checks, worker quiescence, ordered renames, and verified aliases protect recovery and current callers. |
+| [`src/mindroom/session_storage_preflight.py`][session-preflight] | An owned session table lacks required Agno columns. | The recovery lock, SQLite rollback recovery, and whole-directory archive complete before current storage creation. |
+| [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
+| [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
+
+## Python provenance and regression coverage
+
+Each historical Python boundary carries a source block naming its legacy format, last native old writer and replacement, current handling, and meaningful regression coverage.
+Those source blocks are authoritative for exact release details and test node IDs; this index groups boundaries that share a behavioral test surface.
+`Last legacy release` means the final stable tagged release whose native writer or typed model emitted the old representation, not the final reader that accepted it.
+Continued acceptance or reader removal belongs in `Handling`, separate from the writer cutoff and replacement release.
+When no stable tag contained an old native writer, the block uses an honest unreleased, unversioned external-input, or no-tagged-model classification; schema-based recovery likewise states that it has no single release cutoff.
+
+| Boundary owners | Behavioral evidence |
+| --- | --- |
+| [`mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | [Gateway OAuth][gateway-oauth-tests], [capacity][gateway-capacity-tests], [lifecycle][gateway-lifecycle-tests], and [account][gateway-account-tests] tests exercise the staged schema upgrades and released token cutoff. |
+| [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover precedence and retained duplicates. |
+| [`legacy_openai_tool_replay.py`][legacy-openai] | [OpenAI model tests][openai-model-tests] cover missing arguments, streamed placeholders, matching orphan results, copying, and input nonmutation. |
+| [`legacy_handled_turns.py`][legacy-handled] and [`event_journal/legacy_turn_records.py`][legacy-turn-records] | [Handled-turn tests][handled-turn-tests] cover released JSON shapes, the deliberate unversioned cutoff, interrupted adoption, occupied indexes, reopen behavior, and reconstructed replay facts. |
+| [`event_journal/legacy_schema.py`][journal-legacy-schema] | [Journal upgrade tests][journal-upgrade-tests] start from literal pre-Nio DDL and verify retained history and terminal facts, retired unfinished work, and stable repeat opening. |
+| [`legacy_delivery_payloads.py`][legacy-delivery] and [`legacy_approval_payloads.py`][legacy-approval] | [Journal store][journal-store-tests], [response runner][response-runner-tests], and [approval][approval-tests] tests cover visible-result precedence, wire sanitation, frozen visibility, origin recovery, and sparse card identity. |
+| [`matrix/legacy_sync_continuity.py`][legacy-sync] and [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | [Sync-continuity tests][sync-continuity-tests] cover complete v2/v3 conversion and retry, while [crypto upgrade tests][crypto-upgrade-tests] verify that identity, keys, and trust survive retirement of transport recovery. |
+| [`script_runs/legacy_schema.py`][script-legacy-schema] | [Script-run tests][script-run-tests] rebuild the literal old table, preserve every old value, add empty resource snapshots, and verify a second open. |
+| [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
+| [`matrix/legacy_state.py`][matrix-legacy-state] and [`matrix/users.py`][matrix-users] | [Matrix identity][matrix-identity-tests] and [agent manager][matrix-agent-tests] tests preserve durable account state, verify stable reloads, and exercise the missing-request fallback without network registration. |
+| [`config/legacy_access.py`][access-legacy] and [`config/legacy_fields.py`][config-legacy] | [Access migration tests][access-migration-tests] cover validated conversion, exact backup bytes, stable publication, and rejection paths; [configuration tests][agent-config-tests] cover every directed retired-field error. |
+| [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
+| [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
+| [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
+| [`execution_preparation.py`][execution-preparation] and [`streaming.py`][streaming] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical markers, current structured-status precedence, and interruption classification. |
+| [`session_storage_preflight.py`][session-preflight] | [Session recovery tests][session-recovery-tests] cover schema-based archive, locks, rollback recovery, unrelated tables, current corruption, and byte preservation without inventing one release cutoff. |
+| [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert exact shared-domain and host-only expiry cookies on both endpoints and retain current host-only behavior for localhost, IP addresses, and single-label hosts. |
+
+This index intentionally excludes current authoring shorthands, protocol adapters, recovery rules, and caches that tolerate unknown versions because those are active interfaces rather than evidence of a retired native writer.
+Sparse publication, job, and failure fields in [`knowledge/index_metadata.py`][knowledge-index] remain a current writer contract: the writer still omits optional values and the reader accepts those sparse in-progress and failed records.
+Dependency-owned schemas remain attributed to their dependency, and removed readers remain documented as removed rather than recreated only to obtain conversion coverage.
+The coverage delivered here is limited to Python owners, including the SSO route; inventoried SQL migrations, browser cleanup, and infrastructure setup below remain outside this implementation and carry no new annotation or test claim.
+
+## Journal, delivery, approvals, and sync
+
+Journal IDs use `J` to avoid colliding with credential IDs.
+
+| ID | Status | Owner and reason |
+| --- | --- | --- |
+| J1 | Isolated | [`legacy_handled_turns.py`][legacy-handled] adopts pre-journal JSON once and renames it. |
+| J2 | Isolated | [`handled_turns.py`][handled] keeps current sparse fields, [`turn_store.py`][turn-store] owns Agno run recovery, and [`legacy_handled_turns.py`][legacy-handled] restores only absent historical revision provenance. |
+| J3 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] replaces the old additive conversion framework with the Nio ownership cutoff. |
+| J4 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] drops old interactive tables instead of archiving or translating them. |
+| J5 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] retires the old response outbox rather than converting delivery debt. |
+| J6 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] retires all pre-cutoff delivery tables, replacing the earlier unfenced-outbox guard. |
+| J7 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] drops old approval transport and continuations rather than converting or tombstoning them. |
+| J8 | Isolated | [`legacy_delivery_payloads.py`][legacy-delivery] owns inline FINAL results, precedence, markers, and wire sanitation. |
+| J9 | Isolated | [`legacy_approval_payloads.py`][legacy-approval] rebuilds historical optional context; [`approval_execution.py`][approval-execution] keeps current exact execution gates. |
+| J10 | Isolated | [`legacy_approval_payloads.py`][legacy-approval] owns the old card ID alias; [`approval_manager.py`][approval-manager] keeps current authentication, retries, tombstones, and fail-closed behavior. |
+| J11 | Isolated | [`matrix/legacy_sync_continuity.py`][legacy-sync] converts valid v2/v3 join fences to current v4 and discards the obsolete checkpoint. |
+| J12 | Removed/superseded | [The upgrade fixture][pre-journal-test] confirms old event-cache and dispatch-obligation files have no runtime reader and remain untouched. |
+| J13 | Current behavior | [`event_journal_open.py`][journal-open] owns binding, generation, adoption, and database ownership guards. |
+| J14 | Current behavior | [`sync_restart_retry.py`][restart-retry] and [`visible_response_reconciliation.py`][visible-recovery] keep current replay and visible-response safety. |
+
+## Agent state, history, memory, and knowledge
+
+| ID | Status | Owner and reason |
+| --- | --- | --- |
+| S1 | Isolated | [`script_runs/legacy_schema.py`][script-legacy-schema] adds old missing resource columns inside the current store transaction. |
+| S2 | Isolated | [`knowledge/legacy_metadata.py`][knowledge-legacy] normalizes absent or empty optional filters. |
+| S3 | Isolated | [`knowledge/legacy_metadata.py`][knowledge-legacy] retains empty historical sentinels for missing corpus settings, rebuilding only when the corresponding current corpus-compatibility value differs. |
+| S4 | Current behavior | [`knowledge/index_metadata.py`][knowledge-index] deliberately writes and reads sparse publication, job, and failure lifecycle fields. |
+| S5 | Current behavior | [`knowledge/collections.py`][knowledge-collections] protects current default and live collections as well as older published layouts. |
+| S6 | Tiny retained default | [`memory/auto_flush.py`][auto-flush] discards two retired location fields while current worker identity sanitation and queue defaults remain. |
+| S7 | Removed/superseded | [`memory/functions.py`][memory-functions] no longer contains or exports the monolithic memory-prompt wrapper. |
+| S8 | Current behavior | [`ai_runtime.py`][ai-runtime] supports string input and deep-copies canonical message sequences for retries. |
+| S9 | Isolated | [`legacy_openai_tool_replay.py`][legacy-openai] repairs old stored calls; current sparse-stream filtering stays in the adapters. |
+| S10 | Current behavior | [`agent_storage.py`][agent-storage] and [`history/compaction.py`][history-compaction] own the current prompt persistence and replay boundary. |
+| S11 | Removed/superseded | [`thread_export/storage.py`][thread-export] refuses populated markerless roots and marks only empty roots. |
+| S12 | Tiny retained default | [`report_publishing/store.py`][report-store] treats missing `artifact_kind` as `html_file`. |
+| S13 | Tiny retained default | [`scheduling.py`][scheduling] treats missing `history_limit` as the current `None` default. |
+| S14 | Current behavior | [`history/storage.py`][history-storage] reads current v2 compaction state and ignores v1. |
+| S15 | Current behavior | [`knowledge/candidate_checkpoint.py`][candidate-checkpoint] rebuilds unknown versions and retains current torn-tail recovery. |
+| S16 | Current behavior | [`external_triggers/store.py`][trigger-store] and [`external_triggers/replay_store.py`][replay-store] own current validation and replay deduplication; the only retained historical default supplies an empty `threads` map when that section is absent. |
+| S17 | Current behavior | [Receipts][scheduled-records], [todos][todo-state], [attachments][attachments], and workflows combine sparse fields with current identity and integrity checks. |
+| S18 | Isolated | [`session_storage_preflight.py`][session-preflight] archives incompatible owned sessions; MindRoom does not invoke Agno's historical migration manager. |
+| S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob merge, scrub, and double-JSON decoding; other Agno readers remain dependency-owned. |
+| S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
+
+## Configuration and credentials
+
+| ID | Status | Owner and reason |
+| --- | --- | --- |
+| C1 | Isolated | [`config/legacy_access.py`][access-legacy] converts retired reply-permission lists into membership access. |
+| C2 | Current behavior | [`config/main.py`][config-main] accepts YAML null for optional root sections as a supported authoring form. |
+| C3 | Current behavior | [`config/main.py`][config-main] normalizes supported string plugin entries to objects. |
+| C4 | Current behavior | [`tool_system/plugin_imports.py`][plugin-imports] supports bare packages beside paths and explicit Python specs. |
+| C5 | Current behavior | [`config/models.py`][config-models] reads and emits current string, compact, and explicit tool entries. |
+| C6 | Current behavior | [`tool_system/metadata.py`][tool-metadata] keeps current text/list override interoperability. |
+| C7 | Isolated | [`config/legacy_fields.py`][config-legacy] rejects retired fields with directed errors. |
+| C8 | Current behavior | [`config/memory.py`][config-memory] supports `memory: none`. |
+| C9 | Removed/superseded | [`cli/migrate.py`][cli-migrate] now applies access migration; the exact-text starter-memory converter is gone. |
+| C10 | Tiny retained default | [`cli/owner.py`][cli-owner] replaces both old and current owner placeholders during pairing. |
+| C11 | Current behavior | [`constants.py`][constants] owns current config, environment, and path selection without relocating data. |
+| C12 | Current behavior | [`cli/local_stack.py`][local-stack] retains existing local-chat flags and container names. |
+| A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
+| A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
+| A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
+| A4 | Current behavior | [`credentials_sync.py`][credentials-sync] supports current inline, named, embedder, and shared OpenAI credential sources. |
+| A5 | Current behavior | [`credentials_sync.py`][credentials-sync] supports current provider aliases and `NAME` or `NAME_FILE` secrets. |
+
+## OAuth, Matrix state, and tools
+
+| ID | Status | Owner and reason |
+| --- | --- | --- |
+| O1 | Removed/superseded | [`oauth/credential_store.py`][oauth-store] no longer adopts OAuth JSON; JSON-only tokens require reconnection and files remain untouched. |
+| O2 | Removed/superseded | [`oauth/credential_store.py`][oauth-store] no longer performs opaque or deferred old JSON adoption. |
+| O3 | Isolated | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] removes the old publication field; obsolete JSON and sidecar cleanup is gone. |
+| O4 | Current behavior | [`oauth/credential_store.py`][oauth-store] owns schema, private-file, and scope-binding validation. |
+| O5 | Current behavior | [`oauth/credential_lifecycle.py`][oauth-lifecycle] owns target resolution, generation checks, and reset receipts. |
+| O6 | Current behavior | [`oauth/client.py`][oauth-client] and [`credential_lifecycle.py`][oauth-lifecycle] support active provider dialects and configured original authentication. |
+| M1 | Isolated | [`matrix/legacy_state.py`][matrix-legacy-state] backfills domains and asks the current state owner to rewrite noncanonical data. |
+| M2 | Tiny retained default | [`matrix/users.py`][matrix-users] falls back from missing `requested_username` to persisted actual username. |
+| M3 | Removed/superseded | [`thread_tags.py`][thread-tags] reads only one state event per thread-tag pair; the old thread-wide overlay is gone. |
+| T1 | Current behavior | [`tools/python.py`][python-tools] publishes both installer names over one implementation. |
+| T2 | Current behavior | [`tools/agentql.py`][agentql] adapts the currently installed AgentQL and browser-stealth combination. |
+| T3 | Current behavior | [`tools/brandfetch.py`][brandfetch] and [`custom_tools/coding.py`][coding-tools] retain public option and tool naming. |
+| T4 | Current behavior | [`api/dynamic_workflows.py`][workflow-api] deliberately returns 404 for the unscoped private-report route. |
+| T5 | Current behavior | [`egress/policy.py`][egress-policy] retains the older allowlist path environment name as a deny-safe alias. |
+| T6 | Current behavior | [Provider adapters][claude-compat] serve current request, replay, sampling, and tool-schema APIs. |
+| T7 | Current behavior | [`tool_system/skills.py`][skills] supports OpenClaw metadata eligibility and its active tool preset. |
+
+## Dependencies, SaaS, and deployment
+
+These rows are checked manually because the original inventory used section headings rather than IDs.
+
+| ID | Status | Owner and reason |
+| --- | --- | --- |
+| D1 | Dependency-owned | [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] isolates the pre-durable cutoff, while Nio owns its current SQLite schema and preserves crypto and trust records. |
+| D2 | Dependency-owned | [`knowledge/indexing_config.py`][knowledge-settings] owns corpus compatibility, while Chroma owns storage-engine migrations. |
+| D3 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history-table rewrite and possibly external default history path to Mem0. |
+| D4 | Current behavior | [The three SaaS SQL files][saas-migrations] remain explicit migrations for authoritative account, subscription, instance, payment, usage, audit, and grant data. |
+| D5 | Current behavior | [SSO cookie cleanup][sso], [Terraform relocation][terraform-state], and [root service-worker cleanup][client-chart] remain deployment-owned; logger aliases and UI preferences are current state. |
+| D6 | Current behavior | [Worker protocol checks][worker-compat] and [desktop protocol checks][desktop-protocol] protect current execution, identity reuse, metadata recovery, and replay gates. |
+| D7 | Current behavior | [Provider][claude-compat], [Matrix protocol][event-info], dependency, and [cancellation][cancellation] adapters remain necessary after database reset. |
+| D8 | Current behavior | [`session_storage_preflight.py`][session-preflight] is the concrete owned-session archive boundary; reset remains an explicit owner policy, not a generic exception fallback. |
+| D9 | Current behavior | [Usage diagnostics][usage], [model overrides][thread-models], [invited rooms][invited-rooms], and [vocabulary cache][tag-vocabulary] deliberately use weak retention without an old conversion chain. |
+
+## Upgrade and reset limits
+
+An incompatible format is different from a locked database, permission failure, missing key, full disk, or current-schema corruption.
+Migration owners reject those failures rather than converting them into deletion.
+The OAuth credential and sync-continuity stores reject unsupported versions; other owners retain their existing version policies.
+Several sparse readers deliberately ignore unknown fields or drop malformed reconstructible records.
+
+Additional small compatibility branches stay with current readers.
+[`execution_preparation.py`][execution-preparation] classifies structured stream status first and uses the old ` [cancelled]` and ` [error]` body markers recognized by [`streaming.py`][streaming] only as a fallback.
+Interrupted visible replies are excluded; eligible in-progress text is cleaned before it is included in model context.
+[`external_triggers/replay_store.py`][replay-store] supplies an empty `threads` map for replay stores written before thread keys existed.
+
+A journal replacement must coordinate its generation binding with the next Nio baseline.
+Agno sessions may still contain current handled-turn recovery facts and historical run blobs, while Matrix keeps visible messages and state independently of local storage.
+Private storage moves require stopped primaries and absent managed workers, as described in [Private Storage Migration](https://docs.mindroom.chat/deployment/private-storage-upgrade/).
+The Nio cutoff abandons pre-durable pending transport work while preserving crypto material, as described in [Nio 1.0 Upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/).
+Dependency migrations use their dependency's schema and locking contract, and SaaS databases are never treated as reconstructible caches.
+
+[access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
+[agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py
+[agentql]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/agentql.py
+[ai-runtime]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/ai_runtime.py
+[approval-execution]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval_execution.py
+[approval-manager]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/approval_manager.py
+[attachments]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/attachments.py
+[auto-flush]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/auto_flush.py
+[brandfetch]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/brandfetch.py
+[candidate-checkpoint]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/candidate_checkpoint.py
+[cancellation]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/cancellation.py
+[claude-compat]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/claude_compat.py
+[cli-migrate]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/cli/migrate.py
+[cli-owner]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/cli/owner.py
+[client-chart]: https://github.com/mindroom-ai/mindroom/tree/main/cluster/k8s/client
+[coding-tools]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/coding.py
+[config-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_fields.py
+[config-main]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/main.py
+[config-memory]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/memory.py
+[config-models]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/models.py
+[constants]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/constants.py
+[credentials]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/credentials.py
+[credentials-sync]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/credentials_sync.py
+[crypto-upgrade]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/legacy_crypto_upgrade.py
+[desktop-protocol]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/desktop/protocol.py
+[egress-policy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/egress/policy.py
+[event-info]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/event_info.py
+[handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/handled_turns.py
+[history-compaction]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/compaction.py
+[history-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/storage.py
+[invited-rooms]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/invited_rooms_store.py
+[journal-open]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal_open.py
+[journal-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_schema.py
+[knowledge-collections]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/collections.py
+[knowledge-index]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/index_metadata.py
+[knowledge-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_metadata.py
+[knowledge-settings]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/indexing_config.py
+[legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_approval_payloads.py
+[legacy-delivery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_delivery_payloads.py
+[legacy-handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_handled_turns.py
+[legacy-openai]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_openai_tool_replay.py
+[legacy-session]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_session_storage.py
+[legacy-sync]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/legacy_sync_continuity.py
+[legacy-turn-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_turn_records.py
+[local-stack]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/cli/local_stack.py
+[matrix-legacy-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/legacy_state.py
+[matrix-users]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/users.py
+[mcp-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/mcp_gateway/legacy_schema.py
+[memory-config]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/config.py
+[memory-functions]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/functions.py
+[oauth-client]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/client.py
+[oauth-legacy-credentials]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/legacy_credentials.py
+[oauth-lifecycle]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/credential_lifecycle.py
+[oauth-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/credential_store.py
+[plugin-imports]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/plugin_imports.py
+[pre-journal-test]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_upgrade_from_pre_journal_storage.py
+[private-legacy-aliases]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage_aliases.py
+[private-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage.py
+[private-paths]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/private_storage_paths.py
+[python-tools]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/python.py
+[replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/replay_store.py
+[report-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/report_publishing/store.py
+[restart-retry]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/sync_restart_retry.py
+[saas-migrations]: https://github.com/mindroom-ai/mindroom/tree/main/saas-platform/supabase/migrations
+[scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
+[scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py
+[script-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_schema.py
+[session-preflight]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/session_storage_preflight.py
+[skills]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/skills.py
+[sso]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/src/backend/routes/sso.py
+[tag-vocabulary]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_tag_vocabulary.py
+[terraform-state]: https://github.com/mindroom-ai/mindroom/blob/main/cluster/scripts/setup-terraform-state.sh
+[thread-export]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_export/storage.py
+[thread-models]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_models.py
+[thread-tags]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_tags.py
+[turn-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/turn_store.py
+[todo-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/custom_tools/todo_state.py
+[tool-metadata]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/metadata.py
+[trigger-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/store.py
+[usage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/usage_stats_storage.py
+[visible-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/visible_response_reconciliation.py
+[worker-compat]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/compatibility.py
+[workflow-api]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/api/dynamic_workflows.py
+[execution-preparation]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/execution_preparation.py
+[streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/streaming.py
+[access-migration-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_access_migration.py
+[agent-config-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agents.py
+[agent-runs-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agent_storage_runs.py
+[approval-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_tool_approval.py
+[cli-connect-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_cli_connect.py
+[crypto-upgrade-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_crypto_upgrade.py
+[gateway-account-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_mcp_gateway_accounts.py
+[gateway-capacity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_mcp_gateway_oauth_capacity.py
+[gateway-lifecycle-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_mcp_gateway_lifecycle.py
+[gateway-oauth-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_mcp_gateway_oauth.py
+[handled-turn-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_handled_turns.py
+[journal-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_event_journal_store.py
+[journal-upgrade-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_journal_upgrade_boundary.py
+[knowledge-indexing-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_knowledge_indexing_config.py
+[matrix-agent-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_agent_manager.py
+[matrix-identity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_identity.py
+[memory-flush-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_memory_auto_flush.py
+[oauth-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_oauth_credential_store.py
+[openai-model-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_openai_models.py
+[partial-reply-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_partial_reply_context.py
+[private-storage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_private_storage_migration.py
+[report-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_report_publishing.py
+[response-runner-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_response_runner_focused.py
+[script-run-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_script_run_store.py
+[session-recovery-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agent_session_storage_recovery.py
+[sso-cookie-tests]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/tests/test_sso_cookie_attrs.py
+[streaming-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_streaming_behavior.py
+[sync-continuity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_sync_continuity_store.py
+[trigger-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_external_trigger_replay_store.py
+[usage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_usage_stats_storage.py
+[workflow-scheduling-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_workflow_scheduling.py
 
 # Deployment
 
@@ -18612,6 +19008,9 @@ The feature is disabled by default and requires both `MINDROOM_TRUSTED_UPSTREAM_
 
 ## Route browser and machine traffic
 
+The following OAuth routes and consent flow apply to the default `MINDROOM_MCP_AUTH_MODE=builtin` mode.
+For externally issued credentials, see [External authorization](#external-authorization); `/mcp` and protected-resource discovery remain common.
+
 Forward these paths to the MindRoom API:
 
 | Paths | Authentication at the access proxy |
@@ -18645,7 +19044,7 @@ The consent form still requires a signed browser identity, a one-use nonce, and 
 ## Connect an MCP client
 
 Configure a Streamable HTTP server with URL `https://assistant.example.org/mcp`.
-The supported client flow uses OAuth authorization code with PKCE S256 and dynamic public-client registration:
+The built-in client flow uses OAuth authorization code with PKCE S256 and dynamic public-client registration:
 
 1. Read the resource metadata URL from the gateway's `401` bearer challenge.
 2. Discover the authorization server at issuer `https://assistant.example.org/mcp/oauth`.
@@ -18656,17 +19055,99 @@ The supported client flow uses OAuth authorization code with PKCE S256 and dynam
 
 The exact resource is required for both code exchange and refresh.
 Client callbacks must be registered HTTPS URLs or loopback HTTP URLs.
-Dashboard API keys, browser cookies, upstream identity headers, and third-party provider tokens do not authenticate the MCP endpoint.
-MindRoom issues its own client grant; upstream service tokens stay in the existing personal credential store.
+Dashboard API keys, browser cookies, and unsigned identity headers do not authenticate the MCP endpoint.
+In built-in mode, MindRoom issues its own client grant; upstream service tokens stay in the existing personal credential store.
 
 This implementation uses the Python MCP SDK 1.x Streamable HTTP protocol, tested with protocol version `2025-11-25`.
 It uses stateless requests and JSON responses; it does not offer resumable SSE sessions, resources, prompts, or newer protocol features outside that SDK version.
 The gateway validates SDK request and notification envelopes before dispatch and returns fixed errors without logging malformed input or unknown tool names.
 Valid unsolicited response/error envelopes are acknowledged with an empty HTTP 202 and dropped: this stateless gateway never sends correlated client-result requests.
 If bidirectional requests or stateful sessions are added later, their client responses must instead reach the owning session.
-Client applications need support for this OAuth registration and discovery flow; a static bearer-only configuration screen cannot perform initial login.
+Client applications need support for the chosen authorization server's registration and discovery flow; a static bearer-only configuration screen cannot perform initial login.
+
+## External authorization
+
+External mode verifies signed credentials from one configured authority, then checks an active [provisioned account](#managed-account-provisioning) and current personal-agent access on every MCP request and again before tool dispatch.
+It requires `MINDROOM_MCP_SCIM_TOKEN`; the portal prerequisites above still apply.
+
+```bash
+MINDROOM_MCP_AUTH_MODE=external
+MINDROOM_MCP_EXTERNAL_AUTHORIZATION_SERVER=https://identity.example.org
+MINDROOM_MCP_EXTERNAL_ISSUER=https://identity.example.org
+MINDROOM_MCP_EXTERNAL_AUDIENCE=https://assistant.example.org/mcp
+MINDROOM_MCP_EXTERNAL_JWKS_URL=https://identity.example.org/.well-known/jwks.json
+MINDROOM_MCP_EXTERNAL_MATRIX_USER_ID_CLAIM=matrix_user_id
+```
+
+Protected-resource metadata's `authorization_servers` field advertises `MINDROOM_MCP_EXTERNAL_AUTHORIZATION_SERVER`, whose discovery document supplies the client's OAuth endpoints.
+This issuer identifier may differ from `MINDROOM_MCP_EXTERNAL_ISSUER`; preserve significant trailing slashes.
+External mode disables MindRoom's OAuth registration, authorization, consent, token, revocation, authorization-server metadata, and client-management controls.
+Manage external authorizations at their issuer; provider connections in the portal remain separate.
+Restart the API after changing authentication settings: changed or invalid settings fail closed until restart.
+
+By default, send `Authorization: Bearer <JWT>`.
+Credentials must use RS256 or ES256 and contain signed `iss`, `aud`, `exp`, `iat`, `sub`, and the configured email claim.
+Unless the email-domain/template mapping below is configured, they must also contain the configured Matrix identity claim.
+`MINDROOM_MCP_EXTERNAL_EMAIL_CLAIM` defaults to `email`.
+Opaque tokens, introspection, and OIDC ID tokens are unsupported; use an audience dedicated to this MCP resource, distinct from a client ID or browser application's audience.
+Set optional `MINDROOM_MCP_EXTERNAL_REQUIRED_SCOPES` to whitespace-separated scopes required in the signed `scope` claim; no tool scope is implicitly required in external mode.
+
+Shared issuer keys, an operator-entered audience, and an email domain do not establish tenant isolation.
+Trust requires exclusive resource/identity namespaces or a verified issuer-owned client binding.
+Set optional `MINDROOM_MCP_EXTERNAL_CLIENT_ID=registered-client` to require that exact signed string `client_id`, the standard [JWT access-token client claim](https://www.rfc-editor.org/rfc/rfc9068.html#section-2.2).
+Missing, differently typed, or different client IDs are rejected when pinned.
+The issuer must guarantee that other tenants cannot select or override this claim and must guarantee the signed user's identity within the intended tenant.
+This pin restricts one registered client; it does not prove an identity provider's claim contract or certify provider compatibility.
+A pinned client must use its preregistered client ID and support the chosen authorization server's discovery and authorization flow.
+Omit it only when the authority or assertion edge already enforces exclusive tenant resource and identity namespaces.
+
+Alternatively, omit `MINDROOM_MCP_EXTERNAL_MATRIX_USER_ID_CLAIM` and configure both:
+
+```bash
+MINDROOM_MCP_EXTERNAL_EMAIL_DOMAIN=example.org
+MINDROOM_MCP_EXTERNAL_EMAIL_TO_MATRIX_USER_ID_TEMPLATE='@{localpart}:example.org'
+```
+
+Only the configured email domain is accepted by this mapping; the complete signed email must match SCIM `userName` exactly, including case.
+The issuer must control these identity claims. Unsigned headers, browser cookies, owner API keys, and local gateway tokens cannot substitute for external credentials.
+
+### Direct OAuth and signed proxy assertions
+
+Direct JumpCloud JWT authentication is unverified and not currently recommended.
+[JumpCloud's OIDC guide](https://jumpcloud.com/support/sso-with-oidc) documents JWT access tokens and additional audiences, but its subject-mapping guarantee applies to ID tokens.
+The shared regional issuer/JWKS, an added MCP audience, and an email mapping do not demonstrate tenant isolation.
+Direct use would require a verified issuer-owned, non-overridable `client_id` pin and a verified access-token identity contract; the documented connector settings do not establish either guarantee.
+Use JumpCloud as the identity provider behind an OAuth-aware proxy that enforces the intended tenant's login policy and supplies trusted signed origin assertions instead.
+
+An OAuth-aware proxy can instead send a raw signed JWT in the header configured by `MINDROOM_MCP_EXTERNAL_TOKEN_HEADER`.
+For example, [Cloudflare Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/) uses `Cf-Access-Jwt-Assertion`; configure that header, the assertion issuer/JWKS, the MCP Access application's audience, and the OAuth discovery issuer separately.
+The edge must own OAuth, enforce the MCP policy, replace client-supplied assertions, and prevent origin bypass; do not retain a bypass policy on `/mcp` or combine Managed OAuth with built-in mode.
+SCIM still needs its separately authenticated route without interactive login redirects.
+Cloudflare labels Managed OAuth beta.
+
+### External lifecycle and validation
+
+Account creation, migration, rename, reactivation, and delete/recreate require a fresh JWT whose `iat` is strictly more than 60 seconds after the latest account security event recorded by the gateway; profile-only updates preserve access.
+With synchronized clocks, obtain that fresh JWT more than 60 seconds after the event; initial provisioning also incurs this delay, and issuer lag can extend it.
+Strict future-`iat` rejection remains in force.
+The revocation guarantee assumes the issuer is at most 60 seconds ahead of the gateway and the gateway clock does not move backward: keep stable, synchronized clocks; unbounded skew is unsupported.
+Existing accounts receive a one-time event cutoff when upgrading; the same 60-second margin also applies to already-persisted cutoffs.
+JWKS refresh is shared and bounded; signing-key revocation can lag by up to 60 seconds.
+SCIM disable takes effect when received and committed; already-started provider actions may finish.
+The issuer owns refresh revocation and login policy: after account reactivation, silent renewal can produce an accepted fresh token without interactive login.
+
+External per-user concurrency limits span tokens; the per-grant limit and cancellation ownership use the exact signed token's digest.
+Cancelling a call requires the same token used to start it; renewing a token or proxy assertion does not transfer cancellation ownership.
+
+Local tests cover signed issuer profiles, HTTP SCIM offboarding, native tool use, and user isolation.
+Hosted tenant login and connector delivery have not been verified.
+Before general access, verify real client login/resource handling, two users' tools, disable with an existing client, refresh rejection, and reactivation against the intended service.
 
 ## Access and lifecycle
+
+The OAuth token lifetimes, client-management controls, and issuer-storage limits in this section govern built-in credentials.
+External mode reuses the shared provider/account store, so its provider and storage configuration still validates at startup; leave unused `MINDROOM_MCP_OAUTH_*` settings at valid defaults.
+Personal-agent authorization, persistence, and active MCP call limits apply to both modes; external credential lifecycle is described above.
 
 Access tokens last up to 15 minutes.
 Refresh tokens rotate on use; replay revokes the grant family.
@@ -18781,9 +19262,9 @@ Do not share the provisioning secret with MCP clients or browser applications.
 The provisioning routes do not allow browser CORS access.
 
 The endpoint implements a restricted SCIM 2.0 User lifecycle profile: create, list, read, replace, PATCH, and delete, plus service-provider/schema discovery.
-User names match verified browser email exactly, including case; schema discovery advertises this case-sensitive policy.
+User names match verified email exactly, including case; schema discovery advertises this case-sensitive policy.
 This differs from the general SCIM core userName case-insensitive convention, so check connector matching behavior during enrollment.
-Configure the connector's `userName` attribute to the same email verified by the signed browser identity; provisioning does not authenticate the browser or grant tool permissions.
+Configure the connector's `userName` attribute to the email verified by browser identity in built-in mode or the signed MCP credential in external mode; provisioning does not authenticate the browser or grant tool permissions.
 Group management, bulk operations, password management, and sorting are unsupported.
 Disable group management in the connector; unsupported group requests return an explicit error.
 Connectors that insist on a successful test-group operation need a compatible configuration before this endpoint can be used.
@@ -18794,7 +19275,7 @@ An unsupported operation rolls back the entire PATCH, including any accompanying
 Configure and test the connector's actual update and deactivation payloads against this profile before relying on provisioning for offboarding.
 
 Use the base URL `https://assistant.example.org/mcp/scim/v2` with the dedicated bearer token in a compatible custom SCIM connector.
-Provision an active test user, approve an MCP client through the existing portal login, then deactivate the provisioned user and verify that token refresh, tool use, and further consent are rejected.
+In built-in mode, provision an active test user, approve an MCP client through the existing portal login, then deactivate the provisioned user and verify that token refresh, tool use, and further consent are rejected.
 Account deactivation, user-name changes, and deletion remove all bound grants and pending consent atomically.
 Reactivation permits a new approval and never restores old grants.
 Unknown or inactive accounts cannot authorize clients in managed-account mode.
@@ -18979,6 +19460,14 @@ MindRoom stores data in the `mindroom_data` directory by default:
 
 Keep `tracking/` on persistent storage and include it in backups.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
+
+Before opening an owned agent or team session database, MindRoom checks whether its session table contains the columns required by the installed Agno version.
+If required session columns are missing, MindRoom renames the complete `sessions/` directory to a unique sibling `sessions.incompatible-<id>/`, preserving the database and SQLite sidecars, and starts a fresh session store.
+These archives are retained for inspection or manual recovery; include them in backups and remove them only when no longer needed.
+Compatible history stays in place, including older readable run blobs alongside current run rows, extra columns, and stores awaiting lazy table creation.
+This check does not validate existing runs-table schemas or archive databases on permission, locking, I/O, or corruption errors.
+Learning, workspaces, credentials, encryption keys, custom stores, and durable journal state are outside this session recovery boundary.
+
 Dispatch-obligation databases retain one compact terminal row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
 The retained terminal rows have no automatic retention window because deleting them weakens replay deduplication.
 Pending rows temporarily retain the full event replay payload and should represent only actively deferred or retry-owned work, not completed ignore paths.
@@ -20768,11 +21257,11 @@ A warning is logged when that guard preserves existing target state because the 
 A complete room enumeration that returns zero threads preserves existing YAML exports for that room and logs a warning because an anomalous empty response cannot be distinguished from deletion of the final thread.
 After either warning, verify the source state and remove the preserved export manually only when the deletion is confirmed; workspace git history remains the recovery path for mistaken cleanup.
 Enabled targets whose resolved output directories are equal or nested are all skipped before Matrix work.
-MindRoom claims an output root by writing a `.mindroom-thread-exports` ownership marker, and it claims automatically when the root is empty or already holds a room directory containing an exported thread file.
-A directory that merely contains an `index.json` is not treated as evidence, so pointing `--output` at an unrelated project or build directory is refused rather than adopted.
-Unrelated entries beside those room directories, such as `.DS_Store`, a `.git` directory, or your own notes, neither block the claim nor ever get deleted.
-A root MindRoom cannot recognize is skipped for the entire pass, so it is neither exported to nor cleaned up, and the skip is reported as a target failure.
-Adopt such a root by creating `.mindroom-thread-exports` inside it containing exactly `{"format":"mindroom-thread-exports","version":1}` followed by a newline.
+MindRoom claims an empty output root by writing a `.mindroom-thread-exports` ownership marker.
+Any populated markerless root is refused and left unchanged, regardless of whether its contents resemble thread exports.
+To use an existing populated root, create `.mindroom-thread-exports` inside it containing exactly `{"format":"mindroom-thread-exports","version":1}` followed by a newline.
+Unrelated entries in a marked root, such as `.DS_Store`, a `.git` directory, or your own notes, are never deleted.
+A refused root is skipped for the entire pass, so it is neither exported to nor cleaned up, and the skip is reported as a target failure.
 Cleanup then removes only recognizable room directories and thread YAML files, leaving unrelated entries untouched and logged.
 Retracting a room whose directory still holds unrelated entries removes only the exported files and leaves the directory in place, and repeating the pass stays a quiet no-op.
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
@@ -21169,6 +21658,8 @@ Runs a series of checks in one pass:
 
 ## config
 
+`mindroom config migrate` applies the membership access migration and preserves retired starter-memory settings.
+
 Manage MindRoom configuration files.
 The `config` subgroup contains commands for creating, viewing, editing, and validating your `config.yaml`.
 
@@ -21199,7 +21690,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ validate   Validate config.yaml and check for common issues.                           │
 │ resolve    Print the fully merged config YAML with all !include tags resolved.         │
 │ path       Show the resolved config file path and search locations.                    │
-│ migrate    Apply supported migrations to config.yaml.                                  │
+│ migrate    Migrate config.yaml to membership access settings.                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

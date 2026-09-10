@@ -24,6 +24,7 @@ from . import (
     background_approvals,
     interactive_questions,
     journal,
+    legacy_turn_records,
     membership_hooks,
     outbox,
     reads,
@@ -196,6 +197,7 @@ class PrincipalStore:
         self,
         *,
         limit: int = _DEFAULT_PENDING_LIMIT,
+        room_id: str | None = None,
         after_receipt_order: int | None = None,
         runtime_generation: str = "unmanaged",
     ) -> PendingPage:
@@ -205,6 +207,7 @@ class PrincipalStore:
                 transaction,
                 self._principal_id,
                 limit=limit,
+                room_id=room_id,
                 after_receipt_order=after_receipt_order,
                 runtime_generation=runtime_generation,
             ),
@@ -1835,7 +1838,7 @@ class TurnRecordStore:
     ) -> int:
         """Fill only the indexes with no record yet, for migration. Returns how many."""
         return await self._backend.write(
-            lambda transaction: turn_records.adopt_missing(
+            lambda transaction: legacy_turn_records.adopt_missing(
                 transaction,
                 self._agent_name,
                 index_event_ids=index_event_ids,

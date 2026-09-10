@@ -436,9 +436,12 @@ async def _apply_turn_plan(  # noqa: C901
             release_response_claim,
         ),
         name=f"inbox_response:{prepared.event.event_id}",
+        room_id=room.room_id,
         recovery_proof_ready=response_recovery_ready,
         on_failure=lambda: (
-            controller.deps.retry_dispatch_sources(handled_turn.source_event_ids) if response_started.is_set() else None
+            controller.deps.retry_dispatch_sources(room.room_id, handled_turn.source_event_ids)
+            if response_started.is_set()
+            else None
         ),
         on_terminal=release_response_claim,
         source_event_ids=handled_turn.source_event_ids,

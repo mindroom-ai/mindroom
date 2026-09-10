@@ -195,6 +195,7 @@ class _RecordingResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
+        room_id: str,  # noqa: ARG002
         recovery_proof_ready: Callable[[], Awaitable[bool]],
         on_failure: Callable[[], None] | None = None,
         on_terminal: Callable[[], None] | None = None,
@@ -528,7 +529,7 @@ def _build_harness(
     async def _dispatch_source_is_terminal(_source_event_id: str) -> bool:
         return False
 
-    def _retry_dispatch_sources(source_event_ids: tuple[str, ...]) -> None:
+    def _retry_dispatch_sources(_room_id: str, source_event_ids: tuple[str, ...]) -> None:
         retried_dispatch_sources.append(source_event_ids)
 
     def _retry_failed_coalesced_dispatch(
@@ -797,6 +798,16 @@ def _obligation_runner(
         room_for_id=lambda _room_id: room,
         schedule_trigger_sender_is_managed=lambda sender: sender == principal_id,
     )
+
+
+async def _settle_dispatcher(harness: _Harness, dispatcher: JournalDispatcher) -> None:
+    """Drive test-owned response tasks and honor retry cooldowns until journal settlement."""
+    async with asyncio.timeout(5):
+        while await dispatcher.store.unsettled_event_ids():
+            await dispatcher.drain_once()
+            await harness.gate.drain_all()
+            await harness.runner.settle_inbox_responses()
+            await asyncio.sleep(0.01)
 
 
 def _router_relay_event(
@@ -1336,6 +1347,14 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
     await harness.gate.drain_all()
     await harness.runner.settle_inbox_responses()
     await obligation_runner.drain_once()
+
+    obligation_runner.start()
+    try:
+        async with asyncio.timeout(5):
+            while await obligation_runner.store.unsettled_event_ids():  # noqa: ASYNC110 - settlement has no event signal
+                await asyncio.sleep(0.01)
+    finally:
+        await obligation_runner.stop()
 
     assert not await obligation_runner.store.is_pending(first.event_id)
     assert not await obligation_runner.store.is_pending(second.event_id)
@@ -2317,8 +2336,13 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
     assert await validator.precheck_event(room, event, is_edit=kind == "edit") == _SENDER
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
     await memberships.refresh(config, runtime_paths_for(config), client)
-    await dispatcher.drain_once()
-    await dispatcher.stop()
+    dispatcher.start()
+    try:
+        async with asyncio.timeout(5):
+            while await dispatcher.store.is_pending(event.event_id):  # noqa: ASYNC110 - journal settlement has no event signal
+                await asyncio.sleep(0.01)
+    finally:
+        await dispatcher.stop()
     assert await dispatcher.store.pending() == ()
     assert harness.turn_store.is_handled(event.event_id)
     assert harness.runner.requests == []
@@ -4514,7 +4538,7 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
         await harness.gate.drain_all()
         await harness.runner.settle_inbox_responses()
         assert attempted == ["$first", "$first", "$second"]
-        await dispatcher.drain_once()
+        await _settle_dispatcher(harness, dispatcher)
     finally:
         await dispatcher.stop()
     assert [request.prompt for request in harness.runner.requests] == (
@@ -4612,9 +4636,7 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
             assert before["ledger_exists"] is False
             assert before["retry_requests"] == [(event.event_id,)]
             await memberships.refresh(config, runtime_paths_for(config), client)
-        await dispatcher.drain_once()
-        await harness.gate.drain_all()
-        await harness.runner.settle_inbox_responses()
+        await _settle_dispatcher(harness, dispatcher)
         after_count = len(harness.runner.requests)
         await dispatcher.drain_once()
         await harness.gate.drain_all()

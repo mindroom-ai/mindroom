@@ -126,6 +126,7 @@ async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR
         name="inbox_response:deleted",
         recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
         source_event_ids=turn.source_event_ids,
+        room_id=ROOM,
     )
     await started.wait()
     try:
@@ -212,6 +213,7 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     await reopened.warm()
     bot = _response_recovery_bot(journal_store, reopened)
     model = _ReplayCaptureModel(id="test", name="test", provider="test")
+    survivor_delivered = asyncio.Event()
 
     async def survivor(_room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
         assert event.event_id == "$survivor"
@@ -239,6 +241,7 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
             payload={"msgtype": "m.text", "body": answer.content},
             settle_source_event_ids=("$survivor",),
         )
+        survivor_delivered.set()
         return TurnDispatchOutcome.DEFERRED
 
     dispatcher = _dispatcher(principal, survivor)
@@ -247,6 +250,11 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
         await dispatcher._worker.drain_once()
         assert not await principal.is_pending(REDACTION)
     await dispatcher.drain_once()
+    dispatcher.start()
+    try:
+        await asyncio.wait_for(survivor_delivered.wait(), timeout=5)
+    finally:
+        await dispatcher.stop()
     assert len(model.requests) == 1
     assert "keep prompt" in model.requests[0]
     assert "deleted prompt" not in model.requests[0]

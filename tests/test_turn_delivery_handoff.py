@@ -18,6 +18,7 @@ restart would resend the frozen answer *and* run the model again for it.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
@@ -463,9 +464,12 @@ class TestTheJournalNoLongerAsksWhetherATurnFinished:
         """
         bot = _make_bot(tmp_path)
         dispatched: list[str] = []
+        replayed = asyncio.Event()
 
         async def on_message(_room: nio.MatrixRoom, event: nio.RoomMessageText) -> TurnDispatchOutcome:
             dispatched.append(event.event_id)
+            if len(dispatched) == 2:
+                replayed.set()
             return TurnDispatchOutcome.DEFERRED
 
         dispatcher = _dispatcher(bot, on_message)
@@ -475,6 +479,11 @@ class TestTheJournalNoLongerAsksWhetherATurnFinished:
 
         await bot._turn_store.record_turn(TurnRecord.create(["$cause"], response_event_id="$response"))
         await dispatcher.drain_once()
+        dispatcher.start()
+        try:
+            await asyncio.wait_for(replayed.wait(), timeout=5)
+        finally:
+            await dispatcher.stop()
 
         assert bot._turn_store.is_handled("$cause")
         assert dispatched == ["$cause", "$cause"], "the journal decided on the turn engine's behalf"

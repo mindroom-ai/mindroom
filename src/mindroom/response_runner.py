@@ -57,6 +57,7 @@ from mindroom.history.storage import has_pending_force_compaction_scope, read_sc
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
+from mindroom.legacy_approval_payloads import restore_legacy_approval_origin
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     fetch_latest_visible_body,
@@ -131,7 +132,6 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
-from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
 
@@ -697,7 +697,7 @@ class ResponseRunnerDeps:
     state_writer: ConversationStateWriter
     request_preparer: ResponsePayloadPreparer
     approval_store: PrincipalStore
-    retry_approval_sources: Callable[[tuple[str, ...]], None]
+    retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
 
 
@@ -723,6 +723,7 @@ class _InboxResponseOwnership:
     on_failure: Callable[[], None] | None
     shutdown_phase_trace: ResponseShutdownPhaseTrace
     source_event_ids: frozenset[str]
+    room_id: str
     drain_intent: RuntimeShutdownIntent | None = None
     proof_task: asyncio.Task[bool] | None = None
 
@@ -775,6 +776,7 @@ class ResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
+        room_id: str,
         recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
         on_failure: Callable[[], None] | None = None,
         on_terminal: Callable[[], None] | None = None,
@@ -795,6 +797,7 @@ class ResponseRunner:
             on_failure=on_failure,
             shutdown_phase_trace=shutdown_phase_trace,
             source_event_ids=frozenset(source_event_ids),
+            room_id=room_id,
         )
         if on_terminal is not None:
             task.add_done_callback(lambda _finished: on_terminal())
@@ -842,7 +845,7 @@ class ResponseRunner:
         if ownership is not None and ownership.drain_intent is None:
             self._inbox_response_tasks.pop(task)
         if ownership is not None and ownership.source_event_ids:
-            self.deps.retry_approval_sources(tuple(ownership.source_event_ids))
+            self.deps.retry_approval_sources(ownership.room_id, tuple(ownership.source_event_ids))
         if task.cancelled():
             return
         error = task.exception()
@@ -1694,19 +1697,7 @@ class ResponseRunner:
         target: MessageTarget,
     ) -> ResponseRequest:
         """Rebuild the original response identity for resumed hooks and post-effects."""
-        transport_sender_id = continuation.transport_sender_id or continuation.requester_id
-        relayed = transport_sender_id != continuation.requester_id
-        origin = continuation.origin or TurnOrigin(
-            transport_sender_id=transport_sender_id,
-            requester_id=continuation.requester_id,
-            sender_entity_name=ROUTER_AGENT_NAME if relayed else None,
-            requester_entity_name=None,
-            sender_kind=SenderKind.MANAGED_ENTITY if relayed else SenderKind.USER,
-            requester_kind=SenderKind.USER,
-            intent=TurnIntent.ROUTER_HANDOFF if relayed else TurnIntent.USER_MESSAGE,
-            source_kind=continuation.source_kind,
-            trust=TurnTrust.TRUSTED_INTERNAL if relayed else TurnTrust.EXTERNAL,
-        )
+        origin = restore_legacy_approval_origin(continuation)
         envelope = MessageEnvelope(
             source_event_id=continuation.source_event_ids[0],
             target=target,
@@ -2565,6 +2556,7 @@ class ResponseRunner:
                 resume,
                 name=f"approval_resume:{continuation.approval_id}:{continuation.generation}",
                 recovery_proof_ready=lambda: True,
+                room_id=continuation.room_id,
                 source_event_ids=continuation.source_event_ids,
             )
         except BaseException:

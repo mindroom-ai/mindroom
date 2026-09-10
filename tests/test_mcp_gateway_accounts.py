@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+import mindroom.mcp_gateway.accounts as accounts_module
+import mindroom.mcp_gateway.legacy_schema as legacy_schema_module
 from mindroom.mcp_gateway.accounts import AccountConflictError, GatewayAccounts
 from mindroom.mcp_gateway.store import GatewayOAuthStore
 
@@ -102,3 +104,115 @@ async def test_failed_mutation_rolls_back_profile_and_revocation(tmp_path: Path)
     with pytest.raises(AccountConflictError):
         await directory.replace(first["id"], {"userName": "bob@example.org", "active": False})
     assert await directory.resolve_active("alice@example.org") == first["id"]
+
+
+@pytest.mark.parametrize("operation", ["deactivate", "rename", "delete"])
+async def test_external_token_cannot_revive_after_account_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Subsecond account cutoffs reject old JWTs after rename, reactivation or recreation."""
+    now = [100.1]
+    monkeypatch.setattr(accounts_module.time, "time", lambda: now[0])
+    directory = _directory(tmp_path)
+    account = await directory.create({"userName": "Alice@example.org", "active": True})
+    assert await directory.resolve_external("Alice@example.org", 100.0) is None
+    assert await directory.resolve_external("Alice@example.org", 160.1) is None
+    assert await directory.resolve_external("Alice@example.org", 160.2) == account["id"]
+    assert await directory.resolve_external("alice@example.org", 160.2) is None
+    now[0] = 160.3
+    if operation == "delete":
+        await directory.delete(account["id"])
+        account = await directory.create({"userName": "Alice@example.org", "active": True})
+    else:
+        await directory.replace(
+            account["id"],
+            {
+                "userName": "other@example.org" if operation == "rename" else "Alice@example.org",
+                "active": operation != "deactivate",
+            },
+        )
+        await directory.replace(account["id"], {"userName": "Alice@example.org", "active": True})
+    assert await directory.resolve_external("Alice@example.org", 160.2) is None
+    assert await directory.resolve_external("Alice@example.org", 220.3) is None
+    assert await directory.resolve_external("Alice@example.org", 220.4) == account["id"]
+    assert "token_valid_after" not in account
+    reopened = _directory(tmp_path)
+    assert await reopened.resolve_external("Alice@example.org", 160.2) is None
+
+
+async def test_external_profile_update_preserves_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unrelated profile updates do not invalidate an existing signed credential."""
+    now = [100.1]
+    monkeypatch.setattr(accounts_module.time, "time", lambda: now[0])
+    directory = _directory(tmp_path)
+    account = await directory.create({"userName": "Alice@example.org", "active": True})
+    now[0] = 161.1
+    await directory.replace(account["id"], {"userName": "Alice@example.org", "active": True, "displayName": "New Name"})
+    assert await directory.resolve_external("Alice@example.org", 160.2) == account["id"]
+
+
+async def test_migration_does_not_revive_preexisting_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adding a cutoff to a legacy account requires fresh credentials once, durably."""
+    database_path = tmp_path / "mcp_gateway" / "oauth.sqlite3"
+    database_path.parent.mkdir(parents=True)
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE gateway_accounts (
+                account_id TEXT PRIMARY KEY,
+                user_name TEXT UNIQUE NOT NULL,
+                active INTEGER NOT NULL CHECK(active IN (0, 1)),
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                profile TEXT NOT NULL DEFAULT '{}'
+            );
+            INSERT INTO gateway_accounts VALUES (
+                'active-account', 'Alice@example.org', 1, 100.25, 110.5,
+                '{"userName":"Alice@example.org","active":true,"displayName":"Alice 历史"}'
+            );
+            INSERT INTO gateway_accounts VALUES (
+                'inactive-account', 'Disabled@example.org', 0, 120.25, 130.5,
+                '{"userName":"Disabled@example.org","active":false,"displayName":"Disabled"}'
+            );
+            """,
+        )
+    monkeypatch.setattr(legacy_schema_module.time, "time", lambda: 200.5)
+    migrated = _directory(tmp_path)
+    assert await migrated.resolve_external("Alice@example.org", 200.4) is None
+    assert await migrated.resolve_external("Alice@example.org", 260.5) is None
+    assert await migrated.resolve_external("Alice@example.org", 260.6) == "active-account"
+    assert await migrated.resolve_external("Disabled@example.org", 260.6) is None
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            """
+            SELECT account_id, user_name, active, created_at, updated_at, profile, token_valid_after
+            FROM gateway_accounts ORDER BY account_id
+            """,
+        ).fetchall() == [
+            (
+                "active-account",
+                "Alice@example.org",
+                1,
+                100.25,
+                110.5,
+                '{"userName":"Alice@example.org","active":true,"displayName":"Alice 历史"}',
+                200.5,
+            ),
+            (
+                "inactive-account",
+                "Disabled@example.org",
+                0,
+                120.25,
+                130.5,
+                '{"userName":"Disabled@example.org","active":false,"displayName":"Disabled"}',
+                200.5,
+            ),
+        ]
+    monkeypatch.setattr(legacy_schema_module.time, "time", lambda: 261.5)
+    assert await _directory(tmp_path).resolve_external("Alice@example.org", 260.6) == "active-account"
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT account_id, token_valid_after FROM gateway_accounts ORDER BY account_id",
+        ).fetchall() == [("active-account", 200.5), ("inactive-account", 200.5)]

@@ -714,9 +714,9 @@ async def test_continuation_decision_wakes_its_owning_bot_sources(tmp_path: Path
         cards_provider=lambda: None,
     )
 
-    await transport._wake_continuation_sources("code", ("$source-1", "$source-2"))
+    await transport._wake_continuation_sources("code", "!room:example.org", ("$source-1", "$source-2"))
 
-    owner.retry_approval_sources.assert_called_once_with(("$source-1", "$source-2"))
+    owner.retry_approval_sources.assert_called_once_with("!room:example.org", ("$source-1", "$source-2"))
 
 
 @pytest.mark.asyncio
@@ -919,6 +919,7 @@ async def test_deadline_sweep_expires_an_unacknowledged_card_and_wakes_its_conti
         recorded=True,
         continuation_ready=True,
         continuation_entity_name="code",
+        continuation_room_id="!room:example.org",
         source_event_ids=("$source",),
     )
     cards = MagicMock()
@@ -938,7 +939,7 @@ async def test_deadline_sweep_expires_an_unacknowledged_card_and_wakes_its_conti
     assert await manager._expire_stored("!room:localhost", stored) is False
 
     cards.expire_unacknowledged_approval_card.assert_awaited_once_with(delivery_id="approval-card-1")
-    wake.assert_awaited_once_with("code", ("$source",))
+    wake.assert_awaited_once_with("code", "!room:example.org", ("$source",))
 
 
 @pytest.mark.asyncio
@@ -1683,6 +1684,20 @@ def test_pending_approval_from_card_event_requires_approver_user_id() -> None:
 
     with pytest.raises(ValueError, match="missing required approval fields"):
         PendingApproval.from_card_event(card, room_id="!room:localhost")
+
+
+@pytest.mark.parametrize("legacy_approval_id", [None, "", 1])
+def test_pending_approval_from_sparse_card_uses_tool_call_id_as_approval_id(legacy_approval_id: object) -> None:
+    """External or malformed cards can retain identity through the defensive alias."""
+    card = _approval_card(approval_id="call-old")
+    if legacy_approval_id is None:
+        card["content"].pop("approval_id")
+    else:
+        card["content"]["approval_id"] = legacy_approval_id
+
+    pending = PendingApproval.from_card_event(card, room_id="!room:localhost")
+
+    assert pending.approval_id == "call-old"
 
 
 def test_pending_approval_preserves_distinct_requester_and_approver() -> None:

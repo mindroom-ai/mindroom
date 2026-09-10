@@ -647,6 +647,7 @@ async def test_process_shutdown_signals_responses_before_coalescing_drain() -> N
         response(),
         name="test_early_process_shutdown_response",
         recovery_proof_ready=lambda: True,
+        room_id="!room:example.org",
     )
     await asyncio.wait_for(response_started.wait(), timeout=1.0)
     cancellation_seen_at_coalescing: list[bool] = []
@@ -1495,6 +1496,75 @@ def test_health_defers_only_bounded_recent_owned_ingestion_progress() -> None:
         assert healthy.stale_entities == ()
         assert past_grace.stale_entities == ("draining_agent",)
     finally:
+        reset_matrix_sync_health()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("progress_kind", "progress_times", "expected_report_times"),
+    [
+        (None, (), [90.0, 180.0, 270.0]),
+        ("ingestion", (80, 160, 240), [330.0]),
+        ("sync", (80, 160, 240), [330.0]),
+        ("ingestion", (60, 120, 180, 240, 300), []),
+        ("sync", (60, 120, 180, 240, 300), []),
+    ],
+)
+async def test_watchdog_reports_sustained_stalls_during_startup_grace(
+    monkeypatch: pytest.MonkeyPatch,
+    progress_kind: str | None,
+    progress_times: tuple[int, ...],
+    expected_report_times: list[float],
+) -> None:
+    """Startup grace permits bounded diagnostics without cancelling sync."""
+    bot = _FakeBot()
+    bot._durable_ingestion_progress_generation = 0
+    now = 0.0
+    last_sync: float | None = None
+    report_times: list[float] = []
+
+    async def advance_before_poll(delay: float) -> None:
+        nonlocal now, last_sync
+        assert delay == 5.0
+        now += delay
+        if now in progress_times:
+            if progress_kind == "ingestion":
+                assert bot._durable_ingestion_progress_generation is not None
+                bot._durable_ingestion_progress_generation += 1
+            else:
+                last_sync = now
+        if now >= 350.0:
+            bot.running = False
+
+    def record_log(_logger: object, _method: str, event: dict[str, object]) -> dict[str, object]:
+        if event.get("event") == "matrix_sync_stall_diagnostics":
+            report_times.append(now)
+        return event
+
+    monkeypatch.setattr(runtime_helpers, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(bot, "seconds_since_last_sync_activity", lambda: None if last_sync is None else now - last_sync)
+    sync_task = asyncio.create_task(bot.sync_forever(), name="matrix_sync_test_agent")
+    watchdog_cancelled_sync = asyncio.Event()
+    reset_matrix_sync_health()
+    try:
+        await asyncio.sleep(0)
+        monkeypatch.setattr(runtime_helpers.asyncio, "sleep", advance_before_poll)
+        with capture_logs(processors=[record_log]) as logs:
+            await _SyncIteration._watch(bot, sync_task, watchdog_cancelled_sync)
+        assert report_times == expected_report_times
+        diagnostics = [event for event in logs if event["event"] == "matrix_sync_stall_diagnostics"]
+        for event in diagnostics:
+            assert event["agent"] == "test_agent"
+            assert event["no_progress_seconds"] >= 90.0
+            assert event["generation"] == (len(progress_times) if progress_kind == "ingestion" else 0)
+            assert event["snapshots"][0]["task_name"] == "matrix_sync_test_agent"
+            assert event["sync_age"] == (90.0 if progress_kind == "sync" else None)
+        assert not watchdog_cancelled_sync.is_set()
+        assert not sync_task.done()
+        assert not sync_task.cancelling()
+    finally:
+        sync_task.cancel()
+        await asyncio.gather(sync_task, return_exceptions=True)
         reset_matrix_sync_health()
 
 
@@ -3929,6 +3999,7 @@ async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -
         interrupted_response(),
         name="test_deferred_agent_stop_response",
         recovery_proof_ready=retained_proof,
+        room_id="!room:example.org",
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -4003,6 +4074,7 @@ async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None: 
         interrupted_response(),
         name="test_deferred_agent_stop_cancelling_proof",
         recovery_proof_ready=retryable_proof,
+        room_id="!room:example.org",
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -4145,6 +4217,7 @@ async def test_deferred_agent_stop_deadline_keeps_resources_under_live_proof() -
         interrupted_response(),
         name="test_deferred_agent_stop_deadline_response",
         recovery_proof_ready=resistant_proof,
+        room_id="!room:example.org",
     )
     await response_started.wait()
     runner.begin_process_shutdown()

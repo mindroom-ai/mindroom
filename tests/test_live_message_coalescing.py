@@ -7410,7 +7410,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
 
     assert outcome is _IngressAdmissionOutcome.DEFERRED
     assert drain_result.dispatch_failure_count == 1
-    retry_pending_source.assert_called_once_with(sidecar.event_id)
+    retry_pending_source.assert_called_once_with(room.room_id, sidecar.event_id)
 
 
 @pytest.mark.asyncio

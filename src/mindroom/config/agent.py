@@ -23,6 +23,7 @@ from mindroom.config.access import (
     validate_concrete_matrix_user_ids,
 )
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
+from mindroom.config.legacy_fields import reject_legacy_agent_fields
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
 from mindroom.config.models import (
     AgentLearningMode,
@@ -365,36 +366,7 @@ class AgentConfig(BaseModel):
     @classmethod
     def reject_legacy_agent_fields(cls, data: object) -> object:
         """Reject removed legacy fields to prevent silent misconfiguration."""
-        if isinstance(data, dict):
-            if "knowledge_base" in data:
-                msg = "Agent field 'knowledge_base' was removed. Use 'knowledge_bases' (list) instead."
-                raise ValueError(msg)
-            if "memory_dir" in data:
-                msg = "Agent field 'memory_dir' was removed. Use 'context_files' and memory.backend=file instead."
-                raise ValueError(msg)
-            if "memory_file_path" in data:
-                msg = (
-                    "Agent field 'memory_file_path' was removed. File-backed agent memory now lives in the "
-                    "canonical agent workspace root; keep memory_backend=file and configure context_files "
-                    "relative to that workspace."
-                )
-                raise ValueError(msg)
-            if "sandbox_tools" in data:
-                msg = "Agent field 'sandbox_tools' was removed. Use 'worker_tools' instead."
-                raise ValueError(msg)
-            if "allowed_toolkits" in data:
-                msg = (
-                    "Agent field 'allowed_toolkits' was removed. Expand toolkit/preset/bundle entries into individual "
-                    "tools before applying per-tool defer flags in tools."
-                )
-                raise ValueError(msg)
-            if "initial_toolkits" in data:
-                msg = (
-                    "Agent field 'initial_toolkits' was removed. Expand toolkit/preset/bundle entries into individual "
-                    "tools before applying per-tool initial flags in tools."
-                )
-                raise ValueError(msg)
-        return data
+        return reject_legacy_agent_fields(data)
 
     @field_validator("thread_exports", mode="before")
     @classmethod

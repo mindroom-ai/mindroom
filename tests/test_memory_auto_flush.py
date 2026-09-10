@@ -153,6 +153,95 @@ def test_mark_dirty_and_reprioritize(tmp_path: Path, config: Config) -> None:
     assert '"thread_id"' not in payload
 
 
+def test_reprioritize_rewrites_legacy_location_fields_only(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A public state mutation drops retired locations while preserving current flush history."""
+    state_file = tmp_path / "memory_flush_state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sessions": {
+                    "general:s1": {
+                        "agent_name": "general",
+                        "session_id": "s1",
+                        "worker_key": None,
+                        "execution_identity": None,
+                        "room_id": "!legacy:example.org",
+                        "thread_id": "$legacy-thread",
+                        "dirty": True,
+                        "in_flight": False,
+                        "first_dirty_at": 100,
+                        "last_seen_at": 200,
+                        "last_session_updated_at": 190,
+                        "last_flushed_session_updated_at": 180,
+                        "next_attempt_at": 300,
+                        "consecutive_failures": 2,
+                        "priority_boost_at": None,
+                        "dirty_revision": 4,
+                        "flush_started_dirty_revision": 3,
+                    },
+                    "general:s2": {
+                        "agent_name": "general",
+                        "session_id": "s2",
+                        "worker_key": None,
+                        "execution_identity": None,
+                        "dirty": False,
+                        "in_flight": False,
+                        "first_dirty_at": 110,
+                        "last_seen_at": 210,
+                        "consecutive_failures": 0,
+                        "dirty_revision": 1,
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("mindroom.memory.auto_flush._now_ts", lambda: 500)
+
+    reprioritize_auto_flush_sessions(tmp_path, config, agent_name="general", active_session_id="s2")
+
+    persisted = json.loads(state_file.read_text(encoding="utf-8"))
+    assert persisted == {
+        "version": 1,
+        "sessions": {
+            "general:s1": {
+                "agent_name": "general",
+                "session_id": "s1",
+                "worker_key": None,
+                "execution_identity": None,
+                "dirty": True,
+                "in_flight": False,
+                "first_dirty_at": 100,
+                "last_seen_at": 200,
+                "last_session_updated_at": 190,
+                "last_flushed_session_updated_at": 180,
+                "next_attempt_at": 300,
+                "consecutive_failures": 2,
+                "priority_boost_at": 500,
+                "dirty_revision": 4,
+                "flush_started_dirty_revision": 3,
+            },
+            "general:s2": {
+                "agent_name": "general",
+                "session_id": "s2",
+                "worker_key": None,
+                "execution_identity": None,
+                "dirty": False,
+                "in_flight": False,
+                "first_dirty_at": 110,
+                "last_seen_at": 210,
+                "consecutive_failures": 0,
+                "dirty_revision": 1,
+            },
+        },
+    }
+
+
 def test_mark_dirty_uses_per_agent_file_override(tmp_path: Path, config: Config) -> None:
     """Auto-flush should track agents explicitly configured for file memory."""
     storage_path = tmp_path

@@ -12,6 +12,7 @@ from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
 from openai.types.responses import ResponseOutputItemDoneEvent
 
+from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
 from mindroom.openai_tool_search import (
     formatted_input_with_tool_search_items,
     model_deferred_tool_names,
@@ -26,46 +27,6 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from openai.types.responses import Response, ResponseStreamEvent
     from pydantic import BaseModel
-
-
-# Agno (still in 3.0.5) omits arguments for empty Anthropic tool inputs; agno-agi/agno#8970 proposes the source fix.
-# Remove this repair only after upgrading to a release with that fix and migrating or dropping older histories.
-def _messages_with_openai_tool_arguments(messages: list[Message]) -> list[Message]:
-    """Repair function calls and remove sparse-stream placeholders from replay."""
-    normalized_messages: list[Message] = []
-    removed_tool_call_ids: set[str] = set()
-    for message in messages:
-        if message.role == "tool" and message.tool_call_id in removed_tool_call_ids:
-            continue
-        if message.role != "assistant" or not message.tool_calls:
-            normalized_messages.append(message)
-            continue
-
-        changed = False
-        normalized_tool_calls: list[dict[str, Any]] = []
-        for tool_call in message.tool_calls:
-            function = tool_call.get("function")
-            if not isinstance(function, dict):
-                tool_call_id = tool_call.get("id")
-                if isinstance(tool_call_id, str):
-                    removed_tool_call_ids.add(tool_call_id)
-                changed = True
-                continue
-            if "arguments" in function:
-                normalized_tool_calls.append(tool_call)
-                continue
-            normalized_tool_calls.append(
-                {
-                    **tool_call,
-                    "function": {**function, "arguments": "{}"},
-                },
-            )
-            changed = True
-
-        normalized_messages.append(
-            message.model_copy(update={"tool_calls": normalized_tool_calls}) if changed else message,
-        )
-    return normalized_messages
 
 
 class ChatToolArgumentsCompat:
@@ -90,7 +51,7 @@ class ChatToolArgumentsCompat:
     ) -> list[dict[str, Any]]:
         """Supply the arguments string required by OpenAI for every tool call."""
         return super()._format_all_messages(  # ty: ignore[unresolved-attribute]  # resolved by the OpenAIChat sibling base
-            _messages_with_openai_tool_arguments(messages),
+            repair_legacy_openai_tool_replay(messages),
             compress_tool_results,
         )
 
@@ -139,7 +100,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
     def _using_reasoning_model(self) -> bool:
         """Enable Responses continuation independently of the model's name.
 
-        Agno 3.0.5 gates response chaining and encrypted reasoning retrieval on
+        Agno 3.0.9 gates response chaining and encrypted reasoning retrieval on
         this predicate, although both belong to the API rather than a model list.
         This does not enable reasoning or override ``store=False``.
         """
@@ -170,7 +131,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
         tools: list[Function | dict[str, Any]] | None = None,
     ) -> list[Any]:
         """Reinsert captured tool-search items that Agno drops from history."""
-        messages = _messages_with_openai_tool_arguments(messages)
+        messages = repair_legacy_openai_tool_replay(messages)
         formatted_input = super()._format_messages(messages, compress_tool_results, tools=tools)
         return formatted_input_with_tool_search_items(messages, formatted_input)
 

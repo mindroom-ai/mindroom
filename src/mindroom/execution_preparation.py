@@ -155,6 +155,10 @@ def _classify_partial_reply(
     active_event_ids: Collection[str],
 ) -> _PartialReplyKind | None:
     """Classify a self-authored partial reply from persisted stream metadata first."""
+    # Legacy format: Body-only cancellation, error, and interruption markers without stream_status.
+    # Last legacy release: v2026.3.121; replacement: v2026.3.122 wrote structured stream status.
+    # Handling: Structured status wins; consult body markers only when status is absent or unrecognized.
+    # Coverage: tests/test_partial_reply_context.py::test_legacy_interrupted_markers_without_metadata_are_interrupted.
     status = msg.stream_status
     if status == STREAM_STATUS_COMPLETED:
         return None

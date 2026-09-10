@@ -42,6 +42,9 @@ The feature is disabled by default and requires both `MINDROOM_TRUSTED_UPSTREAM_
 
 ## Route browser and machine traffic
 
+The following OAuth routes and consent flow apply to the default `MINDROOM_MCP_AUTH_MODE=builtin` mode.
+For externally issued credentials, see [External authorization](#external-authorization); `/mcp` and protected-resource discovery remain common.
+
 Forward these paths to the MindRoom API:
 
 | Paths | Authentication at the access proxy |
@@ -75,7 +78,7 @@ The consent form still requires a signed browser identity, a one-use nonce, and 
 ## Connect an MCP client
 
 Configure a Streamable HTTP server with URL `https://assistant.example.org/mcp`.
-The supported client flow uses OAuth authorization code with PKCE S256 and dynamic public-client registration:
+The built-in client flow uses OAuth authorization code with PKCE S256 and dynamic public-client registration:
 
 1. Read the resource metadata URL from the gateway's `401` bearer challenge.
 2. Discover the authorization server at issuer `https://assistant.example.org/mcp/oauth`.
@@ -86,17 +89,99 @@ The supported client flow uses OAuth authorization code with PKCE S256 and dynam
 
 The exact resource is required for both code exchange and refresh.
 Client callbacks must be registered HTTPS URLs or loopback HTTP URLs.
-Dashboard API keys, browser cookies, upstream identity headers, and third-party provider tokens do not authenticate the MCP endpoint.
-MindRoom issues its own client grant; upstream service tokens stay in the existing personal credential store.
+Dashboard API keys, browser cookies, and unsigned identity headers do not authenticate the MCP endpoint.
+In built-in mode, MindRoom issues its own client grant; upstream service tokens stay in the existing personal credential store.
 
 This implementation uses the Python MCP SDK 1.x Streamable HTTP protocol, tested with protocol version `2025-11-25`.
 It uses stateless requests and JSON responses; it does not offer resumable SSE sessions, resources, prompts, or newer protocol features outside that SDK version.
 The gateway validates SDK request and notification envelopes before dispatch and returns fixed errors without logging malformed input or unknown tool names.
 Valid unsolicited response/error envelopes are acknowledged with an empty HTTP 202 and dropped: this stateless gateway never sends correlated client-result requests.
 If bidirectional requests or stateful sessions are added later, their client responses must instead reach the owning session.
-Client applications need support for this OAuth registration and discovery flow; a static bearer-only configuration screen cannot perform initial login.
+Client applications need support for the chosen authorization server's registration and discovery flow; a static bearer-only configuration screen cannot perform initial login.
+
+## External authorization
+
+External mode verifies signed credentials from one configured authority, then checks an active [provisioned account](#managed-account-provisioning) and current personal-agent access on every MCP request and again before tool dispatch.
+It requires `MINDROOM_MCP_SCIM_TOKEN`; the portal prerequisites above still apply.
+
+```bash
+MINDROOM_MCP_AUTH_MODE=external
+MINDROOM_MCP_EXTERNAL_AUTHORIZATION_SERVER=https://identity.example.org
+MINDROOM_MCP_EXTERNAL_ISSUER=https://identity.example.org
+MINDROOM_MCP_EXTERNAL_AUDIENCE=https://assistant.example.org/mcp
+MINDROOM_MCP_EXTERNAL_JWKS_URL=https://identity.example.org/.well-known/jwks.json
+MINDROOM_MCP_EXTERNAL_MATRIX_USER_ID_CLAIM=matrix_user_id
+```
+
+Protected-resource metadata's `authorization_servers` field advertises `MINDROOM_MCP_EXTERNAL_AUTHORIZATION_SERVER`, whose discovery document supplies the client's OAuth endpoints.
+This issuer identifier may differ from `MINDROOM_MCP_EXTERNAL_ISSUER`; preserve significant trailing slashes.
+External mode disables MindRoom's OAuth registration, authorization, consent, token, revocation, authorization-server metadata, and client-management controls.
+Manage external authorizations at their issuer; provider connections in the portal remain separate.
+Restart the API after changing authentication settings: changed or invalid settings fail closed until restart.
+
+By default, send `Authorization: Bearer <JWT>`.
+Credentials must use RS256 or ES256 and contain signed `iss`, `aud`, `exp`, `iat`, `sub`, and the configured email claim.
+Unless the email-domain/template mapping below is configured, they must also contain the configured Matrix identity claim.
+`MINDROOM_MCP_EXTERNAL_EMAIL_CLAIM` defaults to `email`.
+Opaque tokens, introspection, and OIDC ID tokens are unsupported; use an audience dedicated to this MCP resource, distinct from a client ID or browser application's audience.
+Set optional `MINDROOM_MCP_EXTERNAL_REQUIRED_SCOPES` to whitespace-separated scopes required in the signed `scope` claim; no tool scope is implicitly required in external mode.
+
+Shared issuer keys, an operator-entered audience, and an email domain do not establish tenant isolation.
+Trust requires exclusive resource/identity namespaces or a verified issuer-owned client binding.
+Set optional `MINDROOM_MCP_EXTERNAL_CLIENT_ID=registered-client` to require that exact signed string `client_id`, the standard [JWT access-token client claim](https://www.rfc-editor.org/rfc/rfc9068.html#section-2.2).
+Missing, differently typed, or different client IDs are rejected when pinned.
+The issuer must guarantee that other tenants cannot select or override this claim and must guarantee the signed user's identity within the intended tenant.
+This pin restricts one registered client; it does not prove an identity provider's claim contract or certify provider compatibility.
+A pinned client must use its preregistered client ID and support the chosen authorization server's discovery and authorization flow.
+Omit it only when the authority or assertion edge already enforces exclusive tenant resource and identity namespaces.
+
+Alternatively, omit `MINDROOM_MCP_EXTERNAL_MATRIX_USER_ID_CLAIM` and configure both:
+
+```bash
+MINDROOM_MCP_EXTERNAL_EMAIL_DOMAIN=example.org
+MINDROOM_MCP_EXTERNAL_EMAIL_TO_MATRIX_USER_ID_TEMPLATE='@{localpart}:example.org'
+```
+
+Only the configured email domain is accepted by this mapping; the complete signed email must match SCIM `userName` exactly, including case.
+The issuer must control these identity claims. Unsigned headers, browser cookies, owner API keys, and local gateway tokens cannot substitute for external credentials.
+
+### Direct OAuth and signed proxy assertions
+
+Direct JumpCloud JWT authentication is unverified and not currently recommended.
+[JumpCloud's OIDC guide](https://jumpcloud.com/support/sso-with-oidc) documents JWT access tokens and additional audiences, but its subject-mapping guarantee applies to ID tokens.
+The shared regional issuer/JWKS, an added MCP audience, and an email mapping do not demonstrate tenant isolation.
+Direct use would require a verified issuer-owned, non-overridable `client_id` pin and a verified access-token identity contract; the documented connector settings do not establish either guarantee.
+Use JumpCloud as the identity provider behind an OAuth-aware proxy that enforces the intended tenant's login policy and supplies trusted signed origin assertions instead.
+
+An OAuth-aware proxy can instead send a raw signed JWT in the header configured by `MINDROOM_MCP_EXTERNAL_TOKEN_HEADER`.
+For example, [Cloudflare Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/) uses `Cf-Access-Jwt-Assertion`; configure that header, the assertion issuer/JWKS, the MCP Access application's audience, and the OAuth discovery issuer separately.
+The edge must own OAuth, enforce the MCP policy, replace client-supplied assertions, and prevent origin bypass; do not retain a bypass policy on `/mcp` or combine Managed OAuth with built-in mode.
+SCIM still needs its separately authenticated route without interactive login redirects.
+Cloudflare labels Managed OAuth beta.
+
+### External lifecycle and validation
+
+Account creation, migration, rename, reactivation, and delete/recreate require a fresh JWT whose `iat` is strictly more than 60 seconds after the latest account security event recorded by the gateway; profile-only updates preserve access.
+With synchronized clocks, obtain that fresh JWT more than 60 seconds after the event; initial provisioning also incurs this delay, and issuer lag can extend it.
+Strict future-`iat` rejection remains in force.
+The revocation guarantee assumes the issuer is at most 60 seconds ahead of the gateway and the gateway clock does not move backward: keep stable, synchronized clocks; unbounded skew is unsupported.
+Existing accounts receive a one-time event cutoff when upgrading; the same 60-second margin also applies to already-persisted cutoffs.
+JWKS refresh is shared and bounded; signing-key revocation can lag by up to 60 seconds.
+SCIM disable takes effect when received and committed; already-started provider actions may finish.
+The issuer owns refresh revocation and login policy: after account reactivation, silent renewal can produce an accepted fresh token without interactive login.
+
+External per-user concurrency limits span tokens; the per-grant limit and cancellation ownership use the exact signed token's digest.
+Cancelling a call requires the same token used to start it; renewing a token or proxy assertion does not transfer cancellation ownership.
+
+Local tests cover signed issuer profiles, HTTP SCIM offboarding, native tool use, and user isolation.
+Hosted tenant login and connector delivery have not been verified.
+Before general access, verify real client login/resource handling, two users' tools, disable with an existing client, refresh rejection, and reactivation against the intended service.
 
 ## Access and lifecycle
+
+The OAuth token lifetimes, client-management controls, and issuer-storage limits in this section govern built-in credentials.
+External mode reuses the shared provider/account store, so its provider and storage configuration still validates at startup; leave unused `MINDROOM_MCP_OAUTH_*` settings at valid defaults.
+Personal-agent authorization, persistence, and active MCP call limits apply to both modes; external credential lifecycle is described above.
 
 Access tokens last up to 15 minutes.
 Refresh tokens rotate on use; replay revokes the grant family.
@@ -211,9 +296,9 @@ Do not share the provisioning secret with MCP clients or browser applications.
 The provisioning routes do not allow browser CORS access.
 
 The endpoint implements a restricted SCIM 2.0 User lifecycle profile: create, list, read, replace, PATCH, and delete, plus service-provider/schema discovery.
-User names match verified browser email exactly, including case; schema discovery advertises this case-sensitive policy.
+User names match verified email exactly, including case; schema discovery advertises this case-sensitive policy.
 This differs from the general SCIM core userName case-insensitive convention, so check connector matching behavior during enrollment.
-Configure the connector's `userName` attribute to the same email verified by the signed browser identity; provisioning does not authenticate the browser or grant tool permissions.
+Configure the connector's `userName` attribute to the email verified by browser identity in built-in mode or the signed MCP credential in external mode; provisioning does not authenticate the browser or grant tool permissions.
 Group management, bulk operations, password management, and sorting are unsupported.
 Disable group management in the connector; unsupported group requests return an explicit error.
 Connectors that insist on a successful test-group operation need a compatible configuration before this endpoint can be used.
@@ -224,7 +309,7 @@ An unsupported operation rolls back the entire PATCH, including any accompanying
 Configure and test the connector's actual update and deactivation payloads against this profile before relying on provisioning for offboarding.
 
 Use the base URL `https://assistant.example.org/mcp/scim/v2` with the dedicated bearer token in a compatible custom SCIM connector.
-Provision an active test user, approve an MCP client through the existing portal login, then deactivate the provisioned user and verify that token refresh, tool use, and further consent are rejected.
+In built-in mode, provision an active test user, approve an MCP client through the existing portal login, then deactivate the provisioned user and verify that token refresh, tool use, and further consent are rejected.
 Account deactivation, user-name changes, and deletion remove all bound grants and pending consent atomically.
 Reactivation permits a new approval and never restores old grants.
 Unknown or inactive accounts cannot authorize clients in managed-account mode.

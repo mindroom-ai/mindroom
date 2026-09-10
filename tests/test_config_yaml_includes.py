@@ -195,15 +195,17 @@ class TestIncludeTags:
         assert data == {}
         assert files == frozenset({(tmp_path / "config.yaml").resolve()})
 
+    @pytest.mark.parametrize("tools", ["!include shared/tools.yaml", "[!expand shared/tools.yaml]"])
     def test_diamond_include_reads_the_shared_file_once(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        tools: str,
     ) -> None:
         """A file reachable via two include paths is read once so digest and content stay coherent."""
         _write(tmp_path / "config.yaml", "a: !include a.yaml\nb: !include b.yaml\n")
-        _write(tmp_path / "a.yaml", "tools: !include shared/tools.yaml\n")
-        _write(tmp_path / "b.yaml", "tools: !include shared/tools.yaml\n")
+        _write(tmp_path / "a.yaml", f"tools: {tools}\n")
+        _write(tmp_path / "b.yaml", f"tools: {tools}\n")
         _write(tmp_path / "shared" / "tools.yaml", "- calculator\n")
 
         read_names: list[str] = []
@@ -220,6 +222,145 @@ class TestIncludeTags:
         assert data == {"a": {"tools": ["calculator"]}, "b": {"tools": ["calculator"]}}
         assert (tmp_path / "shared" / "tools.yaml").resolve() in files
         assert read_names.count("tools.yaml") == 1
+
+
+class TestListExpansion:
+    """Explicit expansion splices shared YAML lists into the surrounding sequence."""
+
+    @pytest.mark.parametrize(
+        "tools",
+        ["\n  - calculator\n  - !expand tools.yaml\n  - shell", "[calculator, !expand tools.yaml, shell]"],
+    )
+    def test_expand_preserves_order_duplicates_and_nested_values(self, tmp_path: Path, tools: str) -> None:
+        """Expand one level while retaining ordinary includes and nested list values."""
+        config_path = _write(tmp_path / "config.yaml", f"tools: {tools}\nordinary: [!include tools.yaml]\n")
+        shared = _write(tmp_path / "tools.yaml", "- file\n- calculator\n- [nested, list]\n- {key: value}\n")
+
+        data, files = load_yaml_config_source(config_path)
+
+        shared_values = ["file", "calculator", ["nested", "list"], {"key": "value"}]
+        assert data["tools"] == ["calculator", *shared_values, "shell"]
+        assert data["ordinary"] == [shared_values]
+        assert files == frozenset({config_path.resolve(), shared.resolve()})
+
+    def test_expand_composes_recursively_with_includes(self, tmp_path: Path) -> None:
+        """Nested expansions resolve from their own file and track all dependencies."""
+        config_path = _write(tmp_path / "config.yaml", "agent: !include agents/code.yaml\n")
+        agent = _write(tmp_path / "agents/code.yaml", "tools: [!expand _shared/tools.yaml, shell]\n")
+        shared = _write(tmp_path / "agents/_shared/tools.yaml", "- !expand base.yaml\n- file\n- !expand base.yaml\n")
+        base = _write(tmp_path / "agents/_shared/base.yaml", "!include calculator.yaml\n")
+        calculator = _write(tmp_path / "agents/_shared/calculator.yaml", "- calculator\n")
+
+        data, files = load_yaml_config_source(config_path)
+
+        assert data == {"agent": {"tools": ["calculator", "file", "calculator", "shell"]}}
+        assert files == frozenset(path.resolve() for path in (config_path, agent, shared, base, calculator))
+
+    def test_empty_list_expands_to_no_items(self, tmp_path: Path) -> None:
+        """An explicit empty list is a valid expansion and still tracks its file."""
+        config_path = _write(tmp_path / "config.yaml", "tools: [!expand empty.yaml, calculator]\n")
+        empty = _write(tmp_path / "empty.yaml", "[]\n")
+
+        data, files = load_yaml_config_source(config_path)
+
+        assert data == {"tools": ["calculator"]}
+        assert empty.resolve() in files
+
+    def test_expand_preserves_yaml_aliases_and_mapping_merges(self, tmp_path: Path) -> None:
+        """Ordinary aliases and merges keep working around expanded list items."""
+        config_path = _write(
+            tmp_path / "config.yaml",
+            "base: &base\n  tools: &tools [!expand tools.yaml, file]\n"
+            "agent: {<<: *base}\ncopy: *tools\nnested: [*tools]\n",
+        )
+        _write(tmp_path / "tools.yaml", "- calculator\n")
+
+        data, _files = load_yaml_config_source(config_path)
+
+        assert data["base"] == data["agent"] == {"tools": ["calculator", "file"]}
+        assert data["copy"] is data["base"]["tools"]
+        assert data["nested"] == [["calculator", "file"]]
+
+    @pytest.mark.parametrize("content", ["", "null\n", "calculator\n", "42\n", "tools: [calculator]\n"])
+    def test_expand_rejects_non_lists_with_source_location(self, tmp_path: Path, content: str) -> None:
+        """Bad shared values report the expansion site and retain failure dependencies."""
+        config_path = _write(tmp_path / "config.yaml", "tools:\n  - !expand tools.yaml\n")
+        shared = _write(tmp_path / "tools.yaml", content)
+
+        with pytest.raises(
+            ConfigIncludeError,
+            match=r"!expand.*tools\.yaml.*must contain a YAML list.*config\.yaml, line 2",
+        ) as exc_info:
+            load_yaml_config_source(config_path)
+
+        assert partial_source_files(exc_info.value) == frozenset({config_path.resolve(), shared.resolve()})
+
+    @pytest.mark.parametrize(
+        "source",
+        ["!expand tools.yaml\n", "tools: !expand tools.yaml\n", "!expand tools.yaml: value\n"],
+    )
+    def test_expand_requires_a_list_item(self, tmp_path: Path, source: str) -> None:
+        """Expansion outside a sequence reports a clear usage error."""
+        config_path = _write(tmp_path / "config.yaml", source)
+        _write(tmp_path / "tools.yaml", "- calculator\n")
+
+        with pytest.raises(ConfigIncludeError, match=r"!expand.*only.*list item.*config\.yaml, line 1"):
+            load_yaml_config_source(config_path)
+
+    @pytest.mark.parametrize("value", ["[]", "{}", "''"])
+    def test_expand_requires_a_file_path(self, tmp_path: Path, value: str) -> None:
+        """Only a nonempty scalar relative file path can follow !expand."""
+        config_path = _write(tmp_path / "config.yaml", f"tools:\n  - !expand {value}\n")
+
+        with pytest.raises(ConfigIncludeError, match=r"!expand expects a relative file path.*config\.yaml, line 2"):
+            load_yaml_config_source(config_path)
+
+    @pytest.mark.parametrize(
+        ("target", "error"),
+        [
+            ("missing.yaml", "does not exist"),
+            ("/tools.yaml", "does not allow absolute paths"),
+            ("../tools.yaml", "outside the configuration directory"),
+            (".hidden.yaml", "does not allow hidden path components"),
+        ],
+    )
+    def test_expand_obeys_include_path_rules(self, tmp_path: Path, target: str, error: str) -> None:
+        """Expansion reuses the same file access rules as ordinary includes."""
+        config_path = _write(tmp_path / "config.yaml", f"tools:\n  - !expand {target}\n")
+
+        with pytest.raises(ConfigIncludeError, match=error):
+            load_yaml_config_source(config_path)
+
+    def test_expand_rejects_include_cycles(self, tmp_path: Path) -> None:
+        """Mixed include and expansion cycles report the full file chain."""
+        config_path = _write(tmp_path / "config.yaml", "tools: [!expand tools.yaml]\n")
+        _write(tmp_path / "tools.yaml", "- !include config.yaml\n")
+
+        with pytest.raises(
+            ConfigIncludeError,
+            match=r"include cycle detected: config.yaml -> tools.yaml -> config.yaml",
+        ):
+            load_yaml_config_source(config_path)
+
+    def test_expanded_agent_tools_validate_and_resolve(self, tmp_path: Path) -> None:
+        """Agent configs and CLI resolution expose the final flat tools list."""
+        config_path = _write_split_config(tmp_path)
+        agent = tmp_path / "agents/code.yaml"
+        agent.write_text(
+            agent.read_text().replace(
+                "tools: !include _shared/tools.yaml",
+                "tools: [!expand _shared/tools.yaml, file]",
+            ),
+        )
+
+        config = load_config(resolve_runtime_paths(config_path=config_path))
+        result = runner.invoke(app, ["config", "resolve", "--path", str(config_path)])
+
+        assert [tool.name for tool in config.agents["code"].tools] == ["calculator", "file"]
+        assert [tool.name for tool in config.agents["research"].tools] == ["calculator"]
+        assert (tmp_path / "agents/_shared/tools.yaml").resolve() in config.source_files
+        assert result.exit_code == 0, result.output
+        assert yaml.safe_load(result.stdout)["agents"]["code"]["tools"] == ["calculator", "file"]
 
 
 class TestIncludeErrors:

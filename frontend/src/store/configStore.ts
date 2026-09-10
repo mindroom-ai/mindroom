@@ -15,9 +15,10 @@ import {
   RoomDefaultsConfig,
 } from "@/types/config";
 import * as configService from "@/services/configService";
-import type {
-  ConfigDiagnostic,
-  ConfigValidationIssue,
+import {
+  isConfigConflictDiagnostic,
+  type ConfigDiagnostic,
+  type ConfigValidationIssue,
 } from "@/lib/configValidation";
 import {
   cloneToolEntries,
@@ -31,6 +32,8 @@ import {
 
 const AGENT_POLICIES_ERROR_MESSAGE = "Failed to derive agent policies";
 const CONFIG_VALIDATION_FAILED_MESSAGE = "Configuration validation failed";
+const CONFIG_CONFLICT_MESSAGE =
+  "Configuration changed elsewhere. Your draft has not been saved. Copy any changes you want to keep, then refresh this page and reapply them.";
 
 export type SaveConfigResult =
   | { status: "saved" }
@@ -102,17 +105,15 @@ function retainedDraftDiagnostics(
     );
   });
 
-  if (diagnosticsContainValidationErrors(filteredDiagnostics)) {
-    return filteredDiagnostics.filter(
-      (diagnostic) =>
-        diagnostic.kind === "validation" ||
-        (diagnostic.kind === "global" &&
-          diagnostic.message === CONFIG_VALIDATION_FAILED_MESSAGE),
-    );
-  }
-
+  const hasValidationErrors =
+    diagnosticsContainValidationErrors(filteredDiagnostics);
   return filteredDiagnostics.filter(
-    (diagnostic) => diagnostic.kind === "validation",
+    (diagnostic) =>
+      diagnostic.kind === "validation" ||
+      isConfigConflictDiagnostic(diagnostic) ||
+      (hasValidationErrors &&
+        diagnostic.kind === "global" &&
+        diagnostic.message === CONFIG_VALIDATION_FAILED_MESSAGE),
   );
 }
 
@@ -153,6 +154,23 @@ function firstGlobalDiagnosticMessage(
     diagnostics.find((diagnostic) => diagnostic.kind === "global")?.message ??
     fallbackMessage
   );
+}
+
+function configConflictDiagnostics(
+  diagnostics: ConfigDiagnostic[],
+  blocking: boolean,
+): ConfigDiagnostic[] {
+  return [
+    {
+      kind: "global",
+      code: "config_conflict",
+      message: CONFIG_CONFLICT_MESSAGE,
+      blocking,
+    },
+    ...retainedDraftDiagnostics(diagnostics).filter(
+      (diagnostic) => !isConfigConflictDiagnostic(diagnostic),
+    ),
+  ];
 }
 
 function nextDraftVersion(draftVersion: number): number {
@@ -713,7 +731,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       isLoading: true,
       diagnostics: currentState.isDirty
         ? retainedDraftDiagnostics(currentState.diagnostics)
-        : [],
+        : currentState.diagnostics.filter(isConfigConflictDiagnostic),
       loadConfigRequestId,
     });
     try {
@@ -823,12 +841,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           return;
         }
         if (recoveryConfigSourceError != null) {
-          const recoveryDiagnostics = globalDiagnostics(
-            recoveryConfigSourceError instanceof Error
-              ? recoveryConfigSourceError.message
-              : "Failed to load raw configuration",
-            true,
-          );
+          const recoveryDiagnostics = [
+            ...latestState.diagnostics.filter(isConfigConflictDiagnostic),
+            ...globalDiagnostics(
+              recoveryConfigSourceError instanceof Error
+                ? recoveryConfigSourceError.message
+                : "Failed to load raw configuration",
+              true,
+            ),
+          ];
           if (
             latestState.isDirty ||
             latestState.draftVersion != draftVersionAtStart
@@ -857,11 +878,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           set({
             isLoading: false,
             syncStatus: "error",
-            diagnostics: validationDiagnostics(error.issues, {
-              blocking:
-                latestState.recoveryConfigSource != null &&
-                latestState.config == null,
-            }),
+            diagnostics: [
+              ...latestState.diagnostics.filter(isConfigConflictDiagnostic),
+              ...validationDiagnostics(error.issues, {
+                blocking:
+                  latestState.recoveryConfigSource != null &&
+                  latestState.config == null,
+              }),
+            ],
           });
           return;
         }
@@ -879,6 +903,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
       set({
         diagnostics: [
+          ...get().diagnostics.filter(isConfigConflictDiagnostic),
           {
             kind: "global",
             message:
@@ -945,6 +970,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       diagnostics,
       dirtyRoots,
     } = get();
+    const conflict = diagnostics.find(isConfigConflictDiagnostic);
+    if (conflict) {
+      return { status: "error", message: conflict.message, diagnostics };
+    }
     if (!config) {
       return {
         status: "error",
@@ -1144,16 +1173,25 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         return { status: "stale" };
       }
       const currentState = get();
+      if (error instanceof configService.ConfigStaleError) {
+        const errorDiagnostics = configConflictDiagnostics(
+          currentState.diagnostics,
+          false,
+        );
+        set({
+          diagnostics: errorDiagnostics,
+          isLoading: false,
+          syncStatus: "error",
+        });
+        return {
+          status: "error",
+          message: CONFIG_CONFLICT_MESSAGE,
+          diagnostics: errorDiagnostics,
+        };
+      }
       const draftChangedSinceSaveStarted =
         currentState.draftVersion !== savedDraftVersion;
       if (draftChangedSinceSaveStarted) {
-        set({
-          isLoading: false,
-          syncStatus: draftSyncStatus(currentState),
-        });
-        return { status: "stale" };
-      }
-      if (error instanceof configService.ConfigStaleError) {
         set({
           isLoading: false,
           syncStatus: draftSyncStatus(currentState),
@@ -1238,6 +1276,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       draftVersion,
       committedGeneration,
     } = get();
+    const conflict = diagnostics.find(isConfigConflictDiagnostic);
+    if (conflict) {
+      return { status: "error", message: conflict.message, diagnostics };
+    }
     if (recoveryConfigSource == null) {
       return {
         status: "error",
@@ -1317,16 +1359,25 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         return { status: "stale" };
       }
       const currentState = get();
+      if (error instanceof configService.ConfigStaleError) {
+        const errorDiagnostics = configConflictDiagnostics(
+          currentState.diagnostics,
+          true,
+        );
+        set({
+          diagnostics: errorDiagnostics,
+          isLoading: false,
+          syncStatus: "error",
+        });
+        return {
+          status: "error",
+          message: CONFIG_CONFLICT_MESSAGE,
+          diagnostics: errorDiagnostics,
+        };
+      }
       const draftChangedSinceSaveStarted =
         currentState.draftVersion !== savedDraftVersion;
       if (draftChangedSinceSaveStarted) {
-        set({
-          isLoading: false,
-          syncStatus: draftSyncStatus(currentState),
-        });
-        return { status: "stale" };
-      }
-      if (error instanceof configService.ConfigStaleError) {
         set({
           isLoading: false,
           syncStatus: draftSyncStatus(currentState),

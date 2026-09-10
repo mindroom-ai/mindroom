@@ -19,7 +19,7 @@ import pytest
 import mindroom.durable_write as durable_write_module
 import mindroom.oauth.credential_store as credential_store_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
 from mindroom.oauth.credential_store import (
     _oauth_credential_database_path,
@@ -39,18 +39,6 @@ class _Provider:
     id = "demo_provider"
     credential_service = "demo_oauth"
     requester_scoped_credentials = True
-
-
-class _CapturingLogger:
-    def __init__(self) -> None:
-        self.info_calls: list[tuple[str, dict[str, object]]] = []
-        self.warning_calls: list[tuple[str, dict[str, object]]] = []
-
-    def info(self, event: str, **kwargs: object) -> None:
-        self.info_calls.append((event, kwargs))
-
-    def warning(self, event: str, **kwargs: object) -> None:
-        self.warning_calls.append((event, kwargs))
 
 
 def _hold_sqlite_transaction(
@@ -359,6 +347,83 @@ async def test_requester_key_upgrade_preserves_primary_runtime_oauth_credentials
         assert reader.snapshot().credentials is None
 
 
+@pytest.mark.asyncio
+async def test_tagged_oauth_scope_binding_reads_literal_v1_database(tmp_path: Path) -> None:
+    """The released v1 binding remains readable without rewriting its key or receipts."""
+    context = _context(tmp_path, requester_id="@alice:example.org")
+    assert context.worker_target is not None
+    database_path = _oauth_credential_database_path(context)
+    database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    payload = context.credentials_manager.encode_credentials(
+        context.provider.credential_service,
+        {"token": "tagged-access", "refresh_token": "tagged-refresh", "provider_extra": {"keep": 1}},
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE oauth_credential_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                provider_id TEXT NOT NULL,
+                credential_service TEXT NOT NULL,
+                worker_scope TEXT NOT NULL,
+                worker_key TEXT NOT NULL,
+                routing_agent_name TEXT NOT NULL,
+                generation TEXT NOT NULL,
+                connection_generation TEXT NOT NULL,
+                credential_payload BLOB,
+                credential_present INTEGER NOT NULL CHECK (credential_present IN (0, 1)),
+                credential_unreadable INTEGER NOT NULL CHECK (credential_unreadable IN (0, 1))
+            );
+            CREATE TABLE oauth_reset_operations (
+                operation_id TEXT PRIMARY KEY,
+                credential_existed INTEGER NOT NULL CHECK (credential_existed IN (0, 1))
+            );
+            PRAGMA user_version = 1;
+            """,
+        )
+        connection.execute(
+            """
+            INSERT INTO oauth_credential_state VALUES (
+                1, 'demo_provider', 'demo_oauth', 'user',
+                'v1:tenant:user:@alice:example.org', '',
+                'tagged-generation', 'tagged-connection-generation', ?, 1, 0
+            )
+            """,
+            (payload,),
+        )
+        connection.execute("INSERT INTO oauth_reset_operations VALUES ('tagged-reset', 1)")
+    original_bytes = database_path.read_bytes()
+    expected_credentials = {
+        "token": "tagged-access",
+        "refresh_token": "tagged-refresh",
+        "provider_extra": {"keep": 1},
+    }
+
+    async with oauth_credential_reader(context) as reader:
+        snapshot = reader.snapshot()
+        assert snapshot.credentials == expected_credentials
+        assert (snapshot.generation, snapshot.connection_generation) == (
+            "tagged-generation",
+            "tagged-connection-generation",
+        )
+        assert reader.reset_operation_result("tagged-reset") is True
+    assert database_path.read_bytes() == original_bytes
+
+    async with oauth_credential_transaction(context) as transaction:
+        assert transaction.snapshot().credentials == expected_credentials
+        assert transaction.reset_operation_result("tagged-reset") is True
+        await transaction.commit()
+    assert database_path.read_bytes() == original_bytes
+
+    legacy_context = replace(
+        context,
+        worker_target=replace(context.worker_target, worker_key="v1:tenant:user:@alice:example.org"),
+    )
+    async with oauth_credential_reader(legacy_context) as reader:
+        assert reader.snapshot().credentials == expected_credentials
+        assert reader.reset_operation_result("tagged-reset") is True
+
+
 async def _assert_scope_rejected(context: OAuthCredentialContext) -> None:
     for open_store in (oauth_credential_reader, oauth_credential_transaction):
         with pytest.raises(OAuthProviderError, match="different credential scope"):
@@ -636,73 +701,104 @@ async def test_database_directory_permission_failure_uses_oauth_error_boundary(
 
 
 @pytest.mark.asyncio
-async def test_corrupt_encrypted_legacy_credential_can_be_reset_without_plaintext_storage(tmp_path: Path) -> None:
-    """Unreadable plaintext never enters an encrypted DB, but its presence remains resettable."""
-    encryption_key = base64.urlsafe_b64encode(b"k" * 32).decode()
+@pytest.mark.parametrize("encrypted", [False, True])
+@pytest.mark.parametrize("commit_normalization", [False, True])
+async def test_legacy_publication_marker_normalizes_without_changing_credentials_or_generations(
+    tmp_path: Path,
+    encrypted: bool,
+    commit_normalization: bool,
+) -> None:
+    """Only a committed writer strips the marker, preserving credentials and generations."""
+    encryption_key = base64.urlsafe_b64encode(b"k" * 32).decode() if encrypted else None
     context = _context(tmp_path, encryption_key=encryption_key)
-    save_scoped_credentials(
-        context.provider.credential_service,
-        {"token": "temporary"},
-        credentials_manager=context.credentials_manager,
-        worker_target=context.worker_target,
-    )
-    legacy_path = context.credentials_manager.for_primary_runtime_scope(
-        "@alice:example.test",
-        None,
-    ).get_credentials_path(context.provider.credential_service)
-    legacy_path.write_bytes(b"corrupt-plaintext-secret")
-
     async with oauth_credential_transaction(context) as transaction:
-        with pytest.raises(OAuthProviderError, match="could not be loaded"):
-            transaction.snapshot()
         await transaction.commit()
-
     database_path = _oauth_credential_database_path(context)
-    assert b"corrupt-plaintext-secret" not in database_path.read_bytes()
-    async with oauth_credential_transaction(context) as transaction:
-        assert transaction.reset("browser:corrupt-reset") is True
-        await transaction.commit()
-
-
-@pytest.mark.asyncio
-async def test_enabling_encryption_preserves_unadopted_plaintext_legacy_credentials(tmp_path: Path) -> None:
-    """Encryption activation must not delete plaintext bytes that were not adopted."""
-    plaintext_context = _context(tmp_path)
-    save_scoped_credentials(
-        plaintext_context.provider.credential_service,
-        {"token": "recoverable", "refresh_token": "recoverable-refresh"},
-        credentials_manager=plaintext_context.credentials_manager,
-        worker_target=plaintext_context.worker_target,
+    legacy_credentials = {
+        "token": "old-access",
+        "refresh_token": "old-refresh",
+        "provider_extra": {"keep": 1},
+        "_mindroom_oauth_publication": {"generation": "obsolete"},
+    }
+    expected_credentials = {
+        "token": "old-access",
+        "refresh_token": "old-refresh",
+        "provider_extra": {"keep": 1},
+    }
+    encoded = context.credentials_manager.encode_credentials(
+        context.provider.credential_service,
+        legacy_credentials,
     )
-    legacy_path = plaintext_context.credentials_manager.for_primary_runtime_scope(
-        "@alice:example.test",
-        None,
-    ).get_credentials_path(plaintext_context.provider.credential_service)
-    original_payload = legacy_path.read_bytes()
-    encryption_key = base64.urlsafe_b64encode(b"k" * 32).decode()
-    encrypted_context = _context(tmp_path, encryption_key=encryption_key)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE oauth_credential_state
+            SET generation = 'legacy-generation',
+                connection_generation = 'legacy-connection-generation',
+                credential_payload = ?, credential_present = 1, credential_unreadable = 0
+            WHERE singleton = 1
+            """,
+            (encoded,),
+        )
+    before_read = database_path.read_bytes()
 
-    async with oauth_credential_transaction(encrypted_context) as transaction:
-        with pytest.raises(OAuthProviderError, match="could not be loaded"):
-            transaction.snapshot()
+    async with oauth_credential_reader(context) as reader:
+        snapshot = reader.snapshot()
+        assert snapshot.credentials == expected_credentials
+        assert (snapshot.generation, snapshot.connection_generation) == (
+            "legacy-generation",
+            "legacy-connection-generation",
+        )
+    assert database_path.read_bytes() == before_read
+
+    async with oauth_credential_transaction(context) as transaction:
+        snapshot = transaction.snapshot()
+        assert snapshot.credentials == expected_credentials
+        assert (snapshot.generation, snapshot.connection_generation) == (
+            "legacy-generation",
+            "legacy-connection-generation",
+        )
+        if commit_normalization:
+            await transaction.commit()
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT credential_payload, generation, connection_generation
+            FROM oauth_credential_state WHERE singleton = 1
+            """,
+        ).fetchone()
+    assert row is not None
+    durable_credentials = context.credentials_manager.decode_credentials(
+        context.provider.credential_service,
+        bytes(row[0]),
+    )
+    assert durable_credentials == (expected_credentials if commit_normalization else legacy_credentials)
+    assert row[1:] == ("legacy-generation", "legacy-connection-generation")
+    async with oauth_credential_reader(context) as reader:
+        reopened = reader.snapshot()
+        assert reopened.credentials == expected_credentials
+        assert (reopened.generation, reopened.connection_generation) == (
+            "legacy-generation",
+            "legacy-connection-generation",
+        )
+
+    caller_credentials = dict(legacy_credentials)
+    async with oauth_credential_transaction(context) as transaction:
+        published = transaction.publish(caller_credentials, advance_connection_generation=False)
         await transaction.commit()
-
-    assert legacy_path.read_bytes() == original_payload
-
-    async with oauth_credential_reader(plaintext_context) as reader:
-        recovered = reader.snapshot()
-
-    assert recovered.credentials == {"token": "recoverable", "refresh_token": "recoverable-refresh"}
-    assert not legacy_path.exists()
+    assert caller_credentials == legacy_credentials
+    assert published.credentials == expected_credentials
 
 
 @pytest.mark.asyncio
-async def test_legacy_adoption_removes_every_obsolete_sidecar(tmp_path: Path) -> None:
-    """SQLite adoption removes the credential plus every lock and generation sidecar."""
-    context = _context(tmp_path)
+@pytest.mark.parametrize("encrypted", [False, True])
+async def test_json_only_credentials_and_sidecars_are_ignored(tmp_path: Path, encrypted: bool) -> None:
+    """A JSON-only connection requires reconnect while obsolete files remain inert."""
+    context = _context(tmp_path, encryption_key=base64.urlsafe_b64encode(b"k" * 32).decode() if encrypted else None)
     save_scoped_credentials(
         context.provider.credential_service,
-        {"token": "legacy"},
+        {"token": "json-only"},
         credentials_manager=context.credentials_manager,
         worker_target=context.worker_target,
     )
@@ -716,136 +812,25 @@ async def test_legacy_adoption_removes_every_obsolete_sidecar(tmp_path: Path) ->
         legacy_path.with_name(f"{legacy_path.name}.oauth-refresh.lock"),
     )
     for sidecar in sidecars:
-        sidecar.write_text("legacy", encoding="utf-8")
+        sidecar.write_text("obsolete", encoding="utf-8")
+    original_files = {path: path.read_bytes() for path in (legacy_path, *sidecars)}
+
+    async with oauth_credential_reader(context) as reader:
+        assert reader.snapshot().credentials is None
 
     async with oauth_credential_transaction(context) as transaction:
-        assert transaction.snapshot().credentials == {"token": "legacy"}
+        transaction.publish({"token": "reconnected"}, advance_connection_generation=True)
         await transaction.commit()
-
-    assert not legacy_path.exists()
-    assert all(not sidecar.exists() for sidecar in sidecars)
-
-
-@pytest.mark.asyncio
-async def test_legacy_adoption_logs_only_safe_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A committed legacy adoption reports its outcome without scope paths or credential data."""
-    context = _context(tmp_path)
-    credential_value = "legacy-sensitive-value"
-    save_scoped_credentials(
-        context.provider.credential_service,
-        {"token": credential_value},
-        credentials_manager=context.credentials_manager,
-        worker_target=context.worker_target,
-    )
-    logger = _CapturingLogger()
-    monkeypatch.setattr(credential_store_module, "logger", logger)
+    async with oauth_credential_reader(context) as reader:
+        assert reader.snapshot().credentials == {"token": "reconnected"}
 
     async with oauth_credential_transaction(context) as transaction:
-        assert transaction.snapshot().credentials == {"token": credential_value}
+        assert transaction.reset("reset-operation") is True
         await transaction.commit()
+    async with oauth_credential_reader(context) as reader:
+        assert reader.snapshot().credentials is None
 
-    assert logger.info_calls == [
-        (
-            "oauth_legacy_credentials_adopted",
-            {
-                "provider_id": "demo_provider",
-                "credential_service": "demo_oauth",
-                "credential_present": True,
-                "credential_unreadable": False,
-            },
-        ),
-    ]
-    logged_payload = repr(logger.info_calls)
-    assert credential_value not in logged_payload
-    assert "@alice:example.test" not in logged_payload
-    assert str(tmp_path) not in logged_payload
-
-
-@pytest.mark.asyncio
-async def test_legacy_cleanup_failure_logs_only_safe_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A legacy cleanup failure reports its type without exposing the scoped path."""
-    context = _context(tmp_path)
-    credential_value = "legacy-cleanup-sensitive-value"
-    save_scoped_credentials(
-        context.provider.credential_service,
-        {"token": credential_value},
-        credentials_manager=context.credentials_manager,
-        worker_target=context.worker_target,
-    )
-    legacy_path = context.credentials_manager.for_primary_runtime_scope(
-        "@alice:example.test",
-        None,
-    ).get_credentials_path(context.provider.credential_service)
-    original_unlink = Path.unlink
-
-    def fail_credential_cleanup(path: Path, *, missing_ok: bool = False) -> None:
-        if path == legacy_path:
-            raise PermissionError
-        original_unlink(path, missing_ok=missing_ok)
-
-    logger = _CapturingLogger()
-    monkeypatch.setattr(Path, "unlink", fail_credential_cleanup)
-    monkeypatch.setattr(credential_store_module, "logger", logger)
-
-    async with oauth_credential_transaction(context) as transaction:
-        assert transaction.snapshot().credentials == {"token": credential_value}
-        await transaction.commit()
-
-    assert logger.warning_calls == [
-        (
-            "oauth_legacy_credential_cleanup_failed",
-            {
-                "provider_id": "demo_provider",
-                "credential_service": "demo_oauth",
-                "error_type": "PermissionError",
-            },
-        ),
-    ]
-    logged_payload = repr(logger.info_calls + logger.warning_calls)
-    assert credential_value not in logged_payload
-    assert "@alice:example.test" not in logged_payload
-    assert str(tmp_path) not in logged_payload
-
-
-@pytest.mark.asyncio
-async def test_wrong_key_legacy_ciphertext_recovers_when_original_key_returns(tmp_path: Path) -> None:
-    """Opaque legacy ciphertext is retried and normalized after the right key returns."""
-    original_key = base64.urlsafe_b64encode(b"a" * 32).decode()
-    wrong_key = base64.urlsafe_b64encode(b"b" * 32).decode()
-    original_context = _context(tmp_path, encryption_key=original_key)
-    save_scoped_credentials(
-        original_context.provider.credential_service,
-        {"token": "recoverable"},
-        credentials_manager=original_context.credentials_manager,
-        worker_target=original_context.worker_target,
-    )
-
-    wrong_context = _context(tmp_path, encryption_key=wrong_key)
-    async with oauth_credential_transaction(wrong_context) as transaction:
-        with pytest.raises(OAuthProviderError, match="could not be loaded"):
-            transaction.snapshot()
-        await transaction.commit()
-
-    recovered_context = OAuthCredentialContext(
-        provider=original_context.provider,
-        runtime_paths=original_context.runtime_paths,
-        credentials_manager=CredentialsManager(
-            original_context.credentials_manager.base_path,
-            shared_base_path=original_context.credentials_manager.shared_base_path,
-            encryption_key=original_key,
-        ),
-        worker_target=original_context.worker_target,
-    )
-    async with oauth_credential_transaction(recovered_context) as transaction:
-        snapshot = transaction.snapshot()
-        await transaction.commit()
-    assert snapshot.credentials == {"token": "recoverable"}
+    assert {path: path.read_bytes() for path in original_files} == original_files
 
 
 def test_database_symlink_is_rejected(tmp_path: Path) -> None:
@@ -1041,26 +1026,3 @@ async def test_reader_probe_validates_inside_one_snapshot(
         assert reader.generations().generation
 
     assert validation_transactions == [True, True]
-
-
-@pytest.mark.asyncio
-async def test_legacy_cleanup_decision_is_made_inside_initialization_transaction(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Legacy cleanup must not open an unprotected read window after initialization commits."""
-    context = _context(tmp_path)
-    original_cleanup_decision = credential_store_module._legacy_cleanup_must_be_deferred
-
-    def require_transaction(connection: sqlite3.Connection) -> bool:
-        assert connection.in_transaction
-        return original_cleanup_decision(connection)
-
-    monkeypatch.setattr(
-        credential_store_module,
-        "_legacy_cleanup_must_be_deferred",
-        require_transaction,
-    )
-
-    async with oauth_credential_transaction(context) as transaction:
-        await transaction.commit()

@@ -21,7 +21,9 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync
+from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
+from tests.oauth_test_utils import publish_oauth_credentials
 
 
 @pytest.fixture
@@ -45,7 +47,12 @@ def mock_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
             "https://www.googleapis.com/auth/gmail.compose",
         ],
     }
-    manager.save_credentials("google_gmail_oauth", test_creds)
+    publish_oauth_credentials(
+        google_gmail_oauth_provider(),
+        test_creds,
+        credentials_manager=manager,
+        worker_target=None,
+    )
     return manager
 
 
@@ -187,7 +194,12 @@ class TestGmailTools:
         runtime_paths: RuntimePaths,
     ) -> None:
         """Test initialization when credentials are invalid."""
-        mock_credentials_manager.save_credentials("google_gmail_oauth", {"invalid": "data"})
+        publish_oauth_credentials(
+            google_gmail_oauth_provider(),
+            {"invalid": "data"},
+            credentials_manager=mock_credentials_manager,
+            worker_target=None,
+        )
         mock_credentials_class.side_effect = TypeError("Missing required fields")
 
         with (

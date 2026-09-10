@@ -10,8 +10,6 @@ from typing import TYPE_CHECKING
 
 from agno.tools.function import Function
 
-from mindroom import agno_tool_wrapper_patch
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -38,7 +36,6 @@ def _wrap_from_a_frame_holding(sentinel: _Sentinel, tool: Callable[..., object] 
 
 def test_wrapped_tool_does_not_retain_the_wrapping_frame() -> None:
     """The caller's locals must be collectable once the wrapper exists."""
-    agno_tool_wrapper_patch.apply_patch()
     sentinel = _Sentinel()
     sentinel_ref = weakref.ref(sentinel)
 
@@ -52,7 +49,6 @@ def test_wrapped_tool_does_not_retain_the_wrapping_frame() -> None:
 
 def test_async_generator_tool_does_not_retain_the_wrapping_frame() -> None:
     """The async-generator shim closes over a second pydantic wrapper that must be released too."""
-    agno_tool_wrapper_patch.apply_patch()
     sentinel = _Sentinel()
     sentinel_ref = weakref.ref(sentinel)
 
@@ -62,11 +58,3 @@ def test_async_generator_tool_does_not_retain_the_wrapping_frame() -> None:
 
     assert sentinel_ref() is None
     assert inspect.isasyncgenfunction(wrapped)
-
-
-def test_apply_patch_is_idempotent() -> None:
-    """Repeat installs must keep the first wrapper in place."""
-    agno_tool_wrapper_patch.apply_patch()
-    installed = Function._wrap_callable_uncached
-    agno_tool_wrapper_patch.apply_patch()
-    assert Function._wrap_callable_uncached is installed

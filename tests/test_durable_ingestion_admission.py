@@ -116,14 +116,13 @@ async def test_acknowledged_retry_wakes_an_idle_semantic_worker(
         return True
 
     worker = PendingEventWorker(store=principal, handle=handle)
-    collect = worker._collect_dispatchable
+    dispatch = worker._dispatch_ready_rooms
 
-    async def collect_and_signal() -> tuple[dict[str, list[JournalEvent]], bool]:
-        result = await collect()
+    async def dispatch_and_signal() -> None:
+        await dispatch()
         worker_idle.set()
-        return result
 
-    monkeypatch.setattr(worker, "_collect_dispatchable", collect_and_signal)
+    monkeypatch.setattr(worker, "_dispatch_ready_rooms", dispatch_and_signal)
 
     async def interrupt_after_commit(
         _record: IngestionRecordAdmission,

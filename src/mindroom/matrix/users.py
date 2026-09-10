@@ -597,6 +597,10 @@ def _direct_token_registration_error(
     return None
 
 
+# Legacy format: Persisted internal Matrix accounts omitted requested_username.
+# Last legacy release: v2026.5.160; replacement: v2026.5.161 persisted the immutable creation request.
+# Handling: Use the actual stored username as the original request only when the dedicated field is absent.
+# Coverage: tests/test_matrix_agent_manager.py::TestAgentUserCreation::test_create_internal_user_legacy_state_uses_actual_username_as_original_request.
 def _validate_existing_internal_user_request(
     *,
     agent_name: str,

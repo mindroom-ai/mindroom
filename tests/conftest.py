@@ -86,7 +86,7 @@ from mindroom.event_journal import (
     VisibleMessage,
 )
 from mindroom.event_journal import reads as journal_reads
-from mindroom.event_journal.outbox import _legacy_delivery_result, matrix_delivery_payload
+from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.history.runtime import (
@@ -108,6 +108,7 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
+from mindroom.legacy_delivery_payloads import _inline_final_result
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
@@ -1350,7 +1351,7 @@ class FakeOutbox:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=matrix_delivery_payload(self.principal_id, delivery_id, stage, payload),
-                result=dict(result) if result is not None else _legacy_delivery_result(payload),
+                result=dict(result) if result is not None else _inline_final_result(payload),
                 event_type=event_type,
                 edits_event_id=edits_event_id,
                 permanent_failure_reason=permanent_failure_reason,
@@ -1368,7 +1369,7 @@ class FakeOutbox:
             thread_id=thread_id,
             transaction_id=transaction_id,
             payload=matrix_delivery_payload(self.principal_id, delivery_id, stage, payload),
-            result=dict(result) if result is not None else _legacy_delivery_result(payload),
+            result=dict(result) if result is not None else _inline_final_result(payload),
             edits_event_id=edits_event_id,
             acknowledged_event_id=None,
             created_at_ns=len(self.rows),

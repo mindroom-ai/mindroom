@@ -17,6 +17,7 @@ from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
+from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -91,9 +92,11 @@ def test_google_sheets_public_method_returns_structured_connect_instruction(tmp_
 def test_google_sheets_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     credentials_manager.save_credentials("google_sheets", {"spreadsheet_id": "sheet-id", "_source": "ui"})
-    credentials_manager.save_credentials(
-        "google_sheets_oauth",
+    publish_oauth_credentials(
+        google_sheets_oauth_provider(),
         {"token": "access-token", "refresh_token": "refresh-token", "_source": "oauth"},
+        credentials_manager=credentials_manager,
+        worker_target=None,
     )
     tool = GoogleSheetsTools(
         runtime_paths=_runtime_paths(tmp_path),

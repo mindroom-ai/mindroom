@@ -39,12 +39,14 @@ from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sy
 from mindroom.matrix.state import MatrixState
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.credential_store import oauth_credential_transaction
+from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
+from tests.oauth_test_utils import publish_oauth_credentials
 
 TEST_WORKER_AUTH = "token"
 
@@ -2210,8 +2212,8 @@ def test_get_tools_reports_requester_scoped_github_oauth_for_unscoped_agent(test
     )
     oauth_target = resolve_worker_target("user", "general", execution_identity=identity)
     oauth_secret = "github-oauth-secret"  # noqa: S105
-    save_scoped_credentials(
-        "github_oauth",
+    publish_oauth_credentials(
+        github_oauth_provider(),
         {
             "token": oauth_secret,
             "refresh_token": "github-refresh-secret",

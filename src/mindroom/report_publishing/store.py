@@ -197,6 +197,10 @@ def _published_report_to_json(report: PublishedReport) -> dict[str, object]:
     }
 
 
+# Legacy format: Published report records omitted artifact_kind and represented single HTML files.
+# Last legacy release: v2026.6.71; replacement: v2026.6.72 persisted artifact_kind for HTML and static sites.
+# Handling: Default missing kind to html_file; an existing mutation rewrites the complete current record.
+# Coverage: tests/test_report_publishing.py::test_report_publishing_store_upgrades_legacy_html_record_on_revoke.
 def _published_report_from_json(data: dict[str, object]) -> PublishedReport:
     missing_fields = sorted(_REQUIRED_PUBLISHED_REPORT_FIELDS - data.keys())
     if missing_fields:

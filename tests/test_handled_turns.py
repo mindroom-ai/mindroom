@@ -22,10 +22,11 @@ from mindroom.handled_turns import (
 )
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
+from mindroom.turn_record import RevisionReplay
 
 if TYPE_CHECKING:
     from _collections_abc import dict_values
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore
@@ -164,7 +165,7 @@ async def test_scoped_lookup_tracks_updates_and_retention(journal_store: EventJo
 def _write_legacy_ledger(path: Path, records: dict[str, dict[str, object]]) -> Path:
     """Write one pre-database JSON ledger exactly as the retired writer left it."""
     path.write_text(
-        json.dumps({"schema_version": TurnRecordCodec.schema_version(), "records": records}),
+        json.dumps({"schema_version": 1, "records": records}),
         encoding="utf-8",
     )
     return path
@@ -800,6 +801,51 @@ async def test_source_event_revisions_persist_across_restart_and_run_recovery(
     assert recovered is not None
     assert recovered.source_event_revisions == revisions
     assert recovered.requester_id == "@user:example.com"
+
+
+@pytest.mark.asyncio
+async def test_v2026_9_42_turn_record_restores_revision_replay_through_store_reopen(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """A released summary-only row restores edit provenance through both store opens."""
+    old_record_json = (
+        '{"anchor_event_id":"$source","source_event_ids":["$source"],'
+        '"redacted_source_event_ids":[],"pending_redaction_cleanup_event_ids":[],'
+        '"response_event_id":"$answer","completed":true,"timestamp":1000.011,'
+        '"source_event_prompts":{"$source":"edited prompt"},'
+        '"source_event_revisions":{"$source":[1000022,"$edit"]},'
+        '"suppressed_source_event_revisions":{"$source":[1000033,"$suppressed-edit"]}}'
+    )
+    agent_name = "summary_only_replay"
+    first_store = journal_database()
+    await first_store.turn_records(agent_name).upsert(
+        index_event_ids=("$source",),
+        anchor_event_id="$source",
+        record_json=old_record_json,
+    )
+
+    first = await _open_ledger(first_store, agent_name)
+    first_record = first.get_turn_record("$source")
+    assert first_record is not None
+    assert first_record.source_event_prompts == {"$source": "edited prompt"}
+    assert first_record.suppressed_source_event_revisions == {
+        "$source": (1_000_033, "$suppressed-edit"),
+    }
+    assert first_record.revision_replay == {
+        "$edit": RevisionReplay(
+            source_event_id="$source",
+            timestamp_ms=1_000_022,
+            legacy_summary_provenance=True,
+        ),
+    }
+
+    await first_store.close()
+    reopened_store = journal_database()
+    reopened = await _open_ledger(reopened_store, agent_name)
+    reopened_record = reopened.get_turn_record("$source")
+    assert reopened_record is not None
+    assert reopened_record.revision_replay == first_record.revision_replay
+    assert reopened_record.suppressed_source_event_revisions == first_record.suppressed_source_event_revisions
 
 
 @pytest.mark.asyncio
@@ -2034,6 +2080,37 @@ async def test_get_turn_record_returns_none_for_unknown_source(journal_store: Ev
 
 
 @pytest.mark.asyncio
+async def test_released_unversioned_ledger_cutoff_preserves_bytes_without_adoption(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """The intentional pre-schema cutoff processes the file without adopting rows."""
+    old_bytes = b'{"$source":{"timestamp":1000.0,"response_event_id":"$answer","completed":true}}'
+    legacy_file = tmp_path / "agent_responded.json"
+    legacy_file.write_bytes(old_bytes)
+
+    first = await _open_ledger(
+        journal_store,
+        "released_unversioned_cutoff",
+        legacy_responses_file=legacy_file,
+    )
+
+    imported_marker = legacy_file.with_suffix(".json.imported")
+    assert first.get_turn_record("$source") is None
+    assert await _read_persisted_records(journal_store, "released_unversioned_cutoff") == {}
+    assert not legacy_file.exists()
+    assert imported_marker.read_bytes() == old_bytes
+
+    reopened = await _reload_ledger(
+        journal_store,
+        "released_unversioned_cutoff",
+        legacy_responses_file=legacy_file,
+    )
+    assert reopened.get_turn_record("$source") is None
+    assert imported_marker.read_bytes() == old_bytes
+
+
+@pytest.mark.asyncio
 async def test_a_pre_database_ledger_is_adopted_on_first_load(
     journal_store: EventJournalStore,
     tmp_path: Path,
@@ -2122,6 +2199,95 @@ async def test_a_partly_stored_legacy_turn_keeps_both_halves(
     assert _get_response_event_id(tracker, "$first") == "$current", "the newer record was overwritten"
     assert _get_response_event_id(tracker, "$second") == "$legacy", "the unrecorded source was not adopted"
     assert not legacy_file.exists(), "the file must still be retired"
+
+
+@dataclass(frozen=True, slots=True)
+class _FailSecondLegacyAdoptionStore(TurnRecordStore):
+    """Persist one old row, then interrupt the next adoption attempt."""
+
+    calls: list[tuple[str, ...]] = field(default_factory=list)
+
+    async def adopt_missing(
+        self,
+        *,
+        index_event_ids: Sequence[str],
+        anchor_event_id: str,
+        record_json: str,
+    ) -> int:
+        """Retain real first-write effects and fail before the second write."""
+        self.calls.append(tuple(index_event_ids))
+        if len(self.calls) == 2:
+            msg = "interrupted before the second legacy row"
+            raise RuntimeError(msg)
+        return await TurnRecordStore.adopt_missing(
+            self,
+            index_event_ids=index_event_ids,
+            anchor_event_id=anchor_event_id,
+            record_json=record_json,
+        )
+
+
+@pytest.mark.asyncio
+async def test_interrupted_legacy_ledger_import_retries_missing_indexes_before_rename(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """A partial import remains retryable without replacing its adopted row."""
+    old_bytes = (
+        b'{"schema_version":1,"records":{'
+        b'"$first":{"anchor_event_id":"$first","source_event_ids":["$first"],'
+        b'"redacted_source_event_ids":[],"pending_redaction_cleanup_event_ids":[],'
+        b'"response_event_id":"$legacy-first","completed":true,"timestamp":1000.0},'
+        b'"$second":{"anchor_event_id":"$second","source_event_ids":["$second"],'
+        b'"redacted_source_event_ids":[],"pending_redaction_cleanup_event_ids":[],'
+        b'"response_event_id":"$legacy-second","completed":true,"timestamp":1001.0}}}'
+    )
+    legacy_file = tmp_path / "agent_responded.json"
+    legacy_file.write_bytes(old_bytes)
+    agent_name = "interrupted_legacy_import"
+    failing_records = _FailSecondLegacyAdoptionStore(
+        _backend=journal_store.backend,
+        _agent_name=agent_name,
+    )
+    interrupted = HandledTurnLedger(
+        agent_name,
+        records=failing_records,
+        legacy_responses_file=legacy_file,
+    )
+
+    with pytest.raises(RuntimeError, match="interrupted before the second legacy row"):
+        await interrupted.load()
+
+    after_failure = await _read_persisted_records(journal_store, agent_name)
+    assert after_failure["$first"]["response_event_id"] == "$legacy-first"
+    assert "$second" not in after_failure
+    assert legacy_file.read_bytes() == old_bytes
+    assert not legacy_file.with_suffix(".json.imported").exists()
+
+    current_record_json = (
+        '{"anchor_event_id":"$first","source_event_ids":["$first"],'
+        '"redacted_source_event_ids":[],"pending_redaction_cleanup_event_ids":[],'
+        '"response_event_id":"$current-first","completed":true,"timestamp":2000.0,'
+        '"source_event_prompts":{"$first":"newer prompt"}}'
+    )
+    await journal_store.turn_records(agent_name).upsert(
+        index_event_ids=("$first",),
+        anchor_event_id="$first",
+        record_json=current_record_json,
+    )
+    retried = await _open_ledger(
+        journal_store,
+        agent_name,
+        legacy_responses_file=legacy_file,
+    )
+
+    assert _get_response_event_id(retried, "$first") == "$current-first"
+    current = retried.get_turn_record("$first")
+    assert current is not None
+    assert current.source_event_prompts == {"$first": "newer prompt"}
+    assert _get_response_event_id(retried, "$second") == "$legacy-second"
+    assert not legacy_file.exists()
+    assert legacy_file.with_suffix(".json.imported").read_bytes() == old_bytes
 
 
 @pytest.mark.asyncio

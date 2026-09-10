@@ -591,6 +591,41 @@ async def test_bad_event_at_server_exhaustion_stays_repairable(principal: Princi
     assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 
 
+@pytest.mark.parametrize("old_event_type", ["encrypted_file", "cleared_avatar"])
+async def test_repair_accepts_encrypted_attachments_and_cleared_avatars(
+    principal: PrincipalStore,
+    old_event_type: str,
+) -> None:
+    """Readable historical metadata must not block newer conversation messages."""
+    old = raw("$old", "attachment.txt", ts=1_000)
+    if old_event_type == "encrypted_file":
+        old["content"] = {
+            "msgtype": "m.file",
+            "body": "attachment.txt",
+            "file": {
+                "url": "mxc://example.org/encrypted-attachment",
+                "key": {"alg": "A256CTR", "k": "test-key"},
+                "iv": "test-iv",
+                "hashes": {"sha256": "test-hash"},
+            },
+        }
+    else:
+        old.update(type="m.room.avatar", state_key="", content={"url": None})
+    client = PagedClient(pages=[([raw("$new", "new message", ts=2_000), old], None)])
+    await principal.record_room_history_recovery(ROOM)
+
+    await hydrator(principal, client).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+    assert await principal.room_history_recovery(ROOM) is None
+    assert await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+    page = await principal.read_conversation(room_id=ROOM, thread_id=None, limit=10)
+    expected_ids = ["$old", "$new"] if old_event_type == "encrypted_file" else ["$new"]
+    assert [message.logical_event_id for message in page.messages] == expected_ids
+    if old_event_type == "encrypted_file":
+        assert page.messages[0].content["file"] == old["content"]["file"]
+    assert client.calls == 1
+
+
 async def test_repair_pagination_error_leaves_the_obligation_repairable(principal: PrincipalStore) -> None:
     """A failed request may leave retry-safe pages but cannot publish them as whole."""
     client = PagedClient(

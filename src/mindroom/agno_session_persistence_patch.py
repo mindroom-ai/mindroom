@@ -7,7 +7,7 @@ import contextvars
 import threading
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from functools import partial
 from importlib.metadata import version
@@ -16,6 +16,7 @@ from queue import SimpleQueue
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.agent import _session as agent_session
+from agno.session import AgentSession, TeamSession, WorkflowSession
 from agno.team import _session as team_session
 
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
-    from agno.session import AgentSession, TeamSession, WorkflowSession
     from agno.team import Team
 
     type _AgentSession = AgentSession | TeamSession | WorkflowSession
@@ -40,10 +40,8 @@ type _PersistenceTarget = tuple[str, str]
 # When bumping this pin, check whether these upstream fixes are included and delete
 # the matching MindRoom override (each is linked from its own docstring):
 #   agno-agi/agno#9939  delete_runs scrubs the 2.x blob atomically  -> agent_storage delete_runs blob part
-#   agno-agi/agno#9937  bulk upsert owner check                     -> agent_storage upsert_sessions
 #   agno-agi/agno#9938  run_index never below MAX+1 (or #9342)      -> agent_storage upsert_run
-#   agno-agi/agno#9941  validate_call wrappers drop the caller frame -> agno_tool_wrapper_patch
-_SUPPORTED_AGNO_VERSION = "3.0.5"
+_SUPPORTED_AGNO_VERSION = "3.0.9"
 _ORIGINAL_AGENT_ASAVE_SESSION = agent_session.asave_session
 _ORIGINAL_AGENT_SAVE_SESSION = agent_session.save_session
 _ORIGINAL_AGENT_ASAVE_RUN = agent_session.asave_run
@@ -141,6 +139,11 @@ async def _offload_sync_save[Owner, Payload](
     worker: Future[object | None] = lane.executor.submit(_run_prepared_operation, operations)
     try:
         context = contextvars.copy_context()
+        if isinstance(payload, (AgentSession, TeamSession, WorkflowSession)):
+            # Agno 3 persists runs separately; snapshot only the session row.
+            # Clear history on a shallow copy so the live session stays intact.
+            payload = copy(payload)
+            payload.runs = None
         snapshot = deepcopy(payload)
         operation = partial(context.run, save, owner, snapshot, *save_args)
     except BaseException:

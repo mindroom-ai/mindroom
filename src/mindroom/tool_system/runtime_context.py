@@ -61,6 +61,38 @@ _ToolContextReturn = TypeVar("_ToolContextReturn")
 _StreamChunk = TypeVar("_StreamChunk")
 
 
+@dataclass(frozen=True)
+class DetachedRequesterContext:
+    """Authenticated requester authority for tools without a Matrix conversation."""
+
+    requester_id: str
+    config: Config
+    runtime_paths: RuntimePaths
+    agent_reply_memberships: AgentReplyMembershipIndex
+    config_provider: Callable[[], Config | None]
+
+
+_DETACHED_REQUESTER_CONTEXT: ContextVar[DetachedRequesterContext | None] = ContextVar(
+    "detached_requester_context",
+    default=None,
+)
+
+
+def get_detached_requester_context() -> DetachedRequesterContext | None:
+    """Return authority established by the current detached request boundary."""
+    return _DETACHED_REQUESTER_CONTEXT.get()
+
+
+@contextmanager
+def detached_requester_context(context: DetachedRequesterContext | None) -> Iterator[None]:
+    """Bind detached authority for an operation without leaking between requests."""
+    token = _DETACHED_REQUESTER_CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _DETACHED_REQUESTER_CONTEXT.reset(token)
+
+
 @contextmanager
 def _tool_runtime_context_scope(tool_context: ToolRuntimeContext | None) -> Iterator[None]:
     """Bind tool runtime state only for the duration of one concrete operation."""

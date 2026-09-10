@@ -29,6 +29,7 @@ Large configs can be split across multiple files with Home-Assistant-style inclu
 | Tag | Result |
 |-----|--------|
 | `!include rel/path.yaml` | The parsed content of that YAML file, with nested include tags resolved recursively |
+| `!expand rel/path.yaml` | Splices the file's YAML list into the surrounding list at this item; a MindRoom extension for shared tools, instructions, and other lists |
 | `!include_text rel/path.md` | The file's raw text as a string (UTF-8, one trailing newline stripped); a MindRoom extension for long prompt or instruction blocks |
 | `!include_dir_list rel/dir` | A list with one item per YAML file in the directory |
 | `!include_dir_named rel/dir` | A mapping of filename-without-extension to each file's parsed content |
@@ -72,6 +73,31 @@ Files and directories whose name starts with `.` or `_` are skipped by directory
 Explicit include paths may not contain hidden components: any path component starting with `.` (other than the `.` and `..` navigation components) is rejected, so `!include_text .env` fails with a clear include error.
 The `_` convention gives shared snippet files a home inside included trees, such as `agents/_shared/web_tools.yaml` above, which is pulled in via an explicit `!include`.
 Use such snippets instead of YAML anchors when sharing values between files, because YAML anchors are scoped to a single file and cannot cross an include boundary.
+
+### Expanding Shared Lists
+
+Use `!expand` as a list item to reuse a shared list and add items for individual agents:
+
+```yaml
+# agents/researcher.yaml
+researcher:
+  role: Deep research and analysis
+  tools:
+    - !expand _shared/web_tools.yaml
+    - calculator
+```
+
+With the `agents/_shared/web_tools.yaml` file above, this resolves to `tools: [duckduckgo, website, browser, calculator]`.
+The compact form `tools: [!expand _shared/web_tools.yaml, calculator]` works too.
+You can place several expansions anywhere in a list, with ordinary items before, between, or after them.
+Shared files can themselves use `!expand` and other include tags recursively, with paths relative to each containing file.
+Expansion preserves order and duplicates and only splices one level; nested lists inside the shared list remain nested.
+An ordinary `- !include tools.yaml` still inserts the included value as one item, even when that value is a list.
+The expanded file must resolve to a YAML list: `[]` adds nothing, while an empty file, `null`, a scalar, or a mapping raises an error.
+`!expand` requires a relative file path and is only valid as a list item; use `tools: !include tools.yaml` to replace an entire list.
+Expanded files follow the same path restrictions, cycle checks, source tracking, and hot reload behavior as other included files.
+
+### Include Errors and Hot Reload
 
 Error handling is strict so a broken split fails loudly:
 
@@ -705,9 +731,10 @@ PY
 When this variable is configured, `CredentialsManager` writes encrypted credential files with mode `0600` and creates credential directories with mode `0700`.
 Encrypted mode refuses plaintext credential JSON files for every credential service.
 Existing non-OAuth plaintext credentials become unreadable and cannot be overwritten while encryption is enabled, so back them up and recreate them under encryption or remove the key before reading them again.
-Encrypted mode refuses to copy plaintext legacy OAuth credential bytes into the encrypted SQLite store.
-No OAuth plaintext-to-encrypted migration is performed automatically; the legacy file remains available for operator recovery until an explicit reset or replacement commits, so configure the key before saving credentials that must be encrypted.
-If encryption is disabled again before that commit, MindRoom re-adopts the retained plaintext legacy credential into the unencrypted SQLite store.
+OAuth credentials are read only from their authoritative SQLite stores and use the active encryption setting when published.
+Legacy OAuth JSON files and sidecars are ignored and left unchanged, and changing the encryption setting never imports them.
+An OAuth connection that exists only in JSON must be reconnected with the intended encryption setting.
+Current encrypted SQLite credentials become readable again when their correct key is restored.
 
 ## Debug Logging
 

@@ -1406,10 +1406,10 @@ def test_server_tool_search_blocks_round_trip_in_assistant_history() -> None:
 
     assistant_wires = [message for message in captured_kwargs[1]["messages"] if message["role"] == "assistant"]
     assert len(assistant_wires) == 1
-    replayed_dict_blocks = [block for block in assistant_wires[0]["content"] if isinstance(block, dict)]
-    assert replayed_dict_blocks == [
-        first_response.content[1].model_dump(),
-        first_response.content[2].model_dump(),
+    assert assistant_wires[0]["content"] == [
+        {"type": "text", "text": "I'll search for a weather tool."},
+        _SERVER_TOOL_USE_BLOCK,
+        _TOOL_SEARCH_RESULT_BLOCK,
     ]
 
 

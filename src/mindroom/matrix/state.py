@@ -10,6 +10,7 @@ from time import monotonic
 from pydantic import BaseModel, Field, field_serializer
 
 from mindroom import constants, yaml_io
+from mindroom.matrix.legacy_state import normalize_legacy_matrix_state
 
 _MATRIX_STATE_STAT_TTL_SECONDS = 1.0
 _matrix_state_write_generation = 0
@@ -222,16 +223,6 @@ def _current_runtime_domain(runtime_paths: constants.RuntimePaths) -> str:
     return server_part.split(":", 1)[0]
 
 
-def _migrate_accounts_to_current_schema(state: MatrixState, *, current_domain: str) -> bool:
-    """Normalize persisted accounts to the current on-disk schema."""
-    changed = False
-    for account in state.accounts.values():
-        if account.domain is None:
-            account.domain = current_domain
-            changed = True
-    return changed
-
-
 def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixState:
     """Load one Matrix state file from disk."""
     if not state_file.exists():
@@ -239,9 +230,8 @@ def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixS
     with state_file.open(encoding="utf-8") as f:
         data = yaml_io.safe_load(f) or {}
     state = MatrixState.model_validate(data)
-    migrated = _migrate_accounts_to_current_schema(state, current_domain=current_domain)
-    normalized_data = state.model_dump(mode="json")
-    if migrated or data != normalized_data:
+    normalized_data = normalize_legacy_matrix_state(state, data, current_domain=current_domain)
+    if normalized_data is not None:
         _write_matrix_state_file(state_file, normalized_data)
     return state
 

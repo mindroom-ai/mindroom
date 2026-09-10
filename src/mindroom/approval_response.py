@@ -171,7 +171,7 @@ class ApprovalResponseCoordinator:
     runtime_paths: RuntimePaths
     store: PrincipalStore
     delivery_gateway: DeliveryGateway
-    retry_sources: Callable[[tuple[str, ...]], None]
+    retry_sources: Callable[[str, tuple[str, ...]], None]
 
     async def create(self, continuation: ApprovalContinuation) -> ApprovalContinuation:
         """Persist one born-bound paused run against its original sources."""
@@ -314,7 +314,7 @@ class ApprovalResponseCoordinator:
                 raise RuntimeError(failure_reason)
             continuation = refreshed
         if continuation.state == "ready":
-            self.retry_sources(continuation.source_event_ids)
+            self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
     async def advance_pause(
         self,
@@ -386,7 +386,7 @@ class ApprovalResponseCoordinator:
             expected_runtime_generation=continuation.runtime_generation,
         )
         if failing is not None:
-            self.retry_sources(failing.source_event_ids)
+            self.retry_sources(failing.room_id, failing.source_event_ids)
         return failing
 
     async def fail_publication(self, approval_id: str, *, reason: str) -> ApprovalContinuation | None:
