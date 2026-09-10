@@ -13,12 +13,13 @@ import asyncio
 import shutil
 import sqlite3
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from agno.vectordb.chroma import ChromaDb
 from chromadb.errors import InternalError, NotFoundError
 
+from mindroom.knowledge.chroma_client import ChromaDb
 from mindroom.knowledge.indexing_config import storage_key_for_base
 from mindroom.logging_config import get_logger
 from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
@@ -281,15 +282,16 @@ async def delete_collection(space: CollectionSpace, collection_name: str) -> boo
 def _delete_collection_sync(space: CollectionSpace, collection_name: str) -> bool:
     """Delete one collection, treating an already-absent one as success."""
     vector_db = build_vector_db(space, collection_name)
-    deleted = vector_db.delete()
-    if not deleted:
-        try:
-            vector_db.client.get_collection(name=vector_db.collection_name)
-        except NotFoundError:
-            deleted = True
-    if deleted:
-        _reclaim_orphaned_segment_directories(space)
-    return deleted
+    with closing(vector_db):
+        deleted = vector_db.delete()
+        if not deleted:
+            try:
+                vector_db.client.get_collection(name=vector_db.collection_name)
+            except NotFoundError:
+                deleted = True
+        if deleted:
+            _reclaim_orphaned_segment_directories(space)
+        return deleted
 
 
 def _reclaim_orphaned_segment_directories(space: CollectionSpace) -> None:
@@ -383,7 +385,9 @@ def cleanup_superseded_collections(
                 unowned.append(collection_name)
             continue
         try:
-            build_vector_db(space, collection_name).delete()
+            deletion_db = build_vector_db(space, collection_name)
+            with closing(deletion_db):
+                deletion_db.delete()
         except Exception:
             logger.warning(
                 "Failed to clean superseded knowledge collection",
