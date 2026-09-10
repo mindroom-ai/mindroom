@@ -470,7 +470,7 @@ The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can
 ## Process isolation
 
 Published semantic searches and collection probes run in short-lived subprocesses.
-Embedding credentials and provider health stay in the application; only query vectors and document data cross the process boundary.
+Embedding credentials and provider health stay in the application; query vectors, filters, and document data cross the typed read boundary.
 Each child exits after one operation, releasing its native Chroma memory.
 At most two read children run at once, with a 30-second execution timeout.
 Excess reads fail immediately as busy so waiting knowledge requests cannot fill the application's shared thread pool.
