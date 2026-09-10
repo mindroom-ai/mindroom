@@ -9,6 +9,11 @@ Managed workers must be absent before inspecting or moving any scope contents.
 # Handling: relocate only verified private owners; startup adoption began in v2026.9.36.
 # Coverage: tests/test_private_storage_migration.py::test_startup_moves_every_owner_and_preserves_contents.
 
+# Legacy format: private scopes created without authoritative owner records.
+# Last legacy release: v2026.8.132; replacement: v2026.8.133 writes owner records for fresh scopes.
+# Handling: preserve recordless scopes and matching session mirrors without adoption, including after later upgrades.
+# Coverage: tests/test_private_storage_migration.py::test_startup_preserves_recordless_scopes_without_adopting_them.
+
 from __future__ import annotations
 
 import os
