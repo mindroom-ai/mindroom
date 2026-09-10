@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from agno.models.base import Model
 
     from mindroom.history.runtime import ScopeSessionContext
+    from mindroom.timing import DispatchPipelineTiming
 
 __all__ = [
     "EMPTY_RESPONSE_NOTICE",
@@ -807,11 +808,14 @@ async def cached_agent_run(
     run_id_callback: Callable[[str], None] | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> RunOutput:
     """Shared wrapper for one ``agent.arun()`` call."""
     media_inputs = media or MediaInputs()
     note_attempt_run_id(run_id_callback, run_id)
     prepared_input = attach_media_to_run_input(run_input, media_inputs)
+    if pipeline_timing is not None:
+        pipeline_timing.mark_model_request()
     return await agent.arun(
         prepared_input,
         session_id=session_id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +16,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+from mindroom import ai_runtime
 from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
@@ -29,6 +31,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
+from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import make_turn_context, seed_session
 
 if TYPE_CHECKING:
@@ -36,10 +39,26 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.media_inputs import MediaInputs
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
+
+@pytest.fixture
+def media_preparation_times(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Observe real input copying/attachment before each Agno invocation."""
+    completed_at: list[float] = []
+    attach_media = ai_runtime.attach_media_to_run_input
+
+    def attach(run_input: ai_runtime.ModelRunInput, media: MediaInputs) -> list[Message]:
+        prepared = attach_media(run_input, media)
+        completed_at.append(time.perf_counter())
+        return prepared
+
+    monkeypatch.setattr(ai_runtime, "attach_media_to_run_input", attach)
+    return completed_at
 
 
 def _config() -> Config:
@@ -259,10 +278,14 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
 
 
 @pytest.mark.asyncio
-async def test_ai_response_retries_once_after_empty_completed_run(tmp_path: Path) -> None:
+async def test_ai_response_retries_once_after_empty_completed_run(
+    tmp_path: Path,
+    media_preparation_times: list[float],
+) -> None:
     """One empty completed response should trigger exactly one fresh model attempt."""
     empty_agent = _mock_agent(_completed_run("run-empty", None))
     recovered_agent = _mock_agent(_completed_run("run-good", "Recovered"))
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
 
     with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
         mock_prepare.side_effect = [
@@ -275,11 +298,15 @@ async def test_ai_response_retries_once_after_empty_completed_run(tmp_path: Path
             prompt="test",
             runtime_paths=_runtime_paths(tmp_path),
             config=_config(),
+            pipeline_timing=timing,
         )
 
     assert result == "Recovered"
     empty_agent.arun.assert_called_once()
     recovered_agent.arun.assert_called_once()
+    assert media_preparation_times[0] <= timing.marks["first_model_request_sent"]
+    assert media_preparation_times[-1] <= timing.marks["model_request_sent"]
+    assert timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
 
 
 @pytest.mark.asyncio
@@ -362,7 +389,10 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_response_retries_once_after_empty_completed_stream(tmp_path: Path) -> None:
+async def test_stream_agent_response_retries_once_after_empty_completed_stream(
+    tmp_path: Path,
+    media_preparation_times: list[float],
+) -> None:
     """One empty completed stream should trigger exactly one fresh streaming attempt."""
 
     async def empty_stream() -> AsyncIterator[object]:
@@ -374,6 +404,7 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(t
 
     empty_agent = _mock_streaming_agent(empty_stream())
     recovered_agent = _mock_streaming_agent(recovered_stream())
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
 
     with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
         mock_prepare.side_effect = [
@@ -388,6 +419,7 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(t
                 prompt="test",
                 runtime_paths=_runtime_paths(tmp_path),
                 config=_config(),
+                pipeline_timing=timing,
             )
         ]
 
@@ -395,6 +427,9 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(t
     assert contents == ["Recovered"]
     empty_agent.arun.assert_called_once()
     recovered_agent.arun.assert_called_once()
+    assert media_preparation_times[0] <= timing.marks["first_model_request_sent"]
+    assert media_preparation_times[-1] <= timing.marks["model_request_sent"]
+    assert timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
 
 
 @pytest.mark.asyncio
