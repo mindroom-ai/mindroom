@@ -114,17 +114,18 @@ async def test_search_preserves_document_fields_and_filters(published_index: Pat
 async def test_merged_search_covers_more_sources_than_reader_slots(published_index: Path) -> None:
     """One query must search every assigned base despite the native child limit."""
     with Client(settings=Settings(is_persistent=True, persist_directory=str(published_index))) as client:
-        for name in ("second", "third"):
+        for name in ("second", "third", "fourth", "fifth"):
             collection = client.create_collection(name)
             collection.add(ids=[name], embeddings=[[1.0, 0.0]], documents=[name], metadatas=[{"team": "a"}])
 
     merged = _MultiKnowledgeVectorDb(
         vector_dbs=[
-            ChromaReadProxy(name, str(published_index), _Embedder()) for name in ("published", "second", "third")
+            ChromaReadProxy(name, str(published_index), _Embedder())
+            for name in ("published", "second", "third", "fourth", "fifth")
         ],
     )
-    documents = await merged.async_search(query="alpha", limit=3, filters={"team": "a"})
-    assert [document.id for document in documents] == ["a", "second", "third"]
+    documents = await merged.async_search(query="alpha", limit=5, filters={"team": "a"})
+    assert [document.id for document in documents] == ["a", "second", "third", "fourth", "fifth"]
 
 
 @pytest.mark.asyncio
