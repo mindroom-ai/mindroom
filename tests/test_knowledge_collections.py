@@ -16,6 +16,7 @@ from chromadb.config import Settings
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import CandidateCheckpoint
 from mindroom.knowledge.collections import (
     CollectionSpace,
@@ -26,6 +27,7 @@ from mindroom.knowledge.collections import (
 )
 from mindroom.knowledge.index_metadata import PublishedIndexState, save_published_index_state
 from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.read_process import _read_slot
 from mindroom.knowledge.registry import (
     _PublishedIndexHandle,
     get_published_index,
@@ -33,10 +35,13 @@ from mindroom.knowledge.registry import (
     published_index_storage_path,
     resolve_published_index_key,
 )
+from mindroom.knowledge.utils import resolve_knowledge_base_access
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 
 @pytest.fixture
@@ -210,11 +215,12 @@ def test_candidate_inspection_error_releases_owned_client(tmp_path: Path, monkey
     _assert_storage_released(space, {space.default_collection, candidate_name})
 
 
-def test_concurrent_cold_lookups_keep_returned_readers_queryable(
+@pytest.fixture
+def published_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Concurrent published handles remain usable without retaining parent native clients."""
+) -> tuple[Config, RuntimePaths]:
+    """A published real collection with no process-local read handle yet."""
     monkeypatch.setattr("mindroom.knowledge.registry._published_indexes", {})
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -243,6 +249,16 @@ def test_concurrent_cold_lookups_keep_returned_readers_queryable(
             source_signature="empty",
         ),
     )
+    return config, runtime_paths
+
+
+def test_concurrent_cold_lookups_keep_returned_readers_queryable(
+    published_lookup: tuple[Config, RuntimePaths],
+) -> None:
+    """Concurrent published handles remain usable without retaining parent native clients."""
+    config, runtime_paths = published_lookup
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    storage_path = published_index_storage_path(key)
     barrier = Barrier(2)
 
     def lookup() -> _PublishedIndexHandle:
@@ -261,3 +277,44 @@ def test_concurrent_cold_lookups_keep_returned_readers_queryable(
     # the published handles retain a system in this process.
     with Client(settings=Settings(is_persistent=True, persist_directory=str(storage_path), allow_reset=True)) as client:
         assert client.count_collections() == 1
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_busy_published_lookup_reports_unavailable_then_recovers(
+    published_lookup: tuple[Config, RuntimePaths],
+    cached: bool,
+) -> None:
+    """Reader saturation stays a per-base availability result, including cached handles."""
+    config, runtime_paths = published_lookup
+    if cached:
+        assert resolve_knowledge_base_access("docs", config, runtime_paths).knowledge is not None
+
+    with _read_slot(), _read_slot():
+        busy = resolve_knowledge_base_access("docs", config, runtime_paths)
+        assert busy.knowledge is None
+        assert busy.availability is KnowledgeAvailability.REFRESH_FAILED
+
+    recovered = resolve_knowledge_base_access("docs", config, runtime_paths)
+    assert recovered.knowledge is not None
+    assert recovered.availability is KnowledgeAvailability.READY
+
+
+def test_cached_published_lookup_reports_probe_timeout(
+    published_lookup: tuple[Config, RuntimePaths],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cached probe timeout must not escape knowledge availability resolution."""
+    config, runtime_paths = published_lookup
+    assert resolve_knowledge_base_access("docs", config, runtime_paths).knowledge is not None
+
+    def timeout(*args: object, **kwargs: object) -> Never:  # noqa: ARG001
+        message = "Knowledge read timed out"
+        raise TimeoutError(message)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("mindroom.knowledge.read_proxy.collection_exists", timeout)
+        unavailable = resolve_knowledge_base_access("docs", config, runtime_paths)
+        assert unavailable.knowledge is None
+        assert unavailable.availability is KnowledgeAvailability.REFRESH_FAILED
+
+    assert resolve_knowledge_base_access("docs", config, runtime_paths).availability is KnowledgeAvailability.READY
