@@ -8,6 +8,7 @@ across refactors.
 from __future__ import annotations
 
 import hashlib
+from contextlib import closing
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple, cast
@@ -227,9 +228,7 @@ class IndexingSettings:
 
 def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
     """Check collection existence without constructing Agno Knowledge."""
-    from agno.vectordb.chroma import ChromaDb  # noqa: PLC0415
-
-    from mindroom.knowledge.chroma_client import require_chroma_client  # noqa: PLC0415
+    from mindroom.knowledge.chroma_client import ChromaDb  # noqa: PLC0415
 
     vector_db = ChromaDb(
         collection=collection_name,
@@ -238,18 +237,8 @@ def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
         # The base Embedder raises on every embed call, so a probe can never embed content.
         embedder=Embedder(),
     )
-    # The probe owns this client. Dropping ChromaDb leaves its native system
-    # alive; closing the client releases only this owner's shared reference.
-    try:
-        unverified_client = vector_db.client
-    except Exception:
-        # Match ChromaDb.exists(), which also treats client-open errors as missing.
-        return False
-    client = require_chroma_client(unverified_client)
-    try:
+    with closing(vector_db):
         return vector_db.exists()
-    finally:
-        client.close()
 
 
 def _safe_identifier(value: str) -> str:

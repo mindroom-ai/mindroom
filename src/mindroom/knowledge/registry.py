@@ -375,7 +375,7 @@ def _build_published_index_vector_db(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _PublishedIndexVectorDb:
-    from agno.vectordb.chroma import ChromaDb  # noqa: PLC0415
+    from mindroom.knowledge.chroma_client import ChromaDb  # noqa: PLC0415
 
     return cast(
         "_PublishedIndexVectorDb",

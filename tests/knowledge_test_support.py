@@ -6,14 +6,12 @@ from itertools import count
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar, cast
-from unittest.mock import Mock
 
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
-from agno.vectordb import chroma as agno_chroma
-from chromadb.api.client import Client
 
+import mindroom.knowledge.chroma_client as knowledge_chroma_client
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
@@ -168,9 +166,6 @@ class _Collection:
 
 
 class _Client:
-    def close(self) -> None:
-        """The in-memory fake has no external resources to release."""
-
     def get_collection(self, name: str) -> _Collection:
         return _Collection(name)
 
@@ -185,7 +180,10 @@ class _VectorDb:
 
     def __init__(self, *, collection: str, **_: object) -> None:
         self.collection_name = collection
-        self.client = Mock(spec_set=Client, wraps=_Client())
+        self.client = _Client()
+
+    def close(self) -> None:
+        """The in-memory fake has no external resources to release."""
 
     def delete(self) -> bool:
         with self.lock:
@@ -295,7 +293,7 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "mindroom.knowledge.manager.create_configured_embedder",
         lambda *_args, **_kwargs: _FakeEmbedder(),
     )
-    monkeypatch.setattr(agno_chroma, "ChromaDb", _VectorDb)
+    monkeypatch.setattr(knowledge_chroma_client, "ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.registry.StrictSearchKnowledge", _Knowledge)
     monkeypatch.setattr("mindroom.knowledge.registry.create_configured_embedder", lambda *_args, **_kwargs: object())
     knowledge_registry._published_indexes.clear()

@@ -20,7 +20,6 @@ from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.json_reader import JSONReader
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
-from agno.vectordb.chroma import ChromaDb
 from chromadb.errors import InternalError
 
 from mindroom.chunking import SafeFixedSizeChunking
@@ -47,7 +46,7 @@ from mindroom.knowledge.candidate_checkpoint import (
     load_candidate_checkpoint,
     save_candidate_checkpoint,
 )
-from mindroom.knowledge.chroma_client import require_chroma_client
+from mindroom.knowledge.chroma_client import ChromaDb
 from mindroom.knowledge.collections import (
     SOURCE_DIGEST_KEY,
     SOURCE_MTIME_NS_KEY,
@@ -1351,16 +1350,10 @@ class KnowledgeManager:
         bounded by the in-flight file rather than the whole copied corpus.
         """
         vector_db = build_vector_db(self._collections, checkpoint.collection, embedder=embedder)
-        try:
-            unverified_client = vector_db.client
-        except Exception:
-            # Preserve the client-open failure behavior of ChromaDb.exists().
-            return False
-        client = require_chroma_client(unverified_client)
-        with closing(client):
+        with closing(vector_db):
             if not vector_db.exists():
                 return False
-            collection = client.get_collection(name=vector_db.collection_name)
+            collection = vector_db.client.get_collection(name=vector_db.collection_name)
             has_rows = bool(collection.get(limit=1, include=[])["ids"])
             return not checkpoint.completed and has_rows
 

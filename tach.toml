@@ -4052,6 +4052,7 @@ visibility = [
     "mindroom.knowledge.collections",
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.manager",
+    "mindroom.knowledge.registry",
 ]
 
 [[modules]]
@@ -4099,6 +4100,7 @@ path = "mindroom.knowledge.registry"
 depends_on = [
     "mindroom.embedding_factory",
     "mindroom.knowledge.availability",
+    "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
     "mindroom.runtime_resolution",

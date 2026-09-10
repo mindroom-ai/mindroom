@@ -17,10 +17,9 @@ from contextlib import closing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from agno.vectordb.chroma import ChromaDb
 from chromadb.errors import InternalError, NotFoundError
 
-from mindroom.knowledge.chroma_client import require_chroma_client
+from mindroom.knowledge.chroma_client import ChromaDb
 from mindroom.knowledge.indexing_config import storage_key_for_base
 from mindroom.logging_config import get_logger
 from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
@@ -283,7 +282,7 @@ async def delete_collection(space: CollectionSpace, collection_name: str) -> boo
 def _delete_collection_sync(space: CollectionSpace, collection_name: str) -> bool:
     """Delete one collection, treating an already-absent one as success."""
     vector_db = build_vector_db(space, collection_name)
-    with closing(require_chroma_client(vector_db.client)):
+    with closing(vector_db):
         deleted = vector_db.delete()
         if not deleted:
             try:
@@ -387,7 +386,7 @@ def cleanup_superseded_collections(
             continue
         try:
             deletion_db = build_vector_db(space, collection_name)
-            with closing(require_chroma_client(deletion_db.client)):
+            with closing(deletion_db):
                 deletion_db.delete()
         except Exception:
             logger.warning(
