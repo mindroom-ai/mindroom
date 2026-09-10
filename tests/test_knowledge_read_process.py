@@ -165,3 +165,34 @@ async def test_embedding_failure_propagates_before_starting_child(
     with pytest.raises(PermissionError, match="embedding credentials expired"):
         await proxy.async_search("alpha")
     assert capture_read_processes == []
+
+
+@pytest.mark.asyncio
+async def test_search_does_not_recreate_deleted_published_collection(published_index: Path) -> None:
+    """A new reader must preserve disappearance instead of publishing fake-empty success."""
+    proxy = ChromaReadProxy("published", str(published_index), _Embedder())
+    assert await proxy.async_search("alpha")
+    with Client(settings=Settings(is_persistent=True, persist_directory=str(published_index))) as client:
+        client.delete_collection("published")
+    with pytest.raises(RuntimeError, match="NotFoundError"):
+        await proxy.async_search("alpha")
+    assert await asyncio.to_thread(chroma_collection_exists, published_index, "published") is False
+
+
+@pytest.mark.asyncio
+async def test_native_error_logs_redacted_child_diagnostics(
+    published_index: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Preserve the failing operation and native explanation without URL credentials."""
+    proxy = ChromaReadProxy("published", str(published_index), _Embedder())
+    with pytest.raises(RuntimeError, match="ValueError"):
+        await proxy.async_search(
+            "alpha",
+            filters={"team": {"$invalid": "https://reader:synthetic-secret@example.test"}},
+        )
+    error = capfd.readouterr().err
+    assert "Traceback" in error
+    assert "ValueError" in error
+    assert "$invalid" in error
+    assert "synthetic-secret" not in error

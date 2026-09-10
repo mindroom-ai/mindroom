@@ -926,8 +926,8 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("shared local new", encoding="utf-8")
     monkeypatch.setattr(
-        "mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess",
-        refresh_knowledge_binding,
+        "mindroom.knowledge.refresh_runner._refresh_index_in_subprocess",
+        knowledge_refresh_runner._refresh_resolved_knowledge_binding,
     )
     scheduler = KnowledgeRefreshScheduler()
 
@@ -5393,8 +5393,10 @@ async def test_refresh_scheduler_does_not_deep_copy_config_on_event_loop(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("manual", [False, True])
 async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure(
     tmp_path: Path,
+    manual: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A refresh that persisted REFRESH_FAILED triggers one embedder health probe."""
@@ -5405,8 +5407,7 @@ async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure
     scheduler = KnowledgeRefreshScheduler()
     probe_reasons: list[str] = []
 
-    async def _fake_refresh(base_id: str, **_kwargs: object) -> None:
-        key = resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths, create=True)
+    async def _fake_refresh(key: knowledge_registry.PublishedIndexKey, **_kwargs: object) -> None:
         knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(
             key,
             error="Indexed 0 of 3 managed knowledge files (first error: embedder authentication failed (HTTP 401))",
@@ -5422,10 +5423,14 @@ async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure
         assert health_recorder is not None
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
-    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await scheduler.refresh_now(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    ) if manual else scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     for _ in range(200):
         if probe_reasons:
             break
@@ -5462,8 +5467,8 @@ async def test_refresh_scheduler_skips_probe_for_non_embedder_subprocess_failure
         del health_recorder
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     for _ in range(200):
@@ -5502,8 +5507,8 @@ async def test_refresh_scheduler_does_not_probe_after_successful_refresh(
         msg = f"unexpected embedder probe: {reason}"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await asyncio.wait_for(refreshed.wait(), timeout=5)
@@ -5512,8 +5517,10 @@ async def test_refresh_scheduler_does_not_probe_after_successful_refresh(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("manual", [False, True])
 async def test_successful_subprocess_refresh_probes_to_clear_stale_health(
     tmp_path: Path,
+    manual: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A successful child refresh repairs stale main-process health."""
@@ -5538,11 +5545,15 @@ async def test_successful_subprocess_refresh_probes_to_clear_stale_health(
         assert health_recorder is not None
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
     try:
-        scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+        await scheduler.refresh_now(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        ) if manual else scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
         for _ in range(200):
             if probe_reasons:
                 break
@@ -5583,8 +5594,8 @@ async def test_refresh_scheduled_before_reload_cannot_probe_old_config(
         del health_recorder
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await started.wait()
@@ -5662,7 +5673,7 @@ async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
             second_started.set()
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_index_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await first_started.wait()
@@ -9655,3 +9666,30 @@ async def test_manual_refresh_returns_failed_candidate_result_and_tracks_parent_
         last_error="embedding unavailable",
     )
     assert not knowledge_refresh_locks.is_refresh_active(target)
+
+
+@pytest.mark.asyncio
+async def test_refresh_spawn_failure_updates_persisted_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed interpreter launch is still a failed refresh with released parent ownership."""
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    monkeypatch.setattr(
+        knowledge_refresh_runner.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(side_effect=OSError("spawn refused")),
+    )
+    with pytest.raises(OSError, match="spawn refused"):
+        await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+            "docs",
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.last_error == "spawn refused"
+    assert (
+        knowledge_registry.published_index_availability_for_state(key=key, state=state)
+        is KnowledgeAvailability.REFRESH_FAILED
+    )
+    assert not knowledge_refresh_locks.is_refresh_active(knowledge_registry.refresh_target_for_published_index_key(key))

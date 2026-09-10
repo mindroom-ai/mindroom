@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from pydantic import TypeAdapter
 
+from mindroom.background_tasks import create_background_task
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -28,6 +29,14 @@ from mindroom.constants import (
     runtime_env_values,
 )
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.embedder_health import (
+    EmbedderHealthRecorder,
+    capture_embedder_health_recorder,
+    check_embedder_health,
+    embedder_in_use,
+    get_embedder_failure,
+)
+from mindroom.embedding_errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.github_app_auth import (
     GitHubAppTokenBinding,
@@ -201,13 +210,14 @@ async def _resolve_subprocess_github_app_token(
     )
 
 
-async def refresh_knowledge_binding_in_subprocess(  # noqa: PLR0915 - Keep process and result-file ownership together.
+async def refresh_knowledge_binding_in_subprocess(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     force_reindex: bool = False,
+    health_recorder: EmbedderHealthRecorder | None = None,
 ) -> KnowledgeRefreshResult:
     """Run one knowledge refresh in a child interpreter.
 
@@ -223,6 +233,76 @@ async def refresh_knowledge_binding_in_subprocess(  # noqa: PLR0915 - Keep proce
         execution_identity=execution_identity,
         create=True,
     )
+    recorder = health_recorder or capture_embedder_health_recorder()
+    try:
+        result = await _refresh_index_in_subprocess(
+            key,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            force_reindex=force_reindex,
+        )
+    except Exception:
+        _schedule_refresh_health_check(key, config, runtime_paths, recorder, refresh_raised=True)
+        raise
+    _schedule_refresh_health_check(key, config, runtime_paths, recorder, refresh_raised=False)
+    return result
+
+
+def _schedule_refresh_health_check(
+    key: PublishedIndexKey,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    health_recorder: EmbedderHealthRecorder,
+    *,
+    refresh_raised: bool,
+) -> None:
+    """Restore parent provider health after either manual or scheduled child work."""
+    if embedder_in_use(config):
+        create_background_task(
+            _check_embedder_after_refresh(
+                key,
+                config,
+                runtime_paths,
+                health_recorder,
+                refresh_raised=refresh_raised,
+            ),
+            name=f"embedder_refresh_health_check:{key.base_id}",
+        )
+
+
+async def _check_embedder_after_refresh(
+    key: PublishedIndexKey,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    health_recorder: EmbedderHealthRecorder,
+    *,
+    refresh_raised: bool,
+) -> None:
+    if not health_recorder.is_current():
+        return
+    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
+    persisted_embedder_failure = state is not None and extract_classified_embedder_detail(state.last_error) is not None
+    if refresh_raised or persisted_embedder_failure:
+        if not persisted_embedder_failure:
+            return
+        reason = "knowledge_refresh_failed"
+    else:
+        if get_embedder_failure() is None:
+            return
+        reason = "knowledge_refresh_recovery"
+    await check_embedder_health(config, runtime_paths, reason=reason, health_recorder=health_recorder)
+
+
+async def _refresh_index_in_subprocess(  # noqa: PLR0915 - Keep process and result-file ownership together.
+    key: PublishedIndexKey,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    force_reindex: bool,
+) -> KnowledgeRefreshResult:
+    base_id = key.base_id
     target = refresh_target_for_published_index_key(key)
     mark_refresh_active(target)
     try:
@@ -248,6 +328,19 @@ async def refresh_knowledge_binding_in_subprocess(  # noqa: PLR0915 - Keep proce
                 # Resolved before the spawn so a malformed window rejects the refresh
                 # instead of leaving a child nobody is waiting on.
                 timeout = _refresh_subprocess_timeout_seconds(runtime_paths)
+                env = dict(runtime_env_values(runtime_paths))
+                env.setdefault("PATH", os.environ.get("PATH") or os.defpath)
+                env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
+                env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "mindroom.knowledge_refresh_runner",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=output,
+                    env=env,
+                    **_subprocess_session_kwargs(),
+                )
             except Exception as exc:
                 await _reconcile_failed_refresh_subprocess(
                     key,
@@ -255,19 +348,6 @@ async def refresh_knowledge_binding_in_subprocess(  # noqa: PLR0915 - Keep proce
                     error=redact_credentials_in_text(str(exc)),
                 )
                 raise
-            env = dict(runtime_env_values(runtime_paths))
-            env.setdefault("PATH", os.environ.get("PATH") or os.defpath)
-            env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
-            env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
-            process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "mindroom.knowledge_refresh_runner",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=output,
-                env=env,
-                **_subprocess_session_kwargs(),
-            )
             try:
                 async with asyncio.timeout(timeout):
                     with suppress(BrokenPipeError, ConnectionResetError):

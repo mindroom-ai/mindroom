@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
+import traceback
 from contextlib import closing
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, override
 
 from agno.knowledge.embedder.base import Embedder
 
@@ -18,6 +20,19 @@ from mindroom.knowledge.read_protocol import (
     request_adapter,
     result_adapter,
 )
+from mindroom.redaction import redact_sensitive_text
+
+if TYPE_CHECKING:
+    from chromadb.api.models.Collection import Collection
+
+
+class _PublishedChromaDb(ChromaDb):
+    """Keep Agno's search semantics while forbidding implicit collection creation."""
+
+    @override
+    def _collections_to_query(self, user_id: str | None) -> list[Collection]:
+        del user_id
+        return [self.client.get_collection(name=self.collection_name)]
 
 
 @dataclass
@@ -31,7 +46,7 @@ class _QueryEmbedder(Embedder):
 
 def _read(request: ReadRequest) -> ReadResult:
     with closing(
-        ChromaDb(
+        _PublishedChromaDb(
             collection=request.collection,
             path=request.path,
             persistent_client=True,
@@ -65,6 +80,7 @@ def _main() -> None:
                 message = "Knowledge read result exceeds transport size limit"
                 raise ValueError(message)  # noqa: TRY301
         except Exception as exc:
+            sys.stderr.write(redact_sensitive_text(traceback.format_exc()))
             payload = result_adapter.dump_json(ReadResult(error_type=type(exc).__name__))
         output.write(payload)
 

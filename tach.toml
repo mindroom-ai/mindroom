@@ -4201,7 +4201,6 @@ depends_on = [
 path = "mindroom.knowledge.refresh_scheduler"
 depends_on = [
     "mindroom.embedder_health",
-    "mindroom.embedding_errors",
     "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
@@ -4220,6 +4219,8 @@ visibility = [
 [[modules]]
 path = "mindroom.knowledge.refresh_runner"
 depends_on = [
+    "mindroom.embedder_health",
+    "mindroom.embedding_errors",
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.credentials",
@@ -5444,6 +5445,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.read_worker"
 depends_on = [
+    "mindroom.redaction",
     "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.read_protocol",
 ]
