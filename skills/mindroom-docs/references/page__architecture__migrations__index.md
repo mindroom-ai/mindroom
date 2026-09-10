@@ -153,7 +153,8 @@ These rows are checked manually because the original inventory used section head
 
 An incompatible format is different from a locked database, permission failure, missing key, full disk, or current-schema corruption.
 Migration owners reject those failures rather than converting them into deletion.
-Explicitly versioned stores reject unsupported versions, while several sparse readers deliberately ignore unknown fields or drop malformed reconstructible records.
+The OAuth credential and sync-continuity stores reject unsupported versions; other owners retain their existing version policies.
+Several sparse readers deliberately ignore unknown fields or drop malformed reconstructible records.
 
 Additional small compatibility branches stay with current readers.
 [`execution_preparation.py`][execution-preparation] classifies structured stream status first and uses the old ` [cancelled]` and ` [error]` body markers recognized by [`streaming.py`][streaming] only as a fallback.
