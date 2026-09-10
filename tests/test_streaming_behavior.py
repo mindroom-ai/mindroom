@@ -2374,6 +2374,7 @@ class TestStreamingBehavior:
             run_stream(),
             name="test_process_shutdown_stream",
             recovery_proof_ready=lambda: False,
+            room_id="!room:example.org",
         )
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             await asyncio.wait_for(first_edit_finished.wait(), timeout=1.0)

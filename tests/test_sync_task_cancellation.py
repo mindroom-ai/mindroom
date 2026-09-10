@@ -647,6 +647,7 @@ async def test_process_shutdown_signals_responses_before_coalescing_drain() -> N
         response(),
         name="test_early_process_shutdown_response",
         recovery_proof_ready=lambda: True,
+        room_id="!room:example.org",
     )
     await asyncio.wait_for(response_started.wait(), timeout=1.0)
     cancellation_seen_at_coalescing: list[bool] = []
@@ -3998,6 +3999,7 @@ async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -
         interrupted_response(),
         name="test_deferred_agent_stop_response",
         recovery_proof_ready=retained_proof,
+        room_id="!room:example.org",
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -4072,6 +4074,7 @@ async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None: 
         interrupted_response(),
         name="test_deferred_agent_stop_cancelling_proof",
         recovery_proof_ready=retryable_proof,
+        room_id="!room:example.org",
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -4214,6 +4217,7 @@ async def test_deferred_agent_stop_deadline_keeps_resources_under_live_proof() -
         interrupted_response(),
         name="test_deferred_agent_stop_deadline_response",
         recovery_proof_ready=resistant_proof,
+        room_id="!room:example.org",
     )
     await response_started.wait()
     runner.begin_process_shutdown()

@@ -349,7 +349,7 @@ class TurnControllerDeps:
     interrupted_turn_rooms: InterruptedTurnRooms
     visible_voice_echo: VisibleVoiceEchoLifecycle
     visible_responses: VisibleResponseReconciler
-    retry_dispatch_sources: Callable[[tuple[str, ...]], None]
+    retry_dispatch_sources: Callable[[str, tuple[str, ...]], None]
     response_recovery_ready: Callable[[TurnRecord], Awaitable[bool]]
     settle_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
     dispatch_source_is_terminal: Callable[[str], Awaitable[bool]]
@@ -1367,7 +1367,7 @@ class TurnController:
         try:
             reservation = await self.deps.response_runner.reserve_response_lifecycle(response_envelope)
         except BaseException:
-            self.deps.retry_dispatch_sources((source_event_id,))
+            self.deps.retry_dispatch_sources(response_target.room_id, (source_event_id,))
             raise
 
         async def run_owned_response() -> None:
@@ -1385,7 +1385,7 @@ class TurnController:
                     await self.deps.settle_dispatch_sources((source_event_id,))
             except BaseException:
                 if not response_claim_transferred:
-                    self.deps.retry_dispatch_sources((source_event_id,))
+                    self.deps.retry_dispatch_sources(response_target.room_id, (source_event_id,))
                 raise
             finally:
                 await reservation.release()
@@ -1395,17 +1395,18 @@ class TurnController:
             self.deps.response_runner.track_inbox_response(
                 owned_response,
                 name=f"interactive_selection_response:{source_event_id}",
+                room_id=response_target.room_id,
                 recovery_proof_ready=lambda: (
                     response_target.source_thread_id is not None
                     and self.deps.interrupted_turn_rooms.contains(source_event_id)
                 ),
-                on_failure=lambda: self.deps.retry_dispatch_sources((source_event_id,)),
+                on_failure=lambda: self.deps.retry_dispatch_sources(response_target.room_id, (source_event_id,)),
                 source_event_ids=(source_event_id,),
             )
         except BaseException:
             owned_response.close()
             await reservation.release()
-            self.deps.retry_dispatch_sources((source_event_id,))
+            self.deps.retry_dispatch_sources(response_target.room_id, (source_event_id,))
             raise
         # Ownership registration is synchronous, and the task cannot execute
         # until this callback yields after reporting its deferred handoff.

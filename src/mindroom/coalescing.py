@@ -216,7 +216,7 @@ class CoalescingGate:
         dispatch_allowed_now: Callable[[CoalescingKey], bool] | None = None,
         timestamp_formatter: TimestampFormatter | None = None,
         on_dispatch_failure: Callable[[tuple[PendingEvent, ...]], None] | None = None,
-        on_undelivered_source: Callable[[str], None] | None = None,
+        on_undelivered_source: Callable[[str, str], None] | None = None,
         on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._dispatch_turn = dispatch_turn
@@ -299,12 +299,12 @@ class CoalescingGate:
         """Release one lane slot that will not be admitted."""
         self._lanes.release(slot)
 
-    def _handle_undelivered_lane_source(self, source_event_id: str) -> None:
+    def _handle_undelivered_lane_source(self, room_id: str, source_event_id: str) -> None:
         """Return a source that left its lane without another live gate owner."""
         if self.has_pending_source_event(source_event_id):
             return
         if self._on_undelivered_source is not None:
-            self._on_undelivered_source(source_event_id)
+            self._on_undelivered_source(room_id, source_event_id)
 
     async def _handle_intentionally_ignored_lane_source(self, source_event_id: str) -> None:
         """Settle a source whose asynchronous readiness completed with no payload."""

@@ -1625,6 +1625,7 @@ class TestAgentBot(AgentBotTestBase):
             finalize_after_cancellation(),
             name="test_process_shutdown_placeholder",
             recovery_proof_ready=lambda: False,
+            room_id="!room:example.org",
         )
         await asyncio.wait_for(started.wait(), timeout=1.0)
 

@@ -2373,6 +2373,7 @@ class TestAnEndedMembershipStopsTheAnswer:
             cancel_visible_note(),
             name="test_process_shutdown_cancel_note",
             recovery_proof_ready=lambda: False,
+            room_id=_ROOM_ID,
         )
         await asyncio.wait_for(started.wait(), timeout=1.0)
 
@@ -2421,6 +2422,7 @@ class TestAnEndedMembershipStopsTheAnswer:
             deliver_final(),
             name="test_process_shutdown_final_hook",
             recovery_proof_ready=lambda: False,
+            room_id=_ROOM_ID,
         )
         await asyncio.wait_for(hook_started.wait(), timeout=1.0)
 
@@ -3769,6 +3771,7 @@ class TestTurnDeliverySerialization:
             ),
             name="test_process_shutdown_completed_final",
             recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+            room_id=_ROOM_ID,
         )
         await send_started.wait()
         runner.begin_process_shutdown()
@@ -3857,6 +3860,7 @@ class TestTurnDeliverySerialization:
             ),
             name="test_process_shutdown_repeated_cancel_after_final_ack",
             recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+            room_id=_ROOM_ID,
         )
         await send_started.wait()
         original_request_task_cancel = request_task_cancel
@@ -3960,6 +3964,7 @@ class TestTurnDeliverySerialization:
             ),
             name="test_process_shutdown_completed_final_edit",
             recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+            room_id=_ROOM_ID,
         )
         await send_started.wait()
         runner.begin_process_shutdown()

@@ -68,6 +68,7 @@ async def test_departure_during_generation_allows_orderly_shutdown(
         name="generation_during_departure",
         recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
         source_event_ids=sources,
+        room_id=ROOM,
     )
     try:
         await generating.wait()

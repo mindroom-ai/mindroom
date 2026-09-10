@@ -1377,6 +1377,29 @@ async def corrupt(store: PrincipalStore, *event_ids: str) -> None:
 class TestUnreadableRowsDoNotEndTheBacklog:
     """A short page of pending work has to mean one thing, or paging is a lie."""
 
+    async def test_room_pages_keep_order_and_unreadable_cursor(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Room selection must seek past its own corrupt row without mixing owners."""
+        await admit(alice, "$first", ts=9_000)
+        await admit(alice, "$other", room_id="!other:example.org")
+        await admit(journal_store.principal("agent@bob"), "$foreign")
+        await admit(alice, "$corrupt")
+        await admit(alice, "$last", ts=1_000)
+        await corrupt(alice, "$corrupt")
+
+        page = await alice.pending(room_id=ROOM, limit=2)
+
+        assert [event.event_id for event in page] == ["$first"]
+        assert page.unreadable_rows == 1
+        assert not page.reached_end
+        tail = await alice.pending(room_id=ROOM, limit=2, after_receipt_order=page.resume_after)
+        assert [event.event_id for event in tail] == ["$last"]
+        assert tail.reached_end
+        assert [event.event_id for event in await alice.pending(room_id="!other:example.org")] == ["$other"]
+
     async def test_a_corrupt_row_shortens_its_page_without_ending_the_backlog(
         self,
         alice: PrincipalStore,
@@ -6383,20 +6406,25 @@ class TestApprovalContinuations:
         assert winner.runtime_generation == "runtime-a"
         assert loser is None
 
-    async def test_pending_page_exposes_only_runnable_primary_source(self, alice: PrincipalStore) -> None:
+    @pytest.mark.parametrize("room_id", [None, ROOM])
+    async def test_pending_page_exposes_only_runnable_primary_source(
+        self,
+        alice: PrincipalStore,
+        room_id: str | None,
+    ) -> None:
         """Waiting and live claims stay hidden while ready and old claims re-enter once."""
         await self.admit_sources(alice)
         waiting = self.continuation(state="waiting")
         await alice.create_approval_continuation(waiting)
 
-        assert list(await alice.pending(runtime_generation="runtime-a")) == []
+        assert list(await alice.pending(room_id=room_id, runtime_generation="runtime-a")) == []
 
         await alice.request_approval_failure(
             waiting.approval_id,
             "make it runnable",
             expected_state="waiting",
         )
-        failing = await alice.pending(runtime_generation="runtime-a")
+        failing = await alice.pending(room_id=room_id, runtime_generation="runtime-a")
         assert [event.event_id for event in failing] == ["$source-1"]
 
     async def test_pending_card_page_exposes_unreadable_durable_debt(self, alice: PrincipalStore) -> None:

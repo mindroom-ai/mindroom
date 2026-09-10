@@ -256,6 +256,7 @@ async def test_team_delivery_exposes_fixed_shutdown_phase(
             team_response_owner(),
             name=f"test_team_{boundary}_shutdown_phase",
             recovery_proof_ready=lambda: True,
+            room_id="!room:example.org",
         )
         await boundary_started.wait()
         coordinator.begin_process_shutdown()

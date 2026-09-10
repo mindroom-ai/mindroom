@@ -200,6 +200,7 @@ async def test_process_shutdown_refuses_new_response_owners_until_admissions_res
                 refused_response,
                 name="test_late_process_shutdown_response",
                 recovery_proof_ready=lambda: True,
+                room_id=_target().room_id,
             )
     finally:
         if accidentally_owned is not None:
@@ -214,6 +215,7 @@ async def test_process_shutdown_refuses_new_response_owners_until_admissions_res
         asyncio.sleep(0),
         name="test_resumed_response",
         recovery_proof_ready=lambda: True,
+        room_id=_target().room_id,
     )
     await resumed_response
     assert runner.pending_inbox_response_count == 0
@@ -246,6 +248,7 @@ async def test_process_shutdown_releases_claim_when_response_never_starts() -> N
             name="test_never_started_claimed_response",
             recovery_proof_ready=recovery_proof_ready,
             on_terminal=release_claim,
+            room_id=_target().room_id,
         )
     except BaseException:
         response.close()
@@ -350,6 +353,7 @@ async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() ->
         interrupted_response(),
         name="test_unrecoverable_interrupted_response",
         recovery_proof_ready=lambda: False,
+        room_id=_target().room_id,
     )
     await response_started.wait()
 
@@ -368,6 +372,7 @@ async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() ->
         recoverable_interrupted_response(),
         name="test_recoverable_interrupted_response",
         recovery_proof_ready=lambda: True,
+        room_id=_target().room_id,
     )
     await recoverable_response_started.wait()
 
@@ -404,6 +409,7 @@ async def test_process_shutdown_accepts_clean_response_without_recovery_proof() 
         response_finishes_cleanly(),
         name="test_clean_process_shutdown_response",
         recovery_proof_ready=invalid_recovery_proof,
+        room_id=_target().room_id,
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -438,6 +444,7 @@ async def test_process_shutdown_reports_terminal_durable_response_as_drained() -
         interrupted_response(),
         name="test_durable_process_shutdown_response",
         recovery_proof_ready=durable_recovery_ready,
+        room_id=_target().room_id,
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -475,6 +482,7 @@ async def test_process_shutdown_waits_for_durable_proof_to_become_ready() -> Non
         interrupted_response(),
         name="test_eventually_durable_process_response",
         recovery_proof_ready=eventually_durable_recovery,
+        room_id=_target().room_id,
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -509,6 +517,7 @@ async def test_process_shutdown_retries_cancellation_within_bounded_cleanup() ->
         layered_cleanup(),
         name="test_layered_process_shutdown_cleanup",
         recovery_proof_ready=lambda: True,
+        room_id=_target().room_id,
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -554,6 +563,7 @@ async def test_process_shutdown_keeps_indefinitely_resistant_response_owned() ->
         indefinitely_resistant_response(),
         name="test_indefinitely_resistant_process_response",
         recovery_proof_ready=lambda: True,
+        room_id=_target().room_id,
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -603,6 +613,7 @@ async def test_process_shutdown_bounds_async_recovery_proof() -> None:
         interrupted_response(),
         name="test_stuck_process_shutdown_recovery_proof",
         recovery_proof_ready=stuck_recovery_proof,
+        room_id=_target().room_id,
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -660,6 +671,7 @@ async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_ow
         interrupted_response(),
         name="test_resistant_process_shutdown_recovery_proof",
         recovery_proof_ready=cancellation_resistant_proof,
+        room_id=_target().room_id,
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -729,6 +741,7 @@ async def test_process_shutdown_reuses_late_recovery_proof_on_cleanup_retry() ->
         interrupted_response(),
         name="test_late_recovery_proof_reuse",
         recovery_proof_ready=cancellation_resistant_proof,
+        room_id=_target().room_id,
     )
     await response_started.wait()
     runner.begin_process_shutdown()
@@ -781,6 +794,7 @@ async def test_recovery_proofs_wait_until_every_response_is_terminal() -> None:
         live_response(),
         name="terminal_gate",
         recovery_proof_ready=stuck_recovery_proof,
+        room_id=_target().room_id,
     )
     await finished_task
 
@@ -857,6 +871,7 @@ async def test_process_shutdown_drains_four_owned_response_lifecycles(
                 owned_response(index),
                 name=f"test_process_shutdown_response_{index}",
                 recovery_proof_ready=lambda: True,
+                room_id=_target().room_id,
             )
             for index in range(4)
         ]
@@ -917,11 +932,13 @@ async def test_process_shutdown_starts_terminal_proof_while_peer_unwinds() -> No
             fast_response(),
             name="test_fast_terminal_response",
             recovery_proof_ready=fast_proof,
+            room_id=_target().room_id,
         ),
         runner.track_inbox_response(
             slow_response(),
             name="test_slow_unwinding_response",
             recovery_proof_ready=lambda: True,
+            room_id=_target().room_id,
         ),
     ]
     await fast_started.wait()
@@ -959,6 +976,7 @@ async def test_failed_detached_inbox_response_returns_sources_to_retry_owner() -
         name="test_failed_detached_inbox_response",
         recovery_proof_ready=lambda: False,
         on_failure=on_failure,
+        room_id=_target().room_id,
     )
 
     await asyncio.gather(response_task, return_exceptions=True)
@@ -970,7 +988,8 @@ async def test_failed_detached_inbox_response_returns_sources_to_retry_owner() -
 @pytest.mark.asyncio
 async def test_detached_inbox_response_owns_source_until_task_finishes() -> None:
     """Journal replay must not reclaim a source while its response task is alive."""
-    runner = ResponseRunner(deps=MagicMock())
+    retry_sources = MagicMock()
+    runner = ResponseRunner(deps=MagicMock(retry_approval_sources=retry_sources))
     response_started = asyncio.Event()
     release_response = asyncio.Event()
 
@@ -983,6 +1002,7 @@ async def test_detached_inbox_response_owns_source_until_task_finishes() -> None
         name="test_source_owned_inbox_response",
         recovery_proof_ready=lambda: False,
         source_event_ids=("$reaction",),
+        room_id=_target().room_id,
     )
 
     assert runner.has_live_inbox_response("$reaction")
@@ -992,6 +1012,7 @@ async def test_detached_inbox_response_owns_source_until_task_finishes() -> None
     await asyncio.sleep(0)
 
     assert not runner.has_live_inbox_response("$reaction")
+    retry_sources.assert_called_once_with(_target().room_id, ("$reaction",))
 
 
 class RecordingStopManager(StopManager):
@@ -3775,7 +3796,7 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
     assert edit_request.new_text == paused.response_text
     assert edit_request.tool_trace == list(paused.tool_trace)
     send_text.assert_not_awaited()
-    retry_sources.assert_called_once_with(("$source",))
+    retry_sources.assert_called_once_with(request.room_id, ("$source",))
     assert outcome.final_visible_body == paused.response_text
     assert outcome.delivery_kind == "edited"
     assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
@@ -3828,7 +3849,7 @@ async def test_automatic_pause_without_visible_event_sends_ordered_tools(tmp_pat
     assert send_request.response_text == paused.response_text
     assert send_request.tool_trace == list(paused.tool_trace)
     assert send_request.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
-    retry_sources.assert_called_once_with(("$source",))
+    retry_sources.assert_called_once_with(request.room_id, ("$source",))
     assert outcome.final_visible_body == paused.response_text
     assert outcome.delivery_kind == "sent"
     assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
@@ -4330,7 +4351,7 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
     edit_request = edit_text.await_args.args[0]
     assert edit_request.new_text == paused.response_text
     assert edit_request.tool_trace == list(paused.tool_trace)
-    retry_sources.assert_called_once_with(("$source",))
+    retry_sources.assert_called_once_with(request.room_id, ("$source",))
     assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
 
 
@@ -4453,7 +4474,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         awaited.kwargs["tool_name"] for awaited in approval_store.prepare_detached_approval.await_args_list
     ] == expected_cards
     if expected_state == "ready":
-        retry_sources.assert_called_once_with(("$source",))
+        retry_sources.assert_called_once_with(current.room_id, ("$source",))
         restarted = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
         claimed = await restarted.deps.approval_store.claim_approval_continuation(
             continuation.approval_id,
@@ -5646,6 +5667,7 @@ async def test_non_streaming_final_delivery_exposes_fixed_shutdown_phase(tmp_pat
             coordinator._process_and_respond(_plain_request(_target())),
             name="test_non_streaming_final_delivery_phase",
             recovery_proof_ready=lambda: True,
+            room_id=_target().room_id,
         )
         await finalization_started.wait()
         coordinator.begin_process_shutdown()
@@ -6077,6 +6099,7 @@ async def test_process_shutdown_exposes_retained_streaming_response_phase(
             coordinator._process_and_respond_streaming(_plain_request(_target())),
             name="test_retained_streaming_response_phase",
             recovery_proof_ready=lambda: True,
+            room_id=_target().room_id,
         )
         await generation_started.wait()
         coordinator.begin_process_shutdown()
@@ -6135,6 +6158,7 @@ async def test_process_shutdown_exposes_retained_final_delivery_phase(
             coordinator._process_and_respond_streaming(_plain_request(_target())),
             name="test_retained_final_delivery_phase",
             recovery_proof_ready=lambda: True,
+            room_id=_target().room_id,
         )
         await finalization_started.wait()
         coordinator.begin_process_shutdown()
@@ -7930,6 +7954,7 @@ async def test_generic_retry_reuses_cancelled_offloaded_proof() -> None:
         name="generic_offloaded",
         recovery_proof_ready=proof,
         source_event_ids=("$source",),
+        room_id=_target().room_id,
     )
     await started.wait()
     with pytest.raises(response_runner.ResponseShutdownTimeoutError):
@@ -7977,6 +8002,7 @@ async def test_cancelled_generic_drain_keeps_proof_owner() -> None:
         name="cancelled_generic",
         recovery_proof_ready=proof,
         source_event_ids=("$source",),
+        room_id=_target().room_id,
     )
     await started.wait()
     draining = asyncio.create_task(runner.drain_inbox_responses(cancel_after_seconds=0.1))
@@ -8023,6 +8049,7 @@ async def test_generic_to_process_proof_promotion_retries_false_result(completed
         name="promoted_generic",
         recovery_proof_ready=proof,
         source_event_ids=("$source",),
+        room_id=_target().room_id,
     )
     await started.wait()
     with pytest.raises(response_runner.ResponseShutdownTimeoutError):
@@ -8055,11 +8082,21 @@ async def test_overlapping_drains_keep_snapshot_ownership() -> None:
         second_started.set()
         await release_second.wait()
 
-    first = runner.track_inbox_response(first_response(), name="first_snapshot", recovery_proof_ready=lambda: True)
+    first = runner.track_inbox_response(
+        first_response(),
+        name="first_snapshot",
+        recovery_proof_ready=lambda: True,
+        room_id="!room:example.org",
+    )
     await first_started.wait()
     first_drain = asyncio.create_task(runner.drain_inbox_responses(cancel_after_seconds=0.01))
     await asyncio.sleep(0)
-    second = runner.track_inbox_response(second_response(), name="second_snapshot", recovery_proof_ready=lambda: True)
+    second = runner.track_inbox_response(
+        second_response(),
+        name="second_snapshot",
+        recovery_proof_ready=lambda: True,
+        room_id="!room:example.org",
+    )
     await second_started.wait()
     second_drain = asyncio.create_task(runner.drain_inbox_responses(cancel_after_seconds=0.1))
     assert not await first_drain

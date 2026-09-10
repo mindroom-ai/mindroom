@@ -70,7 +70,7 @@ class _ApprovalTransportBot(Protocol):
         thread_id: str,
     ) -> str | None: ...
 
-    def retry_approval_sources(self, source_event_ids: tuple[str, ...]) -> None: ...
+    def retry_approval_sources(self, room_id: str, source_event_ids: tuple[str, ...]) -> None: ...
 
 
 async def _offload_oversized_full_arguments(
@@ -154,12 +154,13 @@ class ApprovalMatrixTransport:
     async def _wake_continuation_sources(
         self,
         entity_name: str,
+        room_id: str,
         source_event_ids: tuple[str, ...],
     ) -> None:
         """Wake the exact owner after an atomic card decision makes work ready."""
         bot = self.bot_provider(entity_name)
         if bot is not None and bot.running:
-            bot.retry_approval_sources(source_event_ids)
+            bot.retry_approval_sources(room_id, source_event_ids)
 
     def _unavailable_entity_reason(self, entity_name: str) -> str | None:
         permanently_unavailable = (
