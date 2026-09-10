@@ -13,8 +13,9 @@ import asyncio
 import shutil
 import sqlite3
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from agno.vectordb.chroma import ChromaDb
 from chromadb.errors import InternalError, NotFoundError
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 
     from agno.knowledge.embedder.base import Embedder
     from agno.vectordb.base import VectorDb
+    from chromadb.api.client import Client
     from chromadb.api.models.Collection import Collection
 
 logger = get_logger(__name__)
@@ -281,15 +283,16 @@ async def delete_collection(space: CollectionSpace, collection_name: str) -> boo
 def _delete_collection_sync(space: CollectionSpace, collection_name: str) -> bool:
     """Delete one collection, treating an already-absent one as success."""
     vector_db = build_vector_db(space, collection_name)
-    deleted = vector_db.delete()
-    if not deleted:
-        try:
-            vector_db.client.get_collection(name=vector_db.collection_name)
-        except NotFoundError:
-            deleted = True
-    if deleted:
-        _reclaim_orphaned_segment_directories(space)
-    return deleted
+    with closing(cast("Client", vector_db.client)):
+        deleted = vector_db.delete()
+        if not deleted:
+            try:
+                vector_db.client.get_collection(name=vector_db.collection_name)
+            except NotFoundError:
+                deleted = True
+        if deleted:
+            _reclaim_orphaned_segment_directories(space)
+        return deleted
 
 
 def _reclaim_orphaned_segment_directories(space: CollectionSpace) -> None:
@@ -383,7 +386,9 @@ def cleanup_superseded_collections(
                 unowned.append(collection_name)
             continue
         try:
-            build_vector_db(space, collection_name).delete()
+            deletion_db = build_vector_db(space, collection_name)
+            with closing(cast("Client", deletion_db.client)):
+                deletion_db.delete()
         except Exception:
             logger.warning(
                 "Failed to clean superseded knowledge collection",
