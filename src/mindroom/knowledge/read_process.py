@@ -21,6 +21,9 @@ from mindroom.knowledge.read_protocol import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
 
+# TODO: Remove this read subprocess workaround after pinning a Chroma release containing
+# https://github.com/chroma-core/chroma/pull/7692 and verifying lock waits no longer stall the application.
+
 # Avoid turning simultaneous searches into unbounded native index copies.
 _read_slots = BoundedSemaphore(2)
 _CHILD_ENV_KEYS = (
