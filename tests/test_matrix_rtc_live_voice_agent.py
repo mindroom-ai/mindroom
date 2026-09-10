@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from livekit.agents.llm import ChatContext
 from livekit.plugins.openai.realtime import GPTLiveDelegation, GPTLiveSession
+from structlog.testing import capture_logs
 
 from mindroom.matrix_rtc.call_tools import CallAgentResponse
 from mindroom.matrix_rtc.live_voice_agent import _LiveDelegationRunner
@@ -190,11 +191,15 @@ async def test_live_delegation_failure_returns_safe_notice_and_next_turn_works()
         _options(respond, on_session_error=notices.append),
         cast("GPTLiveSession", sink),
     )
-    runner.submit(GPTLiveDelegation("one", "First"), ChatContext.empty())
-    runner.submit(GPTLiveDelegation("two", "Second"), ChatContext.empty())
-    await asyncio.gather(*runner._tasks)
+    with capture_logs() as logs:
+        runner.submit(GPTLiveDelegation("one", "First"), ChatContext.empty())
+        runner.submit(GPTLiveDelegation("two", "Second"), ChatContext.empty())
+        await asyncio.gather(*runner._tasks)
 
     assert len(notices) == 1
-    assert "private-token" not in str(notices) + str(sink.results)
+    assert "private-token" not in str(notices) + str(sink.results) + str(logs)
+    failure = next(entry for entry in logs if entry["event"] == "call_live_delegation_failed")
+    assert failure["error_type"] == "ValueError"
+    assert any("live_voice_agent.py:" in frame for frame in failure["traceback_frames"])
     assert sink.results[-1] == ("Done.", "two")
     await runner.aclose()

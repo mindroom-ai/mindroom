@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
@@ -17,6 +19,14 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _DELEGATION_ERROR = "Voice call error: the agent could not complete the delegated request. Please try again."
+
+
+def _exception_frames(error: BaseException) -> list[str]:
+    """Retain stack locations without exception text, source lines, or locals."""
+    return [
+        f"{Path(frame.filename).name}:{frame.lineno} ({frame.name})"
+        for frame in traceback.extract_tb(error.__traceback__)
+    ]
 
 
 def _commentary_chunks(text: str) -> Iterator[str]:
@@ -110,7 +120,11 @@ class _LiveDelegationRunner:
                 for chunk in _commentary_chunks(response.text):
                     self._session.append_commentary(chunk, delegation_id=delegation.id)
             except Exception as error:
-                logger.warning("call_live_delegation_failed", error_type=type(error).__name__)
+                logger.warning(
+                    "call_live_delegation_failed",
+                    error_type=type(error).__name__,
+                    traceback_frames=_exception_frames(error),
+                )
                 if self._closed or generation != self._generation:
                     return
                 if self._options.on_session_error is not None:
@@ -119,8 +133,12 @@ class _LiveDelegationRunner:
 
     def _on_task_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)
-        if not task.cancelled() and task.exception() is not None:
-            logger.warning("call_live_delegation_delivery_failed", error_type=type(task.exception()).__name__)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.warning(
+                "call_live_delegation_delivery_failed",
+                error_type=type(error).__name__,
+                traceback_frames=_exception_frames(error),
+            )
 
     def on_reconnected(self) -> None:
         """Invalidate connection-scoped IDs and cancel their unfinished work."""
