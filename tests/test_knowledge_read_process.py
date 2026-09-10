@@ -242,7 +242,7 @@ async def test_cancelled_embedding_reaps_child_and_releases_capacity(
             await asyncio.Event().wait()
             return [1.0, 0.0]
 
-    for _ in range(3):
+    for _ in range(5):
         embedding_started.clear()
         task = asyncio.create_task(
             ChromaReadProxy("published", str(published_index), BlockingEmbedder()).async_search("alpha"),
@@ -252,7 +252,7 @@ async def test_cancelled_embedding_reaps_child_and_releases_capacity(
         with pytest.raises(asyncio.CancelledError):
             await task
         assert capture_read_processes[-1].poll() is not None
-    assert len(capture_read_processes) == 3
+    assert len(capture_read_processes) == 5
     assert await ChromaReadProxy("published", str(published_index), _Embedder()).async_search("alpha")
 
 
@@ -267,11 +267,11 @@ async def test_stalled_embedding_deadline_reaps_child(
         await asyncio.Event().wait()
         return ReadRequest(str(published_index), "published", "alpha", [1.0, 0.0])
 
-    for _ in range(3):
+    for _ in range(5):
         with pytest.raises(TimeoutError, match="Knowledge read timed out"):
             await read_process.read_chroma_async(prepare_request, timeout=0.05)
         assert capture_read_processes[-1].poll() is not None
-    assert len(capture_read_processes) == 3
+    assert len(capture_read_processes) == 5
 
 
 @pytest.mark.asyncio
