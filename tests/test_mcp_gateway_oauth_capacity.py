@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from mcp.server.auth.provider import TokenError
 
-import mindroom.mcp_gateway.migrations as migrations_module
+import mindroom.mcp_gateway.legacy_schema as legacy_schema_module
 from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
 from tests.test_mcp_gateway_oauth import _Clock, issue_code, pending
@@ -474,7 +474,7 @@ async def test_failed_migration_rolls_back_schema_counters_and_marker(
     tokens = await source.exchange_authorization_code(client, await issue_code(source, client))
     legacy_paths = replace(runtime_paths, storage_root=runtime_paths.storage_root / "legacy")
     _copy_legacy(source, legacy_paths)
-    migrate = migrations_module._migrate_accounting
+    migrate = legacy_schema_module._migrate_accounting
 
     def interrupted(connection: sqlite3.Connection, now: float) -> None:
         migrate(connection, now)
@@ -482,7 +482,7 @@ async def test_failed_migration_rolls_back_schema_counters_and_marker(
         raise RuntimeError(msg)
 
     with monkeypatch.context() as patch:
-        patch.setattr(migrations_module, "_migrate_accounting", interrupted)
+        patch.setattr(legacy_schema_module, "_migrate_accounting", interrupted)
         with pytest.raises(RuntimeError, match="Synthetic interruption"):
             _provider(legacy_paths, clock)
     path = legacy_paths.storage_root / "mcp_gateway" / "oauth.sqlite3"

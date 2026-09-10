@@ -45,6 +45,7 @@ from mindroom.hooks import (
 )
 from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.legacy_private_storage import migrate_private_storage
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
@@ -67,7 +68,6 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
-from mindroom.private_storage_migration import migrate_private_storage
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,

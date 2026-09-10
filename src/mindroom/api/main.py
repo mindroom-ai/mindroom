@@ -46,11 +46,11 @@ from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.embedder_health import get_embedder_failure
 from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.legacy_private_storage import migrate_private_storage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
-from mindroom.private_storage_migration import migrate_private_storage
 from mindroom.runtime_state import get_runtime_state
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.runtime import lease_configured_primary_worker_manager

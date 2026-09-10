@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import mindroom.mcp_gateway.accounts as accounts_module
-import mindroom.mcp_gateway.migrations as migrations_module
+import mindroom.mcp_gateway.legacy_schema as legacy_schema_module
 from mindroom.mcp_gateway.accounts import AccountConflictError, GatewayAccounts
 from mindroom.mcp_gateway.store import GatewayOAuthStore
 
@@ -159,10 +159,10 @@ async def test_migration_does_not_revive_preexisting_tokens(tmp_path: Path, monk
     account = await directory.create({"userName": "Alice@example.org", "active": True})
     with sqlite3.connect(directory.store.path) as connection:
         connection.execute("ALTER TABLE gateway_accounts DROP COLUMN token_valid_after")
-    monkeypatch.setattr(migrations_module.time, "time", lambda: 200.5)
+    monkeypatch.setattr(legacy_schema_module.time, "time", lambda: 200.5)
     migrated = _directory(tmp_path)
     assert await migrated.resolve_external("Alice@example.org", 200.4) is None
     assert await migrated.resolve_external("Alice@example.org", 260.5) is None
     assert await migrated.resolve_external("Alice@example.org", 260.6) == account["id"]
-    monkeypatch.setattr(migrations_module.time, "time", lambda: 261.5)
+    monkeypatch.setattr(legacy_schema_module.time, "time", lambda: 261.5)
     assert await _directory(tmp_path).resolve_external("Alice@example.org", 260.6) == account["id"]

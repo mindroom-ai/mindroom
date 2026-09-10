@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, cast
 
-from mindroom.script_runs.legacy_migrations import migrate_legacy_script_run_columns
+from mindroom.script_runs.legacy_schema import migrate_legacy_script_run_columns
 from mindroom.script_runs.models import (
     ScriptCallClaim,
     ScriptCallRecord,

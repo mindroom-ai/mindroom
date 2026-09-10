@@ -108,9 +108,9 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
-    "mindroom.private_storage_compat",
+    "mindroom.legacy_private_storage_aliases",
     "mindroom.private_storage_paths",
-    "mindroom.private_storage_migration",
+    "mindroom.legacy_private_storage",
     "mindroom.private_instance_identity",
     "mindroom.runtime_resolution",
 ]
@@ -805,13 +805,13 @@ visibility = [
 path = "mindroom.oauth.credential_store"
 depends_on = [
     "mindroom.credentials",
-    "mindroom.oauth.credential_compat",
+    "mindroom.oauth.legacy_credentials",
     "mindroom.oauth.providers",
 ]
 visibility = ["mindroom.oauth.credential_lifecycle"]
 
 [[modules]]
-path = "mindroom.oauth.credential_compat"
+path = "mindroom.oauth.legacy_credentials"
 depends_on = [
     "mindroom.credential_policy",
     "mindroom.credentials",
@@ -822,7 +822,7 @@ visibility = ["mindroom.oauth.credential_store"]
 [[modules]]
 path = "mindroom.oauth.credential_store_types"
 depends_on = []
-visibility = ["mindroom.oauth.credential_store", "mindroom.oauth.credential_compat"]
+visibility = ["mindroom.oauth.credential_store", "mindroom.oauth.legacy_credentials"]
 
 [[modules]]
 path = "mindroom.oauth.credential_lifecycle"
@@ -1144,7 +1144,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
-    "mindroom.private_storage_migration",
+    "mindroom.legacy_private_storage",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
     "mindroom.api.thread_exports",
@@ -1343,7 +1343,7 @@ path = "mindroom.script_runs.shim"
 depends_on = []
 
 [[modules]]
-path = "mindroom.script_runs.legacy_migrations"
+path = "mindroom.script_runs.legacy_schema"
 depends_on = []
 
 [[modules]]
@@ -1859,7 +1859,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
-    "mindroom.private_storage_migration",
+    "mindroom.legacy_private_storage",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
     "mindroom.event_journal_open",
@@ -5132,7 +5132,7 @@ depends_on = ["mindroom.mcp_gateway.store", "mindroom.mcp_gateway.accounts", "mi
 
 [[modules]]
 path = "mindroom.mcp_gateway.store"
-depends_on = ["mindroom.mcp_gateway.migrations"]
+depends_on = ["mindroom.mcp_gateway.legacy_schema"]
 
 [[modules]]
 path = "mindroom.api.mcp_clients"
@@ -5161,7 +5161,7 @@ path = "mindroom.mcp_gateway.lifecycle"
 depends_on = []
 
 [[modules]]
-path = "mindroom.mcp_gateway.migrations"
+path = "mindroom.mcp_gateway.legacy_schema"
 depends_on = []
 visibility = ["mindroom.mcp_gateway.store"]
 
@@ -5332,13 +5332,13 @@ visibility = ["mindroom.cli.main"]
 
 
 [[modules]]
-path = "mindroom.private_storage_migration"
+path = "mindroom.legacy_private_storage"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.durable_write",
     "mindroom.file_locks",
     "mindroom.private_instance_identity_store",
-    "mindroom.private_storage_compat",
+    "mindroom.legacy_private_storage_aliases",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.storage_preflight",
 ]
@@ -5352,7 +5352,7 @@ depends_on = [
     "mindroom.workers.backends.docker",
     "mindroom.workers.backends.kubernetes",
 ]
-visibility = ["mindroom.private_storage_migration"]
+visibility = ["mindroom.legacy_private_storage"]
 
 [[modules]]
 path = "mindroom.session_storage_preflight"
@@ -5360,18 +5360,18 @@ depends_on = ["mindroom.durable_write", "mindroom.file_locks"]
 visibility = ["mindroom.agent_storage"]
 
 [[modules]]
-path = "mindroom.private_storage_compat"
+path = "mindroom.legacy_private_storage_aliases"
 depends_on = [
     "mindroom.private_instance_identity_store",
     "mindroom.tool_system.worker_routing",
 ]
-visibility = ["mindroom.private_storage_migration", "mindroom.private_storage_paths"]
+visibility = ["mindroom.legacy_private_storage", "mindroom.private_storage_paths"]
 
 [[modules]]
 path = "mindroom.private_storage_paths"
 depends_on = [
     "mindroom.private_instance_identity_store",
-    "mindroom.private_storage_compat",
+    "mindroom.legacy_private_storage_aliases",
     "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.api.sandbox_worker_prep", "mindroom.workers.backends._dedicated_worker_common"]

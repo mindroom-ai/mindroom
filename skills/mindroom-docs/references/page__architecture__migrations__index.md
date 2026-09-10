@@ -1,6 +1,7 @@
 # Migration and compatibility boundaries
 
-MindRoom keeps substantive historical schemas and representations in named migration or compatibility modules.
+MindRoom keeps substantive historical schemas and representations in named legacy modules.
+Historical-format production owners use `legacy_<subject>.py` beside their current owner, including one-time upgrades and recurring old-data readers.
 The current storage or lifecycle owner keeps its transaction, locking, validation, authorization, retry, and current-format processing.
 Small field defaults stay with their current model when extraction would add indirection without isolating a meaningful migration.
 Dependency-owned migrations and authoritative SaaS data remain under their existing owners.
@@ -25,7 +26,7 @@ The remaining rows were already focused boundaries and complete the current map.
 
 | Boundary | Trigger and current caller | Retained guarantees |
 | --- | --- | --- |
-| [`src/mindroom/mcp_gateway/migrations.py`][mcp-migrations] | `GatewayOAuthStore` calls `migrate_schema` when opening SQLite. | The store retains its writer transaction, base DDL, and live processing; ordered expiry, accounting, lifecycle, account, and token-cutoff upgrades stay together. |
+| [`src/mindroom/mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | `GatewayOAuthStore` calls `migrate_schema` when opening SQLite. | The store retains its writer transaction, base DDL, and live processing; ordered expiry, accounting, lifecycle, account, and token-cutoff upgrades stay together. |
 | [`src/mindroom/legacy_session_storage.py`][legacy-session] | Run deletion and usage diagnostics encounter an Agno 2 `runs` blob. | Current rows win by `run_id`; descendant deletion, transaction ownership, diagnostics, and byte accounting remain with current owners. |
 | [`src/mindroom/legacy_openai_tool_replay.py`][legacy-openai] | OpenAI-family adapters replay histories written before empty tool arguments were preserved. | Repair copies changed messages, supplies empty arguments, and drops placeholder calls with their associated orphan tool results without mutating stored history. |
 | [`src/mindroom/legacy_handled_turns.py`][legacy-handled] | `HandledTurnLedger` finds `tracking/<agent>_responded.json`. | Insert-only adoption protects newer rows, fills absent indexes, retries interrupted work, and renames only after adoption. |
@@ -33,15 +34,15 @@ The remaining rows were already focused boundaries and complete the current map.
 | [`src/mindroom/legacy_delivery_payloads.py`][legacy-delivery] | Outbox reads or Matrix writes encounter inline FINAL results and the bounded marker. | Old inline outcomes keep rolling-writer precedence, current local results remain authoritative otherwise, and full recovery data stays off the wire. |
 | [`src/mindroom/legacy_approval_payloads.py`][legacy-approval] | Approval claim or resume encounters missing historical context or the older card ID. | Current approval ownership, authorization, exact-call checks, transaction settlement, and failure handling remain with current owners. |
 | [`src/mindroom/matrix/legacy_sync_continuity.py`][legacy-sync] | `SyncContinuityStore` loads a valid v2 or v3 record. | The helper validates the old shape, discards its checkpoint, increments revision once, and lets the store rewrite v4 under lock. |
-| [`src/mindroom/script_runs/legacy_migrations.py`][script-migrations] | `ScriptRunStore` finds missing resource snapshot columns. | Schema creation and the transaction stay in the store; old rows receive the established null or empty-map values. |
+| [`src/mindroom/script_runs/legacy_schema.py`][script-legacy-schema] | `ScriptRunStore` finds missing resource snapshot columns. | Schema creation and the transaction stay in the store; old rows receive the established null or empty-map values. |
 | [`src/mindroom/knowledge/legacy_metadata.py`][knowledge-legacy] | Knowledge parsing sees absent or empty optional filter fields. | Current parsing still rejects unknown fields; missing corpus settings retain empty historical sentinels and rebuild only when the corresponding current corpus-compatibility value differs. |
 | [`src/mindroom/matrix/legacy_state.py`][matrix-legacy-state] | Matrix state has accounts without a domain or a noncanonical serialized shape. | Runtime-domain resolution, parsing, caching, and atomic persistence stay in `matrix/state.py`; rewrites happen only when data differs. |
 | [`src/mindroom/config/legacy_fields.py`][config-legacy] | Agent or defaults validation sees a retired field. | Pydantic remains the strict validation boundary and the helper provides directed replacement errors. |
-| [`src/mindroom/event_journal/upgrade.py`][journal-upgrade] | A journal has `journal_events` but lacks Nio-owned `matrix_sync_consumers`. | One schema transaction preserves history, handled turns, generation, and visible projection while retiring obsolete pending execution. |
-| [`src/mindroom/config/access_migration.py`][access-migration] | Config loading or `mindroom config migrate` finds retired access fields. | Complete-source validation, concrete grants, a backup, and atomic membership-schema publication are retained. |
-| [`src/mindroom/private_storage_migration.py`][private-migration], [`private_storage_compat.py`][private-compat], and [`private_storage_paths.py`][private-paths] | Startup finds a verified private scope with the historical requester spelling. | Intent records, owner and inode checks, worker quiescence, ordered renames, and verified aliases protect recovery and current callers. |
+| [`src/mindroom/event_journal/legacy_schema.py`][journal-legacy-schema] | A journal has `journal_events` but lacks Nio-owned `matrix_sync_consumers`. | One schema transaction preserves history, handled turns, generation, and visible projection while retiring obsolete pending execution. |
+| [`src/mindroom/config/legacy_access.py`][access-legacy] | Config loading or `mindroom config migrate` finds retired access fields. | Complete-source validation, concrete grants, a backup, and atomic membership-schema publication are retained. |
+| [`src/mindroom/legacy_private_storage.py`][private-legacy], [`legacy_private_storage_aliases.py`][private-legacy-aliases], and [`private_storage_paths.py`][private-paths] | Startup finds a verified private scope with the historical requester spelling. | Intent records, owner and inode checks, worker quiescence, ordered renames, and verified aliases protect recovery and current callers. |
 | [`src/mindroom/session_storage_preflight.py`][session-preflight] | An owned session table lacks required Agno columns. | The recovery lock, SQLite rollback recovery, and whole-directory archive complete before current storage creation. |
-| [`src/mindroom/oauth/credential_compat.py`][oauth-compat] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
+| [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
 
 ## Journal, delivery, approvals, and sync
@@ -52,11 +53,11 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | --- | --- | --- |
 | J1 | Isolated | [`legacy_handled_turns.py`][legacy-handled] adopts pre-journal JSON once and renames it. |
 | J2 | Isolated | [`handled_turns.py`][handled] keeps current sparse fields, [`turn_store.py`][turn-store] owns Agno run recovery, and [`legacy_handled_turns.py`][legacy-handled] restores only absent historical revision provenance. |
-| J3 | Removed/superseded | [`event_journal/upgrade.py`][journal-upgrade] replaces the old additive conversion framework with the Nio ownership cutoff. |
-| J4 | Removed/superseded | [`event_journal/upgrade.py`][journal-upgrade] drops old interactive tables instead of archiving or translating them. |
-| J5 | Removed/superseded | [`event_journal/upgrade.py`][journal-upgrade] retires the old response outbox rather than converting delivery debt. |
-| J6 | Removed/superseded | [`event_journal/upgrade.py`][journal-upgrade] retires all pre-cutoff delivery tables, replacing the earlier unfenced-outbox guard. |
-| J7 | Removed/superseded | [`event_journal/upgrade.py`][journal-upgrade] drops old approval transport and continuations rather than converting or tombstoning them. |
+| J3 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] replaces the old additive conversion framework with the Nio ownership cutoff. |
+| J4 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] drops old interactive tables instead of archiving or translating them. |
+| J5 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] retires the old response outbox rather than converting delivery debt. |
+| J6 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] retires all pre-cutoff delivery tables, replacing the earlier unfenced-outbox guard. |
+| J7 | Removed/superseded | [`event_journal/legacy_schema.py`][journal-legacy-schema] drops old approval transport and continuations rather than converting or tombstoning them. |
 | J8 | Isolated | [`legacy_delivery_payloads.py`][legacy-delivery] owns inline FINAL results, precedence, markers, and wire sanitation. |
 | J9 | Isolated | [`legacy_approval_payloads.py`][legacy-approval] rebuilds historical optional context; [`approval_execution.py`][approval-execution] keeps current exact execution gates. |
 | J10 | Isolated | [`legacy_approval_payloads.py`][legacy-approval] owns the old card ID alias; [`approval_manager.py`][approval-manager] keeps current authentication, retries, tombstones, and fail-closed behavior. |
@@ -69,7 +70,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 
 | ID | Status | Owner and reason |
 | --- | --- | --- |
-| S1 | Isolated | [`script_runs/legacy_migrations.py`][script-migrations] adds old missing resource columns inside the current store transaction. |
+| S1 | Isolated | [`script_runs/legacy_schema.py`][script-legacy-schema] adds old missing resource columns inside the current store transaction. |
 | S2 | Isolated | [`knowledge/legacy_metadata.py`][knowledge-legacy] normalizes absent or empty optional filters. |
 | S3 | Isolated | [`knowledge/legacy_metadata.py`][knowledge-legacy] retains empty historical sentinels for missing corpus settings, rebuilding only when the corresponding current corpus-compatibility value differs. |
 | S4 | Tiny retained default | [`knowledge/index_metadata.py`][knowledge-index] keeps sparse publication, job, and failure lifecycle fields. |
@@ -94,7 +95,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 
 | ID | Status | Owner and reason |
 | --- | --- | --- |
-| C1 | Isolated | [`config/access_migration.py`][access-migration] converts retired reply-permission lists into membership access. |
+| C1 | Isolated | [`config/legacy_access.py`][access-legacy] converts retired reply-permission lists into membership access. |
 | C2 | Current behavior | [`config/main.py`][config-main] accepts YAML null for optional root sections as a supported authoring form. |
 | C3 | Current behavior | [`config/main.py`][config-main] normalizes supported string plugin entries to objects. |
 | C4 | Current behavior | [`tool_system/plugin_imports.py`][plugin-imports] supports bare packages beside paths and explicit Python specs. |
@@ -118,7 +119,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | --- | --- | --- |
 | O1 | Removed/superseded | [`oauth/credential_store.py`][oauth-store] no longer adopts OAuth JSON; JSON-only tokens require reconnection and files remain untouched. |
 | O2 | Removed/superseded | [`oauth/credential_store.py`][oauth-store] no longer performs opaque or deferred old JSON adoption. |
-| O3 | Isolated | [`oauth/credential_compat.py`][oauth-compat] removes the old publication field; obsolete JSON and sidecar cleanup is gone. |
+| O3 | Isolated | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] removes the old publication field; obsolete JSON and sidecar cleanup is gone. |
 | O4 | Current behavior | [`oauth/credential_store.py`][oauth-store] owns schema, private-file, and scope-binding validation. |
 | O5 | Current behavior | [`oauth/credential_lifecycle.py`][oauth-lifecycle] owns target resolution, generation checks, and reset receipts. |
 | O6 | Current behavior | [`oauth/client.py`][oauth-client] and [`credential_lifecycle.py`][oauth-lifecycle] support active provider dialects and configured original authentication. |
@@ -167,7 +168,7 @@ Private storage moves require stopped primaries and absent managed workers, as d
 The Nio cutoff abandons pre-durable pending transport work while preserving crypto material, as described in [Nio 1.0 Upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/).
 Dependency migrations use their dependency's schema and locking contract, and SaaS databases are never treated as reconstructible caches.
 
-[access-migration]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/access_migration.py
+[access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
 [agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py
 [agentql]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/agentql.py
 [ai-runtime]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/ai_runtime.py
@@ -199,7 +200,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [history-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/storage.py
 [invited-rooms]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/invited_rooms_store.py
 [journal-open]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal_open.py
-[journal-upgrade]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/upgrade.py
+[journal-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_schema.py
 [knowledge-collections]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/collections.py
 [knowledge-index]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/index_metadata.py
 [knowledge-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_metadata.py
@@ -214,17 +215,17 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [local-stack]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/cli/local_stack.py
 [matrix-legacy-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/legacy_state.py
 [matrix-users]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/users.py
-[mcp-migrations]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/mcp_gateway/migrations.py
+[mcp-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/mcp_gateway/legacy_schema.py
 [memory-config]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/config.py
 [memory-functions]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/memory/functions.py
 [oauth-client]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/client.py
-[oauth-compat]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/credential_compat.py
+[oauth-legacy-credentials]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/legacy_credentials.py
 [oauth-lifecycle]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/credential_lifecycle.py
 [oauth-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/oauth/credential_store.py
 [plugin-imports]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/plugin_imports.py
 [pre-journal-test]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_upgrade_from_pre_journal_storage.py
-[private-compat]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/private_storage_compat.py
-[private-migration]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/private_storage_migration.py
+[private-legacy-aliases]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage_aliases.py
+[private-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_private_storage.py
 [private-paths]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/private_storage_paths.py
 [python-tools]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/python.py
 [replay-store]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/external_triggers/replay_store.py
@@ -233,7 +234,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [saas-migrations]: https://github.com/mindroom-ai/mindroom/tree/main/saas-platform/supabase/migrations
 [scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
 [scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py
-[script-migrations]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_migrations.py
+[script-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_schema.py
 [session-preflight]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/session_storage_preflight.py
 [skills]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/skills.py
 [sso]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/src/backend/routes/sso.py

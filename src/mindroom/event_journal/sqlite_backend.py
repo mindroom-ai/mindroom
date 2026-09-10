@@ -22,9 +22,9 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 
+from .legacy_schema import upgrade_legacy_journal
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, render, schema_statements
-from .upgrade import upgrade_legacy_journal
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

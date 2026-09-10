@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
+from .legacy_schema import upgrade_legacy_journal
 from .offloading import ThreadOffload, settled
 from .schema import POSTGRES_DIALECT, render, schema_statements
-from .upgrade import upgrade_legacy_journal
 
 # An arbitrary constant that only this schema setup uses, so the lock it
 # takes cannot collide with an application advisory lock.

@@ -15,7 +15,7 @@ from cryptography.exceptions import InvalidTag
 
 from mindroom.credentials import scoped_credentials_path
 from mindroom.durable_write import fsync_directory_durable
-from mindroom.oauth import credential_compat
+from mindroom.oauth import legacy_credentials
 from mindroom.oauth.providers import OAuthProviderError
 
 if TYPE_CHECKING:
@@ -114,7 +114,7 @@ class OAuthCredentialTransaction:
         connection_generation = (
             secrets.token_hex(32) if advance_connection_generation else generations.connection_generation
         )
-        published = credential_compat.without_legacy_publication(credentials)
+        published = legacy_credentials.without_legacy_publication(credentials)
         payload = self._context.credentials_manager.encode_credentials(
             self._context.provider.credential_service,
             published,
@@ -239,7 +239,7 @@ def _decode_credentials(
     except (OSError, TypeError, ValueError, InvalidTag) as exc:
         msg = "Stored OAuth credentials could not be loaded"
         raise OAuthCredentialUnreadableError(msg) from exc
-    return credential_compat.without_legacy_publication(credentials)
+    return legacy_credentials.without_legacy_publication(credentials)
 
 
 def _oauth_credential_database_path(context: OAuthCredentialStoreContext) -> Path:
@@ -425,7 +425,7 @@ def _validate_scope_binding(
     actual_binding = {key: str(row[key]) for key in expected_binding}
     if actual_binding == expected_binding:
         return
-    legacy_key = credential_compat.compatible_legacy_worker_key(context, connection)
+    legacy_key = legacy_credentials.compatible_legacy_worker_key(context, connection)
     if legacy_key is not None:
         expected_binding["worker_key"] = legacy_key
     if actual_binding != expected_binding:

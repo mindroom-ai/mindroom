@@ -623,7 +623,7 @@ git commit -m "feat: separate credential and platform authority"
 ### Task 5: Automatically migrate retired access fields and remove compatibility branches
 
 **Files:**
-- Create: `src/mindroom/config/access_migration.py`
+- Create: `src/mindroom/config/legacy_access.py`
 - Modify: `src/mindroom/config/main.py`
 - Modify: `src/mindroom/config/auth.py`
 - Modify: `src/mindroom/config/agent.py`

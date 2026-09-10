@@ -7,7 +7,7 @@ import os
 import sqlite3
 from typing import TYPE_CHECKING, TypeVar
 
-from mindroom.mcp_gateway.migrations import migrate_schema
+from mindroom.mcp_gateway.legacy_schema import migrate_schema
 
 if TYPE_CHECKING:
     from collections.abc import Callable
