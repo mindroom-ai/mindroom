@@ -415,9 +415,8 @@ class ApprovalResponseCoordinator:
         manager = approval_manager.get_approval_store()
         if manager is None or not await manager.expire_continuation_cards(current.approval_id):
             return False
-        failed_delivery = await self.final_delivery(current)
-        if failed_delivery is not None and failed_delivery.permanently_failed:
-            return await self.store.finish_approval_continuation(current.approval_id)
+        if await self.store.finish_approval_continuation(current.approval_id):
+            return True
         visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason)
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(

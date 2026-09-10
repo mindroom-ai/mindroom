@@ -138,6 +138,7 @@ visibility = [
 [[modules]]
 path = "mindroom.event_journal"
 depends_on = [
+    "mindroom.event_journal.legacy_approval_recovery",
     "mindroom.history.types",
     "mindroom.interactive_models",
     "mindroom.legacy_approval_payloads",
@@ -157,6 +158,7 @@ visibility = [
     "mindroom.delivery_gateway",
     "mindroom.dispatch_replay_guard",
     "mindroom.event_journal_open",
+    "mindroom.event_journal.legacy_approval_recovery",
     "mindroom.journal_dispatch",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
@@ -173,6 +175,11 @@ visibility = [
     "mindroom.visible_response_reconciliation",
     "mindroom.orchestrator",
 ]
+
+[[modules]]
+path = "mindroom.event_journal.legacy_approval_recovery"
+depends_on = ["mindroom.event_journal"]
+visibility = ["mindroom.event_journal"]
 
 [[modules]]
 path = "mindroom.interactive_models"

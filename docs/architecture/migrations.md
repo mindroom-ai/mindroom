@@ -37,6 +37,7 @@ The remaining rows were already focused boundaries and complete the current map.
 | [`src/mindroom/event_journal/legacy_turn_records.py`][legacy-turn-records] | The handled-turn importer adopts missing journal indexes. | The journal transaction is retained and migration writes never use current upsert deletion semantics. |
 | [`src/mindroom/legacy_delivery_payloads.py`][legacy-delivery] | Outbox reads or Matrix writes encounter inline FINAL results and the bounded marker. | Old inline outcomes keep rolling-writer precedence, current local results remain authoritative otherwise, and full recovery data stays off the wire. |
 | [`src/mindroom/legacy_approval_payloads.py`][legacy-approval] | Approval claim or resume encounters missing historical context or the older card ID. | Current approval ownership, authorization, exact-call checks, transaction settlement, and failure handling remain with current owners. |
+| [`src/mindroom/event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] | Approval settlement encounters an INITIAL retired by historical deleted-response cleanup. | The helper proves exact source and response tombstones with no FINAL; current owners retain card expiration, failure fencing, retries, locking, and transactional settlement. |
 | [`src/mindroom/matrix/legacy_sync_continuity.py`][legacy-sync] | `SyncContinuityStore` loads a valid v2 or v3 record. | The helper validates the old shape, discards its checkpoint, increments revision once, and lets the store rewrite v4 under lock. |
 | [`src/mindroom/script_runs/legacy_schema.py`][script-legacy-schema] | `ScriptRunStore` finds missing resource snapshot columns. | Schema creation and the transaction stay in the store; old rows receive the established null or empty-map values. |
 | [`src/mindroom/knowledge/legacy_metadata.py`][knowledge-legacy] | Knowledge parsing sees absent or empty optional filter fields. | Current parsing still rejects unknown fields; missing corpus settings retain empty historical sentinels and rebuild only when the corresponding current corpus-compatibility value differs. |
@@ -67,6 +68,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`legacy_handled_turns.py`][legacy-handled] and [`event_journal/legacy_turn_records.py`][legacy-turn-records] | [Handled-turn tests][handled-turn-tests] cover released JSON shapes, the deliberate unversioned cutoff, interrupted adoption, occupied indexes, reopen behavior, and reconstructed replay facts. |
 | [`event_journal/legacy_schema.py`][journal-legacy-schema] | [Journal upgrade tests][journal-upgrade-tests] start from literal pre-Nio DDL and verify retained history and terminal facts, retired unfinished work, and stable repeat opening. |
 | [`legacy_delivery_payloads.py`][legacy-delivery] and [`legacy_approval_payloads.py`][legacy-approval] | [Journal store][journal-store-tests], [response runner][response-runner-tests], and [approval][approval-tests] tests cover visible-result precedence, wire sanitation, frozen visibility, origin recovery, and sparse card identity. |
+| [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] | [Journal store][journal-store-tests] tests preserve incomplete deletion proof and FINAL debt; [response runner][response-runner-tests] tests recover every approval state only after card expiration, without editing deleted responses or resuming tools. |
 | [`matrix/legacy_sync_continuity.py`][legacy-sync] and [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | [Sync-continuity tests][sync-continuity-tests] cover complete v2/v3 conversion and retry, while [crypto upgrade tests][crypto-upgrade-tests] verify that identity, keys, and trust survive retirement of transport recovery. |
 | [`script_runs/legacy_schema.py`][script-legacy-schema] | [Script-run tests][script-run-tests] rebuild the literal old table, preserve every old value, add empty resource snapshots, and verify a second open. |
 | [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
@@ -105,6 +107,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | J12 | Removed/superseded | [The upgrade fixture][pre-journal-test] confirms old event-cache and dispatch-obligation files have no runtime reader and remain untouched. |
 | J13 | Current behavior | [`event_journal_open.py`][journal-open] owns binding, generation, adoption, and database ownership guards. |
 | J14 | Current behavior | [`sync_restart_retry.py`][restart-retry] and [`visible_response_reconciliation.py`][visible-recovery] keep current replay and visible-response safety. |
+| J15 | Isolated | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] recognizes approvals stranded by historical INITIAL retirement; current owners retain consent, failure handling, and settlement. |
 
 ## Agent state, history, memory, and knowledge
 
@@ -248,6 +251,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
 [legacy-streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_streaming.py
 [legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_approval_payloads.py
+[legacy-approval-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_approval_recovery.py
 [legacy-delivery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_delivery_payloads.py
 [legacy-handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_handled_turns.py
 [legacy-openai]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_openai_tool_replay.py

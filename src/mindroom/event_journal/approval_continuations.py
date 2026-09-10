@@ -13,6 +13,7 @@ from mindroom.legacy_approval_payloads import resolve_legacy_visibility
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import journal, membership_state, outbox
+from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -378,13 +379,25 @@ def create(
     """Create one paused-run owner only while all of its sources remain pending."""
     if not continuation.source_event_ids:
         return None
+    # Admission and approval creation must agree which owner receives a
+    # concurrent source redaction, on PostgreSQL as well as SQLite.
+    if membership_state.claim_active_membership_epoch(transaction, principal_id, room_id=continuation.room_id) is None:
+        return None
+    initial = outbox.load(
+        transaction,
+        principal_id,
+        delivery_id=continuation.source_event_ids[0],
+        stage=DeliveryStage.INITIAL,
+    )
+    if initial is not None and initial.retired:
+        return None
     for event_id in continuation.source_event_ids:
         row = transaction.fetchone(
             """
             SELECT 1 AS present FROM journal_events
-            WHERE principal_id = ? AND event_id = ? AND state = 'pending'
+            WHERE principal_id = ? AND event_id = ? AND room_id = ? AND state = 'pending'
             """,
-            (principal_id, event_id),
+            (principal_id, event_id, continuation.room_id),
         )
         if row is None:
             return None
@@ -725,7 +738,7 @@ def finish(
     *,
     approval_id: str,
 ) -> bool:
-    """Release sources after the continuation's FINAL reaches a terminal outcome."""
+    """Release sources after terminal FINAL delivery or proven failed-response deletion."""
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return False
@@ -737,7 +750,7 @@ def finish(
         """,
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
     )
-    if delivered is None:
+    if delivered is None and not deleted_delivery_is_terminal(transaction, principal_id, continuation):
         return False
     journal.settle_many(transaction, principal_id, continuation.source_event_ids)
     transaction.execute(

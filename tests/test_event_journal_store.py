@@ -6364,6 +6364,155 @@ class TestApprovalContinuations:
         assert await alice.approval_continuation_for_source("$source-1") == continuation
         assert await alice.approval_continuation_for_source("$source-2") == continuation
 
+    @pytest.mark.parametrize("state", ["waiting", "ready", "claimed", "failing"])
+    async def test_deleted_source_cleanup_preserves_approval_owner(self, alice: PrincipalStore, state: str) -> None:
+        """Deleting source text cannot steal the response owned by an approval."""
+        await self.admit_sources(alice)
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$source-1",
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("Waiting for approval"),
+        )
+        await alice.create_approval_continuation(self.continuation(state=state))
+        for index in (1, 2):
+            await admit(alice, f"$redact-{index}", redacts=f"$source-{index}", kind=EventKind.REDACTION)
+
+        assert await alice.deleted_initial_deliveries(agent_name="agent") == ()
+        with pytest.raises(RuntimeError, match="approval"):
+            await alice.retire_deleted_initial(delivery_id="$source-1")
+        assert await alice.is_pending("$source-1")
+        initial = await alice.load_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.INITIAL)
+        assert initial is not None
+        assert not initial.retired
+
+    async def test_approval_cannot_acquire_retired_initial(self, alice: PrincipalStore) -> None:
+        """A response already retired by deletion cannot acquire a new paused run."""
+        await self.admit_sources(alice)
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$source-1",
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("Waiting"),
+        )
+        await alice.retire_deleted_initial(delivery_id="$source-1")
+
+        assert await alice.create_approval_continuation(self.continuation()) is None
+
+    @pytest.mark.parametrize("approval_first", [True, False])
+    async def test_approval_creation_serializes_with_source_redaction(
+        self,
+        rival_stores: RivalStores,
+        *,
+        approval_first: bool,
+    ) -> None:
+        """Neither admission order can create an approval owning a settled source."""
+        principal = rival_stores.first.principal("agent@alice")
+        await self.admit_sources(principal)
+        reached, release, racer_finished = threading.Event(), threading.Event(), threading.Event()
+
+        def pause() -> None:
+            reached.set()
+            assert release.wait(_WORKER_WAIT_SECONDS)
+
+        holding = EventJournalStore(
+            backend=_PausingBackend(
+                rival_stores.first.backend,
+                pause,
+                statement_matches=lambda sql: (
+                    "SELECT 1 AS present FROM journal_events" in sql
+                    if approval_first
+                    else "UPDATE journal_events" in sql and "NOT EXISTS" in sql
+                ),
+            ),
+        ).principal("agent@alice")
+        racing = rival_stores.second.principal("agent@alice")
+
+        async def redact(store: PrincipalStore) -> None:
+            await admit(store, "$redact", redacts="$source-1", kind=EventKind.REDACTION)
+
+        first = asyncio.create_task(
+            holding.create_approval_continuation(self.continuation()) if approval_first else redact(holding),
+        )
+        try:
+            await asyncio.to_thread(reached.wait, _WORKER_WAIT_SECONDS)
+            assert reached.is_set()
+            second = asyncio.create_task(
+                redact(racing) if approval_first else racing.create_approval_continuation(self.continuation()),
+            )
+            second.add_done_callback(lambda _: racer_finished.set())
+            await asyncio.to_thread(
+                _watch_until_queued_or_finished,
+                rival_stores.database_url,
+                rival_stores.racer_application_name,
+                racer_finished,
+            )
+        finally:
+            release.set()
+        await asyncio.gather(first, second)
+
+        assert (await principal.approval_continuation("approval-1") is not None) is approval_first
+        assert await principal.is_pending("$source-1") is approval_first
+
+    @pytest.mark.parametrize(
+        "proof",
+        ["complete", "source_only", "partial_sources", "active_initial", "wrong_response", "owed_final", "ready"],
+    )
+    async def test_deleted_approval_failure_settles_only_proven_terminal_delivery(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+        proof: str,
+    ) -> None:
+        """Recover an already-retired approval without discarding live delivery debt."""
+        await self.admit_sources(alice)
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$source-1",
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id="$thread",
+            payload=text("Waiting"),
+        )
+        await alice.claim_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.INITIAL)
+        await alice.acknowledge_matrix_delivery(
+            delivery_id="$source-1",
+            stage=DeliveryStage.INITIAL,
+            event_id="$different" if proof == "wrong_response" else "$waiting",
+            delivered_projections=(),
+        )
+        await alice.create_approval_continuation(self.continuation(state="ready" if proof == "ready" else "failing"))
+        if proof == "owed_final":
+            await alice.enqueue_matrix_delivery(
+                delivery_id="$source-1",
+                stage=DeliveryStage.FINAL,
+                room_id=ROOM,
+                thread_id="$thread",
+                payload=text("Frozen final"),
+            )
+        if proof != "active_initial":
+            # Reproduce persisted state created before approval-aware cleanup.
+            await journal_store.backend.write(
+                lambda tx: tx.execute(
+                    "UPDATE matrix_delivery_outbox SET retired = 1 WHERE delivery_id = ? AND stage = 'initial'",
+                    ("$source-1",),
+                ),
+            )
+        deleted = ["$source-1"]
+        if proof != "partial_sources":
+            deleted.append("$source-2")
+        if proof != "source_only":
+            deleted.append("$waiting")
+        for index, event_id in enumerate(deleted):
+            await admit(alice, f"$redact-{index}", redacts=event_id, kind=EventKind.REDACTION)
+
+        finished = await alice.finish_approval_continuation("approval-1")
+
+        assert finished is (proof == "complete")
+        assert await alice.is_pending("$source-1") is not finished
+        assert (await alice.approval_continuation("approval-1") is None) is finished
+
     async def test_continuation_round_trips_committed_presentation_and_visibility(
         self,
         alice: PrincipalStore,

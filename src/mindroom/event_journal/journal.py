@@ -805,7 +805,7 @@ def admit(
     into the raw-event cache this design exists to remove, at roughly half a
     kilobyte for every message the bot has ever seen.
     """
-    epoch = current_membership_epoch(transaction, principal_id, event.room_id)
+    epoch = _claim_membership_state(transaction, principal_id, event.room_id).membership_epoch
     actionable = event.event_class is EventClass.ACTIONABLE
     row = transaction.fetchone(
         """
