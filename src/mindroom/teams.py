@@ -2882,8 +2882,11 @@ async def team_response(  # noqa: C901, PLR0915
                     metadata=run_metadata,
                 ),
             ):
+                prepared_input = list(current_run_input)
+                if pipeline_timing is not None:
+                    pipeline_timing.mark_model_request()
                 return await team.arun(
-                    list(current_run_input),
+                    prepared_input,
                     session_id=ctx.session_id,
                     run_id=current_run_id,
                     user_id=user_id,
@@ -3102,6 +3105,7 @@ async def _team_response_stream_raw(
     session_id: str | None = None,
     run_id: str | None = None,
     user_id: str | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncIterator[Any]:
     """Yield raw team events (for structured live rendering). Falls back to a final response.
 
@@ -3126,8 +3130,11 @@ async def _team_response_stream_raw(
         logger.debug("team_member", agent=agent.name)
 
     try:
+        prepared_input = ai_runtime.copy_run_input(prompt)
+        if pipeline_timing is not None:
+            pipeline_timing.mark_model_request()
         return team.arun(
-            ai_runtime.copy_run_input(prompt),
+            prepared_input,
             stream=True,
             stream_events=True,
             session_id=session_id,
@@ -3392,6 +3399,13 @@ async def team_response_stream(  # noqa: C901, PLR0915
         usage = _TeamStreamUsage()
 
         ai_runtime.note_attempt_run_id(run_id_callback, attempt_run_id)
+        request_context = _team_request_log_context(
+            ctx,
+            team_name=configured_team_name or team_label,
+            prompt=continuation_state.active_prompt,
+            run_input=attempt_run_input,
+            metadata=run_metadata,
+        )
 
         raw_stream = await ai_runtime.run_attempt_with_model(
             attempt_model_runtime,
@@ -3404,6 +3418,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 session_id=ctx.session_id,
                 run_id=attempt_run_id,
                 user_id=user_id,
+                pipeline_timing=pipeline_timing,
             ),
         )
         raw_stream = ai_runtime.stream_attempt_with_model(
@@ -3414,13 +3429,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
         raw_stream = _capture_stream_interrupt(
             stream_with_llm_request_log_context(
                 cast("AsyncGenerator[Any, None]", raw_stream),
-                request_context=_team_request_log_context(
-                    ctx,
-                    team_name=configured_team_name or team_label,
-                    prompt=continuation_state.active_prompt,
-                    run_input=attempt_run_input,
-                    metadata=run_metadata,
-                ),
+                request_context=request_context,
             ),
         )
         bound_team_id = run.scope_context.scope.scope_id if run.scope_context is not None else team.id or ""
