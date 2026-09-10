@@ -88,8 +88,10 @@ Callback and room-read failures pause only that room with exponential retry dela
 Revisiting an eligible receipt at or before the room's latest admitted receipt also starts a cooldown, preventing immediate downstream handoffs from trapping recovery in a retry loop.
 This receipt marker survives bounded page passes and resets when the cooldown ends, using constant memory per room.
 Successful progress past the failed receipt resets that room's retry delay.
-Downstream handoffs retain live ownership, while lost owners rewind the room's query before later callbacks run.
+Room admission and retry history remain alive while downstream responses own unsettled sources, including after the room lane exits.
 Retry handoffs carry their room ID and invalidate that room's current page synchronously, without waiting for a source lookup or affecting another room's progress.
+Fallback liveness checks rotate through a bounded batch; the periodic sweep yields between batches so a large backlog does not multiply probes for every callback or delay the next sweep by a full period per batch.
+Silent owner loss invalidates room admission when the fallback detects it, through the same room wake used by explicit completion notifications.
 Shutdown cancels lane and retry owners without settling unfinished work, which remains available for startup recovery.
 Visible response paths persist `TurnStore` truth, while pure policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity settle their journal events directly instead of recording a turn.
 This keeps ignored high-volume traffic out of the handled-turn ledger without weakening exact callback de-duplication.

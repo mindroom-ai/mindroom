@@ -800,6 +800,16 @@ def _obligation_runner(
     )
 
 
+async def _settle_dispatcher(harness: _Harness, dispatcher: JournalDispatcher) -> None:
+    """Drive test-owned response tasks and honor retry cooldowns until journal settlement."""
+    async with asyncio.timeout(5):
+        while await dispatcher.store.unsettled_event_ids():
+            await dispatcher.drain_once()
+            await harness.gate.drain_all()
+            await harness.runner.settle_inbox_responses()
+            await asyncio.sleep(0.01)
+
+
 def _router_relay_event(
     config: Config,
     *,
@@ -4528,7 +4538,7 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
         await harness.gate.drain_all()
         await harness.runner.settle_inbox_responses()
         assert attempted == ["$first", "$first", "$second"]
-        await dispatcher.drain_once()
+        await _settle_dispatcher(harness, dispatcher)
     finally:
         await dispatcher.stop()
     assert [request.prompt for request in harness.runner.requests] == (
@@ -4626,9 +4636,7 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
             assert before["ledger_exists"] is False
             assert before["retry_requests"] == [(event.event_id,)]
             await memberships.refresh(config, runtime_paths_for(config), client)
-        await dispatcher.drain_once()
-        await harness.gate.drain_all()
-        await harness.runner.settle_inbox_responses()
+        await _settle_dispatcher(harness, dispatcher)
         after_count = len(harness.runner.requests)
         await dispatcher.drain_once()
         await harness.gate.drain_all()

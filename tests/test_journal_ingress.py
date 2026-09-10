@@ -1336,20 +1336,22 @@ class TestPendingEventWorker:
         assert handled == ["$first"]
         assert {event.event_id for event in await alice.pending()} == {"$first", "$second"}
 
-    async def test_owner_lost_within_one_page_rewinds_before_later_callback(
+    async def test_owner_completion_within_one_page_rewinds_before_later_callback(
         self,
         alice: PrincipalStore,
         retry_sleeps: list[tuple[float, asyncio.Event]],
     ) -> None:
-        """An earlier handoff can die while the same page checks its next source."""
+        """An earlier owner returns its source while the page checks its next source."""
         owner_live = True
         handled: list[str] = []
 
         class OwnerLostDuringRead(_FlakyReplayView):
             async def is_pending(self, event_id: str) -> bool:
                 nonlocal owner_live
-                if event_id == "$later":
+                if event_id == "$later" and owner_live:
                     owner_live = False
+                    worker.release(("$earlier",))
+                    worker.wake(room_id=ROOM)
                 return await super().is_pending(event_id)
 
         async def handle(event: JournalEvent) -> bool:
@@ -1851,6 +1853,7 @@ class TestPendingEventWorker:
     async def test_a_deferral_whose_owner_died_is_dispatched_again(
         self,
         alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
     ) -> None:
         """The hole this closes: durable work owed to an owner that is gone.
 
@@ -1877,8 +1880,12 @@ class TestPendingEventWorker:
 
         owner_alive = False
         await worker.drain_once()
-
-        assert attempts == ["$m", "$m"]
+        worker.start()
+        try:
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: attempts == ["$m", "$m"])
+        finally:
+            await worker.stop()
 
     async def test_a_reclaimed_deferral_does_not_jump_ahead_of_an_earlier_event(
         self,
@@ -1903,7 +1910,7 @@ class TestPendingEventWorker:
         # A lost owner requests replay; the room query determines its order.
         late = await alice.load_event("$late")
         assert late is not None
-        worker._deferred["$late"] = late
+        worker._defer(late)
 
         owner_alive = False
         await worker.drain_once()
@@ -2000,6 +2007,175 @@ async def _dispatch_worker_pass(worker: PendingEventWorker) -> None:
 class TestRoomRetryBackoff:
     """Only a room's own successful work resets its bounded retry delay."""
 
+    async def test_worker_restart_retains_a_live_downstream_handoff(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Restarting discovery does not duplicate a response or lose its release bookkeeping."""
+        owner_live = True
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            return not owner_live
+
+        await TestPendingEventWorker._admit(alice, text_event("$source"))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: owner_live)
+        worker.start()
+        try:
+            await _eventually(lambda: "$source" in worker._deferred and not worker._lanes)
+            await worker.stop()
+            worker.start()
+            await worker.drain_once()
+            assert attempts == ["$source"]
+            owner_live = False
+            worker.release(("$source",))
+            worker.wake(room_id=ROOM)
+            await _eventually_async(alice.pending)
+            assert attempts == ["$source", "$source"]
+        finally:
+            await worker.stop()
+
+    async def test_terminal_release_cleans_up_an_idle_rooms_ownership(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A terminal-only release needs no later admission to discard room history."""
+        await TestPendingEventWorker._admit(alice, text_event("$source"))
+
+        async def handle(_event: JournalEvent) -> bool:
+            return False
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        try:
+            await _eventually(lambda: "$source" in worker._deferred and not worker._lanes)
+            await alice.settle("$source")
+            worker.release(("$source",))
+            await _eventually(lambda: ROOM not in worker._rooms)
+            assert not worker._deferred
+        finally:
+            await worker.stop()
+
+    async def test_fallback_sweep_reaches_owners_beyond_one_probe_batch(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A quiet backlog is swept in yielding batches without waiting extra periods."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
+        attempts: list[str] = []
+        lost: set[str] = set()
+        sources = [f"$source-{index}" for index in range(5)]
+        block_discovery = False
+        discovery_blocked = asyncio.Event()
+        release_discovery = asyncio.Event()
+
+        class SlowDiscovery(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                room_id: str | None = None,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                if room_id is None and block_discovery:
+                    discovery_blocked.set()
+                    await release_discovery.wait()
+                return await super().pending(
+                    limit=limit,
+                    room_id=room_id,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            return event.event_id in lost
+
+        for event_id in sources:
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(
+            store=SlowDiscovery(alice),
+            handle=handle,
+            deferral_is_live=lambda event: event.event_id not in lost,
+            deferral_scan_seconds=0.01,
+        )
+        worker.start()
+        try:
+            await _eventually(lambda: len(worker._deferred) == len(sources))
+            block_discovery = True
+            worker.wake()
+            await asyncio.wait_for(discovery_blocked.wait(), timeout=5)
+            lost.add(sources[-1])
+            await _eventually(lambda: attempts.count(sources[-1]) == 2, seconds=5)
+            assert attempts == [*sources, sources[-1]]
+        finally:
+            release_discovery.set()
+            await worker.stop()
+
+    async def test_owner_failure_after_lane_completion_keeps_exponential_cooldown(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A detached response owns retry history after its admission lane exits."""
+        attempts: list[str] = []
+        owner_live = False
+
+        async def handle(event: JournalEvent) -> bool:
+            nonlocal owner_live
+            attempts.append(event.event_id)
+            owner_live = True
+            return False
+
+        await TestPendingEventWorker._admit(alice, text_event("$source"))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: owner_live)
+        worker.start()
+        try:
+            for index, delay in enumerate((1, 2, 4)):
+                await _eventually(lambda index=index: len(attempts) == index + 1 and not worker._lanes)
+                owner_live = False
+                worker.release(("$source",))
+                worker.wake(room_id=ROOM)
+                await _eventually(lambda index=index: len(retry_sleeps) > index or len(attempts) > index + 1)
+                assert len(attempts) == index + 1
+                assert retry_sleeps[index][0] == delay
+                retry_sleeps[index][1].set()
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("count", [128, 256])
+    async def test_bulk_handoffs_require_only_linear_owner_probes(
+        self,
+        alice: PrincipalStore,
+        count: int,
+    ) -> None:
+        """Each admission must not rescan all previously handed-off sources."""
+        probes = 0
+        handled: list[str] = []
+
+        def owner_is_live(_event: JournalEvent) -> bool:
+            nonlocal probes
+            probes += 1
+            return True
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return False
+
+        sources = [f"$source-{index}" for index in range(count)]
+        for event_id in sources:
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=owner_is_live)
+        try:
+            await worker.drain_once()
+            assert handled == sources
+            assert probes <= count * 2
+        finally:
+            await worker.stop()
+
     async def test_alternating_failed_owners_cannot_keep_a_drain_running(
         self,
         alice: PrincipalStore,
@@ -2013,6 +2189,9 @@ class TestRoomRetryBackoff:
 
         async def handle(event: JournalEvent) -> bool:
             attempts.append(event.event_id)
+            if live:
+                worker.release(tuple(live))
+                worker.wake(room_id=event.room_id)
             live.clear()
             live.add(event.event_id)
             return False
@@ -2502,6 +2681,8 @@ class TestRoomRetryBackoff:
             await _dispatch_worker_pass(worker)
             await _dispatch_worker_pass(worker)
             owner_live = False
+            worker.release(("$earlier",))
+            worker.wake(room_id=ROOM)
             for _ in range(cooldown_passes):
                 await _dispatch_worker_pass(worker)
             retry_sleeps[0][1].set()
@@ -2611,6 +2792,9 @@ class TestRoomRetryBackoff:
             await _eventually(lambda: len(retry_sleeps) == 1)
             assert attempts == ["$earlier", "$failed"]
             owner_live = owner_dies_during_scan
+            if not owner_live:
+                worker.release(("$earlier",))
+                worker.wake(room_id=ROOM)
             block_next_room_page = True
             worker.start()
             retry_sleeps[0][1].set()
@@ -2618,6 +2802,9 @@ class TestRoomRetryBackoff:
             assert blocked_event_ids == ["$failed" if owner_dies_during_scan else "$earlier"]
             assert attempts == ["$earlier", "$failed"]
             owner_live = False
+            if owner_dies_during_scan:
+                worker.release(("$earlier",))
+                worker.wake(room_id=ROOM)
             release_page.set()
             await _eventually_async(alice.pending)
             assert attempts == ["$earlier", "$failed", "$earlier", "$failed", "$later", "$last"]
@@ -3231,7 +3418,7 @@ class TestABoundedScanIsFair:
             return True
 
         worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: False)
-        worker._deferred[admitted[0].event_id] = admitted[0]
+        worker._defer(admitted[0])
         worker._scan_cursor = admitted[0].receipt_order
         worker.start()
         try:
@@ -3601,6 +3788,7 @@ class TestRecoveryDoesNotReenterALiveTurn:
     async def test_a_deferred_source_is_still_taken_back_when_its_owner_dies(
         self,
         alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
     ) -> None:
         """Skipping an owned source may not become losing an abandoned one.
 
@@ -3624,8 +3812,12 @@ class TestRecoveryDoesNotReenterALiveTurn:
 
         live_claims.clear()
         await dispatcher.drain_once()
-
-        assert entered == ["$m", "$m"]
+        dispatcher.start()
+        try:
+            retry_sleeps[0][1].set()
+            await _eventually(lambda: entered == ["$m", "$m"])
+        finally:
+            await dispatcher.stop()
 
 
 async def _eventually_async(query: Callable[[], Awaitable[Sized]], *, seconds: float = 10.0) -> None:

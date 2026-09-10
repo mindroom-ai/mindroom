@@ -761,6 +761,14 @@ class TestAgentBot(AgentBotTestBase):
 
             await bot._journal_dispatcher.drain_once()
             await bot._response_runner.drain_inbox_responses()
+            bot._journal_dispatcher.start()
+            try:
+                async with asyncio.timeout(5):
+                    # Journal settlement has no event signal to await.
+                    while event.event_id in await bot._journal_dispatcher.unsettled_event_ids():  # noqa: ASYNC110
+                        await asyncio.sleep(0.01)
+            finally:
+                await bot._journal_dispatcher.stop()
 
         assert event.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
         assert execute.await_count == 2
@@ -1442,7 +1450,7 @@ class TestAgentBot(AgentBotTestBase):
                 assert bot._response_runner.has_live_inbox_response("$coalesced")
                 deferred = await store.load_event("$source")
                 assert deferred is not None
-                bot._journal_dispatcher._worker._deferred[deferred.event_id] = deferred
+                bot._journal_dispatcher._worker._defer(deferred)
                 assert bot._journal_dispatcher._deferral_is_live(deferred)
                 assert await bot._journal_dispatcher._worker.drain_once() == 0
                 assert bot._journal_dispatcher._worker._deferred[deferred.event_id] == deferred

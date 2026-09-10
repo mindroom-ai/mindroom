@@ -8,6 +8,7 @@ Each room keeps its own page position across bounded passes and cooldowns.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -45,6 +46,7 @@ class _RoomProgress:
     cursor: int | None = None
     rewind_before: int | None = None
     admitted_through: int = 0
+    deferred_count: int = 0
 
 
 @dataclass
@@ -78,7 +80,7 @@ class PendingEventWorker:
     _rooms: dict[str, _RoomProgress] = field(default_factory=dict, init=False, repr=False)
     _ready_rooms: set[str] = field(default_factory=set, init=False, repr=False)
     _room_retries: dict[str, _RoomRetry] = field(default_factory=dict, init=False, repr=False)
-    _deferred: dict[str, JournalEvent] = field(default_factory=dict, init=False, repr=False)
+    _deferred: OrderedDict[str, JournalEvent] = field(default_factory=OrderedDict, init=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _pump: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _retry: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
@@ -116,7 +118,16 @@ class PendingEventWorker:
         even after an approval source has left this cache.
         """
         for event_id in event_ids:
-            self._deferred.pop(event_id, None)
+            event = self._deferred.pop(event_id, None)
+            if event is not None:
+                self._rooms[event.room_id].deferred_count -= 1
+                self._queue_room(event.room_id)
+                self._wake.set()
+
+    def _defer(self, event: JournalEvent) -> None:
+        if event.event_id not in self._deferred:
+            self._rooms.setdefault(event.room_id, _RoomProgress()).deferred_count += 1
+        self._deferred[event.event_id] = event
 
     def _owned_tasks(self) -> tuple[asyncio.Task[object], ...]:
         return tuple(
@@ -167,7 +178,11 @@ class PendingEventWorker:
         self._retry = None
         self._deferral_scan = None
         self._lanes.clear()
-        self._rooms.clear()
+        self._rooms = {
+            room_id: _RoomProgress(deferred_count=progress.deferred_count)
+            for room_id, progress in self._rooms.items()
+            if progress.deferred_count
+        }
         self._ready_rooms.clear()
         self._room_retries.clear()
         self._scan_cursor = None
@@ -186,10 +201,12 @@ class PendingEventWorker:
         self._ready_rooms.add(room_id)
 
     def _queue_lost_owners(self) -> None:
-        """Probe globally, but leave reclamation to the room's reserved owner."""
-        for event in tuple(self._deferred.values()):
+        """Rotate a bounded fallback probe; detected loss invalidates room admission."""
+        for _ in range(min(_BATCH_SIZE, len(self._deferred))):
+            event_id, event = self._deferred.popitem(last=False)
+            self._deferred[event_id] = event
             if not self.deferral_is_live(event):
-                self._queue_room(event.room_id)
+                self._reclaim_deferral(event)
 
     async def _discover_rooms(self, *, whole_backlog: bool = False) -> tuple[set[str], bool]:
         """Find rooms without passing global scan slices to their lanes."""
@@ -315,12 +332,14 @@ class PendingEventWorker:
         if self._stopped or lane.cancelled():
             return
         outcome = lane.result()
+        if not outcome.failed and not outcome.more and self._rooms[room_id].deferred_count == 0:
+            self._record_room_progress(room_id, None)
         if outcome.more:
             self._ready_rooms.add(room_id)
         if room_id in self._ready_rooms:
             if self._pump is not None and not self._pump.done():
                 self._start_lane(room_id)
-        elif room_id not in self._room_retries:
+        elif room_id not in self._room_retries and self._rooms[room_id].deferred_count == 0:
             # An exhausted room starts a fresh scan on its next admission.
             self._rooms.pop(room_id, None)
         self._schedule_deferral_scan()
@@ -365,22 +384,16 @@ class PendingEventWorker:
         ):
             del self._room_retries[room_id]
 
-    def _reclaim_room_deferrals(self, room_id: str) -> None:
-        """Only the reserved lane can replace a dead owner with room replay."""
-        progress = self._rooms[room_id]
-        for event in tuple(self._deferred.values()):
-            if event.room_id != room_id or self.deferral_is_live(event):
-                continue
-            rewind = event.receipt_order - 1
-            previous = progress.rewind_before
-            progress.rewind_before = rewind if previous is None else min(previous, rewind)
-            self._deferred.pop(event.event_id, None)
-            logger.warning(
-                "pending_event_deferral_owner_lost",
-                event_id=event.event_id,
-                kind=event.kind.value,
-                room_id=room_id,
-            )
+    def _reclaim_deferral(self, event: JournalEvent) -> None:
+        """Return one lost handoff through the same room boundary as explicit retries."""
+        self.release((event.event_id,))
+        self.wake(room_id=event.room_id)
+        logger.warning(
+            "pending_event_deferral_owner_lost",
+            event_id=event.event_id,
+            kind=event.kind.value,
+            room_id=event.room_id,
+        )
 
     @staticmethod
     def _apply_rewind(progress: _RoomProgress) -> bool:
@@ -398,7 +411,6 @@ class PendingEventWorker:
         """Admit against current ownership; False stops the current page."""
         room_id = event.room_id
         progress = self._rooms[room_id]
-        self._reclaim_room_deferrals(room_id)
         if self._stopped or self._apply_rewind(progress):
             return False
         if event.event_id in self._deferred:
@@ -408,11 +420,10 @@ class PendingEventWorker:
         pending = await self.store.is_pending(event.event_id)
         if self._stopped:
             return False
-        self._reclaim_room_deferrals(room_id)
         if self._apply_rewind(progress):
             return False
         if not pending:
-            self._deferred.pop(event.event_id, None)
+            self.release((event.event_id,))
         else:
             if event.receipt_order <= progress.admitted_through:
                 # A rewind revisits eligible work. Pace the next traversal even
@@ -422,9 +433,11 @@ class PendingEventWorker:
             seen.add(event.event_id)
             progress.admitted_through = event.receipt_order
             if not await self.handle(event):
-                self._deferred[event.event_id] = event
+                self._defer(event)
+                if not self.deferral_is_live(event):
+                    self._reclaim_deferral(event)
             else:
-                self._deferred.pop(event.event_id, None)
+                self.release((event.event_id,))
                 await self.store.settle(event.event_id)
                 self._record_room_progress(room_id, event.receipt_order)
         progress.cursor = event.receipt_order
@@ -438,7 +451,6 @@ class PendingEventWorker:
         try:
             for _ in range(_MAX_SCAN_PAGES):
                 event = None
-                self._reclaim_room_deferrals(room_id)
                 self._apply_rewind(progress)
                 page = await self.store.pending(
                     room_id=room_id,
@@ -448,7 +460,6 @@ class PendingEventWorker:
                 )
                 if self._stopped:
                     return _RoomPass(len(seen))
-                self._reclaim_room_deferrals(room_id)
                 if self._apply_rewind(progress):
                     continue
                 for event in page:
@@ -456,12 +467,10 @@ class PendingEventWorker:
                         failed = self._room_is_backing_off(room_id)
                         return _RoomPass(len(seen), more=not self._stopped and not failed, failed=failed)
                 progress.cursor = page.resume_after
-                self._reclaim_room_deferrals(room_id)
                 if self._apply_rewind(progress):
                     continue
                 if page.reached_end:
                     progress.cursor = None
-                    self._record_room_progress(room_id, None)
                     return _RoomPass(len(seen))
             return _RoomPass(len(seen), more=True)
         except Exception:
@@ -472,7 +481,7 @@ class PendingEventWorker:
                 kind=None if event is None else event.kind.value,
             )
             if event is not None:
-                self._deferred.pop(event.event_id, None)
+                self.release((event.event_id,))
                 progress.cursor = event.receipt_order - 1
             self._schedule_room_retry(room_id, event)
             return _RoomPass(len(seen), failed=True)
@@ -487,6 +496,9 @@ class PendingEventWorker:
 
     async def _scan_after_deferral_delay(self) -> None:
         await asyncio.sleep(self.deferral_scan_seconds)
+        for _ in range(0, len(self._deferred), _BATCH_SIZE):
+            self._queue_lost_owners()
+            await asyncio.sleep(0)
         self._wake.set()
 
     def _schedule_retry(self) -> None:

@@ -1476,6 +1476,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
 
     runner.deps.resolver.fetch_thread_history = AsyncMock(side_effect=history)
     tasks = []
+    response_started = asyncio.Event()
 
     async def callback(callback_room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
         dispatch = PreparedDispatch(
@@ -1510,6 +1511,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             room_id=callback_room.room_id,
         )
         tasks.append(task)
+        response_started.set()
         return TurnDispatchOutcome.DEFERRED
 
     dispatcher = _dispatcher(principal, callback)
@@ -1561,8 +1563,14 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             assert await principal.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL) is None
             assert store.get_turn_record(SOURCE).response_event_id == INITIAL
             assert model_requests == []
+            response_started.clear()
             await dispatcher.drain_once()
-            await tasks[-1]
+            dispatcher.start()
+            try:
+                await asyncio.wait_for(response_started.wait(), timeout=5)
+                await tasks[-1]
+            finally:
+                await dispatcher.stop()
             assert len(model_requests) == 1
             assert "PRIVATE_CONTEXT_TO_DELETE" not in str(model_requests)
             assert visible == {INITIAL: "survivor answer"}
