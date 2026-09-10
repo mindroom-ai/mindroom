@@ -445,7 +445,7 @@ Claude Fable 5.1, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`
 MindRoom also omits those deprecated controls for direct Gemini 3.8 Flash and Gemini 3.5 Flash-Lite requests.
 [GPT-6 Astra does not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters); omit these from authored model options.
 Automatic thread summaries omit their temperature override for GPT-6 Astra, including its OpenRouter route.
-For Mem0 memory extraction, keep the GPT-5.6 Luna default; the current Mem0 request builder does not support Astra's parameter requirements.
+For Mem0 memory extraction with `provider: openai`, use GPT-5.6 Luna; the current Mem0 request builder does not support Astra's parameter requirements.
 
 ## Environment Variables
 
