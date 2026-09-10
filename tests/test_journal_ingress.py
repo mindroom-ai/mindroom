@@ -1336,6 +1336,52 @@ class TestPendingEventWorker:
         assert handled == ["$first"]
         assert {event.event_id for event in await alice.pending()} == {"$first", "$second"}
 
+    @pytest.mark.parametrize("boundary", ["handler", "pending_check"])
+    async def test_shutdown_stops_admission_after_cancellation_is_absorbed(
+        self,
+        alice: PrincipalStore,
+        boundary: str,
+    ) -> None:
+        """Cleanup may finish, but no later callback may enter a stopped worker."""
+        entered = asyncio.Event()
+        handled: list[str] = []
+        stopping = True
+
+        async def finish_on_cancel() -> None:
+            entered.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+
+        class FinishingRead(_FlakyReplayView):
+            async def is_pending(self, event_id: str) -> bool:
+                if stopping and boundary == "pending_check" and event_id == "$head":
+                    await finish_on_cancel()
+                return await super().is_pending(event_id)
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            if stopping and boundary == "handler" and event.event_id == "$head":
+                await finish_on_cancel()
+            return True
+
+        for event_id in ("$head", "$tail"):
+            await self._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=FinishingRead(alice), handle=handle)
+        worker.start()
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            await asyncio.wait_for(worker.stop(), timeout=5)
+            assert handled == (["$head"] if boundary == "handler" else [])
+            assert await alice.unsettled_event_ids() == (
+                frozenset({"$tail"}) if boundary == "handler" else frozenset({"$head", "$tail"})
+            )
+            stopping = False
+            worker.start()
+            await _eventually_async(alice.pending)
+            assert handled == ["$head", "$tail"]
+        finally:
+            await worker.stop()
+
     async def test_a_recovery_drain_runs_a_room_through_its_lane_not_beside_it(
         self,
         alice: PrincipalStore,

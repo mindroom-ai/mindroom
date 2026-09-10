@@ -399,7 +399,9 @@ class PendingEventWorker:
         return True
 
     async def _run_room_event(self, event: JournalEvent, seen: set[str]) -> bool:
-        """Admit against current ownership; False requires a fresh room page."""
+        """Admit against current ownership; False stops the current page."""
+        if self._stopped:
+            return False
         room_id = event.room_id
         progress = self._rooms[room_id]
         self._reclaim_room_deferrals(room_id, seen)
@@ -411,6 +413,8 @@ class PendingEventWorker:
         self._record_room_progress(room_id, event.receipt_order - 1)
         seen.add(event.event_id)
         pending = await self.store.is_pending(event.event_id)
+        if self._stopped:
+            return False
         self._reclaim_room_deferrals(room_id, seen)
         if self._apply_rewind(progress):
             return False
@@ -448,7 +452,7 @@ class PendingEventWorker:
                     continue
                 for event in page:
                     if not await self._run_room_event(event, seen):
-                        return _RoomPass(len(seen), more=True)
+                        return _RoomPass(len(seen), more=not self._stopped)
                 progress.cursor = page.resume_after
                 self._reclaim_room_deferrals(room_id, seen)
                 if self._apply_rewind(progress):
