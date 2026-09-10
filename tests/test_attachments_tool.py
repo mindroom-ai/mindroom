@@ -232,6 +232,8 @@ async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
         ("recording.mp3", b"ID3 audio bytes", "audios", "audio/mpeg"),
         ("document.pdf", b"%PDF-1.4 document bytes", "files", "application/pdf"),
         ("notes.txt", b"Read these notes", "files", "text/plain"),
+        ("archive.zip", b"PK archive bytes", "files", "application/zip"),
+        ("email.eml", b"Subject: Notes\n\nRead these notes", "files", "message/rfc822"),
         ("clip.mp4", b"video bytes", "videos", "video/mp4"),
     ],
 )
@@ -262,7 +264,7 @@ async def test_get_attachment_view_returns_other_media(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("filename", "data"), [("empty.pdf", b""), ("archive.zip", b"PK archive bytes")])
+@pytest.mark.parametrize(("filename", "data"), [("empty.pdf", b""), ("archive.tar", b"tar archive bytes")])
 async def test_get_attachment_view_rejects_unusable_documents(tmp_path: Path, filename: str, data: bytes) -> None:
     """Empty and unsupported documents give a recoverable tool error, not an exception."""
     (tmp_path / filename).write_bytes(data)

@@ -155,6 +155,14 @@ MindRoom stores data in the `mindroom_data` directory by default:
 
 Keep `tracking/` on persistent storage and include it in backups.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
+
+Before opening an owned agent or team session database, MindRoom checks whether its session table contains the columns required by the installed Agno version.
+If required session columns are missing, MindRoom renames the complete `sessions/` directory to a unique sibling `sessions.incompatible-<id>/`, preserving the database and SQLite sidecars, and starts a fresh session store.
+These archives are retained for inspection or manual recovery; include them in backups and remove them only when no longer needed.
+Compatible history stays in place, including older readable run blobs alongside current run rows, extra columns, and stores awaiting lazy table creation.
+This check does not validate existing runs-table schemas or archive databases on permission, locking, I/O, or corruption errors.
+Learning, workspaces, credentials, encryption keys, custom stores, and durable journal state are outside this session recovery boundary.
+
 Dispatch-obligation databases retain one compact terminal row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
 The retained terminal rows have no automatic retention window because deleting them weakens replay deduplication.
 Pending rows temporarily retain the full event replay payload and should represent only actively deferred or retry-owned work, not completed ignore paths.

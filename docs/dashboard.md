@@ -171,6 +171,12 @@ The sync status indicator in the header shows:
 - **Sync Error** - Sync failed
 - **Disconnected** - Lost connection to backend
 
+If another dashboard tab or a server-side edit changes the configuration, saving an older draft can return HTTP 409.
+The dashboard keeps your draft and shows persistent recovery guidance, including in the raw configuration recovery editor.
+Copy any changes you want to keep, refresh the page to load the current configuration, then reapply and save your changes.
+Further save attempts are rejected locally while the conflict remains; editing the draft or refreshing agent policies does not resolve it.
+The dashboard does not automatically reload and retry a full replacement, because that could overwrite another writer's changes.
+
 ### Theme and Responsive Design
 
 Toggle between dark and light themes. The dashboard adapts to desktop and mobile devices.
@@ -292,6 +298,9 @@ Ordinary Matrix transport silence still reaches the watchdog after 120 seconds a
 While Nio commits durable ingestion progress, the watchdog and `/api/health` consume the same monotonic progress snapshot and defer for up to `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` (default 600).
 Both stop deferring when that grace expires or progress stops advancing for their respective silence timeout.
 Successful sync completion refreshes both liveness clocks and clears the ingestion grace window.
+After 90 seconds without sync or durable ingestion progress, `matrix_sync_stall_diagnostics` logs bounded await chains for that agent's sync, ingestion runner, ingestion pump, and delivery recovery tasks, including during first-sync and restarted-sync startup grace.
+Reports repeat at most every 90 seconds and include sync age, time without progress, and ingestion generation without changing watchdog or readiness behavior.
+Snapshots contain at most four tasks and 32 code locations per task, with strings capped at 240 characters; they exclude locals, message content, and source text, and stop at opaque Future or Task await boundaries.
 Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ### Tools & Matrix

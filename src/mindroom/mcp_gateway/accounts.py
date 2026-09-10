@@ -7,6 +7,7 @@ must bound physical storage with the runtime volume quota.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 import uuid
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from mindroom.mcp_gateway.store import GatewayOAuthStore
+
+_EXTERNAL_CLOCK_SKEW_SECONDS = 60
 
 
 class AccountConflictError(Exception):
@@ -36,8 +39,11 @@ def migrate_accounts(connection: sqlite3.Connection) -> None:
         account_id TEXT PRIMARY KEY, user_name TEXT UNIQUE NOT NULL,
         active INTEGER NOT NULL CHECK(active IN (0, 1)),
         created_at REAL NOT NULL, updated_at REAL NOT NULL,
-        profile TEXT NOT NULL DEFAULT '{}'
+        profile TEXT NOT NULL DEFAULT '{}', token_valid_after REAL NOT NULL
     )""")
+    if "token_valid_after" not in {row["name"] for row in connection.execute("PRAGMA table_info(gateway_accounts)")}:
+        connection.execute("ALTER TABLE gateway_accounts ADD COLUMN token_valid_after REAL NOT NULL DEFAULT 0")
+        connection.execute("UPDATE gateway_accounts SET token_valid_after = ?", (time.time(),))
 
 
 def account_is_active(connection: sqlite3.Connection, account_id: str | None) -> bool:
@@ -157,14 +163,30 @@ class GatewayAccounts:
             account_id = str(uuid.uuid4())
             try:
                 connection.execute(
-                    "INSERT INTO gateway_accounts VALUES (?, ?, ?, ?, ?, ?)",
-                    (account_id, clean["userName"], int(clean["active"]), now, now, json.dumps(clean)),
+                    "INSERT INTO gateway_accounts "
+                    "(account_id, user_name, active, created_at, updated_at, profile, token_valid_after) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (account_id, clean["userName"], int(clean["active"]), now, now, json.dumps(clean), now),
                 )
             except sqlite3.IntegrityError as error:
                 raise AccountConflictError from error
             return self._get(connection, account_id)
 
         return await self.store.transact(write)
+
+    async def resolve_external(self, user_name: str, issued_at: float) -> str | None:
+        """Require exact active email and issue time beyond the cutoff plus bounded issuer skew."""
+        if isinstance(issued_at, bool) or not isinstance(issued_at, (int, float)) or not math.isfinite(issued_at):
+            return None
+
+        def read(connection: sqlite3.Connection) -> str | None:
+            row = connection.execute(
+                "SELECT account_id FROM gateway_accounts WHERE user_name = ? AND active = 1 AND token_valid_after < ?",
+                (user_name, issued_at - _EXTERNAL_CLOCK_SKEW_SECONDS),
+            ).fetchone()
+            return row["account_id"] if row else None
+
+        return await self.store.read(read)
 
     @staticmethod
     def _get(connection: sqlite3.Connection, account_id: str) -> dict[str, Any]:
@@ -226,11 +248,23 @@ class GatewayAccounts:
                 clean = _validate_account(transform(dict(old)))
                 if clean == _validate_account(old):
                     continue
+                authority_changed = old["userName"] != clean["userName"] or old["active"] != clean["active"]
+                now = time.time()
                 try:
                     connection.execute(
                         "UPDATE gateway_accounts SET user_name = ?, active = ?, profile = ?, "
-                        "updated_at = MAX(updated_at, ?) WHERE account_id = ?",
-                        (clean["userName"], int(clean["active"]), json.dumps(clean), time.time(), account_id),
+                        "updated_at = MAX(updated_at, ?), "
+                        "token_valid_after = CASE WHEN ? THEN MAX(token_valid_after, ?) ELSE token_valid_after END "
+                        "WHERE account_id = ?",
+                        (
+                            clean["userName"],
+                            int(clean["active"]),
+                            json.dumps(clean),
+                            now,
+                            authority_changed,
+                            now,
+                            account_id,
+                        ),
                     )
                 except sqlite3.IntegrityError as error:
                     raise AccountConflictError from error

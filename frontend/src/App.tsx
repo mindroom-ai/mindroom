@@ -184,7 +184,12 @@ function AppContent() {
   const validationIssues = getConfigValidationIssues(diagnostics);
   const globalDiagnostics = getGlobalConfigDiagnostics(diagnostics);
   const blockingDiagnostic =
-    globalDiagnostics.find((diagnostic) => diagnostic.blocking) ?? null;
+    globalDiagnostics.find(
+      (diagnostic) =>
+        diagnostic.blocking && isAuthDiagnosticMessage(diagnostic.message),
+    ) ??
+    globalDiagnostics.find((diagnostic) => diagnostic.blocking) ??
+    null;
   const showBlockingDiagnosticOverlay = shouldShowBlockingDiagnosticOverlay(
     blockingDiagnostic,
     {
@@ -305,9 +310,12 @@ function AppContent() {
               </p>
             </div>
 
-            {validationIssues.length > 0 ? (
-              <div className="rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-                <p className="font-medium">Current configuration is invalid.</p>
+            <div
+              role="alert"
+              className="rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive"
+            >
+              <p className="font-medium">{blockingDiagnostic.message}</p>
+              {validationIssues.length > 0 && (
                 <ul className="mt-3 list-disc space-y-1 pl-5">
                   {validationIssues.map((issue, index) => (
                     <li key={`${issue.loc.join(".")}-${issue.msg}-${index}`}>
@@ -319,12 +327,8 @@ function AppContent() {
                     </li>
                   ))}
                 </ul>
-              </div>
-            ) : (
-              <div className="rounded-md border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100">
-                {blockingDiagnostic?.message}
-              </div>
-            )}
+              )}
+            </div>
 
             <Textarea
               value={recoveryConfigSource}
@@ -806,8 +810,6 @@ function AppContent() {
             </TabsContent>
           </Tabs>
         </div>
-
-        <Toaster />
       </div>
     </div>
   );
@@ -819,6 +821,7 @@ export default function App() {
       <QueryClientProvider client={queryClient}>
         <ThemeProvider>
           <AppContent />
+          <Toaster />
         </ThemeProvider>
       </QueryClientProvider>
     </BrowserRouter>

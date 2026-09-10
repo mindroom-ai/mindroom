@@ -340,16 +340,6 @@ class CredentialsManager:
     def _credentials_file(self, normalized_service: str) -> Path:
         return self.base_path / f"{normalized_service}_credentials.json"
 
-    @property
-    def credentials_encryption_enabled(self) -> bool:
-        """Return whether this manager encrypts credential payloads."""
-        return self._encryption_key is not None
-
-    @staticmethod
-    def payload_is_encrypted(payload: bytes) -> bool:
-        """Return whether one serialized payload uses MindRoom credential encryption."""
-        return payload.startswith(_ENCRYPTED_CREDENTIALS_MAGIC)
-
     def encode_credentials(self, service: str, credentials: dict[str, Any]) -> bytes:
         """Serialize credentials with the same policy used by the file store."""
         normalized_service = validate_service_name(service)

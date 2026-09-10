@@ -18,6 +18,7 @@ from mindroom.oauth.google_calendar import _GOOGLE_CALENDAR_OAUTH_SCOPES, google
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
+from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -85,9 +86,11 @@ def test_google_calendar_public_method_returns_structured_connect_instruction(tm
 def test_google_calendar_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     credentials_manager.save_credentials("google_calendar", {"calendar_id": "primary", "_source": "ui"})
-    credentials_manager.save_credentials(
-        "google_calendar_oauth",
+    publish_oauth_credentials(
+        google_calendar_oauth_provider(),
         {"token": "access-token", "refresh_token": "refresh-token", "_source": "oauth"},
+        credentials_manager=credentials_manager,
+        worker_target=None,
     )
     tool = GoogleCalendarTools(
         runtime_paths=_runtime_paths(tmp_path),

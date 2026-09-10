@@ -17,7 +17,6 @@ from weakref import WeakKeyDictionary
 
 from agno.tools.function import FunctionCall, _detached, _record_entrypoint_result, _start_entrypoint_call
 
-from mindroom import agno_tool_wrapper_patch
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -92,7 +91,7 @@ class _ToolApprovalGate(Protocol):
 # deferred sync-bridge results. Keep these wrappers covered by tests when bumping Agno
 # in uv.lock, and drop them once upstream supports this as public API. The chain builders
 # take the result-cache plumbing (``cached_result``, ``raw_results``, ``cache_key``) that
-# ``FunctionCall.execute``/``aexecute`` thread through (verified against agno 3.0.5).
+# ``FunctionCall.execute``/``aexecute`` thread through (verified against agno 3.0.9).
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execution_chain_async
 _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN = FunctionCall._build_nested_execution_chain
 _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
@@ -576,7 +575,6 @@ def _patch_agno_async_tool_hook_chain() -> None:
 
 _patch_agno_sync_tool_hook_chain()
 _patch_agno_async_tool_hook_chain()
-agno_tool_wrapper_patch.apply_patch()
 
 
 async def _run_sync_tool_entrypoint(

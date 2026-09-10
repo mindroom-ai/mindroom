@@ -500,8 +500,9 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
 
     if total_compacted_run_count == 0:
         return None
-    for run in scope_visible_runs(working_session, scope):
-        _strip_stale_anthropic_replay_fields(run.messages or [])
+    _strip_stale_anthropic_replay_fields(
+        [message for run in scope_visible_runs(working_session, scope) for message in run.messages or []],
+    )
     return _CompactionRewriteResult(
         summary_text=final_summary_text,
         compacted_run_count=total_compacted_run_count,
@@ -970,6 +971,7 @@ def _messages_for_runs(
     messages: list[Message] = []
     for run in runs:
         messages.extend(_compaction_replay_messages(run, history_settings))
+    _strip_stale_anthropic_replay_fields(messages)
     return messages
 
 
@@ -1124,11 +1126,27 @@ def _strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
         if msg.role != "assistant":
             continue
         pd = msg.provider_data
-        if not isinstance(pd, dict) or "signature" not in pd:
+        if not isinstance(pd, dict):
+            continue
+        has_replay_fields = "signature" in pd
+        content_blocks = pd.get("content_blocks")
+        if isinstance(content_blocks, list):
+            retained_blocks = [
+                block
+                for block in content_blocks
+                if not (
+                    isinstance(block, dict)
+                    and block.get("type") in {"thinking", "redacted_thinking", "redacted_reasoning_content"}
+                )
+            ]
+            if len(retained_blocks) != len(content_blocks):
+                pd["content_blocks"] = retained_blocks
+                has_replay_fields = True
+        if not has_replay_fields:
             continue
         msg.reasoning_content = None
         msg.redacted_reasoning_content = None
-        del pd["signature"]
+        pd.pop("signature", None)
         modified += 1
     return modified
 

@@ -1,6 +1,6 @@
 """Knowledge handle whose searches propagate failures instead of returning [].
 
-agno's ``Knowledge.search``/``asearch`` (verified against agno 3.0.5) wrap the
+agno's ``Knowledge.search``/``asearch`` (verified against agno 3.0.9) wrap the
 vector-db call in ``except Exception``, log the exception text, and return an
 empty list — turning an embedder credential failure into fake-empty search
 results, the exact silent degradation ISSUE-237 exists to kill. Every MindRoom

@@ -40,10 +40,8 @@ type _PersistenceTarget = tuple[str, str]
 # When bumping this pin, check whether these upstream fixes are included and delete
 # the matching MindRoom override (each is linked from its own docstring):
 #   agno-agi/agno#9939  delete_runs scrubs the 2.x blob atomically  -> agent_storage delete_runs blob part
-#   agno-agi/agno#9937  bulk upsert owner check                     -> agent_storage upsert_sessions
 #   agno-agi/agno#9938  run_index never below MAX+1 (or #9342)      -> agent_storage upsert_run
-#   agno-agi/agno#9941  validate_call wrappers drop the caller frame -> agno_tool_wrapper_patch
-_SUPPORTED_AGNO_VERSION = "3.0.5"
+_SUPPORTED_AGNO_VERSION = "3.0.9"
 _ORIGINAL_AGENT_ASAVE_SESSION = agent_session.asave_session
 _ORIGINAL_AGENT_SAVE_SESSION = agent_session.save_session
 _ORIGINAL_AGENT_ASAVE_RUN = agent_session.asave_run

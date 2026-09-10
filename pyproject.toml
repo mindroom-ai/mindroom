@@ -16,7 +16,7 @@ classifiers = [
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agno[anthropic,google,ollama,openai]==3.0.5",
+  "agno[anthropic,google,ollama,openai]==3.0.9",
   "aiohttp>=3.13.3",
   "aiosqlite>=0.20",
   "anthropic>=0.120.2",

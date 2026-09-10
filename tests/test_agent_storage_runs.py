@@ -13,6 +13,7 @@ from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
+from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 
 from mindroom.agent_storage import (
@@ -231,7 +232,7 @@ def test_rejected_owner_mismatch_write_is_reported(tmp_path: Path) -> None:
 
 
 def test_bulk_upsert_preserves_updated_at_when_asked(tmp_path: Path) -> None:
-    """The per-row path stamps updated_at with now; preserve_updated_at must undo that."""
+    """Bulk writes preserve the caller's timestamp only when requested."""
     storage = _storage(tmp_path)
     db_path = tmp_path / "sessions" / "code.db"
     try:
@@ -253,6 +254,67 @@ def test_bulk_upsert_preserves_updated_at_when_asked(tmp_path: Path) -> None:
     assert stamped[0].updated_at != 123
     assert isinstance(preserved[0], AgentSession)
     assert preserved[0].updated_at == 123
+
+
+@pytest.mark.parametrize("session_type", [SessionType.AGENT, SessionType.TEAM])
+@pytest.mark.parametrize("bulk", [False, True])
+def test_session_json_is_written_once_and_legacy_json_still_loads(
+    tmp_path: Path,
+    session_type: SessionType,
+    bulk: bool,
+) -> None:
+    """New session fields are JSON objects; pre-upgrade string-encoded objects still load."""
+    storage = _storage(tmp_path)
+    db_path = tmp_path / "sessions" / "code.db"
+    session_data = {"session_state": {"topic": "café", "enabled": True}}
+    metadata = {"requester": "@alice:example.test", "nested": {"count": 2}}
+    entity_data = {"name": "Code", "description": "Helpful assistant"}
+    summary = SessionSummary(summary="Earlier discussion", topics=["weather"])
+    session_class = AgentSession if session_type == SessionType.AGENT else TeamSession
+    session = session_class(
+        session_id="json-session",
+        user_id="@alice:example.test",
+        session_data=session_data,
+        metadata=metadata,
+        summary=summary,
+        created_at=1_700_000_000,
+    )
+    if isinstance(session, AgentSession):
+        session.agent_data = entity_data
+    else:
+        session.team_data = entity_data
+    expected = (
+        session_data,
+        metadata,
+        entity_data if session_type == SessionType.AGENT else None,
+        entity_data if session_type == SessionType.TEAM else None,
+        {"summary": "Earlier discussion", "topics": ["weather"]},
+    )
+    select_json = "SELECT session_data, metadata, agent_data, team_data, summary FROM code_sessions"
+    try:
+        if bulk:
+            assert len(storage.upsert_sessions([session])) == 1
+        else:
+            assert storage.upsert_session(session) is not None
+        with sqlite3.connect(db_path) as connection:
+            stored = connection.execute(select_json).fetchone()
+            assert tuple(json.loads(value) if value is not None else None for value in stored) == expected
+            connection.execute(
+                "UPDATE code_sessions SET session_data = ?, metadata = ?, agent_data = ?, team_data = ?, summary = ?",
+                tuple(json.dumps(value) if value is not None else None for value in stored),
+            )
+        loaded = storage.get_session("json-session", session_type)
+        assert isinstance(loaded, session_class)
+        assert loaded.session_data == session_data
+        assert loaded.metadata == metadata
+        assert loaded.summary == summary
+        assert (loaded.agent_data if isinstance(loaded, AgentSession) else loaded.team_data) == entity_data
+        assert storage.upsert_session(loaded) is not None
+        with sqlite3.connect(db_path) as connection:
+            rewritten = connection.execute(select_json).fetchone()
+        assert tuple(json.loads(value) if value is not None else None for value in rewritten) == expected
+    finally:
+        storage.close()
 
 
 def test_fresh_state_database_gets_no_session_tables(tmp_path: Path) -> None:
@@ -301,7 +363,7 @@ def test_legacy_runs_blob_is_merged_into_reads_and_deletions_stick(tmp_path: Pat
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
     finally:
         connection.close()
-    assert [run["run_id"] for run in json.loads(json.loads(blob))] == ["run-1", "run-3"]
+    assert [run["run_id"] for run in json.loads(blob)] == ["run-1", "run-3"]
     # Opening a pre-existing file must not let agno's connect listener switch it to WAL.
     assert journal_mode == ("delete",)
 
@@ -430,7 +492,7 @@ def test_delete_runs_scrubs_legacy_blob_descendants_too(tmp_path: Path) -> None:
         (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
     finally:
         connection.close()
-    assert [run["run_id"] for run in json.loads(json.loads(blob))] == ["team2"]
+    assert [run["run_id"] for run in json.loads(blob)] == ["team2"]
 
 
 def test_runs_without_drops_a_child_that_has_no_run_id() -> None:
@@ -475,4 +537,4 @@ def test_delete_runs_tolerates_malformed_legacy_blob_entries(tmp_path: Path) -> 
         (blob,) = connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()
     finally:
         connection.close()
-    assert json.loads(json.loads(blob)) == legacy_runs[2:]
+    assert json.loads(blob) == legacy_runs[2:]

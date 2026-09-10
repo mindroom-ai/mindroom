@@ -22,6 +22,7 @@ from mindroom.oauth.credential_lifecycle import (
 )
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthRefreshRejectedError
+from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -126,8 +127,8 @@ def test_github_refresh_persists_rotated_access_and_refresh_tokens(tmp_path: Pat
     runtime_paths = _runtime_paths(tmp_path)
     _save_client_config(runtime_paths)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    credentials_manager.save_credentials(
-        "github_oauth",
+    publish_oauth_credentials(
+        _provider(),
         {
             "token": "old-access",
             "refresh_token": "old-refresh",
@@ -137,6 +138,8 @@ def test_github_refresh_persists_rotated_access_and_refresh_tokens(tmp_path: Pat
             "_source": "oauth",
             "_oauth_provider": "github",
         },
+        credentials_manager=credentials_manager,
+        worker_target=None,
     )
     refresh_response = {
         "access_token": "rotated-access",
@@ -171,8 +174,14 @@ def test_github_bad_refresh_token_is_terminal_and_deletes_credentials(tmp_path: 
     runtime_paths = _runtime_paths(tmp_path)
     _save_client_config(runtime_paths)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    credentials_manager.save_credentials(
-        "github_oauth",
+    context = OAuthCredentialContext(
+        provider=_provider(),
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    publish_oauth_credentials(
+        context.provider,
         {
             "token": "old-access",
             "refresh_token": "old-refresh",
@@ -182,6 +191,8 @@ def test_github_bad_refresh_token_is_terminal_and_deletes_credentials(tmp_path: 
             "_source": "oauth",
             "_oauth_provider": "github",
         },
+        credentials_manager=context.credentials_manager,
+        worker_target=context.worker_target,
     )
     leaked_description = "provider-controlled account detail"
 
@@ -197,17 +208,8 @@ def test_github_bad_refresh_token_is_terminal_and_deletes_credentials(tmp_path: 
         ),
         pytest.raises(OAuthRefreshRejectedError) as exc_info,
     ):
-        asyncio.run(
-            refresh_oauth_credentials(
-                OAuthCredentialContext(
-                    provider=_provider(),
-                    runtime_paths=runtime_paths,
-                    credentials_manager=credentials_manager,
-                    worker_target=None,
-                ),
-            ),
-        )
+        asyncio.run(refresh_oauth_credentials(context))
 
     assert exc_info.value.oauth_error == "bad_refresh_token"
     assert leaked_description not in str(exc_info.value)
-    assert credentials_manager.load_credentials("github_oauth") is None
+    assert asyncio.run(load_oauth_credentials_snapshot(context)).credentials is None
