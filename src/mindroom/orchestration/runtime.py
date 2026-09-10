@@ -35,6 +35,7 @@ from mindroom.matrix.health import (
     matrix_versions_url,
     response_has_matrix_versions,
 )
+from mindroom.matrix.sync_diagnostics import SyncStallDiagnostics
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
     SYNC_RESTART_SHUTDOWN,
@@ -285,6 +286,7 @@ class _SyncIteration:
         ingestion_grace_seconds = matrix_ingestion_grace_seconds(bot.runtime_paths)
         startup_monotonic = time.monotonic()
         observed_ingestion_generation = bot.durable_ingestion_progress_generation()
+        diagnostics = SyncStallDiagnostics(bot.agent_name, startup_monotonic, observed_ingestion_generation)
         while _matrix_sync_receive_loop_active(bot) and not sync_task.done():
             await asyncio.sleep(_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS)
             if not _matrix_sync_receive_loop_active(bot):
@@ -295,6 +297,11 @@ class _SyncIteration:
                 if ingestion_generation is not None:
                     mark_matrix_ingestion_progress(bot.agent_name)
             sync_age_seconds = bot.seconds_since_last_sync_activity()
+            diagnostics.observe(
+                now=time.monotonic(),
+                sync_age=sync_age_seconds,
+                generation=ingestion_generation,
+            )
 
             if sync_age_seconds is None:
                 # Still waiting for the first SyncResponse/SyncError.
