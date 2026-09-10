@@ -22,8 +22,11 @@ from agno.db.sqlite.async_sqlite import AsyncSqliteDb
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
+from agno.run.workflow import WorkflowRunOutput
 from agno.session.agent import AgentSession
+from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
+from agno.session.workflow import WorkflowSession
 from agno.team import Team
 from agno.team import _session as team_session_module
 
@@ -881,6 +884,159 @@ async def test_persisted_snapshot_is_canonical_without_mutating_the_live_session
         assert isinstance(persisted_run, TeamRunOutput)
         assert live_run.member_responses == [member_response]
         assert persisted_run.member_responses == []
+
+
+@pytest.mark.parametrize("surface", ["agent", "team", "workflow"])
+@pytest.mark.asyncio
+async def test_session_row_save_does_not_copy_run_history(
+    tmp_path: Path,
+    surface: Literal["agent", "team", "workflow"],
+) -> None:
+    """Saving a row must not traverse history that is persisted by separate run saves."""
+
+    class UncopyableHistory:
+        def __deepcopy__(self, _memo: dict[int, object]) -> None:
+            msg = "session row save copied run history"
+            raise AssertionError(msg)
+
+    storage = _storage(tmp_path, "row-only")
+    history = UncopyableHistory()
+    session: AgentSession | TeamSession | WorkflowSession
+    if surface == "workflow":
+        owner = Agent(db=storage, telemetry=False)
+        session = WorkflowSession(
+            session_id="row-only",
+            runs=[WorkflowRunOutput(run_id="run", content=history)],
+        )
+    else:
+        owner, session = _owner_and_session(surface, storage, "row-only")
+        assert session.runs is not None
+        session.runs[0].content = history
+    live_runs = session.runs
+
+    try:
+        await owner.asave_session(session)  # type: ignore[arg-type]
+        persisted = storage.get_session("row-only")
+    finally:
+        storage.close()
+
+    assert persisted is not None
+    assert not isinstance(persisted, dict)
+    assert not persisted.runs
+    assert session.runs is live_runs
+    assert session.runs is not None
+    assert session.runs[0].content is history
+
+
+def _session_with_row_metadata(
+    session_class: type[AgentSession | TeamSession | WorkflowSession],
+) -> tuple[AgentSession | TeamSession | WorkflowSession, dict[str, dict[str, str]]]:
+    """Populate every mutable session-row field, including entity-specific metadata."""
+    session = session_class(
+        session_id="row-metadata",
+        user_id="before",
+        session_data={"session_state": {"current_run_id": "run", "items": ["before"]}},
+        metadata={"tags": ["before"]},
+        created_at=123,
+        updated_at=456,
+    )
+    entity_data = {"model": {"id": "before"}}
+    if isinstance(session, AgentSession):
+        session.agent_id = "agent"
+        session.agent_data = entity_data
+    elif isinstance(session, TeamSession):
+        session.team_id = "team"
+        session.team_data = entity_data
+    else:
+        session.workflow_id = "workflow"
+        session.workflow_name = "before"
+        session.workflow_data = entity_data
+    if isinstance(session, (AgentSession, TeamSession)):
+        session.summary = SessionSummary(summary="before", topics=["before"])
+    return session, entity_data
+
+
+def _assert_entity_row_metadata(session: AgentSession | TeamSession | WorkflowSession) -> None:
+    if isinstance(session, AgentSession):
+        assert session.agent_id == "agent"
+        assert session.agent_data == {"model": {"id": "before"}}
+    elif isinstance(session, TeamSession):
+        assert session.team_id == "team"
+        assert session.team_data == {"model": {"id": "before"}}
+    else:
+        assert session.workflow_id == "workflow"
+        assert session.workflow_data == {"model": {"id": "before"}}
+    if isinstance(session, (AgentSession, TeamSession)):
+        assert session.summary == SessionSummary(summary="before", topics=["before"])
+
+
+@pytest.mark.parametrize("session_class", [AgentSession, TeamSession, WorkflowSession])
+@pytest.mark.asyncio
+async def test_session_row_snapshot_isolates_all_mutable_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_class: type[AgentSession | TeamSession | WorkflowSession],
+) -> None:
+    """Delayed row writes must retain submission-time state for every session type."""
+    storage = _storage(tmp_path, "row-metadata")
+    session, entity_data = _session_with_row_metadata(session_class)
+    owner = (
+        Team(db=storage, members=[], telemetry=False)
+        if isinstance(session, TeamSession)
+        else Agent(
+            db=storage,
+            telemetry=False,
+        )
+    )
+    write_started = threading.Event()
+    release_write = threading.Event()
+    original_upsert = storage.upsert_session
+    snapshots: list[AgentSession | TeamSession | WorkflowSession] = []
+
+    def blocked_upsert(session: AgentSession | TeamSession | WorkflowSession) -> object:
+        snapshots.append(session)
+        write_started.set()
+        assert release_write.wait(timeout=5)
+        return original_upsert(session)
+
+    monkeypatch.setattr(storage, "upsert_session", blocked_upsert)
+    save = asyncio.create_task(owner.asave_session(session))  # type: ignore[arg-type]
+    try:
+        assert await asyncio.to_thread(write_started.wait, 5)
+        assert session.session_data is not None
+        assert session.metadata is not None
+        session.session_data["session_state"]["items"].append("after")
+        session.metadata["tags"].append("after")
+        session.user_id = "after"
+        session.created_at = 789
+        session.updated_at = 999
+        entity_data["model"]["id"] = "after"
+        if isinstance(session, (AgentSession, TeamSession)):
+            assert session.summary is not None
+            assert session.summary.topics is not None
+            session.summary.summary = "after"
+            session.summary.topics.append("after")
+        else:
+            session.workflow_name = "after"
+        release_write.set()
+        await save
+        persisted = storage.get_session("row-metadata")
+    finally:
+        release_write.set()
+        await asyncio.gather(save, return_exceptions=True)
+        storage.close()
+
+    snapshot = snapshots[0]
+    assert snapshot.updated_at == 456
+    assert isinstance(persisted, session_class)
+    assert persisted.user_id == "before"
+    assert persisted.created_at == 123
+    assert persisted.metadata == {"tags": ["before"]}
+    assert persisted.session_data == {"session_state": {"items": ["before"]}}
+    assert session.session_data["session_state"]["current_run_id"] == "run"
+    _assert_entity_row_metadata(persisted)
+    if isinstance(snapshot, WorkflowSession):
+        assert snapshot.workflow_name == "before"
 
 
 @pytest.mark.asyncio
