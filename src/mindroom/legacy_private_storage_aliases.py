@@ -3,7 +3,9 @@
 # Legacy format: relocated current private directories without historical sibling aliases.
 # Last legacy release: v2026.9.36; verified historical aliases introduced in v2026.9.37.
 # Handling: accept only aliases proven by the current owner and exact historical reconstruction.
+# Real historical directories grant no alias access, including preserved recordless scopes.
 # Coverage: tests/test_private_storage_migration.py::test_completed_aliases_reject_tampering.
+# Coverage: tests/test_private_storage_migration.py::test_worker_mount_plan_never_infers_historical_access.
 
 from __future__ import annotations
 
@@ -62,6 +64,8 @@ def load_private_instance_legacy_alias(base_storage_path: Path, worker_key: str)
         info = alias.lstat()
     except FileNotFoundError:
         return None
+    if stat.S_ISDIR(info.st_mode):
+        return None  # An unmigrated directory grants no additional mount access.
     if not stat.S_ISLNK(info.st_mode):
         _raise_invalid_record("legacy alias must be a symlink")
     # Read the literal target: Path normalization would accept './name' as 'name'.

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadExportConfig
 from mindroom.config.main import Config
@@ -27,6 +28,7 @@ from mindroom.file_locks import file_lock_is_held
 from mindroom.private_instance_identity_store import (
     ensure_private_instance_identity,
     load_private_instance_identity,
+    private_instances_for_agent,
     reconstruct_private_instance_worker_key,
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -36,6 +38,8 @@ from mindroom.workers.backends._dedicated_worker_common import plan_scoped_visib
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 _RECORD = ".mindroom-private-instance.json"
 _INTENT = ".mindroom-private-storage-migration.json"
@@ -147,6 +151,80 @@ _REQUESTER = "@alice:example.org"
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("separate", [False, True])
+@pytest.mark.parametrize("verified_neighbor", [False, True])
+@pytest.mark.parametrize(
+    ("old_key", "current_key", "worker_scope"),
+    [
+        (_OLD, _NEW, "user"),
+        (
+            "v1:default:user_agent:@alice:example.org:writer",
+            "v1:default:user_agent:~@alice:example.org:writer",
+            "user_agent",
+        ),
+    ],
+)
+async def test_startup_preserves_recordless_scopes_without_adopting_them(
+    tmp_path: Path,
+    separate: bool,
+    verified_neighbor: bool,
+    old_key: str,
+    current_key: str,
+    worker_scope: WorkerScope,
+) -> None:
+    """Legacy unclaimed data cannot stop startup or gain a guessed requester identity."""
+    migration = importlib.import_module("mindroom.legacy_private_storage")
+    paths = _paths(tmp_path, separate=separate)
+    old = _seed(paths, old_key, _REQUESTER)
+    (old / _RECORD).unlink()
+    mirror = resolve_session_state_root(old, paths)
+    before, mirror_before = _files(old), _files(mirror)
+    inode, mirror_inode = old.stat().st_ino, mirror.stat().st_ino
+    if verified_neighbor:
+        neighbor = _seed(paths, "v1:default:user:bob", "bob")
+
+    await migration.migrate_private_storage(paths)
+    await migration.migrate_private_storage(paths)
+
+    assert not old.is_symlink()
+    assert (old.stat().st_ino, mirror.stat().st_ino) == (inode, mirror_inode)
+    assert (_files(old), _files(mirror)) == (before, mirror_before)
+    assert load_private_instance_identity(paths.storage_root, old) is None
+    assert not private_instance_scope_root_path(paths.storage_root, current_key).exists()
+    unclaimed = [
+        instance
+        for instance in private_instances_for_agent(paths.storage_root, "writer", worker_scope)
+        if instance.state_root == old / "writer"
+    ]
+    assert len(unclaimed) == 1
+    assert unclaimed[0].requester_id is None
+    if verified_neighbor:
+        assert neighbor.is_symlink()
+        assert load_private_instance_identity(paths.storage_root, neighbor.resolve()).requester_id == "bob"
+
+
+@pytest.mark.asyncio
+async def test_empty_recordless_primary_warns_for_retained_session_history(tmp_path: Path) -> None:
+    """Operators must hear about retained data even when only its session mirror is populated."""
+    migration = importlib.import_module("mindroom.legacy_private_storage")
+    paths = _paths(tmp_path)
+    primary = private_instance_scope_root_path(paths.storage_root, _OLD)
+    primary.mkdir(parents=True)
+    mirror = resolve_session_state_root(primary, paths)
+    mirror.mkdir(parents=True)
+    history = mirror / "history.db"
+    history.write_bytes(b"retained session history")
+
+    with capture_logs() as logs:
+        await migration.migrate_private_storage(paths)
+
+    assert any(entry["log_level"] == "warning" and entry.get("scope") == str(primary) for entry in logs)
+    assert history.read_bytes() == b"retained session history"
+    assert list(primary.iterdir()) == []
+    assert not private_instance_scope_root_path(paths.storage_root, _NEW).exists()
+
+
+@pytest.mark.asyncio
 async def test_every_filesystem_mutation_boundary_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Crashes around actual fsync, replace, rename and unlink never lose scope contents."""
     migration = importlib.import_module("mindroom.legacy_private_storage")
@@ -203,7 +281,7 @@ async def test_every_filesystem_mutation_boundary_resumes(tmp_path: Path, monkey
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "conflict",
-    ["primary", "session", "owner", "recordless", "orphan", "scope_link", "record_link", "intent"],
+    ["primary", "session", "owner", "null_owner", "orphan", "scope_link", "record_link", "intent"],
 )
 async def test_preflight_rejects_conflicts_before_any_move(
     tmp_path: Path,
@@ -223,8 +301,8 @@ async def test_preflight_rejects_conflicts_before_any_move(
         payload = json.loads((source / _RECORD).read_text())
         payload["requester_id"] = "@intruder:example.org"
         (source / _RECORD).write_text(json.dumps(payload))
-    elif conflict == "recordless":
-        (source / _RECORD).unlink()
+    elif conflict == "null_owner":
+        (source / _RECORD).write_text("null")
     elif conflict == "orphan":
         orphan = sessions.parent / "unowned"
         orphan.mkdir()
@@ -422,19 +500,19 @@ async def test_primary_admission_fails_before_credentials(
     monkeypatch: pytest.MonkeyPatch,
     entrypoint: str,
 ) -> None:
-    """Both primary entry points must reject unowned storage before starting runtime work."""
+    """Both primary entry points must reject invalid ownership before starting runtime work."""
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
-    (source / _RECORD).unlink()
+    (source / _RECORD).write_text("null")
     module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
     monkeypatch.setattr(module, "sync_env_to_credentials", Mock(side_effect=AssertionError("credentials started")))
     if entrypoint == "api":
         monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
-        with pytest.raises(ValueError, match="authoritative owner"):
+        with pytest.raises(ValueError, match=r"[Pp]rivate"):
             async with module._lifespan(module.app):
                 pytest.fail("API admitted runtime work")
     else:
-        with pytest.raises(ValueError, match="authoritative owner"):
+        with pytest.raises(ValueError, match=r"[Pp]rivate"):
             await module.main("ERROR", paths, api=False)
 
 
@@ -697,7 +775,10 @@ async def test_current_runtime_export_and_mounts_find_migrated_contents(tmp_path
     assert source.is_symlink()
 
 
-@pytest.mark.parametrize("state", ["fresh", "ownerless", "owned_without_alias", "foreign_collision"])
+@pytest.mark.parametrize(
+    "state",
+    ["fresh", "ownerless", "owned_without_alias", "foreign_collision", "unowned_historical"],
+)
 def test_worker_mount_plan_never_infers_historical_access(tmp_path: Path, state: str) -> None:
     """Canonical-only scopes remain usable without granting unverified historical destinations."""
     worker_key = "v1:default:user:~alice_bob"
@@ -705,8 +786,12 @@ def test_worker_mount_plan_never_infers_historical_access(tmp_path: Path, state:
     if state == "ownerless":
         canonical.mkdir(parents=True)
         (canonical / "notes.txt").write_text("existing unowned workspace")
-    elif state in {"owned_without_alias", "foreign_collision"}:
+    elif state in {"owned_without_alias", "foreign_collision", "unowned_historical"}:
         ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id="alice_bob")
+    if state == "unowned_historical":
+        historical = private_instance_scope_root_path(tmp_path, "v1:default:user:alice_bob")
+        historical.mkdir()
+        (historical / "notes.txt").write_text("unverified old data")
     if state == "foreign_collision":
         historical_key = "v1:default:user:alice_bob"
         foreign_key = reconstruct_private_instance_worker_key(historical_key, "alice/bob")

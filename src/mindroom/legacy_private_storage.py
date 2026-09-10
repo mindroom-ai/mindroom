@@ -9,6 +9,11 @@ Managed workers must be absent before inspecting or moving any scope contents.
 # Handling: relocate only verified private owners; startup adoption began in v2026.9.36.
 # Coverage: tests/test_private_storage_migration.py::test_startup_moves_every_owner_and_preserves_contents.
 
+# Legacy format: private scopes created without authoritative owner records.
+# Last legacy release: v2026.8.132; replacement: v2026.8.133 writes owner records for fresh scopes.
+# Handling: preserve recordless scopes and matching session mirrors without adoption, including after later upgrades.
+# Coverage: tests/test_private_storage_migration.py::test_startup_preserves_recordless_scopes_without_adopting_them.
+
 from __future__ import annotations
 
 import os
@@ -26,6 +31,7 @@ from mindroom.legacy_private_storage_aliases import (
     historical_private_instance_worker_key,
     load_private_instance_legacy_alias,
 )
+from mindroom.logging_config import get_logger
 from mindroom.private_instance_identity_store import (
     PrivateInstanceIdentity,
     load_private_instance_identity,
@@ -43,6 +49,7 @@ if TYPE_CHECKING:
 _RECORD = ".mindroom-private-instance.json"
 _INTENT = ".mindroom-private-storage-migration.json"
 _LOCK = ".mindroom-storage-upgrade.lock"
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -222,10 +229,12 @@ def _discover(roots: tuple[Path, Path]) -> list[_Intent]:
             pending.append(intent)
             known_names.update(path.name for path in _locations(primary, intent))
             continue
-        payload = load_private_instance_record_payload(scope / _RECORD)
-        if payload is None:
-            if any(scope.iterdir()):
-                _reject("populated private scope has no authoritative owner")
+        record = scope / _RECORD
+        payload = load_private_instance_record_payload(record)
+        if payload is None and not record.exists():
+            logger.warning("Preserving private scope without an owner record; not migrating", scope=str(scope))
+            # Retain its session mirror too, without claiming either directory.
+            known_names.add(scope.name)
             continue
         owner = parse_private_instance_identity_payload(payload)
         _old, new = _keys(owner)

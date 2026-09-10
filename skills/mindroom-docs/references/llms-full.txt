@@ -18215,6 +18215,12 @@ It renames the matching session directory first, then the primary scope, and fin
 Database files, WAL companions, credentials, workspaces, and histories retain their contents.
 Worker credential directories remain separate and are not relocated.
 
+Older versions can leave populated private scopes without an owner record.
+Startup warns and leaves these scopes and their matching session mirrors in place, without moving data, assigning an owner, or granting historical alias access.
+Directory names and session metadata are not used to infer ownership.
+New requester scopes remain separate; the retained unclaimed history is not automatically attached to them.
+Recover that history only after independently verifying its owner, with all writers stopped.
+
 Each pending scope temporarily contains `.mindroom-private-storage-migration.json` with its exact owner, volume paths, and original directory inodes.
 The intent moves with the primary scope and is removed after both locations and the current owner record are durable.
 It contains private owner information and belongs on the protected storage volume.
@@ -18227,7 +18233,7 @@ Do not remove or copy pending intent records, create destination directories, or
 Abrupt process death can leave partial temporary files from durable intent or owner writes.
 These remain protected, untouched files and never authorize recovery; only the exact final intent and owner records do.
 
-Startup rejects ambiguous owners, populated scopes without owner records, conflicting destinations, missing recorded session mirrors, unrelated recovery records, unsafe scope or record links, nested mounts, and links that would break after relocation.
+Startup rejects malformed or ambiguous owner records, conflicting destinations, missing recorded session mirrors, session-only data without a primary scope, unrelated recovery records, unsafe scope or record links, nested mounts, and links that would break after relocation.
 Inspect and correct the reported conflict with all writers stopped, then restart.
 There is no migration CLI or automatic rollback.
 To return to an older deployment, stop all writers and restore the coordinated backups together before starting it.
