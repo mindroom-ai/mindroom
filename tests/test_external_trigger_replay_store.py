@@ -464,7 +464,20 @@ def test_payload_rejects_oversized_thread_key() -> None:
 
 def test_store_without_threads_section_is_accepted(tmp_path: Path) -> None:
     """Replay files written before thread keys existed still load."""
-    _store_path(tmp_path).write_text(json.dumps({"nonces": {}, "events": {}}), encoding="utf-8")
+    _store_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "nonces": {"campground": {"nonce-old": {"expires_at": 2_000}}},
+                "events": {
+                    "campground": {
+                        "event-delivered": {"state": "delivered", "expires_at": 2_100},
+                        "event-pending": {"state": "in_progress", "expires_at": 2_200},
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
     store = ExternalTriggerReplayStore(tmp_path)
 
     claim, root, reservation = store.claim_thread_key(
@@ -485,16 +498,35 @@ def test_store_without_threads_section_is_accepted(tmp_path: Path) -> None:
         now=1_000,
         ttl_seconds=600,
     )
-    assert json.loads(_store_path(tmp_path).read_text(encoding="utf-8"))["threads"] == {
-        "campground": {
-            "site-42": {
-                "room_id": "!room:localhost",
-                "thread_event_id": "$root-1",
-                "reservation": None,
-                "expires_at": 1_600,
+    assert json.loads(_store_path(tmp_path).read_text(encoding="utf-8")) == {
+        "nonces": {"campground": {"nonce-old": {"expires_at": 2_000}}},
+        "events": {
+            "campground": {
+                "event-delivered": {"state": "delivered", "expires_at": 2_100},
+                "event-pending": {"state": "in_progress", "expires_at": 2_200},
+            },
+        },
+        "threads": {
+            "campground": {
+                "site-42": {
+                    "room_id": "!room:localhost",
+                    "thread_event_id": "$root-1",
+                    "reservation": None,
+                    "expires_at": 1_600,
+                },
             },
         },
     }
+    reopened = ExternalTriggerReplayStore(tmp_path)
+    assert reopened.claim_nonce("campground", "nonce-old", now=1_001, ttl_seconds=300) is False
+    assert (
+        reopened.claim_event_id("campground", "event-delivered", now=1_001, ttl_seconds=300)
+        is ExternalTriggerEventClaim.DELIVERED
+    )
+    assert (
+        reopened.claim_event_id("campground", "event-pending", now=1_001, ttl_seconds=300)
+        is ExternalTriggerEventClaim.IN_PROGRESS
+    )
 
 
 @pytest.mark.parametrize(

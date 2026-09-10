@@ -24,6 +24,7 @@ from . import (
     background_approvals,
     interactive_questions,
     journal,
+    legacy_turn_records,
     membership_hooks,
     outbox,
     reads,
@@ -1837,7 +1838,7 @@ class TurnRecordStore:
     ) -> int:
         """Fill only the indexes with no record yet, for migration. Returns how many."""
         return await self._backend.write(
-            lambda transaction: turn_records.adopt_missing(
+            lambda transaction: legacy_turn_records.adopt_missing(
                 transaction,
                 self._agent_name,
                 index_event_ids=index_event_ids,

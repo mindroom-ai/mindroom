@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
+from mindroom.legacy_approval_payloads import legacy_approval_card_id
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import sidecar_upload_is_usable
 from mindroom.matrix.visible_body import visible_content_from_content
@@ -52,7 +53,7 @@ class PendingApproval:
 
         event_id = _required_str(event, "event_id")
         sender = _required_str(event, "sender")
-        approval_id = _content_str(content, "approval_id") or _content_str(content, "tool_call_id")
+        approval_id = legacy_approval_card_id(content)
         tool_name = _content_str(content, "tool_name")
         approver_user_id = _content_str(content, "approver_user_id")
         if approval_id is None or tool_name is None or approver_user_id is None:

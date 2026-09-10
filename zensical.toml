@@ -74,6 +74,7 @@ nav = [
     { "Overview" = "architecture/index.md" },
     { "Matrix Integration" = "architecture/matrix.md" },
     { "Agent Orchestration" = "architecture/orchestration.md" },
+    { "Migration Boundaries" = "architecture/migrations.md" },
   ] },
   { "Deployment" = [
     { "Overview" = "deployment/index.md" },

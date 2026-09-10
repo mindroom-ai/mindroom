@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 from agno.knowledge.embedder.base import Embedder
 
 from mindroom.embeddings import effective_knowledge_embedder_signature
+from mindroom.knowledge.legacy_metadata import normalize_legacy_indexing_settings
 from mindroom.knowledge.redaction import credential_free_url_identity
 
 if TYPE_CHECKING:
@@ -132,10 +133,7 @@ class IndexingSettings:
         mode = settings["mode"]
         if mode not in _INDEXING_MODES:
             return None
-
-        # ``indexing_settings_key`` only populates extra_extensions in semantic
-        # mode, emitting "" otherwise, so legacy metadata must normalize to that.
-        semantic_only_empty = _EMPTY_FILTER_KEY if mode == "semantic" else ""
+        settings = normalize_legacy_indexing_settings(settings, empty_filter_key=_EMPTY_FILTER_KEY)
 
         return cls(
             base_id=settings["base_id"],
@@ -154,16 +152,13 @@ class IndexingSettings:
             git_skip_hidden=settings["git_skip_hidden"],
             git_include_patterns=settings["git_include_patterns"],
             git_exclude_patterns=settings["git_exclude_patterns"],
-            include_patterns=_optional_filter_key(settings, "include_patterns"),
-            exclude_patterns=_optional_filter_key(settings, "exclude_patterns"),
+            include_patterns=settings["include_patterns"],
+            exclude_patterns=settings["exclude_patterns"],
             include_extensions=settings["include_extensions"],
             exclude_extensions=settings["exclude_extensions"],
-            extra_extensions=_optional_filter_key(settings, "extra_extensions", empty_value=semantic_only_empty),
-            # Not normalized on purpose: skip_hidden is a bool string rather than
-            # a filter key, and absent metadata must keep failing the corpus match
-            # so pre-skip_hidden indexes are rebuilt (see the field docstring).
-            skip_hidden=settings.get("skip_hidden", ""),
-            require_content_before_publish=settings.get("require_content_before_publish", ""),
+            extra_extensions=settings["extra_extensions"],
+            skip_hidden=settings["skip_hidden"],
+            require_content_before_publish=settings["require_content_before_publish"],
         )
 
     def to_metadata(self) -> dict[str, str]:
@@ -280,21 +275,6 @@ def _filter_settings_key(values: Iterable[str]) -> str:
 
 
 _EMPTY_FILTER_KEY = _filter_settings_key(())
-
-
-def _optional_filter_key(
-    settings: Mapping[str, str],
-    name: str,
-    *,
-    empty_value: str = _EMPTY_FILTER_KEY,
-) -> str:
-    """Read one optional filter key, normalizing legacy absence to today's producer output.
-
-    Metadata predating these keys omits them entirely. Mapping absence onto what
-    ``indexing_settings_key`` emits now keeps an old index from being misread as
-    config-incompatible and needlessly rebuilt.
-    """
-    return settings.get(name, "") or empty_value
 
 
 def indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> IndexingSettings:

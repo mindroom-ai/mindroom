@@ -9,34 +9,6 @@ if TYPE_CHECKING:
     import sqlite3
 
 
-def migrate_lifecycle(connection: sqlite3.Connection) -> None:
-    """Preserve existing absolute deadlines and leave unknown creation/activity dates null."""
-    columns = {row["name"] for row in connection.execute("PRAGMA table_info(grants)")}
-    if "idle_expires_at" in columns:
-        return
-    for declaration in (
-        "created_at REAL",
-        "last_used_at REAL",
-        "last_activity_at REAL",
-        "idle_expires_at REAL",
-        "account_id TEXT",
-    ):
-        connection.execute("ALTER TABLE grants ADD COLUMN " + declaration)
-    connection.execute("UPDATE grants SET idle_expires_at = expires_at")
-    connection.execute("ALTER TABLE pending ADD COLUMN account_id TEXT")
-    for statement in (
-        "CREATE INDEX grants_idle_expiry ON grants(idle_expires_at)",
-        "CREATE INDEX grants_account ON grants(account_id)",
-        "CREATE INDEX pending_account ON pending(account_id)",
-        "CREATE INDEX capabilities_access_expiry ON capabilities(expires_at) WHERE kind = 'access'",
-        """CREATE INDEX grants_owner ON grants(requester_id,
-            json_extract(payload, '$.authenticated_user_id'), json_extract(payload, '$.agent_name'),
-            json_extract(payload, '$.resource'))""",
-        "CREATE INDEX pending_owner ON pending(requester_id, authenticated_user_id, agent_name)",
-    ):
-        connection.execute(statement)
-
-
 def touch_grant(
     connection: sqlite3.Connection,
     grant_id: str,

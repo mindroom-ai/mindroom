@@ -18,6 +18,11 @@ logger = get_logger(__name__)
 
 _LEGACY_RECOVERY_TABLES = ("pendingtimelineevents", "syncrecoverygaps", "syncrecoveryabandonedrooms")
 
+# Legacy format: Dependency-owned 0.40 crypto store with pre-durable transport recovery tables.
+# Last legacy release: v2026.9.28; replacement: v2026.9.29 selected dependency 1.0 durable ingestion.
+# Handling: Retire only pending recovery rows under the file lease while preserving identity, trust, and keys.
+# Coverage: tests/test_legacy_crypto_upgrade.py::test_owned_startup_retires_legacy_recovery_without_changing_keys.
+
 
 def retire_legacy_crypto_recovery(database_path: Path, *, user_id: str, device_id: str) -> None:
     """Permit first durable adoption after explicitly abandoning old transport work.

@@ -11,6 +11,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Legacy format: Application-owned journal ingestion without matrix_sync_consumers.
+# Last legacy release: v2026.9.28; replacement: v2026.9.29 transferred ingestion ownership.
+# Handling: Retire unfinished transport work while preserving history, terminal turns, and journal generation.
+# Coverage: tests/test_journal_upgrade_boundary.py::test_released_journal_upgrades_and_preserves_new_work.
+
 # Recreate execution state instead of translating obsolete ownership or payloads.
 # Children precede parents so this also works with foreign keys enabled.
 _RETIRED_TABLES = (

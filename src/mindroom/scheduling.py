@@ -103,6 +103,16 @@ class CronSchedule(BaseModel):
             return f"Cron: {self.to_cron_string()}"
 
 
+# Legacy format: Scheduled workflows omitted new_thread and therefore reused their persisted thread by default.
+# Last legacy release: v2026.3.109; replacement: v2026.3.110 persisted explicit thread-creation mode.
+# Handling: Pydantic defaults missing new_thread to false, preserving the old same-thread behavior.
+# Coverage: tests/test_workflow_scheduling.py::TestScheduledWorkflow::test_workflow_old_payload_defaults_new_thread_false.
+
+
+# Legacy format: Scheduled workflows omitted history_limit and exposed the full available thread history.
+# Last legacy release: v2026.7.136; replacement: v2026.7.137 persisted the optional history bound.
+# Handling: Pydantic defaults absence to None, which retains unlimited history for old workflows.
+# Coverage: tests/test_workflow_scheduling.py::TestScheduledWorkflow::test_persisted_workflow_without_history_limit_loads_as_unlimited.
 class ScheduledWorkflow(BaseModel):
     """Structured representation of a scheduled task or workflow."""
 

@@ -42,6 +42,7 @@ MindRoom's architecture consists of several key components working together.
 - [Matrix Integration](matrix.md) - How MindRoom connects to Matrix
 - [Agent Orchestration](orchestration.md) - How agents are managed
 - [Bot Runtime](bot-runtime.md) - The inbound turn pipeline and its module boundaries
+- [Migration and Compatibility Boundaries](migrations.md) - Current owners for historical formats, dependency migrations, and retained compatibility
 - [Matrix Event-Journal Security](matrix-event-journal-security.md) - Which decrypted plaintext is durable, who owns it, and what removes it
 - [Matrix Event-Journal Contracts](../dev/matrix-event-journal-contracts.md) - What the journal guarantees, and the homeserver behaviour you would otherwise rediscover by debugging
 
@@ -104,14 +105,14 @@ MindRoom's architecture consists of several key components working together.
 ## Storage upgrade boundaries
 
 Historical formats stay with their storage or lifecycle owners, while current callers consume canonical identities and paths.
-`private_storage_compat.py` owns historical requester spellings and verified aliases; only startup migration and `private_storage_paths.py` can import it.
+`legacy_private_storage_aliases.py` owns historical requester spellings and verified aliases; only startup migration and `private_storage_paths.py` can import it.
 Worker mount planning and sandbox path validation use `private_storage_paths.py`, while `private_instance_identity_store.py` validates current identities.
 
-`oauth/credential_compat.py` owns publication-field normalization and lossless historical requester bindings.
+`oauth/legacy_credentials.py` owns publication-field normalization and lossless historical requester bindings.
 Only `oauth/credential_store.py` can import it; the store retains schema, scope validation, current credential state, transaction locks, retries, and commit ownership.
 OAuth credentials stored only in legacy JSON files require reconnection; those files and their obsolete sidecars remain untouched.
 
-Existing lifecycle adapters remain at their focused entry points: `private_storage_migration.py` at startup, `config/access_migration.py` during config loading, and Nio journal and crypto adapters when their stores open.
+Existing lifecycle adapters remain at their focused entry points: `legacy_private_storage.py` at startup, `config/legacy_access.py` during config loading, and Nio journal and crypto adapters when their stores open.
 `session_storage_preflight.py` checks owned session databases before opening them and archives session directories whose tables lack required columns; see [Session Storage Recovery](orchestration.md#session-storage-recovery).
 Tach visibility rules keep compatibility internals behind their owning boundaries.
 

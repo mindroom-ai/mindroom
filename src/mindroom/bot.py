@@ -23,7 +23,6 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.handled_turns import TurnRecord, legacy_responses_file_path
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -41,6 +40,7 @@ from mindroom.hooks import (
     emit,
     send_hook_message,
 )
+from mindroom.legacy_handled_turns import legacy_responses_file_path
 from mindroom.matrix.decrypt_diagnostics import DecryptionDiagnostics
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
 from mindroom.matrix.durable_membership import change_local_membership
@@ -170,6 +170,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
+    from mindroom.handled_turns import TurnRecord
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.client_session import MindRoomAsyncClient
     from mindroom.matrix.identity import MatrixID

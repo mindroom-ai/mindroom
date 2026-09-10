@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from contextlib import nullcontext
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
@@ -19,6 +18,7 @@ from sqlalchemy import Engine, create_engine, event, select
 
 from mindroom import agno_session_persistence_patch
 from mindroom.constants import prompt_roles_for_history_storage
+from mindroom.legacy_session_storage import scrub_legacy_run_blobs
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage_preflight import session_storage_preflight
@@ -320,55 +320,8 @@ class _ConversationSqliteDb(SqliteDb):
                     frontier = [child for child in children if child not in wanted]
                     wanted.update(frontier)
                 sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
-            # --- 2.x legacy only: a sessions table whose ``runs`` blob has not
-            # yet migrated (or was refused). Agno merges that blob into every
-            # read, so ids deleted above must leave it too.
-            if sessions_table is None or "runs" not in sessions_table.c:
-                return
-            rows = sess.execute(
-                select(sessions_table.c.session_id, sessions_table.c.runs).where(sessions_table.c.runs.isnot(None)),
-            ).fetchall()
-            for session_id, blob in rows:
-                legacy_runs = _decode_legacy_runs(blob)
-                kept = _dicts_without(legacy_runs, wanted)
-                if len(kept) == len(legacy_runs):
-                    continue
-                sess.execute(
-                    sessions_table.update().where(sessions_table.c.session_id == session_id).values(runs=kept),
-                )
-
-
-# --- 2.x legacy blob helpers used by the safe fallback in ``delete_runs`` above.
-
-
-def _string_field(entry: object, key: str) -> str | None:
-    value = cast("dict[str, Any]", entry).get(key) if isinstance(entry, dict) else None
-    return value if isinstance(value, str) and value else None
-
-
-def _dicts_without(runs: list[Any], run_ids: set[str]) -> list[Any]:
-    """Legacy blob entries minus ``run_ids`` and every entry descending from them.
-
-    Entries are whatever the 2.x blob holds; ids that are missing or not
-    strings never match anything and are simply carried along.
-    """
-    removed = set(run_ids)
-    while True:
-        children = {
-            run_id
-            for run in runs
-            if _string_field(run, "parent_run_id") in removed
-            and (run_id := _string_field(run, "run_id")) is not None
-            and run_id not in removed
-        }
-        if not children:
-            break
-        removed |= children
-    return [
-        run
-        for run in runs
-        if _string_field(run, "run_id") not in removed and _string_field(run, "parent_run_id") not in removed
-    ]
+            if sessions_table is not None:
+                scrub_legacy_run_blobs(sess, sessions_table, wanted)
 
 
 def runs_without(
@@ -394,16 +347,6 @@ def runs_without(
     # A child without its own run_id cannot be reached through the id map but is
     # still a descendant; its parent_run_id says so.
     return [run for run in run_list if run.run_id not in removed and run.parent_run_id not in removed]
-
-
-def _decode_legacy_runs(blob: object) -> list[Any]:
-    """The run dicts inside a 2.x ``runs`` value, or nothing when agno's read merge would ignore it too."""
-    if isinstance(blob, str):
-        try:
-            blob = json.loads(blob)
-        except json.JSONDecodeError:
-            return []
-    return blob if isinstance(blob, list) else []
 
 
 def save_runs(
