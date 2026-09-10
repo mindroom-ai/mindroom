@@ -462,18 +462,100 @@ def test_load_config_migrates_single_file_after_validation(tmp_path: Path) -> No
     from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
 
     config_path = Path(tmp_path) / "config.yaml"
-    original = "authorization:\n  global_users:\n    - '@owner:example.com'\n"
+    original = """agents:
+  code:
+    display_name: Code
+    role: Writes code
+    rooms: [lobby, dev]
+    access:
+      current_room_members: true
+      members_of_rooms: [existing]
+      users: ['@current:example.com']
+    credential_managers: ['@manager:example.com']
+rooms:
+  existing: {}
+  lobby:
+    invite_users: ['@current-room:example.com']
+  dev: {}
+administrators: ['@current-admin:example.com']
+room_defaults:
+  join_policy: knock
+  listed: true
+  encrypted: false
+  invite_users: ['@current-default:example.com']
+  admins: ['@current-room-admin:example.com']
+authorization:
+  global_users: ['@owner:example.com']
+  agent_reply_permissions:
+    code:
+      users: ['@legacy-agent:example.com']
+      joined_rooms: [lobby]
+  room_permissions:
+    dev: ['@legacy-room:example.com']
+  default_room_access: true
+matrix_room_access:
+  mode: multi_user
+  multi_user_join_rule: public
+  publish_to_room_directory: false
+  encrypt_managed_rooms: true
+  invite_only_rooms: [dev]
+  room_admins: ['@legacy-admin:example.com']
+"""
     config_path.write_text(original, encoding="utf-8")
+    config_path.chmod(0o640)
 
     config = load_config(resolve_runtime_paths(config_path=config_path))
 
     migrated = yaml_io.safe_load(config_path.read_text(encoding="utf-8"))
-    assert migrated["administrators"] == ["@owner:example.com"]
-    assert migrated["room_defaults"]["invite_users"] == ["@owner:example.com"]
+    assert migrated == {
+        "agents": {
+            "code": {
+                "display_name": "Code",
+                "role": "Writes code",
+                "rooms": ["lobby", "dev"],
+                "access": {
+                    "current_room_members": True,
+                    "members_of_rooms": ["existing", "lobby"],
+                    "users": ["@current:example.com", "@legacy-agent:example.com"],
+                },
+                "credential_managers": ["@manager:example.com", "@legacy-agent:example.com"],
+            },
+        },
+        "rooms": {
+            "existing": {},
+            "lobby": {"invite_users": ["@current-room:example.com"]},
+            "dev": {
+                "invite_users": ["@legacy-room:example.com"],
+                "join_policy": "invite",
+                "listed": False,
+            },
+        },
+        "administrators": ["@current-admin:example.com", "@owner:example.com"],
+        "room_defaults": {
+            "join_policy": "knock",
+            "listed": True,
+            "encrypted": False,
+            "invite_users": ["@current-default:example.com", "@owner:example.com"],
+            "admins": ["@current-room-admin:example.com", "@legacy-admin:example.com"],
+        },
+    }
     assert "authorization" not in migrated
-    assert config.administrators == ["@owner:example.com"]
+    assert config.administrators == ["@current-admin:example.com", "@owner:example.com"]
     backup_path = config_path.with_name(f"{config_path.name}.pre-membership-access")
-    assert backup_path.read_text(encoding="utf-8") == original
+    assert backup_path.read_bytes() == original.encode()
+    assert config_path.stat().st_mode & 0o777 == 0o640
+    assert backup_path.stat().st_mode & 0o777 == 0o640
+    first_config_bytes = config_path.read_bytes()
+    first_config_stat = config_path.stat()
+    first_backup_stat = backup_path.stat()
+
+    reopened = load_config(resolve_runtime_paths(config_path=config_path))
+
+    assert reopened == config
+    assert config_path.read_bytes() == first_config_bytes
+    assert backup_path.read_bytes() == original.encode()
+    assert config_path.stat() == first_config_stat
+    assert backup_path.stat() == first_backup_stat
 
 
 def test_load_config_directs_bind_mount_migration_to_the_host(

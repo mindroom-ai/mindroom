@@ -4,6 +4,11 @@ Deployment must stop previous primaries and independent controllers first.
 Managed workers must be absent before inspecting or moving any scope contents.
 """
 
+# Legacy format: requester-derived private directories used keys without the lossless `~` prefix.
+# Last legacy release: v2026.9.32; prefixed lossless encoding introduced in v2026.9.33.
+# Handling: relocate only verified private owners; startup adoption began in v2026.9.36.
+# Coverage: tests/test_private_storage_migration.py::test_startup_moves_every_owner_and_preserves_contents.
+
 from __future__ import annotations
 
 import os

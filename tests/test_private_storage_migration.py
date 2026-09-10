@@ -93,14 +93,23 @@ async def test_startup_moves_every_owner_and_preserves_contents(tmp_path: Path, 
     """No request is needed to preserve both private scope kinds at current paths."""
     paths = _paths(tmp_path, separate=separate)
     fixtures = [
-        ("v1:default:user:@alice:example.org", "@alice:example.org", "v1:default:user:~@alice:example.org"),
+        (
+            "v1:default:user:@alice:example.org",
+            "@alice:example.org",
+            "v1:default:user:~@alice:example.org",
+            "v1_default_user_@alice_example.org-7e401f5cab62a04e",
+            "v1_default_user_@alice_example.org-de5e5489020ef9d2",
+        ),
         (
             "v1:default:user_agent:@bob:example.org:writer",
             "@bob:example.org",
             "v1:default:user_agent:~@bob:example.org:writer",
+            "v1_default_user_agent_@bob_example.org_writer-9d7ded5cbf84c12a",
+            "v1_default_user_agent_@bob_example.org_writer-dfedd82aedec13c9",
         ),
     ]
-    sources = [_seed(paths, old, requester) for old, requester, _new in fixtures]
+    sources = [_seed(paths, old, requester) for old, requester, _new, _old_name, _new_name in fixtures]
+    assert [source.name for source in sources] == [fixture[3] for fixture in fixtures]
     database_inodes = [
         (resolve_session_state_root(source, paths) / "writer/sessions/writer.db").stat().st_ino for source in sources
     ]
@@ -108,9 +117,18 @@ async def test_startup_moves_every_owner_and_preserves_contents(tmp_path: Path, 
     secondary = [_files(resolve_session_state_root(source, paths)) for source in sources]
     migration = importlib.import_module("mindroom.legacy_private_storage")
     await migration.migrate_private_storage(paths)
-    for index, (_old, requester, current) in enumerate(fixtures):
+    targets = [
+        private_instance_scope_root_path(paths.storage_root, current) for _old, _requester, current, *_ in fixtures
+    ]
+    assert [target.name for target in targets] == [fixture[4] for fixture in fixtures]
+
+    await migration.migrate_private_storage(paths)
+
+    for index, (_old, requester, current, old_name, current_name) in enumerate(fixtures):
         target = private_instance_scope_root_path(paths.storage_root, current)
+        assert (sources[index].name, target.name) == (old_name, current_name)
         assert sources[index].is_symlink()
+        assert str(sources[index].readlink()) == current_name
         assert sources[index].samefile(target)
         assert _files(target) == primary[index]
         session_target = resolve_session_state_root(target, paths)

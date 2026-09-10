@@ -3,6 +3,26 @@
 Delete this module after pre-membership configuration files are no longer expected to load.
 """
 
+# Legacy format: `authorization.agent_reply_permissions` native values were user lists.
+# Last legacy release: v2026.8.71; structured reply policies introduced in v2026.8.72.
+# Handling: list shorthand remains accepted and is normalized before membership conversion.
+# Coverage: tests/test_access_migration.py::test_access_migration_splits_legacy_owner_permissions.
+
+# Legacy format: authorization global/room grants, default access, and structured reply policies.
+# Last legacy release: v2026.8.127; membership schema introduced in v2026.8.128.
+# Handling: validated values are converted while explicit current grants are preserved.
+# Coverage: tests/test_access_migration.py::test_load_config_migrates_single_file_after_validation.
+
+# Legacy format: root `matrix_room_access` defaults and per-room exceptions.
+# Last legacy release: v2026.8.127; room membership defaults introduced in v2026.8.128.
+# Handling: validated defaults and managed-room references are converted without replacing current fields.
+# Coverage: tests/test_access_migration.py::test_access_migration_maps_room_permissions_and_matrix_defaults.
+
+# Legacy format: unversioned `access_model` marker from external or pre-release input.
+# Last legacy release: no tagged native model; discard handling first released in v2026.8.128.
+# Handling: the marker is discarded and repeated normalization is inert.
+# Coverage: tests/test_access_migration.py::test_access_migration_removes_mode_marker_and_is_idempotent.
+
 from __future__ import annotations
 
 import os

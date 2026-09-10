@@ -90,6 +90,10 @@ def _install_triggers(connection: sqlite3.Connection, table: str, *, lifecycle: 
 
 def _migrate_client_expiry(connection: sqlite3.Connection, registration_expires_at: Callable[[], float]) -> None:
     """Give legacy client registrations the current fixed retention deadline once."""
+    # Legacy format: staged `clients` rows had no registration expiry column.
+    # Last legacy release: pre-release schema; v2026.9.33 already completed this upgrade.
+    # Handling: assign one durable registration deadline and index it without sliding on reopen.
+    # Coverage: tests/test_mcp_gateway_oauth.py::test_legacy_registration_migration_grants_one_durable_grace_period.
     if "expires_at" not in {row["name"] for row in connection.execute("PRAGMA table_info(clients)")}:
         connection.execute("ALTER TABLE clients ADD COLUMN expires_at REAL NOT NULL DEFAULT 0")
         connection.execute("UPDATE clients SET expires_at = ?", (registration_expires_at(),))
@@ -98,6 +102,10 @@ def _migrate_client_expiry(connection: sqlite3.Connection, registration_expires_
 
 def _migrate_accounting(connection: sqlite3.Connection, now: float) -> None:
     """Backfill once under the caller's writer transaction; reopening never resets timestamps."""
+    # Legacy format: staged gateway tables had no byte charges, counters, requester ownership, or issuance time.
+    # Last legacy release: pre-release schema; v2026.9.33 already completed this upgrade.
+    # Handling: backfill fields and counters once inside the store's writer transaction.
+    # Coverage: tests/test_mcp_gateway_oauth_capacity.py::test_legacy_migration_backfills_once_and_over_budget_authority_remains_revocable.
     if connection.execute("PRAGMA user_version").fetchone()[0] >= 1:
         return
     for table in _FIELDS:
@@ -162,6 +170,10 @@ def _migrate_accounting(connection: sqlite3.Connection, now: float) -> None:
 
 def _migrate_lifecycle(connection: sqlite3.Connection) -> None:
     """Preserve existing absolute deadlines and leave unknown creation/activity dates null."""
+    # Legacy format: staged grants and pending consent lacked lifecycle dates and account bindings.
+    # Last legacy release: pre-release schema; v2026.9.33 already completed this upgrade.
+    # Handling: preserve absolute expiry, leave unknown history null, and add nullable account ownership.
+    # Coverage: tests/test_mcp_gateway_lifecycle.py::test_legacy_metadata_stays_unknown_and_absolute_expiry_never_extends.
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(grants)")}
     if "idle_expires_at" in columns:
         return
@@ -190,12 +202,20 @@ def _migrate_lifecycle(connection: sqlite3.Connection) -> None:
 
 def _migrate_accounts(connection: sqlite3.Connection) -> None:
     """Create the directory inside the caller's migration transaction."""
+    # Legacy format: staged gateway schemas had no account directory.
+    # Last legacy release: pre-release schema; v2026.9.33 already created the directory during initialization.
+    # Handling: create the account directory in the same migration transaction.
+    # Coverage: tests/test_mcp_gateway_accounts.py.
     connection.execute("""CREATE TABLE IF NOT EXISTS gateway_accounts (
         account_id TEXT PRIMARY KEY, user_name TEXT UNIQUE NOT NULL,
         active INTEGER NOT NULL CHECK(active IN (0, 1)),
         created_at REAL NOT NULL, updated_at REAL NOT NULL,
         profile TEXT NOT NULL DEFAULT '{}', token_valid_after REAL NOT NULL
     )""")
+    # Legacy format: released six-column gateway accounts had no external-token cutoff.
+    # Last legacy release: v2026.9.46; `token_valid_after` introduced in v2026.9.47.
+    # Handling: assign one durable migration-time cutoff so older external tokens remain rejected.
+    # Coverage: tests/test_mcp_gateway_accounts.py::test_migration_does_not_revive_preexisting_tokens.
     if "token_valid_after" not in {row["name"] for row in connection.execute("PRAGMA table_info(gateway_accounts)")}:
         connection.execute("ALTER TABLE gateway_accounts ADD COLUMN token_valid_after REAL NOT NULL DEFAULT 0")
         connection.execute("UPDATE gateway_accounts SET token_valid_after = ?", (time.time(),))
@@ -203,6 +223,10 @@ def _migrate_accounts(connection: sqlite3.Connection) -> None:
 
 def _migrate_lifecycle_accounting(connection: sqlite3.Connection) -> None:
     """Compact consumed refresh bindings and install their bounded charge once."""
+    # Legacy format: staged accounting v1 retained full payloads on consumed refresh rows.
+    # Last legacy release: pre-release schema; v2026.9.33 already completed accounting v2.
+    # Handling: compact only consumed refresh payloads, replace triggers, and reconcile byte counters atomically.
+    # Coverage: tests/test_mcp_gateway_oauth_capacity.py::test_v1_accounting_upgrade_compacts_historical_refresh_and_preserves_replay.
     if connection.execute("PRAGMA user_version").fetchone()[0] >= 2:
         return
     connection.execute("UPDATE capabilities SET payload = '{}' WHERE kind = 'refresh' AND consumed = 1")

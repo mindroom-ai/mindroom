@@ -1,5 +1,10 @@
 """Atomic SQLite storage for one canonical OAuth credential scope."""
 
+# Legacy format: generic JSON OAuth credentials and adjacent generation/lock sidecars.
+# Last legacy release: v2026.8.79; authoritative SQLite storage introduced in v2026.8.80.
+# Handling: adoption ended after v2026.9.48; obsolete files stay untouched and reconnect is required.
+# Coverage: tests/test_oauth_credential_store.py::test_json_only_credentials_and_sidecars_are_ignored.
+
 from __future__ import annotations
 
 import asyncio

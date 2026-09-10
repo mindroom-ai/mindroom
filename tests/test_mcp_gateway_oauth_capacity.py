@@ -328,6 +328,199 @@ def _copy_legacy(source: GatewayOAuthProvider, paths: RuntimePaths) -> None:
             legacy.executemany("INSERT INTO " + table + " VALUES (" + ",".join("?" for _ in fields) + ")", rows)  # noqa: S608
 
 
+def _seed_accounting_v1(paths: RuntimePaths) -> Path:
+    """Seed the staged v1 schema with literal authority and full refresh payloads."""
+    path = paths.storage_root / "mcp_gateway" / "oauth.sqlite3"
+    path.parent.mkdir(parents=True)
+    client_metadata = (
+        '{"client_id":"desktop","client_name":"客户端","redirect_uris":["https://client.example.org/callback"],'
+        '"token_endpoint_auth_method":"none","grant_types":["authorization_code","refresh_token"],'
+        '"response_types":["code"],"scope":"mcp:tools"}'
+    )
+    pending_payload = (
+        '{"client_id":"desktop","client_name":"客户端","params":'
+        '{"redirect_uri":"https://client.example.org/callback","resource":"https://example.org/mcp"}}'
+    )
+    grant_payload = (
+        '{"client_id":"desktop","requester_id":"@alice:example.org",'
+        '"authenticated_user_id":"@alice:example.org","agent_name":"personal",'
+        '"grant_id":"grant-legacy","account_id":null,"resource":"https://example.org/mcp",'
+        '"scopes":["mcp:tools"],"redirect_uri":"https://client.example.org/callback"}'
+    )
+    capability_payload = grant_payload[:-1] + ',"expires_at":2100000000.0}'
+
+    def charge(overhead: int, *values: str | None) -> int:
+        return overhead + sum(len(value.encode("utf-8")) for value in values if value is not None)
+
+    client_charge = charge(1024, "desktop", client_metadata)
+    pending_charge = charge(
+        1024,
+        "pending-state-hash",
+        pending_payload,
+        "@pending:example.org",
+        "@pending:example.org",
+        "personal",
+        "pending-csrf-hash",
+    )
+    grant_charge = charge(
+        2048,
+        "grant-legacy",
+        grant_payload,
+        "@alice:example.org",
+        "@alice:example.org",
+    )
+    capability_rows = [
+        (
+            "33dcf770b06b8fb8e4295828b143ef247e33dc28dc743f4291d0964d6d4b3d66",
+            "refresh",
+            capability_payload,
+            1,
+            None,
+        ),
+        (
+            "b728f1d0c6e7e003b8864e5178967d48f779102edfbef72571192efa3201cf1b",
+            "refresh",
+            capability_payload,
+            0,
+            None,
+        ),
+        (
+            "eb669948ad0442b93bffe753f63a98925756fe3d82c1212a9232ad8d8d748fa2",
+            "access",
+            capability_payload,
+            0,
+            1_999_999_999.0,
+        ),
+    ]
+    capability_charges = [
+        charge(1024, token_hash, kind, "grant-legacy", payload)
+        for token_hash, kind, payload, _consumed, _issued_at in capability_rows
+    ]
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE clients (
+                client_id TEXT PRIMARY KEY, metadata TEXT NOT NULL,
+                expires_at REAL NOT NULL, accounted_bytes INTEGER NOT NULL
+            );
+            CREATE TABLE pending (
+                state_hash TEXT PRIMARY KEY, payload TEXT NOT NULL, expires_at REAL NOT NULL,
+                requester_id TEXT, authenticated_user_id TEXT, agent_name TEXT, csrf_hash TEXT,
+                accounted_bytes INTEGER NOT NULL, account_id TEXT
+            );
+            CREATE TABLE grants (
+                grant_id TEXT PRIMARY KEY, payload TEXT NOT NULL, expires_at REAL NOT NULL,
+                revoked INTEGER NOT NULL DEFAULT 0, accounted_bytes INTEGER NOT NULL,
+                requester_id TEXT NOT NULL, requester_charge INTEGER NOT NULL,
+                created_at REAL, last_used_at REAL, last_activity_at REAL,
+                idle_expires_at REAL, account_id TEXT
+            );
+            CREATE TABLE capabilities (
+                token_hash TEXT PRIMARY KEY, kind TEXT NOT NULL, grant_id TEXT NOT NULL,
+                payload TEXT NOT NULL, expires_at REAL NOT NULL, consumed INTEGER NOT NULL DEFAULT 0,
+                accounted_bytes INTEGER NOT NULL, issued_at REAL,
+                FOREIGN KEY (grant_id) REFERENCES grants(grant_id)
+            );
+            CREATE TABLE oauth_usage (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                bytes_used INTEGER NOT NULL, onboarding_bytes INTEGER NOT NULL
+            );
+            CREATE TABLE requester_usage (requester_id TEXT PRIMARY KEY, bytes_used INTEGER NOT NULL);
+            CREATE INDEX capabilities_grant ON capabilities(grant_id);
+            CREATE INDEX grants_client ON grants(json_extract(payload, '$.client_id'));
+            CREATE INDEX pending_client ON pending(json_extract(payload, '$.client_id'));
+            CREATE INDEX pending_expiry ON pending(expires_at);
+            CREATE INDEX clients_expiry ON clients(expires_at);
+            CREATE INDEX grants_expiry ON grants(expires_at);
+            CREATE INDEX grants_revoked ON grants(grant_id) WHERE revoked = 1;
+            CREATE INDEX capabilities_code_expiry ON capabilities(expires_at) WHERE kind = 'code';
+            CREATE INDEX capabilities_code_consumed ON capabilities(grant_id) WHERE kind = 'code' AND consumed = 1;
+            CREATE INDEX capabilities_live ON capabilities(grant_id) WHERE consumed = 0 AND kind IN ('access', 'refresh');
+            CREATE INDEX capabilities_issuance ON capabilities(grant_id, issued_at) WHERE kind = 'access';
+            CREATE INDEX grants_idle_expiry ON grants(idle_expires_at);
+            CREATE INDEX grants_account ON grants(account_id);
+            CREATE INDEX pending_account ON pending(account_id);
+            CREATE INDEX capabilities_access_expiry ON capabilities(expires_at) WHERE kind = 'access';
+            CREATE INDEX grants_owner ON grants(
+                requester_id, json_extract(payload, '$.authenticated_user_id'),
+                json_extract(payload, '$.agent_name'), json_extract(payload, '$.resource')
+            );
+            CREATE INDEX pending_owner ON pending(requester_id, authenticated_user_id, agent_name);
+            CREATE TRIGGER grants_owner_immutable BEFORE UPDATE OF requester_id ON grants
+                WHEN OLD.requester_id != NEW.requester_id
+                BEGIN SELECT RAISE(ABORT, 'Grant requester is immutable'); END;
+            CREATE TRIGGER grants_pin_client AFTER INSERT ON grants BEGIN SELECT 1; END;
+            CREATE TRIGGER grants_unpin_client AFTER DELETE ON grants BEGIN SELECT 1; END;
+            PRAGMA user_version = 1;
+            """,
+        )
+        for table in ("clients", "pending", "grants", "capabilities"):
+            for suffix, event in (
+                ("charge_insert", "AFTER INSERT"),
+                ("charge_change", "AFTER UPDATE"),
+                ("usage_update", "AFTER UPDATE OF accounted_bytes"),
+                ("usage_delete", "AFTER DELETE"),
+            ):
+                connection.execute(
+                    f"CREATE TRIGGER {table}_{suffix} {event} ON {table} BEGIN SELECT 1; END",
+                )
+        connection.execute(
+            "INSERT INTO clients VALUES (?, ?, ?, ?)",
+            ("desktop", client_metadata, 2_100_000_000.0, client_charge),
+        )
+        connection.execute(
+            "INSERT INTO pending VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "pending-state-hash",
+                pending_payload,
+                2_100_000_000.0,
+                "@pending:example.org",
+                "@pending:example.org",
+                "personal",
+                "pending-csrf-hash",
+                pending_charge,
+                "pending-account",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO grants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "grant-legacy",
+                grant_payload,
+                2_100_000_000.0,
+                0,
+                grant_charge,
+                "@alice:example.org",
+                grant_charge + client_charge,
+                1_999_999_000.0,
+                1_999_999_500.0,
+                1_999_999_800.0,
+                2_100_000_000.0,
+                None,
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO capabilities VALUES (?, ?, 'grant-legacy', ?, 2100000000.0, ?, ?, ?)",
+            [
+                (token_hash, kind, payload, consumed, capability_charge, issued_at)
+                for (token_hash, kind, payload, consumed, issued_at), capability_charge in zip(
+                    capability_rows,
+                    capability_charges,
+                    strict=True,
+                )
+            ],
+        )
+        connection.execute(
+            "INSERT INTO oauth_usage VALUES (1, ?, ?)",
+            (1024 + client_charge + pending_charge + grant_charge + sum(capability_charges), pending_charge),
+        )
+        connection.execute(
+            "INSERT INTO requester_usage VALUES (?, ?)",
+            ("@alice:example.org", grant_charge + client_charge + sum(capability_charges)),
+        )
+    return path
+
+
 async def test_legacy_migration_backfills_once_and_over_budget_authority_remains_revocable(
     runtime_paths: RuntimePaths,
     client: OAuthClientInformationFull,
@@ -372,6 +565,124 @@ async def test_legacy_migration_backfills_once_and_over_budget_authority_remains
     await limited.revoke_token(original)
     assert await restarted.load_access_token(fresh.access_token) is None
     assert _reconcile(restarted)[1] == {}
+
+
+async def test_v1_accounting_upgrade_compacts_historical_refresh_and_preserves_replay(
+    runtime_paths: RuntimePaths,
+    client: OAuthClientInformationFull,
+) -> None:
+    """The v1-to-v2 step compacts only consumed refresh payloads and rebuilds exact counters."""
+    path = _seed_accounting_v1(runtime_paths)
+    provider = _provider(runtime_paths, _Clock())
+
+    consumed = await provider.load_refresh_token(client, "consumed-refresh")
+    live_refresh = await provider.load_refresh_token(client, "live-refresh")
+    live_access = await provider.load_access_token("live-access")
+    assert consumed is not None
+    assert consumed.grant_id == "grant-legacy"
+    assert live_refresh is not None
+    assert live_refresh.grant_id == "grant-legacy"
+    assert live_access is not None
+    assert live_access.grant_id == "grant-legacy"
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        capabilities = connection.execute(
+            "SELECT token_hash, kind, grant_id, payload, expires_at, consumed FROM capabilities ORDER BY token_hash",
+        ).fetchall()
+        by_hash = {row["token_hash"]: row for row in capabilities}
+        assert by_hash["33dcf770b06b8fb8e4295828b143ef247e33dc28dc743f4291d0964d6d4b3d66"]["payload"] == "{}"
+        assert by_hash["b728f1d0c6e7e003b8864e5178967d48f779102edfbef72571192efa3201cf1b"]["payload"] != "{}"
+        assert by_hash["eb669948ad0442b93bffe753f63a98925756fe3d82c1212a9232ad8d8d748fa2"]["payload"] != "{}"
+        assert [(row["kind"], row["consumed"]) for row in capabilities] == [
+            ("refresh", 1),
+            ("refresh", 0),
+            ("access", 0),
+        ]
+        assert all(row["grant_id"] == "grant-legacy" and row["expires_at"] == 2_100_000_000.0 for row in capabilities)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        client_row = connection.execute("SELECT metadata, expires_at FROM clients").fetchone()
+        assert json.loads(client_row["metadata"])["client_name"] == "客户端"
+        assert client_row["expires_at"] == 2_100_000_000.0
+        grant_row = connection.execute("SELECT payload, expires_at, revoked FROM grants").fetchone()
+        assert json.loads(grant_row["payload"])["resource"] == "https://example.org/mcp"
+        assert (grant_row["expires_at"], grant_row["revoked"]) == (
+            2_100_000_000.0,
+            0,
+        )
+        pending_row = connection.execute("SELECT payload, expires_at, account_id FROM pending").fetchone()
+        assert json.loads(pending_row["payload"])["client_name"] == "客户端"
+        assert (pending_row["expires_at"], pending_row["account_id"]) == (
+            2_100_000_000.0,
+            "pending-account",
+        )
+    usage = _reconcile(provider)
+    migrated_bytes = path.read_bytes()
+
+    reopened = _provider(runtime_paths, _Clock(now=2_000_000_123.0))
+
+    assert path.read_bytes() == migrated_bytes
+    assert _reconcile(reopened) == usage
+
+
+async def test_failed_v1_migration_rolls_back_compaction_triggers_and_counters(
+    runtime_paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure after v2 work leaves the complete v1 transaction retryable."""
+    path = _seed_accounting_v1(runtime_paths)
+    with sqlite3.connect(path) as connection:
+        old_payload = connection.execute(
+            "SELECT payload FROM capabilities WHERE token_hash = ?",
+            ("33dcf770b06b8fb8e4295828b143ef247e33dc28dc743f4291d0964d6d4b3d66",),
+        ).fetchone()[0]
+        old_counters = connection.execute("SELECT * FROM oauth_usage").fetchone()
+        old_triggers = dict(
+            connection.execute("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name"),
+        )
+    migrate = legacy_schema_module._migrate_lifecycle_accounting
+
+    def interrupted(connection: sqlite3.Connection) -> None:
+        migrate(connection)
+        msg = "Synthetic interruption after v2 migration"
+        raise RuntimeError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            legacy_schema_module,
+            "_migrate_lifecycle_accounting",
+            interrupted,
+        )
+        with pytest.raises(RuntimeError, match="after v2 migration"):
+            _provider(runtime_paths, _Clock())
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT payload FROM capabilities WHERE token_hash = ?",
+                ("33dcf770b06b8fb8e4295828b143ef247e33dc28dc743f4291d0964d6d4b3d66",),
+            ).fetchone()[0]
+            == old_payload
+        )
+        assert connection.execute("SELECT * FROM oauth_usage").fetchone() == old_counters
+        assert (
+            dict(
+                connection.execute("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name"),
+            )
+            == old_triggers
+        )
+
+    reopened = _provider(runtime_paths, _Clock())
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert (
+            connection.execute(
+                "SELECT payload FROM capabilities WHERE token_hash = ?",
+                ("33dcf770b06b8fb8e4295828b143ef247e33dc28dc743f4291d0964d6d4b3d66",),
+            ).fetchone()[0]
+            == "{}"
+        )
+    _reconcile(reopened)
 
 
 async def test_parallel_issuance_burst_has_one_winner_and_backwards_clock_does_not_reset(

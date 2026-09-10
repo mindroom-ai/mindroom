@@ -1,5 +1,10 @@
 """Historical requester keys and verified private-storage aliases."""
 
+# Legacy format: relocated current private directories without historical sibling aliases.
+# Last legacy release: v2026.9.36; verified historical aliases introduced in v2026.9.37.
+# Handling: accept only aliases proven by the current owner and exact historical reconstruction.
+# Coverage: tests/test_private_storage_migration.py::test_completed_aliases_reject_tampering.
+
 from __future__ import annotations
 
 import os
