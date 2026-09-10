@@ -91,6 +91,15 @@ def _assume_owner_is_live(event: JournalEvent) -> bool:
 
 
 @dataclass
+class _RoomRetry:
+    """One room's failure history and independently owned cooldown."""
+
+    delay_seconds: float
+    task: asyncio.Task[None]
+    event: JournalEvent
+
+
+@dataclass
 class PendingEventWorker:
     """Drain pending journal events, in receipt order within each room.
 
@@ -117,7 +126,7 @@ class PendingEventWorker:
     _process_shutdown: bool = field(default=False, init=False, repr=False)
     _stop_generation: int = field(default=0, init=False, repr=False)
     _retry_delay_seconds: float = field(default=_INITIAL_RETRY_DELAY_SECONDS, init=False, repr=False)
-    _failed_rooms: set[str] = field(default_factory=set, init=False, repr=False)
+    _room_retries: dict[str, _RoomRetry] = field(default_factory=dict, init=False, repr=False)
     # Events handed to a turn that is still running, kept whole rather than by
     # id. They stay pending durably so a crash replays them, but dispatching
     # one again while its turn is alive would answer the same message twice --
@@ -155,7 +164,15 @@ class PendingEventWorker:
 
     def _owned_tasks(self) -> tuple[asyncio.Task[None], ...]:
         return tuple(
-            task for task in (self._pump, self._retry, self._deferral_scan, *self._lanes.values()) if task is not None
+            task
+            for task in (
+                self._pump,
+                self._retry,
+                self._deferral_scan,
+                *self._lanes.values(),
+                *(retry.task for retry in self._room_retries.values()),
+            )
+            if task is not None
         )
 
     @property
@@ -194,6 +211,7 @@ class PendingEventWorker:
         self._retry = None
         self._deferral_scan = None
         self._lanes.clear()
+        self._room_retries.clear()
         self._rooms_with_more.clear()
         return True
 
@@ -203,7 +221,7 @@ class PendingEventWorker:
         await self.wait_stopped(timeout_seconds=None)
 
     async def drain_once(self) -> int:
-        """Run every currently pending event to completion and return the count.
+        """Run currently eligible events and return the count, skipping room cooldowns.
 
         Exists for startup recovery and for tests, where "the queue is empty"
         has to be observable rather than eventually true. Unlike a pump pass,
@@ -269,6 +287,8 @@ class PendingEventWorker:
         if self._stopped or stop_generation != self._stop_generation:
             return
         lane = self._start_lane(room_id, events)
+        if lane is None:
+            return
         await asyncio.wait([lane])
         # This lane is the drain's own, so whatever ended it is the drain's to
         # report. A cancelled turn is not a failed one: it leaves its event
@@ -293,18 +313,23 @@ class PendingEventWorker:
             return
         started = False
         for room_id, events in by_room.items():
+            if self._room_is_backing_off(room_id):
+                continue
             active = self._lanes.get(room_id)
             if active is not None and not active.done():
                 # Nothing else will look at this room again on its own, so its
                 # lane has to wake the pump when it finishes.
                 self._rooms_with_more.add(room_id)
                 continue
-            started = True
-            self._start_lane(room_id, events)
-        if started:
-            self._retry_delay_seconds = _INITIAL_RETRY_DELAY_SECONDS
+            if self._start_lane(room_id, events) is not None:
+                started = True
         if more_remains:
             self._continue_scanning(dispatched=started)
+        else:
+            self._retry_delay_seconds = _INITIAL_RETRY_DELAY_SECONDS
+        if any(retry.task.done() and room_id not in self._lanes for room_id, retry in self._room_retries.items()):
+            # The scan may not have reached a ready room's failed head yet.
+            self._schedule_retry()
         # A pass that found every deferral still owned starts no lane, so the
         # lane-finished path cannot be the only thing that arms the next look.
         self._schedule_deferral_scan()
@@ -330,8 +355,28 @@ class PendingEventWorker:
         else:
             self._schedule_retry()
 
-    def _start_lane(self, room_id: str, events: list[JournalEvent]) -> asyncio.Task[None]:
-        """Make one room's lane, which is the only one that room may have."""
+    def _start_lane(self, room_id: str, events: list[JournalEvent]) -> asyncio.Task[None] | None:
+        """Admit a lane against current retry state after any scan or lane wait."""
+        if self._room_is_backing_off(room_id):
+            return None
+        retry = self._room_retries.get(room_id)
+        if retry is not None and not any(event.event_id == retry.event.event_id for event in events):
+            events = [event for event in events if event.receipt_order < retry.event.receipt_order]
+        if not events:
+            return None
+        # Cooldown expiry or owner loss while a scan awaited I/O can expose
+        # an earlier deferral after its initial reclaim. Admission owns order.
+        event_ids = {event.event_id for event in events}
+        last_receipt = events[-1].receipt_order
+        reclaimed = (
+            event
+            for event in tuple(self._deferred.values())
+            if event.room_id == room_id
+            and event.receipt_order < last_receipt
+            and event.event_id not in event_ids
+            and not self.deferral_is_live(event)
+        )
+        events = sorted([*events, *reclaimed], key=lambda event: event.receipt_order)
         self._rooms_with_more.discard(room_id)
         lane = asyncio.create_task(self._run_lane(events), name=f"pending_event_lane_{room_id}")
         self._lanes[room_id] = lane
@@ -343,11 +388,57 @@ class PendingEventWorker:
             del self._lanes[room_id]
         if self._stopped or lane.cancelled():
             return
-        if room_id in self._failed_rooms:
-            self._schedule_retry()
-        elif room_id in self._rooms_with_more:
+        if room_id in self._rooms_with_more and not self._room_is_backing_off(room_id):
             self._wake.set()
         self._schedule_deferral_scan()
+
+    def _room_is_backing_off(self, room_id: str) -> bool:
+        retry = self._room_retries.get(room_id)
+        return retry is not None and not retry.task.done()
+
+    def _schedule_room_retry(self, event: JournalEvent) -> None:
+        """Keep each room's cooldown independent of admissions and other rooms."""
+        if self._stopped:
+            return
+        logger.exception(
+            "pending_event_failed",
+            event_id=event.event_id,
+            kind=event.kind.value,
+            room_id=event.room_id,
+        )
+        room_id = event.room_id
+        previous = self._room_retries.get(room_id)
+        delay = (
+            _INITIAL_RETRY_DELAY_SECONDS
+            if previous is None
+            else min(previous.delay_seconds * 2, _MAX_RETRY_DELAY_SECONDS)
+        )
+        task = asyncio.create_task(self._retry_room_after_delay(delay), name=f"pending_event_room_retry_{room_id}")
+        self._room_retries[room_id] = _RoomRetry(delay, task, event)
+
+    async def _retry_room_after_delay(self, delay: float) -> None:
+        await asyncio.sleep(delay)
+        self._wake.set()
+
+    def _clear_room_retry(self, event: JournalEvent) -> None:
+        """Only recovery of the failed event removes its room's ordering fence."""
+        retry = self._room_retries.get(event.room_id)
+        if retry is not None and retry.event.event_id == event.event_id:
+            del self._room_retries[event.room_id]
+
+    async def _forget_settled_room_retries(self) -> None:
+        """An externally settled failed head must not block its room forever."""
+        for room_id, retry in tuple(self._room_retries.items()):
+            if not retry.task.done() or room_id in self._lanes:
+                continue
+            try:
+                pending = await self.store.is_pending(retry.event.event_id)
+            except Exception:
+                if self._room_retries.get(room_id) is retry and room_id not in self._lanes:
+                    self._schedule_room_retry(retry.event)
+                continue
+            if not pending and self._room_retries.get(room_id) is retry and room_id not in self._lanes:
+                del self._room_retries[room_id]
 
     def _schedule_deferral_scan(self) -> None:
         """Arrange one later look while anything is deferred.
@@ -408,6 +499,7 @@ class PendingEventWorker:
         pages earlier -- and a room's lane is handed that list verbatim, so a
         handler that defers rather than settling runs twice on one source.
         """
+        await self._forget_settled_room_retries()
         by_room = self._reclaim_lost_deferrals()
         reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
         origin = self._scan_cursor
@@ -447,6 +539,7 @@ class PendingEventWorker:
         stops moving, and it is that loop, not one pass of it, that has to see
         every event.
         """
+        await self._forget_settled_room_retries()
         by_room = self._reclaim_lost_deferrals()
         reclaimed = frozenset(event.event_id for events in by_room.values() for event in events)
         cursor: int | None = None
@@ -477,6 +570,17 @@ class PendingEventWorker:
         for event in page:
             if stop_after is not None and event.receipt_order > stop_after:
                 return True
+            if self._room_is_backing_off(event.room_id):
+                continue
+            retry = self._room_retries.get(event.room_id)
+            if (
+                retry is not None
+                and event.receipt_order > retry.event.receipt_order
+                and not any(prior.event_id == retry.event.event_id for prior in by_room.get(event.room_id, ()))
+            ):
+                # A rotating scan can reach the tail before the failed head.
+                # Wait for the contiguous segment starting at that head.
+                continue
             if event.event_id in already_taken:
                 # The reclaim at the top of this pass already took it back.
                 continue
@@ -504,16 +608,19 @@ class PendingEventWorker:
         """
         by_room: dict[str, list[JournalEvent]] = {}
         for event in tuple(self._deferred.values()):
-            if self.deferral_is_live(event):
+            if self._room_is_backing_off(event.room_id) or self.deferral_is_live(event):
                 continue
-            self._deferred.pop(event.event_id, None)
+            # Keep ownership until a lane actually handles the reclaimed event.
+            # A scan can still lose admission to a busy or newly cooling room.
             logger.warning(
                 "pending_event_deferral_owner_lost",
                 event_id=event.event_id,
                 kind=event.kind.value,
                 room_id=event.room_id,
             )
-            by_room.setdefault(event.room_id, []).append(event)
+            retry = self._room_retries.get(event.room_id)
+            if retry is None or event.receipt_order <= retry.event.receipt_order:
+                by_room.setdefault(event.room_id, []).append(event)
         return by_room
 
     async def _run_lane(self, events: list[JournalEvent]) -> None:
@@ -531,28 +638,23 @@ class PendingEventWorker:
         until some unrelated event woke the pump, and then run its handler a
         second time.
         """
-        room_id = events[0].room_id if events else ""
         for event in events:
             if self._stopped:
                 return
             try:
                 if not await self.store.is_pending(event.event_id):
                     self._deferred.pop(event.event_id, None)
+                    self._clear_room_retry(event)
                     continue
                 if not await self.handle(event):
                     self._deferred[event.event_id] = event
+                    self._clear_room_retry(event)
                     continue
                 self._deferred.pop(event.event_id, None)
                 await self.store.settle(event.event_id)
+                self._clear_room_retry(event)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception(
-                    "pending_event_failed",
-                    event_id=event.event_id,
-                    kind=event.kind.value,
-                    room_id=event.room_id,
-                )
-                self._failed_rooms.add(room_id)
+                self._schedule_room_retry(event)
                 return
-        self._failed_rooms.discard(room_id)

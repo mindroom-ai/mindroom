@@ -1897,6 +1897,460 @@ class TestPendingEventWorker:
         await worker.stop()
 
 
+@pytest.fixture
+def retry_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[tuple[float, asyncio.Event]]:
+    """Hold only worker retry timers, leaving real journal I/O and loop scheduling intact."""
+    sleeping: list[tuple[float, asyncio.Event]] = []
+    original_sleep = asyncio.sleep
+
+    async def sleep(delay: float) -> None:
+        task = asyncio.current_task()
+        if task is not None and "retry" in task.get_name():
+            release = asyncio.Event()
+            sleeping.append((delay, release))
+            await release.wait()
+        else:
+            await original_sleep(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    return sleeping
+
+
+async def _dispatch_worker_pass(worker: PendingEventWorker) -> None:
+    """Finish one real scan and its room lanes without running the background pump."""
+    await worker._dispatch_ready_rooms()
+    await asyncio.gather(*worker._lanes.values())
+    await asyncio.sleep(0)
+
+
+class TestRoomRetryBackoff:
+    """Only a room's own successful work resets its bounded retry delay."""
+
+    @pytest.mark.parametrize("drain", [False, True])
+    async def test_admissions_do_not_bypass_a_failed_rooms_cooldown(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        *,
+        drain: bool,
+    ) -> None:
+        """An unrelated wake runs healthy rooms without retrying a failed head early."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$failed":
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            assert len(retry_sleeps) == 1
+            await TestPendingEventWorker._admit(alice, text_event("$later"))
+            await TestPendingEventWorker._admit(alice, text_event("$healthy"), "!healthy:example.org")
+            if drain:
+                await asyncio.wait_for(worker.drain_once(), timeout=1)
+            else:
+                await _dispatch_worker_pass(worker)
+
+            assert attempts == ["$failed", "$healthy"]
+            assert await alice.unsettled_event_ids() == frozenset({"$failed", "$later"})
+        finally:
+            await worker.stop()
+
+    async def test_consecutive_room_failures_back_off_to_cap_and_success_resets(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """Lane starts and successful work in another room cannot reset failure history."""
+        attempts: list[str] = []
+        failing = True
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.room_id == ROOM and failing:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            for index, expected_delay in enumerate((1, 2, 4, 8, 16, 30, 30)):
+                await _dispatch_worker_pass(worker)
+                assert retry_sleeps[-1][0] == expected_delay
+                assert attempts.count("$failed") == index + 1
+                await TestPendingEventWorker._admit(alice, text_event(f"$healthy{index}"), "!healthy:example.org")
+                await _dispatch_worker_pass(worker)
+                assert attempts[-1] == f"$healthy{index}"
+                retry_sleeps[-1][1].set()
+                await asyncio.sleep(0)
+
+            failing = False
+            await _dispatch_worker_pass(worker)
+            assert not await alice.is_pending("$failed")
+            failing = True
+            await TestPendingEventWorker._admit(alice, text_event("$new-failure"))
+            await _dispatch_worker_pass(worker)
+            assert retry_sleeps[-1][0] == 1
+        finally:
+            await worker.stop()
+
+    async def test_each_room_wakes_at_its_own_retry_without_new_admission(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """One timer cannot release another failing room or strand its pending event."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if attempts.count(event.event_id) == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        worker = PendingEventWorker(store=alice, handle=handle)
+        await TestPendingEventWorker._admit(alice, text_event("$first"))
+        worker.start()
+        try:
+            await _eventually(lambda: len(retry_sleeps) == 1)
+            await TestPendingEventWorker._admit(alice, text_event("$second"), "!second:example.org")
+            worker.wake()
+            await _eventually(lambda: len(retry_sleeps) == 2)
+            retry_sleeps[1][1].set()
+            await _eventually(lambda: attempts.count("$second") == 2)
+            assert attempts.count("$first") == 1
+            retry_sleeps[0][1].set()
+            await _eventually_async(alice.pending)
+            assert attempts == ["$first", "$second", "$second", "$first"]
+        finally:
+            await worker.stop()
+        assert worker.pending_task_count == 0
+
+    async def test_retry_waits_for_failed_head_when_scan_resumes_in_later_page(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A rotating scan must not dispatch later room events ahead of the failed head."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if attempts == ["$first"]:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id in ("$first", "$second", "$third"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            for _ in range(6):
+                await _dispatch_worker_pass(worker)
+            assert attempts == ["$first", "$first", "$second", "$third"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            await worker.stop()
+
+    async def test_settled_failed_head_releases_later_events_after_cooldown(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """External settlement cannot leave an absent failed head blocking later work."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$failed":
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        await TestPendingEventWorker._admit(alice, text_event("$later"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            await alice.settle("$failed")
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            await _dispatch_worker_pass(worker)
+            assert attempts == ["$failed", "$later"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("cooldown_passes", [0, 4])
+    async def test_reclaimed_earlier_event_does_not_release_later_slice_before_failed_head(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        cooldown_passes: int,
+    ) -> None:
+        """Reclaimed work before the failure cannot make a later scan slice safe."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        attempts: list[str] = []
+        owner_live = True
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$earlier":
+                return not owner_live
+            if event.event_id == "$failed" and attempts.count("$failed") == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        for event_id in ("$earlier", "$failed", "$later", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(store=alice, handle=handle, deferral_is_live=lambda _event: owner_live)
+        try:
+            await _dispatch_worker_pass(worker)
+            await _dispatch_worker_pass(worker)
+            owner_live = False
+            for _ in range(cooldown_passes):
+                await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            for _ in range(8):
+                await _dispatch_worker_pass(worker)
+            assert attempts == ["$earlier", "$failed", "$earlier", "$failed", "$later", "$last"]
+        finally:
+            await worker.stop()
+
+    async def test_failed_head_read_does_not_block_other_rooms(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """Checking a failed head must keep store failures scoped to that room."""
+        handled: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        store = _FlakyReplayView(alice, fail_is_pending={"$failed"})
+        worker = PendingEventWorker(store=store, handle=handle)
+        try:
+            await _dispatch_worker_pass(worker)
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            store.fail_is_pending.add("$failed")
+            await TestPendingEventWorker._admit(alice, text_event("$healthy"), "!healthy:example.org")
+            await _dispatch_worker_pass(worker)
+            assert handled == ["$healthy"]
+            assert retry_sleeps[-1][0] == 2
+        finally:
+            await worker.stop()
+
+    @pytest.mark.parametrize("owner_dies_during_scan", [False, True])
+    async def test_retry_admission_reclaims_earlier_deferral_after_awaited_page(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        owner_dies_during_scan: bool,
+    ) -> None:
+        """Cooldown expiry or owner death during I/O cannot hide an earlier deferral."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        owner_live = True
+        block_page = False
+        page_entered = asyncio.Event()
+        release_page = asyncio.Event()
+        attempts: list[str] = []
+        for event_id in ("$earlier", "$failed", "$later", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        earlier = (await alice.pending())[0]
+
+        class BlockingRetryPage(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                page = await super().pending(
+                    limit=limit,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+                if block_page and after_receipt_order == earlier.receipt_order:
+                    page_entered.set()
+                    await release_page.wait()
+                return page
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if event.event_id == "$earlier":
+                return not owner_live
+            if event.event_id == "$failed" and attempts.count("$failed") == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        worker = PendingEventWorker(
+            store=BlockingRetryPage(alice),
+            handle=handle,
+            deferral_is_live=lambda _event: owner_live,
+        )
+        await _dispatch_worker_pass(worker)
+        await _dispatch_worker_pass(worker)
+        owner_live = owner_dies_during_scan
+        for _ in range(4):
+            await _dispatch_worker_pass(worker)
+        assert worker._scan_cursor == earlier.receipt_order
+        block_page = True
+        scanning = asyncio.create_task(_dispatch_worker_pass(worker))
+        try:
+            await page_entered.wait()
+            owner_live = False
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            release_page.set()
+            await scanning
+            assert attempts == ["$earlier", "$failed", "$earlier", "$failed"]
+            for _ in range(4):
+                await _dispatch_worker_pass(worker)
+            assert attempts == ["$earlier", "$failed", "$earlier", "$failed", "$later", "$last"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            release_page.set()
+            scanning.cancel()
+            await asyncio.gather(scanning, return_exceptions=True)
+            await worker.stop()
+
+    @pytest.mark.parametrize("drain", [False, True])
+    async def test_stale_tail_cannot_overtake_head_that_failed_during_scan(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        drain: bool,
+    ) -> None:
+        """Final lane admission rechecks failures that appeared during an awaited scan."""
+        monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 1)
+        entered_head = asyncio.Event()
+        fail_head = asyncio.Event()
+        entered_last_page = asyncio.Event()
+        release_last_page = asyncio.Event()
+        attempts: list[str] = []
+        for event_id in ("$head", "$tail", "$last"):
+            await TestPendingEventWorker._admit(alice, text_event(event_id))
+        admitted = await alice.pending()
+        tail = admitted[1]
+
+        class BlockingLastPage(_FlakyReplayView):
+            async def pending(
+                self,
+                *,
+                limit: int = 256,
+                after_receipt_order: int | None = None,
+                runtime_generation: str = "unmanaged",
+            ) -> PendingPage:
+                page = await super().pending(
+                    limit=limit,
+                    after_receipt_order=after_receipt_order,
+                    runtime_generation=runtime_generation,
+                )
+                if after_receipt_order == tail.receipt_order:
+                    entered_last_page.set()
+                    await release_last_page.wait()
+                return page
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if attempts == ["$head"]:
+                entered_head.set()
+                await fail_head.wait()
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        worker = PendingEventWorker(store=BlockingLastPage(alice), handle=handle)
+        await worker._dispatch_ready_rooms()
+        await entered_head.wait()
+        head_lane = worker._lanes[ROOM]
+        monkeypatch.setattr("mindroom.pending_event_worker._MAX_SCAN_PAGES", 2)
+        scanning = asyncio.create_task(worker._collect_dispatchable() if drain else worker._dispatch_ready_rooms())
+        try:
+            await entered_last_page.wait()
+            fail_head.set()
+            await head_lane
+            await asyncio.sleep(0)
+            retry_sleeps[0][1].set()
+            await asyncio.sleep(0)
+            release_last_page.set()
+            await scanning
+            if drain:
+                await worker._drain_room(ROOM, [tail], stop_generation=worker._stop_generation)
+            await asyncio.gather(*worker._lanes.values())
+            assert attempts == ["$head"]
+            for _ in range(4):
+                await _dispatch_worker_pass(worker)
+            assert attempts == ["$head", "$head", "$tail", "$last"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            fail_head.set()
+            release_last_page.set()
+            scanning.cancel()
+            await asyncio.gather(scanning, return_exceptions=True)
+            await worker.stop()
+
+    async def test_shutdown_cancels_room_cooldown_and_restart_replays_pending_work(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
+        """A cooling room owns a cancellable timer and leaves its journal work durable."""
+        attempts: list[str] = []
+
+        async def handle(event: JournalEvent) -> bool:
+            attempts.append(event.event_id)
+            if len(attempts) == 1:
+                msg = "callback unavailable"
+                raise RuntimeError(msg)
+            return True
+
+        await TestPendingEventWorker._admit(alice, text_event("$failed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        await _dispatch_worker_pass(worker)
+        assert len(retry_sleeps) == 1
+        worker.begin_shutdown()
+        assert await worker.wait_stopped(timeout_seconds=0.1)
+        assert worker.pending_task_count == 0
+        assert await alice.is_pending("$failed")
+        worker.start()
+        try:
+            await _eventually_async(alice.pending)
+        finally:
+            await worker.stop()
+        assert attempts == ["$failed", "$failed"]
+
+
 class TestOutOfBandDispatch:
     """An event its caller runs itself is still an event with one handler."""
 
@@ -3050,7 +3504,11 @@ class TestAdmittedWorkReachesItsCallback:
         assert [event.event_id for event in handled] == ["$call"]
         assert not await alice.is_pending("$call")
 
-    async def test_failed_call_callback_replays_from_durable_work(self, alice: PrincipalStore) -> None:
+    async def test_failed_call_callback_replays_from_durable_work(
+        self,
+        alice: PrincipalStore,
+        retry_sleeps: list[tuple[float, asyncio.Event]],
+    ) -> None:
         """A callback failure keeps the RTC event pending for a later pass."""
         failure = RuntimeError("call reconciliation failed")
         on_rtc = AsyncMock(side_effect=[failure, None])
@@ -3077,8 +3535,13 @@ class TestAdmittedWorkReachesItsCallback:
         assert await alice.is_pending("$call-retry")
 
         await dispatcher.drain_once()
+        assert on_rtc.await_count == 1
+        retry_sleeps[0][1].set()
+        await asyncio.sleep(0)
+        await dispatcher.drain_once()
         assert on_rtc.await_count == 2
         assert not await alice.is_pending("$call-retry")
+        await dispatcher.stop()
 
 
 class TestScheduleTriggerDispatch:
