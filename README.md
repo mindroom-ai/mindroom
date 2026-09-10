@@ -229,7 +229,7 @@ voice:
   enabled: true
   stt:
     provider: openai
-    model: gpt-4o-transcribe
+    model: gpt-transcribe
 
 mindroom_user:
   username: mindroom_user  # Immutable once the account is created on first run

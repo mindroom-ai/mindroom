@@ -1857,7 +1857,7 @@
         },
         {
           "authored_override": true,
-          "default": "sonic-2",
+          "default": "sonic-3.6",
           "description": null,
           "label": "Model ID",
           "name": "model_id",
@@ -3135,7 +3135,7 @@
         },
         {
           "authored_override": true,
-          "default": "eleven_multilingual_v2",
+          "default": "eleven_v3",
           "description": null,
           "label": "Model ID",
           "name": "model_id",
@@ -3246,7 +3246,7 @@
         },
         {
           "authored_override": true,
-          "default": "fal-ai/hunyuan-video",
+          "default": "fal-ai/hunyuan-video-v1.5/text-to-video",
           "description": null,
           "label": "Model",
           "name": "model",
@@ -3819,7 +3819,7 @@
         },
         {
           "authored_override": true,
-          "default": "veo-3.1-generate-preview",
+          "default": "veo-3.1-generate-001",
           "description": null,
           "label": "Video Generation Model",
           "name": "video_generation_model",
@@ -4445,7 +4445,7 @@
         },
         {
           "authored_override": true,
-          "default": "playai-tts",
+          "default": "canopylabs/orpheus-v1-english",
           "description": null,
           "label": "Tts Model",
           "name": "tts_model",
@@ -4457,7 +4457,7 @@
         },
         {
           "authored_override": true,
-          "default": "Chip-PlayAI",
+          "default": "troy",
           "description": null,
           "label": "Tts Voice",
           "name": "tts_voice",
@@ -5242,7 +5242,7 @@
         },
         {
           "authored_override": true,
-          "default": "gpt-4o-transcribe",
+          "default": "gpt-transcribe",
           "description": null,
           "label": "Transcription Model",
           "name": "transcription_model",
@@ -5290,7 +5290,7 @@
         },
         {
           "authored_override": true,
-          "default": "gpt-image-2",
+          "default": "gpt-image-2.5-sunburst",
           "description": null,
           "label": "Image Model",
           "name": "image_model",
@@ -6032,7 +6032,7 @@
         },
         {
           "authored_override": true,
-          "default": "minimax/video-01",
+          "default": "minimax/h3",
           "description": null,
           "label": "Model",
           "name": "model",

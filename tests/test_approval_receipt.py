@@ -161,7 +161,7 @@ async def test_model_call_hook_appends_one_trusted_approval_receipt_after_tool_r
 @pytest.mark.asyncio
 async def test_openai_previous_response_chain_keeps_receipt_provider_visible() -> None:
     """Stateful Responses requests must include the receipt after their chain boundary."""
-    model = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")
     seen_requests: list[tuple[dict[str, object], list[object]]] = []
 
     async def record_request(*, messages: list[Message], **_kwargs: object) -> ModelResponse:
@@ -208,8 +208,8 @@ async def test_openai_previous_response_chain_keeps_receipt_provider_visible() -
 @pytest.mark.asyncio
 async def test_gemini_fallback_preserves_system_prompt_from_openai_history() -> None:
     """OpenAI response metadata must not replace Gemini's original system rules."""
-    primary = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")
-    fallback = MindRoomGoogleGemini(id="gemini-3.6-flash", api_key="test-key")
+    primary = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")
+    fallback = MindRoomGoogleGemini(id="gemini-3.8-flash", api_key="test-key")
     seen_system_message: list[object] = []
 
     async def record_request(*, messages: list[Message], **_kwargs: object) -> ModelResponse:

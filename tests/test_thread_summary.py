@@ -2565,6 +2565,9 @@ class TestGenerateSummary:
     @pytest.mark.parametrize(
         "model_id",
         [
+            "claude-fable-5-1",
+            "anthropic.claude-fable-5-1",
+            "anthropic/claude-fable-5.1",
             "claude-fable-5",
             "anthropic.claude-fable-5",
             "anthropic/claude-fable-5",
@@ -2595,7 +2598,10 @@ class TestGenerateSummary:
 
         assert model.temperature is None
 
-    @pytest.mark.parametrize("model_id", ["gemini-3.6-flash", "gemini-3.5-flash-lite"])
+    @pytest.mark.parametrize(
+        "model_id",
+        ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"],
+    )
     async def test_generate_summary_omits_deprecated_direct_google_temperature(self, model_id: str) -> None:
         """Current direct Gemini requests must omit deprecated sampling controls."""
         model = MindRoomGoogleGemini(id=model_id, api_key="dummy-key", temperature=0.9)
@@ -2608,7 +2614,7 @@ class TestGenerateSummary:
 
         assert model.temperature is None
 
-    @pytest.mark.parametrize("model_id", ["google/gemini-3.6-flash", "google/gemini-3.5-flash-lite"])
+    @pytest.mark.parametrize("model_id", ["google/gemini-3.8-flash", "google/gemini-3.5-flash-lite"])
     async def test_generate_summary_preserves_supported_openrouter_gemini_temperature(self, model_id: str) -> None:
         """OpenRouter supports temperature for current Gemini request IDs."""
         model = _TemperatureAwareIdentifiedModel(model_id, temperature=0.9)

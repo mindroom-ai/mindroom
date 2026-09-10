@@ -12,12 +12,16 @@ if TYPE_CHECKING:
 __all__ = (
     "AWS_BEDROCK_CLAUDE_OPUS",
     "AZURE_OPENAI_DEFAULT_DEPLOYMENT",
+    "CARTESIA_TTS",
     "CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
     "CODEX_GPT",
+    "CODEX_GPT_ALIAS",
     "CODEX_GPT_ENDPOINT",
     "CONFIG_INIT_MODEL_ALTERNATIVES",
     "CONFIG_INIT_MODEL_PRESETS",
     "DEEPSEEK_V4_PRO",
+    "ELEVENLABS_TTS",
+    "FAL_VIDEO",
     "GOOGLE_AVATAR_IMAGE",
     "GOOGLE_AVATAR_PROMPT",
     "GOOGLE_IMAGE",
@@ -44,10 +48,10 @@ __all__ = (
     "OPENAI_GPT_TERRA",
     "OPENAI_IMAGE",
     "OPENAI_REALTIME",
-    "OPENAI_REALTIME_TRANSCRIPTION",
     "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
     "OPENAI_TRANSCRIPTION",
     "OPENAI_TTS",
+    "REPLICATE_VIDEO",
     "SAAS_MODEL_PRESETS",
     "SENTENCE_TRANSFORMERS_DEFAULT",
     "TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES",
@@ -73,7 +77,7 @@ class ModelPreset:
         return config
 
 
-_ANTHROPIC_FABLE = "claude-fable-5"
+_ANTHROPIC_FABLE = "claude-fable-5-1"
 _ANTHROPIC_OPUS = "claude-opus-5"
 _ANTHROPIC_SONNET = "claude-sonnet-5"
 _ANTHROPIC_HAIKU = "claude-haiku-4-5"
@@ -92,14 +96,15 @@ TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES = (
     "claude-sonnet-4-20250514",
     "claude-sonnet-4@",
 )
-_AWS_BEDROCK_CLAUDE_FABLE = "anthropic.claude-fable-5"
+_AWS_BEDROCK_CLAUDE_FABLE = "anthropic.claude-fable-5-1"
 AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-5"
 _AWS_BEDROCK_CLAUDE_SONNET = "anthropic.claude-sonnet-5"
 _AWS_BEDROCK_CLAUDE_HAIKU = "anthropic.claude-haiku-4-5"
-CODEX_GPT = "gpt-5.6"
+CODEX_GPT = "gpt-6-astra"
+CODEX_GPT_ALIAS = "gpt-5.6"
 CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
 KIMI_K3 = "k3"
-_OPENAI_GPT = "gpt-5.6"
+_OPENAI_GPT = "gpt-6-astra"
 # OpenAI's Responses-API tool_search tool requires gpt-5.4 or newer; gating
 # parses the gpt-N.M version from the model id so new releases take the
 # native tool-search path without a list update.
@@ -108,46 +113,50 @@ OPENAI_GPT_TERRA = "gpt-5.6-terra"
 OPENAI_GPT_LUNA = "gpt-5.6-luna"
 AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
 
-_GOOGLE_GEMINI_FLASH = "gemini-3.6-flash"
+_GOOGLE_GEMINI_FLASH = "gemini-3.8-flash"
 _GOOGLE_GEMINI_LITE = "gemini-3.5-flash-lite"
 GOOGLE_AVATAR_PROMPT = _GOOGLE_GEMINI_LITE
 GOOGLE_IMAGE = "gemini-3.1-flash-image"
 GOOGLE_AVATAR_IMAGE = GOOGLE_IMAGE
-GOOGLE_VEO = "veo-3.1-generate-preview"
+GOOGLE_VEO = "veo-3.1-generate-001"
 GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
     _GOOGLE_GEMINI_FLASH,
+    "gemini-3.6-flash",
     _GOOGLE_GEMINI_LITE,
 )
 CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
     _ANTHROPIC_FABLE,
+    "claude-fable-5.1",
+    "claude-fable-5",
     _ANTHROPIC_OPUS,
     _ANTHROPIC_SONNET,
 )
 
-_OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5"
+_OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5.1"
 _OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-5"
 _OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-5"
 _OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-4.5"
 _OPENROUTER_GEMINI_FLASH = f"google/{_GOOGLE_GEMINI_FLASH}"
 _OPENROUTER_GEMINI_LITE = f"google/{_GOOGLE_GEMINI_LITE}"
+_OPENROUTER_OPENAI_GPT = f"openai/{_OPENAI_GPT}"
 _OPENROUTER_OPENAI_TERRA = "openai/gpt-5.6-terra"
-_OPENROUTER_NEMOTRON = "nvidia/nemotron-3-super-120b-a12b:free"
-_OPENROUTER_DEEPSEEK = "deepseek/deepseek-v4-pro"
-_OPENROUTER_GLM = "z-ai/glm-5.2"
+_OPENROUTER_NEMOTRON = "nvidia/nemotron-3.5-lightning:free"
+_OPENROUTER_DEEPSEEK = "deepseek/deepseek-v4.1-flash"
+_OPENROUTER_GLM = "z-ai/glm-5.3"
 _OPENROUTER_KIMI = "moonshotai/kimi-k3"
-_OPENROUTER_TENCENT_HY3 = "tencent/hy3-preview"
+_OPENROUTER_TENCENT_HY4 = "tencent/hy4-preview"
 
 ZAI_BASE_URL_DEFAULT = "https://api.z.ai/api/paas/v4"
 
 OLLAMA_GEMMA = "gemma4"
-OLLAMA_QWEN = "qwen3.6:27b"
+OLLAMA_QWEN = "qwen3.8:27b"
 OLLAMA_HOST_DEFAULT = "http://localhost:11434"
 
 LLAMA_CPP_GEMMA = "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M"
-LLAMA_CPP_QWEN = "unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL"
+LLAMA_CPP_QWEN = "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"
 LLAMA_CPP_BASE_URL_DEFAULT = "http://localhost:8080/v1"
 LOCAL_OPENAI_API_KEY_DEFAULT = "sk-no-key-required"
-LOCAL_QWEN_PRESET_NAME = "qwen3_6_27b"
+LOCAL_QWEN_PRESET_NAME = "qwen3_8_27b"
 LOCAL_QWEN_CONTEXT_WINDOW = 256_000
 MEMORY_OLLAMA_LLM = OLLAMA_GEMMA
 
@@ -155,15 +164,19 @@ OPENAI_EMBEDDING_SMALL = "text-embedding-3-small"
 OPENAI_EMBEDDING_LARGE = "text-embedding-3-large"
 SENTENCE_TRANSFORMERS_DEFAULT = "sentence-transformers/all-MiniLM-L6-v2"
 
-OPENAI_TRANSCRIPTION = "gpt-4o-transcribe"
-OPENAI_REALTIME_TRANSCRIPTION = "gpt-realtime-whisper"
+OPENAI_TRANSCRIPTION = "gpt-transcribe"
 OPENAI_TTS = "gpt-4o-mini-tts"
 OPENAI_REALTIME = "gpt-realtime-2.1"
-OPENAI_IMAGE = "gpt-image-2"
+OPENAI_IMAGE = "gpt-image-2.5-sunburst"
 OPENAI_DALLE = "dall-e-3"
 
 GROQ_TRANSCRIPTION = "whisper-large-v3"
-GROQ_TTS = "playai-tts"
+GROQ_TTS = "canopylabs/orpheus-v1-english"
+
+CARTESIA_TTS = "sonic-3.6"
+ELEVENLABS_TTS = "eleven_v3"
+FAL_VIDEO = "fal-ai/hunyuan-video-v1.5/text-to-video"
+REPLICATE_VIDEO = "minimax/h3"
 
 DEEPSEEK_V4_PRO = "deepseek-v4-pro"
 
@@ -199,6 +212,7 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("openai_luna", ModelPreset("openai", OPENAI_GPT_LUNA, 1_050_000)),
         ),
         "openrouter": (
+            ("astra", ModelPreset("openrouter", _OPENROUTER_OPENAI_GPT, 1_050_000)),
             ("gpt5terra", ModelPreset("openrouter", _OPENROUTER_OPENAI_TERRA, 1_050_000)),
             ("fable", ModelPreset("openrouter", _OPENROUTER_CLAUDE_FABLE, 1_000_000)),
             ("opus", ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000)),
@@ -208,8 +222,8 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("deepseek", ModelPreset("openrouter", _OPENROUTER_DEEPSEEK, 1_048_576)),
             ("glm", ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576)),
             ("kimi", ModelPreset("openrouter", _OPENROUTER_KIMI, 1_048_576)),
-            ("tencent_hy3", ModelPreset("openrouter", _OPENROUTER_TENCENT_HY3, 262_144)),
-            ("nemotron", ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 262_144)),
+            ("tencent_hy4", ModelPreset("openrouter", _OPENROUTER_TENCENT_HY4, 1_048_576)),
+            ("nemotron", ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 1_000_000)),
         ),
         "vertexai_claude": (
             ("fable", ModelPreset("vertexai_claude", _ANTHROPIC_FABLE, 1_000_000)),
@@ -222,6 +236,7 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
 SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {
         "default": ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_048_576),
+        "astra": ModelPreset("openrouter", _OPENROUTER_OPENAI_GPT, 1_050_000),
         "gpt5terra": ModelPreset("openrouter", _OPENROUTER_OPENAI_TERRA, 1_050_000),
         "gpt5luna": ModelPreset("openai", OPENAI_GPT_LUNA, 1_050_000),
         "fable": ModelPreset("openrouter", _OPENROUTER_CLAUDE_FABLE, 1_000_000),
@@ -233,8 +248,8 @@ SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "deepseek": ModelPreset("openrouter", _OPENROUTER_DEEPSEEK, 1_048_576),
         "glm": ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576),
         "kimi": ModelPreset("openrouter", _OPENROUTER_KIMI, 1_048_576),
-        "tencent_hy3": ModelPreset("openrouter", _OPENROUTER_TENCENT_HY3, 262_144),
-        "nemotron": ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 262_144),
+        "tencent_hy4": ModelPreset("openrouter", _OPENROUTER_TENCENT_HY4, 1_048_576),
+        "nemotron": ModelPreset("openrouter", _OPENROUTER_NEMOTRON, 1_000_000),
     },
 )
 

@@ -388,8 +388,12 @@ memory:
 models:
   default:
     provider: openrouter
-    id: google/gemini-3.6-flash
+    id: google/gemini-3.8-flash
     context_window: 1048576
+  astra:
+    provider: openrouter
+    id: openai/gpt-6-astra
+    context_window: 1050000
   gpt5terra:
     provider: openrouter
     id: openai/gpt-5.6-terra
@@ -400,7 +404,7 @@ models:
     context_window: 1050000
   fable:
     provider: openrouter
-    id: anthropic/claude-fable-5
+    id: anthropic/claude-fable-5.1
     context_window: 1000000
   opus:
     provider: openrouter
@@ -416,7 +420,7 @@ models:
     context_window: 200000
   gemini_flash:
     provider: openrouter
-    id: google/gemini-3.6-flash
+    id: google/gemini-3.8-flash
     context_window: 1048576
   gemini_lite:
     provider: openrouter
@@ -424,24 +428,24 @@ models:
     context_window: 1048576
   deepseek:
     provider: openrouter
-    id: deepseek/deepseek-v4-pro
+    id: deepseek/deepseek-v4.1-flash
     context_window: 1048576
   glm:
     provider: openrouter
-    id: z-ai/glm-5.2
+    id: z-ai/glm-5.3
     context_window: 1048576
   kimi:
     provider: openrouter
     id: moonshotai/kimi-k3
     context_window: 1048576
-  tencent_hy3:
+  tencent_hy4:
     provider: openrouter
-    id: tencent/hy3-preview
-    context_window: 262144
+    id: tencent/hy4-preview
+    context_window: 1048576
   nemotron:
     provider: openrouter
-    id: nvidia/nemotron-3-super-120b-a12b:free
-    context_window: 262144
+    id: nvidia/nemotron-3.5-lightning:free
+    context_window: 1000000
 plugins: []
 room_models:
   research: haiku
@@ -475,5 +479,5 @@ voice:
   intelligence:
     model: sonnet
   stt:
-    model: gpt-4o-transcribe
+    model: gpt-transcribe
     provider: openai

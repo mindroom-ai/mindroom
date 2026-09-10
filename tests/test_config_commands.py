@@ -1784,7 +1784,7 @@ async def test_apply_config_change_saves_a_journal_edit_and_says_it_waits_for_a_
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
             },
         ),
@@ -1814,7 +1814,7 @@ async def test_a_saved_journal_edit_survives_a_later_unrelated_write(tmp_path: P
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
             },
         ),

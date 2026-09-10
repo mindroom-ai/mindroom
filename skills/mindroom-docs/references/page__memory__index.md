@@ -90,7 +90,7 @@ memory:
   llm:
     provider: ollama    # ollama, openai, or anthropic
     config:
-      model: llama3.2
+      model: gemma4
 ```
 
 Supported LLM providers: `ollama` (default), `openai`, `anthropic`.

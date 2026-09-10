@@ -113,7 +113,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.6
+    id: gpt-6-astra
 
 defaults:
   tools: [scheduler]
@@ -287,8 +287,8 @@ Run `codex login` before starting MindRoom when using `--provider codex`.
 `--provider azure` uses Azure OpenAI through your deployment name.
 Set `models.default.id` to the Azure deployment name you created.
 
-`--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
-Run `ollama pull gemma4` and `ollama pull qwen3.6:27b` before starting MindRoom.
+`--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.8:27b`.
+Run `ollama pull gemma4` and `ollama pull qwen3.8:27b` before starting MindRoom.
 
 `--provider llama.cpp` uses a local OpenAI-compatible llama.cpp server on `http://localhost:8080/v1`.
 Start `llama-server` with one of the configured Unsloth GGUF refs before starting MindRoom.
@@ -454,7 +454,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.6
+    id: gpt-6-astra
 
 defaults:
   tools: [scheduler]
@@ -1300,7 +1300,7 @@ defaults:
 
 # defaults.thread_summary_temperature controls automatic summaries on providers that support runtime temperature overrides.
 # Set it to null to use provider defaults.
-# Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
+# Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
 # room_thread_summary_models can override defaults.thread_summary_model for a room alias or raw Matrix room ID.
 #
 # A thread's first trusted automatic summary call is summary-only.
@@ -1406,7 +1406,7 @@ voice:
   visible_router_echo: true        # Optional: show router voice progress or direct fallback
   stt:
     provider: openai               # Default: openai
-    model: gpt-4o-transcribe       # Default: gpt-4o-transcribe
+    model: gpt-transcribe       # Default: gpt-transcribe
     credentials_service: openai    # Named credential service for speech
     api_key: null
     host: null
@@ -1427,7 +1427,7 @@ calls:
       model: default                 # Optional: top-level model alias overriding room/agent models for call turns
       stt:
         provider: openai
-        model: gpt-4o-transcribe
+        model: gpt-transcribe
         credentials_service: openai
       tts:
         provider: openai
@@ -2477,6 +2477,8 @@ agents:
 # Model Configuration
 
 Models define the AI providers and model IDs used by agents.
+Examples were checked on September 10, 2026 against the [OpenAI catalog](https://developers.openai.com/api/docs/models), [Claude catalog](https://platform.claude.com/docs/en/models/overview), [Gemini catalog](https://ai.google.dev/gemini-api/docs/models), and [OpenRouter catalog](https://openrouter.ai/api/v1/models).
+Provider-specific IDs can differ for the same model.
 
 ## Supported Providers
 
@@ -2535,7 +2537,7 @@ models:
 
   fable:
     provider: anthropic
-    id: claude-fable-5
+    id: claude-fable-5-1
     context_window: 1000000
 
   opus:
@@ -2557,7 +2559,7 @@ models:
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-5.6
+    id: gpt-6-astra
     context_window: 1050000
 
   # Azure OpenAI
@@ -2568,7 +2570,7 @@ models:
   # OpenAI via a Codex CLI ChatGPT login
   codex:
     provider: codex
-    id: gpt-5.6
+    id: gpt-6-astra
     context_window: 258000
 
   # Kimi K3 via a Kimi Code CLI login
@@ -2580,7 +2582,7 @@ models:
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
-    id: gemini-3.6-flash
+    id: gemini-3.8-flash
     context_window: 1048576
 
   # Anthropic Claude on Vertex AI
@@ -2594,7 +2596,8 @@ models:
   # Local via Ollama
   local:
     provider: ollama
-    id: llama3.2
+    id: qwen3.8:27b
+    context_window: 256000
     host: http://localhost:11434  # Uses dedicated host field
 
   # OpenRouter (access to many model providers)
@@ -2602,15 +2605,17 @@ models:
     provider: openrouter
     id: anthropic/claude-sonnet-5
 
-  # Groq (fast inference)
+  # Groq (fast inference; Qwen3.8 is a preview model)
   groq:
     provider: groq
-    id: llama-3.1-70b-versatile
+    id: qwen/qwen3.8-27b
+    context_window: 131042
 
   # Cerebras
   cerebras:
     provider: cerebras
-    id: llama3.1-8b
+    id: qwen-3.8-27b
+    context_window: 65536
 
   # DeepSeek
   deepseek:
@@ -2618,11 +2623,13 @@ models:
     id: deepseek-v4-pro
     context_window: 1048576
 
-  # Z.ai (GLM models)
+  # Z.ai GLM Coding Plan (OpenAI Chat Completions endpoint)
   glm:
     provider: zai
-    id: glm-5.2
+    id: glm-5.3
     context_window: 1048576
+    extra_kwargs:
+      base_url: https://api.z.ai/api/coding/paas/v4
 
   # Custom OpenAI-compatible endpoint (e.g., vLLM, llama.cpp server)
   custom:
@@ -2631,6 +2638,12 @@ models:
     extra_kwargs:
       base_url: http://localhost:8080/v1
 ```
+
+Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
+Its [tool-choice rules](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide) allow `auto` and `none`; forcing `any` or a named tool returns an error.
+The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each hosting provider document their own context limits.
+[GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3) is available through the GLM Coding Plan endpoint shown above.
+The direct DeepSeek API keeps the aliases `deepseek-v4-flash` and `deepseek-v4-pro`; OpenRouter exposes the newer Flash route as `deepseek/deepseek-v4.1-flash`.
 
 ## Built-In Synthetic Model
 
@@ -2702,12 +2715,13 @@ MindRoom maps the `gpt-5.6` alias to GPT-5.6 Sol and passes other slugs through 
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
-| GPT-5.6 Sol | `gpt-5.6` or `gpt-5.6-sol` | Hard, open-ended work requiring the strongest reasoning |
+| GPT-6 Astra | `gpt-6-astra` | The hardest end-to-end reasoning and agentic work |
+| GPT-5.6 Sol | `gpt-5.6` or `gpt-5.6-sol` | Complex, open-ended work |
 | GPT-5.6 Terra | `gpt-5.6-terra` | Balanced everyday work |
 | GPT-5.6 Luna | `gpt-5.6-luna` | Fast, repeatable, cost-sensitive work |
 
 Older or preview slugs can also work when the logged-in Codex account exposes them.
-The LLM-plugin-style form `openai-codex/gpt-5.6` is accepted as an alternative to the bare alias.
+The LLM-plugin-style form `openai-codex/gpt-6-astra` is accepted as an alternative to the bare alias.
 If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`; user-home prefixes such as `~/custom-codex` are expanded.
 For starter config generation, use `mindroom config init --provider codex`.
 
@@ -2715,7 +2729,7 @@ For starter config generation, use `mindroom config init --provider codex`.
 models:
   default:
     provider: codex
-    id: gpt-5.6
+    id: gpt-6-astra
     context_window: 258000
     # Prompt caching is enabled automatically per active agent session.
     extra_kwargs:
@@ -2725,7 +2739,7 @@ models:
 The `258000` context window is the conservative effective budget used by the Codex ChatGPT surface, not the larger context window exposed by the separately billed OpenAI API.
 Set Codex reasoning effort through `extra_kwargs.reasoning_effort`.
 Agno maps this to the Responses API `reasoning.effort` field.
-Supported GPT-5.6 effort values are `low`, `medium`, `high`, `xhigh`, and `max`.
+Supported GPT-6 Astra effort values are `low`, `medium`, `high`, `xhigh`, and `max`.
 Codex clients also show Ultra, but Ultra adds Codex-managed subagent orchestration and is not reproduced by this model adapter.
 The starter Codex profile uses `medium`.
 
@@ -2781,7 +2795,7 @@ Control routing by passing OpenRouter [provider preferences](https://openrouter.
 models:
   deepseek:
     provider: openrouter
-    id: deepseek/deepseek-v4-pro
+    id: deepseek/deepseek-v4.1-flash
     context_window: 1048576
     extra_kwargs:
       extra_body:
@@ -2818,8 +2832,8 @@ For starter config generation, use `mindroom config init --provider azure`.
 Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
 MindRoom uses Anthropic's Bedrock Mantle Messages client and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
-Bedrock lists Fable 5 as open access, while Opus 5 access can depend on the AWS account and region.
-The generated Bedrock starter config defaults to Opus 5, so confirm access or choose Fable 5 or Sonnet 5 instead.
+Bedrock lists Fable 5.1 as open access, while Opus 5 access can depend on the AWS account and region.
+The generated Bedrock starter config defaults to Opus 5, so confirm access or choose Fable 5.1 or Sonnet 5 instead.
 
 ```yaml
 models:
@@ -2899,8 +2913,8 @@ Common options include:
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., OpenRouter provider routing above)
 
-Claude Fable 5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
-MindRoom also omits those deprecated controls for direct Gemini 3.6 Flash and Gemini 3.5 Flash-Lite requests.
+Claude Fable 5.1, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
+MindRoom also omits those deprecated controls for direct Gemini 3.8 Flash and Gemini 3.5 Flash-Lite requests.
 
 ## Environment Variables
 
@@ -6375,8 +6389,8 @@ The current upstream SDK implementations also honor provider env vars such as `O
 ### What It Does
 
 `openai` exposes `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`.
-`transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `gpt-4o-transcribe`.
-`generate_image()` uses the configured `image_model`, defaults to `gpt-image-2`, and returns attached image bytes rather than only a remote URL.
+`transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `gpt-transcribe`.
+`generate_image()` uses the configured `image_model`, defaults to `gpt-image-2.5-sunburst`, and returns attached image bytes rather than only a remote URL.
 The current implementation handles both `gpt-image-*` style models and older DALL-E response formats internally.
 `generate_speech()` uses the configured OpenAI TTS model, voice, and output format and returns an attached audio artifact.
 
@@ -6389,11 +6403,11 @@ The current implementation handles both `gpt-image-*` style models and older DAL
 | `enable_image_generation` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_speech_generation` | `boolean` | `no` | `true` | Enable `generate_speech()`. |
 | `all` | `boolean` | `no` | `false` | Enable all three OpenAI media functions. |
-| `transcription_model` | `text` | `no` | `gpt-4o-transcribe` | Model used by `transcribe_audio()`. |
+| `transcription_model` | `text` | `no` | `gpt-transcribe` | Model used by `transcribe_audio()`. |
 | `text_to_speech_voice` | `text` | `no` | `alloy` | Default voice for `generate_speech()`. |
 | `text_to_speech_model` | `text` | `no` | `gpt-4o-mini-tts` | Default TTS model for `generate_speech()`. |
 | `text_to_speech_format` | `text` | `no` | `mp3` | Output format for generated speech, such as `mp3`, `wav`, or `opus`. |
-| `image_model` | `text` | `no` | `gpt-image-2` | Image generation model for `generate_image()`. |
+| `image_model` | `text` | `no` | `gpt-image-2.5-sunburst` | Image generation model for `generate_image()`. |
 | `image_quality` | `text` | `no` | `null` | Optional image quality override passed through to the API. |
 | `image_size` | `text` | `no` | `null` | Optional image size override passed through to the API. |
 | `image_style` | `text` | `no` | `null` | Optional image style override passed through to the API. |
@@ -6405,8 +6419,8 @@ agents:
   creator:
     tools:
       - openai:
-          transcription_model: gpt-4o-transcribe
-          image_model: gpt-image-2
+          transcription_model: gpt-transcribe
+          image_model: gpt-image-2.5-sunburst
           text_to_speech_voice: alloy
 ```
 
@@ -6430,7 +6444,7 @@ generate_speech("Status update complete.")
 
 `gemini` exposes `generate_image(prompt)` and `generate_video(prompt)`.
 `generate_image()` uses the Gemini content-generation API with the configured `image_generation_model`, which defaults to Nano Banana 2 (`gemini-3.1-flash-image`), and returns attached image bytes.
-`generate_video()` uses the configured `video_generation_model`, which defaults to Veo 3.1 Preview (`veo-3.1-generate-preview`), polls until the long-running operation completes, and returns attached video artifacts.
+`generate_video()` uses the configured `video_generation_model`, which defaults to Veo 3.1 (`veo-3.1-generate-001`), polls until the long-running operation completes, and returns attached video artifacts.
 The current implementation requires Vertex AI mode for video generation and returns an error if `vertexai` is not enabled.
 In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 
@@ -6443,7 +6457,7 @@ In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 | `project_id` | `text` | `no` | `null` | Vertex project override. Falls back to `GOOGLE_CLOUD_PROJECT` when omitted. |
 | `location` | `text` | `no` | `null` | Vertex location override. Falls back to `GOOGLE_CLOUD_LOCATION` when omitted. |
 | `image_generation_model` | `text` | `no` | `gemini-3.1-flash-image` | Model used by `generate_image()`. |
-| `video_generation_model` | `text` | `no` | `veo-3.1-generate-preview` | Model used by `generate_video()`. |
+| `video_generation_model` | `text` | `no` | `veo-3.1-generate-001` | Model used by `generate_video()`. |
 | `enable_generate_image` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_generate_video` | `boolean` | `no` | `true` | Enable `generate_video()`. |
 | `all` | `boolean` | `no` | `false` | Enable both generation functions. |
@@ -6459,7 +6473,7 @@ agents:
           project_id: my-gcp-project
           location: us-central1
           image_generation_model: gemini-3.1-flash-image
-          video_generation_model: veo-3.1-generate-preview
+          video_generation_model: veo-3.1-generate-001
 ```
 
 ```python
@@ -6492,8 +6506,8 @@ All three functions use the Groq SDK directly and require a Groq API key.
 | `api_key` | `password` | `no` | `null` | Groq API key, with `GROQ_API_KEY` as the upstream SDK fallback. |
 | `transcription_model` | `text` | `no` | `whisper-large-v3` | Model used by `transcribe_audio()`. |
 | `translation_model` | `text` | `no` | `whisper-large-v3` | Model used by `translate_audio()`. |
-| `tts_model` | `text` | `no` | `playai-tts` | Model used by `generate_speech()`. |
-| `tts_voice` | `text` | `no` | `Chip-PlayAI` | Voice used by `generate_speech()`. |
+| `tts_model` | `text` | `no` | `canopylabs/orpheus-v1-english` | Model used by `generate_speech()`. |
+| `tts_voice` | `text` | `no` | `troy` | Voice used by `generate_speech()`. |
 | `enable_transcribe_audio` | `boolean` | `no` | `true` | Enable `transcribe_audio()`. |
 | `enable_translate_audio` | `boolean` | `no` | `true` | Enable `translate_audio()`. |
 | `enable_generate_speech` | `boolean` | `no` | `true` | Enable `generate_speech()`. |
@@ -6507,8 +6521,8 @@ agents:
     tools:
       - groq:
           transcription_model: whisper-large-v3
-          tts_model: playai-tts
-          tts_voice: Chip-PlayAI
+          tts_model: canopylabs/orpheus-v1-english
+          tts_voice: troy
 ```
 
 ```python
@@ -6539,7 +6553,7 @@ Generated artifacts are attached by remote URL rather than downloaded into MindR
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Replicate API key, with `REPLICATE_API_KEY` as the upstream fallback. |
-| `model` | `text` | `no` | `minimax/video-01` | Replicate model ref used by `generate_media()`. |
+| `model` | `text` | `no` | `minimax/h3` | Replicate model ref used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `generate_media()`. |
 
@@ -6550,7 +6564,7 @@ agents:
   video:
     tools:
       - replicate:
-          model: minimax/video-01
+          model: minimax/h3
 ```
 
 ```python
@@ -6579,7 +6593,7 @@ The current implementation streams queue log messages to the MindRoom process lo
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Fal API key, with `FAL_API_KEY` as the upstream fallback. |
-| `model` | `text` | `no` | `fal-ai/hunyuan-video` | Model used by `generate_media()`. |
+| `model` | `text` | `no` | `fal-ai/hunyuan-video-v1.5/text-to-video` | Model used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `enable_image_to_image` | `boolean` | `no` | `false` | Enable `image_to_image()`. |
 | `all` | `boolean` | `no` | `false` | Enable both Fal functions. |
@@ -6591,7 +6605,7 @@ agents:
   visuals:
     tools:
       - fal:
-          model: fal-ai/hunyuan-video
+          model: fal-ai/hunyuan-video-v1.5/text-to-video
           enable_image_to_image: true
 ```
 
@@ -6612,6 +6626,7 @@ image_to_image(
 ## [`dalle`]
 
 `dalle` is the dedicated DALL-E image generation wrapper.
+For current OpenAI image generation, use the [`openai`] toolkit with `gpt-image-2.5-sunburst`; this legacy wrapper only accepts the DALL-E model family.
 
 ### What It Does
 
@@ -6673,7 +6688,7 @@ The current implementation hardcodes MP3 output at 44.1 kHz and 128 kbps.
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Cartesia API key, with `CARTESIA_API_KEY` as the upstream SDK fallback. |
-| `model_id` | `text` | `no` | `sonic-2` | Model used by `text_to_speech()`. |
+| `model_id` | `text` | `no` | `sonic-3.6` | Model used by `text_to_speech()`. |
 | `default_voice_id` | `text` | `no` | `78ab82d5-25be-4f7d-82b3-7ad64e5b85b2` | Default source voice for localization and TTS when no call-specific `voice_id` is supplied. |
 | `enable_text_to_speech` | `boolean` | `no` | `true` | Enable `text_to_speech()`. |
 | `enable_list_voices` | `boolean` | `no` | `true` | Enable `list_voices()`. |
@@ -6687,7 +6702,7 @@ agents:
   voice:
     tools:
       - cartesia:
-          model_id: sonic-2
+          model_id: sonic-3.6
           enable_localize_voice: true
 ```
 
@@ -6727,7 +6742,7 @@ If `target_directory` is set, the current implementation also saves generated au
 | `voice_id` | `text` | `no` | `JBFqnCBsd6RMkjVDRZzb` | Default voice used by `text_to_speech()`. |
 | `api_key` | `password` | `no` | `null` | ElevenLabs API key, with `ELEVEN_LABS_API_KEY` as the upstream fallback. |
 | `target_directory` | `text` | `no` | `null` | Optional directory where generated audio is also saved locally. |
-| `model_id` | `text` | `no` | `eleven_multilingual_v2` | Model used by `text_to_speech()`. |
+| `model_id` | `text` | `no` | `eleven_v3` | Model used by `text_to_speech()`. |
 | `output_format` | `text` | `no` | `mp3_44100_64` | Output codec and bitrate preset for generated audio. |
 | `enable_get_voices` | `boolean` | `no` | `true` | Enable `get_voices()`. |
 | `enable_generate_sound_effect` | `boolean` | `no` | `true` | Enable `generate_sound_effect()`. |
@@ -6741,7 +6756,7 @@ agents:
   audio_fx:
     tools:
       - eleven_labs:
-          model_id: eleven_multilingual_v2
+          model_id: eleven_v3
           output_format: mp3_44100_64
           target_directory: generated-audio
 ```
@@ -6754,6 +6769,7 @@ text_to_speech("The build succeeded.")
 
 ### Notes
 
+- The default [Eleven v3 model](https://elevenlabs.io/docs/overview/models) accepts up to 5,000 characters per request.
 - `target_directory` is optional and only affects local file saving, not the returned attachment.
 - The current implementation always emits `audio/mpeg` artifacts, even when you choose a PCM- or u-law-style output format.
 - `generate_sound_effect()` is useful when you want non-speech audio from the same provider toolkit.
@@ -7677,7 +7693,7 @@ Automatic thread summaries are still implemented in `src/mindroom/thread_summary
 The summarizer posts one `m.notice` summary after a successful response brings a thread to the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
 Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides.
-MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite summaries.
+MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 When no trusted prior summary exists, the first automatic summary is summary-only so a useful thread title appears early.
 The next scheduled refresh uses one structured model call to update the summary and produce up to three normalized topic tags, whether the prior summary was automatic or manual.
@@ -14396,7 +14412,7 @@ memory:
   llm:
     provider: ollama    # ollama, openai, or anthropic
     config:
-      model: llama3.2
+      model: gemma4
 ```
 
 Supported LLM providers: `ollama` (default), `openai`, `anthropic`.
@@ -14660,7 +14676,7 @@ voice:
   visible_router_echo: true
   stt:
     provider: openai
-    model: gpt-4o-transcribe
+    model: gpt-transcribe
     # Optional: custom service root or /v1 base URL
     # host: http://localhost:8080
   intelligence:
@@ -14685,7 +14701,7 @@ voice:
   enabled: true
   stt:
     provider: openai
-    model: gpt-4o-transcribe
+    model: gpt-transcribe
 ```
 
 Requires `voice.stt.api_key` or a named `voice.stt.credentials_service`; the default OpenAI credential service can resolve stored credentials or `OPENAI_API_KEY`.
@@ -15002,11 +15018,11 @@ calls:
       model: call_fast
       stt:
         provider: openai
-        model: gpt-4o-transcribe
+        model: gpt-transcribe
         credentials_service: openai-voice
       tts:
         provider: openai
-        model: tts-1
+        model: gpt-4o-mini-tts
         credentials_service: openai-voice
         extra_kwargs:
           voice: ash
@@ -15030,13 +15046,13 @@ calls:
       backend: cascaded
       stt:
         provider: openai
-        model: gpt-4o-transcribe
+        model: gpt-transcribe
         credentials_service: openai-voice
         extra_kwargs:
           language: en
       tts:
         provider: openai
-        model: tts-1
+        model: gpt-4o-mini-tts
         credentials_service: openai-voice
         extra_kwargs:
           voice: ash
@@ -15046,7 +15062,7 @@ calls:
 
 Each speech component has its own `provider`, `model`, `credentials_service`, `api_key`, `host`, and `extra_kwargs`.
 The two speech legs may select the same named credential or different ones.
-The current OpenAI model catalog documents [`gpt-4o-transcribe`](https://developers.openai.com/api/docs/models/gpt-4o-transcribe) for transcription and [`tts-1`](https://developers.openai.com/api/docs/models/tts-1) for text-to-speech.
+The current OpenAI model catalog documents [`gpt-transcribe`](https://developers.openai.com/api/docs/models/gpt-transcribe) for transcription and [`gpt-4o-mini-tts`](https://developers.openai.com/api/docs/models/gpt-4o-mini-tts) for text-to-speech.
 
 ## Completely local example
 
@@ -15159,7 +15175,7 @@ When a user sends an image in a Matrix room:
 4. The responder replies with its analysis
 
 Image support works automatically for agents and teams -- no configuration is needed.
-The selected model must support vision (e.g., Claude, GPT-5.6).
+The selected model must support vision (e.g., Claude, GPT-6 Astra).
 
 ## Supported Formats
 
@@ -15673,7 +15689,7 @@ Changes are validated against the Pydantic config schema before applying.
 
 ```
 !config set agents.analyst.display_name "Research Expert"
-!config set models.default.id gpt-5.6
+!config set models.default.id gpt-6-astra
 !config set defaults.markdown false
 !config set timezone America/New_York
 ```
@@ -16236,7 +16252,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.6
+    id: gpt-6-astra
 
 external_trigger_policy:
   enabled: true
@@ -21228,7 +21244,7 @@ mindroom config init --force
 Use `--print` to preview the generated `config.yaml` in the terminal with YAML syntax highlighting.
 It does not create or modify `config.yaml`, `.env`, or starter workspace files.
 
-The `--provider codex` preset generates `provider: codex` with `id: gpt-5.6` and `context_window: 258000`.
+The `--provider codex` preset generates `provider: codex` with `id: gpt-6-astra` and `context_window: 258000`.
 They set `extra_kwargs.reasoning_effort: medium`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
@@ -21236,12 +21252,12 @@ Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
 The `--provider kimi` preset generates `provider: kimi` with `id: k3` and `context_window: 1048576`.
 Run `kimi` and `/login` first so MindRoom can read `~/.kimi-code/credentials/kimi-code.json`.
 
-The `--provider ollama` preset generates `provider: ollama` with `id: gemma4`, an additional `qwen3_6_27b` model using `qwen3.6:27b`, and `OLLAMA_HOST=http://localhost:11434`.
+The `--provider ollama` preset generates `provider: ollama` with `id: gemma4`, an additional `qwen3_8_27b` model using `qwen3.8:27b`, and `OLLAMA_HOST=http://localhost:11434`.
 Pull both local models before running MindRoom:
 
 ```bash
 ollama pull gemma4
-ollama pull qwen3.6:27b
+ollama pull qwen3.8:27b
 ```
 
 The `--provider llama.cpp` preset generates OpenAI-compatible local server config for Unsloth GGUF models.
@@ -21249,7 +21265,7 @@ Start llama.cpp with one of the configured model refs before running MindRoom:
 
 ```bash
 llama-server -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M --host 127.0.0.1 --port 8080
-llama-server -hf unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL --host 127.0.0.1 --port 8080
+llama-server -hf unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL --host 127.0.0.1 --port 8080
 ```
 
 ### config show

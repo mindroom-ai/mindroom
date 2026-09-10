@@ -68,7 +68,7 @@ def _safeguard_refusal_message() -> AnthropicMessage:
     return AnthropicMessage(
         id="msg-refusal",
         content=[],
-        model="claude-fable-5",
+        model="claude-fable-5-1",
         role="assistant",
         stop_reason="refusal",
         stop_sequence=None,

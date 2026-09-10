@@ -5,6 +5,8 @@ icon: lucide/brain
 # Model Configuration
 
 Models define the AI providers and model IDs used by agents.
+Examples were checked on September 10, 2026 against the [OpenAI catalog](https://developers.openai.com/api/docs/models), [Claude catalog](https://platform.claude.com/docs/en/models/overview), [Gemini catalog](https://ai.google.dev/gemini-api/docs/models), and [OpenRouter catalog](https://openrouter.ai/api/v1/models).
+Provider-specific IDs can differ for the same model.
 
 ## Supported Providers
 
@@ -63,7 +65,7 @@ models:
 
   fable:
     provider: anthropic
-    id: claude-fable-5
+    id: claude-fable-5-1
     context_window: 1000000
 
   opus:
@@ -85,7 +87,7 @@ models:
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-5.6
+    id: gpt-6-astra
     context_window: 1050000
 
   # Azure OpenAI
@@ -96,7 +98,7 @@ models:
   # OpenAI via a Codex CLI ChatGPT login
   codex:
     provider: codex
-    id: gpt-5.6
+    id: gpt-6-astra
     context_window: 258000
 
   # Kimi K3 via a Kimi Code CLI login
@@ -108,7 +110,7 @@ models:
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
-    id: gemini-3.6-flash
+    id: gemini-3.8-flash
     context_window: 1048576
 
   # Anthropic Claude on Vertex AI
@@ -122,7 +124,8 @@ models:
   # Local via Ollama
   local:
     provider: ollama
-    id: llama3.2
+    id: qwen3.8:27b
+    context_window: 256000
     host: http://localhost:11434  # Uses dedicated host field
 
   # OpenRouter (access to many model providers)
@@ -130,15 +133,17 @@ models:
     provider: openrouter
     id: anthropic/claude-sonnet-5
 
-  # Groq (fast inference)
+  # Groq (fast inference; Qwen3.8 is a preview model)
   groq:
     provider: groq
-    id: llama-3.1-70b-versatile
+    id: qwen/qwen3.8-27b
+    context_window: 131042
 
   # Cerebras
   cerebras:
     provider: cerebras
-    id: llama3.1-8b
+    id: qwen-3.8-27b
+    context_window: 65536
 
   # DeepSeek
   deepseek:
@@ -146,11 +151,13 @@ models:
     id: deepseek-v4-pro
     context_window: 1048576
 
-  # Z.ai (GLM models)
+  # Z.ai GLM Coding Plan (OpenAI Chat Completions endpoint)
   glm:
     provider: zai
-    id: glm-5.2
+    id: glm-5.3
     context_window: 1048576
+    extra_kwargs:
+      base_url: https://api.z.ai/api/coding/paas/v4
 
   # Custom OpenAI-compatible endpoint (e.g., vLLM, llama.cpp server)
   custom:
@@ -159,6 +166,12 @@ models:
     extra_kwargs:
       base_url: http://localhost:8080/v1
 ```
+
+Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
+Its [tool-choice rules](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide) allow `auto` and `none`; forcing `any` or a named tool returns an error.
+The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each hosting provider document their own context limits.
+[GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3) is available through the GLM Coding Plan endpoint shown above.
+The direct DeepSeek API keeps the aliases `deepseek-v4-flash` and `deepseek-v4-pro`; OpenRouter exposes the newer Flash route as `deepseek/deepseek-v4.1-flash`.
 
 ## Built-In Synthetic Model
 
@@ -230,12 +243,13 @@ MindRoom maps the `gpt-5.6` alias to GPT-5.6 Sol and passes other slugs through 
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
-| GPT-5.6 Sol | `gpt-5.6` or `gpt-5.6-sol` | Hard, open-ended work requiring the strongest reasoning |
+| GPT-6 Astra | `gpt-6-astra` | The hardest end-to-end reasoning and agentic work |
+| GPT-5.6 Sol | `gpt-5.6` or `gpt-5.6-sol` | Complex, open-ended work |
 | GPT-5.6 Terra | `gpt-5.6-terra` | Balanced everyday work |
 | GPT-5.6 Luna | `gpt-5.6-luna` | Fast, repeatable, cost-sensitive work |
 
 Older or preview slugs can also work when the logged-in Codex account exposes them.
-The LLM-plugin-style form `openai-codex/gpt-5.6` is accepted as an alternative to the bare alias.
+The LLM-plugin-style form `openai-codex/gpt-6-astra` is accepted as an alternative to the bare alias.
 If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`; user-home prefixes such as `~/custom-codex` are expanded.
 For starter config generation, use `mindroom config init --provider codex`.
 
@@ -243,7 +257,7 @@ For starter config generation, use `mindroom config init --provider codex`.
 models:
   default:
     provider: codex
-    id: gpt-5.6
+    id: gpt-6-astra
     context_window: 258000
     # Prompt caching is enabled automatically per active agent session.
     extra_kwargs:
@@ -253,7 +267,7 @@ models:
 The `258000` context window is the conservative effective budget used by the Codex ChatGPT surface, not the larger context window exposed by the separately billed OpenAI API.
 Set Codex reasoning effort through `extra_kwargs.reasoning_effort`.
 Agno maps this to the Responses API `reasoning.effort` field.
-Supported GPT-5.6 effort values are `low`, `medium`, `high`, `xhigh`, and `max`.
+Supported GPT-6 Astra effort values are `low`, `medium`, `high`, `xhigh`, and `max`.
 Codex clients also show Ultra, but Ultra adds Codex-managed subagent orchestration and is not reproduced by this model adapter.
 The starter Codex profile uses `medium`.
 
@@ -309,7 +323,7 @@ Control routing by passing OpenRouter [provider preferences](https://openrouter.
 models:
   deepseek:
     provider: openrouter
-    id: deepseek/deepseek-v4-pro
+    id: deepseek/deepseek-v4.1-flash
     context_window: 1048576
     extra_kwargs:
       extra_body:
@@ -346,8 +360,8 @@ For starter config generation, use `mindroom config init --provider azure`.
 Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
 MindRoom uses Anthropic's Bedrock Mantle Messages client and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
-Bedrock lists Fable 5 as open access, while Opus 5 access can depend on the AWS account and region.
-The generated Bedrock starter config defaults to Opus 5, so confirm access or choose Fable 5 or Sonnet 5 instead.
+Bedrock lists Fable 5.1 as open access, while Opus 5 access can depend on the AWS account and region.
+The generated Bedrock starter config defaults to Opus 5, so confirm access or choose Fable 5.1 or Sonnet 5 instead.
 
 ```yaml
 models:
@@ -427,8 +441,8 @@ Common options include:
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., OpenRouter provider routing above)
 
-Claude Fable 5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
-MindRoom also omits those deprecated controls for direct Gemini 3.6 Flash and Gemini 3.5 Flash-Lite requests.
+Claude Fable 5.1, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
+MindRoom also omits those deprecated controls for direct Gemini 3.8 Flash and Gemini 3.5 Flash-Lite requests.
 
 ## Environment Variables
 

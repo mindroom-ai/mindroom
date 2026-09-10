@@ -286,7 +286,7 @@ voice:
   visible_router_echo: true  # Show STT placeholder or direct fallback when STT is disabled
   stt:
     provider: openai
-    model: gpt-4o-transcribe
+    model: gpt-transcribe
     # api_key: null  # Optional API key for STT service
     # host: null  # Optional host URL for self-hosted STT
   intelligence:
@@ -384,7 +384,7 @@ defaults:
 ```
 
 Automatic thread summaries use `defaults.thread_summary_temperature` when the selected provider supports runtime temperature overrides.
-MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries.
+MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries.
 When a thread has no trusted prior summary, its first automatic summary call is summary-only so a useful thread title appears early.
 The next scheduled automatic summary refresh also returns one to three tags when the thread has no existing tags, whether the prior summary was automatic or manual.
 Initial tags therefore use the same summary model, room override, temperature, prompt, and background task as the refreshed summary.

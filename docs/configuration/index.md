@@ -426,7 +426,7 @@ defaults:
 
 # defaults.thread_summary_temperature controls automatic summaries on providers that support runtime temperature overrides.
 # Set it to null to use provider defaults.
-# Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
+# Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite always use provider defaults.
 # room_thread_summary_models can override defaults.thread_summary_model for a room alias or raw Matrix room ID.
 #
 # A thread's first trusted automatic summary call is summary-only.
@@ -532,7 +532,7 @@ voice:
   visible_router_echo: true        # Optional: show router voice progress or direct fallback
   stt:
     provider: openai               # Default: openai
-    model: gpt-4o-transcribe       # Default: gpt-4o-transcribe
+    model: gpt-transcribe       # Default: gpt-transcribe
     credentials_service: openai    # Named credential service for speech
     api_key: null
     host: null
@@ -553,7 +553,7 @@ calls:
       model: default                 # Optional: top-level model alias overriding room/agent models for call turns
       stt:
         provider: openai
-        model: gpt-4o-transcribe
+        model: gpt-transcribe
         credentials_service: openai
       tts:
         provider: openai

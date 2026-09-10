@@ -316,7 +316,7 @@ def _cascaded_config(*, local: bool = False, call_model: str | None = None) -> C
                 model=call_model,
                 stt=SpeechServiceConfig(
                     provider="openai_compatible" if local else "openai",
-                    model="whisper-large-v3" if local else "gpt-4o-transcribe",
+                    model="whisper-large-v3" if local else "gpt-transcribe",
                     api_key=None if local else "stt-key",
                     host="http://127.0.0.1:9000" if local else None,
                     extra_kwargs={"language": "en"},
@@ -683,7 +683,7 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
     options = bridge.agent_options
     assert isinstance(options, CascadedVoiceAgentOptions)
     assert (options.stt.model, options.stt.api_key, options.stt.base_url) == (
-        "gpt-4o-transcribe",
+        "gpt-transcribe",
         "stt-key",
         "https://api.openai.com/v1",
     )
@@ -781,7 +781,7 @@ def test_openai_speech_with_custom_host_uses_named_credential(
     service = manager._resolve_speech_service(
         SpeechServiceConfig(
             provider="openai",
-            model="gpt-4o-transcribe",
+            model="gpt-transcribe",
             credentials_service="openai-realtime",
             host="https://proxy.example.test",
         ),
@@ -852,7 +852,7 @@ def test_openai_cloud_speech_uses_explicit_endpoint(
     manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config())
 
     service = manager._resolve_speech_service(
-        SpeechServiceConfig(provider="openai", model="gpt-4o-transcribe", api_key="cloud-key"),
+        SpeechServiceConfig(provider="openai", model="gpt-transcribe", api_key="cloud-key"),
         component="stt",
         room_id=ROOM_ID,
     )
@@ -3849,7 +3849,7 @@ def test_calls_config_rejects_agents_sharing_a_room() -> None:
 
 def test_cascaded_calls_require_both_speech_services() -> None:
     """The discriminated cascaded profile requires both speech legs."""
-    stt = SpeechServiceConfig(model="gpt-4o-transcribe", credentials_service="openai")
+    stt = SpeechServiceConfig(model="gpt-transcribe", credentials_service="openai")
     tts = SpeechServiceConfig(model="tts-1", credentials_service="openai")
 
     config = CallsConfig(
@@ -3876,7 +3876,7 @@ def test_cascaded_calls_require_both_speech_services() -> None:
 
 def test_cascaded_calls_accept_optional_model_override() -> None:
     """A cascaded profile can select a configured model for its agent turns."""
-    stt = SpeechServiceConfig(model="gpt-4o-transcribe", credentials_service="openai")
+    stt = SpeechServiceConfig(model="gpt-transcribe", credentials_service="openai")
     tts = SpeechServiceConfig(model="tts-1", credentials_service="openai")
     config = Config(
         models={"call_fast": ModelConfig(provider="anthropic", id="claude-haiku-4-5")},
@@ -3901,7 +3901,7 @@ def test_cascaded_calls_accept_optional_model_override() -> None:
 
 def test_calls_config_rejects_unknown_cascaded_model() -> None:
     """Call model aliases must exist in the top-level model catalog."""
-    stt = SpeechServiceConfig(model="gpt-4o-transcribe", credentials_service="openai")
+    stt = SpeechServiceConfig(model="gpt-transcribe", credentials_service="openai")
     tts = SpeechServiceConfig(model="tts-1", credentials_service="openai")
 
     with pytest.raises(ValueError, match=r"voice -> missing"):
@@ -3939,7 +3939,7 @@ def test_speech_config_normalizes_blank_optional_fields() -> None:
     """Blank form values use the same fallback behavior as omitted fields."""
     service = SpeechServiceConfig(
         provider="openai",
-        model="gpt-4o-transcribe",
+        model="gpt-transcribe",
         credentials_service="openai",
         host=" ",
         api_key="",
@@ -3972,7 +3972,7 @@ def test_speech_config_rejects_connection_fields_in_extra_kwargs() -> None:
     """Typed connection fields cannot be ambiguously overridden by provider options."""
     with pytest.raises(ValueError, match="must not redefine: api_key, base_url, client"):
         SpeechServiceConfig(
-            model="gpt-4o-transcribe",
+            model="gpt-transcribe",
             extra_kwargs={"api_key": "wrong", "base_url": "https://wrong.example", "client": "wrong"},
         )
 

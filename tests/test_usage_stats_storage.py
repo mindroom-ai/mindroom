@@ -79,7 +79,7 @@ def _run(*, nested: bool = False, parent_run_id: str | None = None) -> dict[str,
         "user_id": "@alice:example.test",
         "created_at": 1_723_837_600,
         "model_provider": "openai",
-        "model": "gpt-5.6",
+        "model": "gpt-6-astra",
         "status": "completed",
         "metrics": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20},
         "member_responses": member_responses,
@@ -205,7 +205,7 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
     assert row.runs[0].metrics == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
     assert row.runs[0].requester_id == "@alice:example.test"
     assert row.runs[0].model_provider == "openai"
-    assert row.runs[0].model == "gpt-5.6"
+    assert row.runs[0].model == "gpt-6-astra"
     assert row.runs_available is True
     assert row.session_metrics_available is False
     assert row.payload_bytes > 0
@@ -236,7 +236,7 @@ def test_reader_extracts_runs_written_by_mindroom_agno_storage(tmp_path: Path) -
                         user_id="@alice:example.test",
                         created_at=1_723_837_600,
                         model_provider="openai",
-                        model="gpt-5.6",
+                        model="gpt-6-astra",
                         status=RunStatus.completed,
                         metrics=RunMetrics(input_tokens=12, output_tokens=8, total_tokens=20),
                     ),
@@ -256,7 +256,7 @@ def test_reader_extracts_runs_written_by_mindroom_agno_storage(tmp_path: Path) -
     assert len(row.runs) == 1
     assert row.runs[0].metrics == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
     assert row.runs[0].model_provider == "openai"
-    assert row.runs[0].model == "gpt-5.6"
+    assert row.runs[0].model == "gpt-6-astra"
 
 
 def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path) -> None:

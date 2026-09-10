@@ -974,7 +974,7 @@ def test_config_load_rejects_unknown_tool_override_key(tmp_path: Path) -> None:
                 "models": {
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-5.6",
+                        "id": "gpt-6-astra",
                     },
                 },
                 "router": {"model": "default"},

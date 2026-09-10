@@ -55,7 +55,7 @@ if TYPE_CHECKING:
             label="Tts Voice",
             type="text",
             required=False,
-            default="Chip-PlayAI",
+            default="troy",
         ),
         ConfigField(
             name="enable_transcribe_audio",

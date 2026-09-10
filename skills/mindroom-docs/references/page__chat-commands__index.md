@@ -302,7 +302,7 @@ Changes are validated against the Pydantic config schema before applying.
 
 ```
 !config set agents.analyst.display_name "Research Expert"
-!config set models.default.id gpt-5.6
+!config set models.default.id gpt-6-astra
 !config set defaults.markdown false
 !config set timezone America/New_York
 ```

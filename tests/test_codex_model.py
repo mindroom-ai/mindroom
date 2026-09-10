@@ -67,6 +67,8 @@ def _write_codex_auth(codex_home: Path, access_token: str, refresh_value: str) -
 @pytest.mark.parametrize(
     ("configured_id", "endpoint_id"),
     [
+        ("gpt-6-astra", "gpt-6-astra"),
+        ("openai-codex/gpt-6-astra", "gpt-6-astra"),
         ("gpt-5.6", "gpt-5.6-sol"),
         ("openai-codex/gpt-5.6", "gpt-5.6-sol"),
         ("gpt-5.6-sol", "gpt-5.6-sol"),

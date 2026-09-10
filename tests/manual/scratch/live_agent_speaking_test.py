@@ -155,7 +155,7 @@ def call_config(openai_key: str) -> CallsConfig:
                 backend="cascaded",
                 stt=SpeechServiceConfig(
                     provider="openai",
-                    model="gpt-4o-transcribe",
+                    model="gpt-transcribe",
                     api_key=openai_key,
                 ),
                 tts=SpeechServiceConfig(
@@ -540,7 +540,7 @@ async def main() -> int:  # noqa: C901, PLR0915
                         memory_backend="file",
                     ),
                 },
-                models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+                models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
                 memory=MemoryConfig(backend="none"),
                 calls=call_config(openai_key),
             )

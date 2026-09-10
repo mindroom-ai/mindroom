@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.model_defaults import CARTESIA_TTS
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
             label="Model ID",
             type="text",
             required=False,
-            default="sonic-2",
+            default=CARTESIA_TTS,
         ),
         ConfigField(
             name="default_voice_id",

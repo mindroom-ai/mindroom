@@ -202,12 +202,12 @@ def test_openrouter_provider_defaults_to_uncapped_max_tokens() -> None:
         "models": {
             "uncapped": {
                 "provider": "openrouter",
-                "id": "deepseek/deepseek-v4-pro",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {"api_key": "test-key"},
             },
             "capped": {
                 "provider": "openrouter",
-                "id": "deepseek/deepseek-v4-pro",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {"api_key": "test-key", "max_tokens": 4096},
             },
         },
@@ -1226,7 +1226,7 @@ def _wire_tool(name: str) -> dict[str, object]:
         ("anthropic", "claude-opus-4-20250514", False),
         ("anthropic", "claude-3-5-sonnet-20241022", False),
         ("vertexai_claude", "claude-sonnet-4@20250514", False),
-        ("openai", "gpt-5.6", False),
+        ("openai", "gpt-6-astra", False),
         ("bedrock_claude", "anthropic.claude-opus-5", False),
     ],
 )
@@ -1421,7 +1421,7 @@ def test_server_tool_blocks_replay_to_non_anthropic_provider_without_crashing() 
         provider_data={"server_tool_blocks": [dict(_SERVER_TOOL_USE_BLOCK), dict(_TOOL_SEARCH_RESULT_BLOCK)]},
     )
 
-    formatted = OpenAIChat(id="gpt-5.6", api_key="test-key")._format_message(assistant)
+    formatted = OpenAIChat(id="gpt-6-astra", api_key="test-key")._format_message(assistant)
 
     assert formatted["role"] == "assistant"
     assert formatted["content"] == "I'll search for a weather tool."
@@ -2093,12 +2093,12 @@ def test_get_model_instance_supports_zai_provider() -> None:
         "models": {
             "glm": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
                 "extra_kwargs": {"api_key": "test-zai-key"},
             },
             "glm_custom": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
                 "extra_kwargs": {
                     "api_key": "test-zai-key",
                     "base_url": "https://open.bigmodel.cn/api/paas/v4",
@@ -2115,7 +2115,7 @@ def test_get_model_instance_supports_zai_provider() -> None:
 
     model = get_model_instance(config, runtime_paths, "glm")
     assert isinstance(model, OpenAILike)
-    assert model.id == "glm-5.2"
+    assert model.id == "glm-5.3"
     assert model.api_key == "test-zai-key"
     assert model.base_url == "https://api.z.ai/api/paas/v4"
     assert model.name == "ZAI"
@@ -2131,7 +2131,7 @@ def test_zai_provider_resolves_api_key_from_runtime_env() -> None:
         "models": {
             "glm": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
             },
         },
         "router": {
@@ -2153,7 +2153,7 @@ def test_zai_provider_drops_falsy_api_key() -> None:
         "models": {
             "glm": {
                 "provider": "zai",
-                "id": "glm-5.2",
+                "id": "glm-5.3",
                 "extra_kwargs": {"api_key": None},
             },
         },

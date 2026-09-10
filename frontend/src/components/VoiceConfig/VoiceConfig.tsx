@@ -32,7 +32,7 @@ const DEFAULT_VOICE_CONFIG: VoiceConfigType = {
   visible_router_echo: true,
   stt: {
     provider: "openai",
-    model: "gpt-4o-transcribe",
+    model: "gpt-transcribe",
     api_key: "",
     host: "",
   },
@@ -312,7 +312,7 @@ export function VoiceConfig() {
                   id="stt-model"
                   value={voiceConfig.stt.model}
                   onChange={(e) => handleSTTChange({ model: e.target.value })}
-                  placeholder="gpt-4o-transcribe"
+                  placeholder="gpt-transcribe"
                 />
               </div>
 

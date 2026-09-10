@@ -154,7 +154,7 @@ class TestVoiceHandler:
         """Promoting the shared speech config does not break existing partial voice STT blocks."""
         config = VoiceConfig.model_validate({"stt": {"provider": "openai"}})
 
-        assert config.stt.model == "gpt-4o-transcribe"
+        assert config.stt.model == "gpt-transcribe"
 
     @pytest.mark.parametrize(
         ("matrix_mime_type", "expected_filename", "expected_mime_type"),
@@ -318,7 +318,7 @@ class TestVoiceHandler:
             Config(
                 voice=VoiceConfig(
                     enabled=True,
-                    stt=VoiceSTTConfig(provider="openai", model="gpt-4o-transcribe"),
+                    stt=VoiceSTTConfig(provider="openai", model="gpt-transcribe"),
                 ),
             ),
         )

@@ -1290,7 +1290,7 @@ class TestConfigInit:
 
         config_text = target.read_text(encoding="utf-8")
         assert "# fable:" in config_text
-        assert "#   id: anthropic.claude-fable-5" in config_text
+        assert "#   id: anthropic.claude-fable-5-1" in config_text
         assert "# sonnet:" in config_text
         assert "#   id: anthropic.claude-sonnet-5" in config_text
         assert "# haiku:" in config_text
@@ -1425,7 +1425,7 @@ def _old_config_init_mind_memory_config(knowledge_path: str) -> str:
 models:
   default:
     provider: openai
-    id: gpt-5.6
+    id: gpt-6-astra
 
 agents:
   assistant:
@@ -1517,7 +1517,7 @@ def _migrated_config_init_mind_memory_config() -> str:
 models:
   default:
     provider: openai
-    id: gpt-5.6
+    id: gpt-6-astra
 
 agents:
   assistant:

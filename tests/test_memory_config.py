@@ -201,7 +201,7 @@ class TestMemoryConfig:
         embedder_config = _MemoryEmbedderConfig(
             provider="openai",
             config=EmbedderConfig(
-                model="gemini-embedding-001",
+                model="gemini-embedding-2",
                 host="http://example.com/v1",
                 dimensions=3072,
             ),
@@ -519,7 +519,7 @@ class TestMemoryConfig:
             embedder=_MemoryEmbedderConfig(
                 provider="openai",
                 config=EmbedderConfig(
-                    model="gemini-embedding-001",
+                    model="gemini-embedding-2",
                     host="http://example.com/v1",
                 ),
             ),
@@ -529,7 +529,7 @@ class TestMemoryConfig:
             embedder=_MemoryEmbedderConfig(
                 provider="openai",
                 config=EmbedderConfig(
-                    model="gemini-embedding-001",
+                    model="gemini-embedding-2",
                     host="http://example.com/v1",
                     dimensions=1536,
                 ),

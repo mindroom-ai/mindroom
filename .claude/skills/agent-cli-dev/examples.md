@@ -1,6 +1,6 @@
 # Examples: Parallel Agent Workflows
 
-Real-world scenarios for spawning parallel AI coding agents, optimized for Claude 4.5 models.
+Real-world scenarios for spawning parallel AI coding agents, optimized for Claude 5 models.
 
 > **Note on prompts**: The examples below show prompt content inline for readability. In practice, **always use `--prompt-file`** for these multi-line prompts to avoid shell quoting issues:
 >

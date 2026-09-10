@@ -16,7 +16,7 @@ from agno.utils.http import get_default_async_client, get_default_sync_client
 from openai import AsyncOpenAI, OpenAI
 
 from mindroom.file_locks import advisory_file_lock
-from mindroom.model_defaults import CODEX_GPT, CODEX_GPT_ENDPOINT
+from mindroom.model_defaults import CODEX_GPT, CODEX_GPT_ALIAS, CODEX_GPT_ENDPOINT
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 
@@ -30,7 +30,7 @@ _CODEX_REFRESH_URL = "https://auth.openai.com/oauth/token"
 _CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _CODEX_REFRESH_SKEW_SECONDS = 30
 _CODEX_MODEL_PREFIX = "openai-codex/"
-_CODEX_MODEL_ALIASES = {CODEX_GPT: CODEX_GPT_ENDPOINT}
+_CODEX_MODEL_ALIASES = {CODEX_GPT_ALIAS: CODEX_GPT_ENDPOINT}
 _CODEX_UNSUPPORTED_REQUEST_PARAMS = {"max_output_tokens", "temperature"}
 _CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 _CODEX_WINDOW_ID_HEADER = "x-codex-window-id"

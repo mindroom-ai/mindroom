@@ -462,7 +462,7 @@ async def test_cascaded_start_closes_stt_when_tts_construction_fails(monkeypatch
     bridge = CascadedVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
     bridge._room = MagicMock()
     options = CascadedVoiceAgentOptions(
-        stt=SpeechServiceOptions(provider="openai", model="gpt-4o-transcribe", api_key="stt-key"),
+        stt=SpeechServiceOptions(provider="openai", model="gpt-transcribe", api_key="stt-key"),
         tts=SpeechServiceOptions(provider="openai", model="tts-1", api_key="tts-key"),
         respond=AsyncMock(),
     )

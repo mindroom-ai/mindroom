@@ -51,19 +51,19 @@ def _success_response(*, count: int = 1) -> SimpleNamespace:
 def _sync_embedder_returning(response: SimpleNamespace) -> MindRoomOpenAIEmbedder:
     client = MagicMock()
     client.embeddings.create.return_value = response
-    return MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, openai_client=client)
+    return MindRoomOpenAIEmbedder(id="gemini-embedding-2", api_key=SECRET, openai_client=client)
 
 
 def _failing_sync_embedder() -> MindRoomOpenAIEmbedder:
     client = MagicMock()
     client.embeddings.create.side_effect = _auth_error()
-    return MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, openai_client=client)
+    return MindRoomOpenAIEmbedder(id="gemini-embedding-2", api_key=SECRET, openai_client=client)
 
 
 def _failing_async_embedder() -> MindRoomOpenAIEmbedder:
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(side_effect=_auth_error())
-    return MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, async_client=async_client)
+    return MindRoomOpenAIEmbedder(id="gemini-embedding-2", api_key=SECRET, async_client=async_client)
 
 
 def test_get_embedding_raises_and_records_failure() -> None:
@@ -114,7 +114,7 @@ async def test_async_batch_raises_without_per_item_retry() -> None:
     """A failing batch raises once without per-item retries."""
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(side_effect=_auth_error())
-    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, async_client=async_client)
+    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-2", api_key=SECRET, async_client=async_client)
 
     with pytest.raises(EmbedderRequestError):
         await embedder.async_get_embeddings_batch_and_usage(["hello", "world"])
@@ -182,7 +182,7 @@ async def test_async_empty_data_raises() -> None:
     """Async single-embedding path rejects an empty data array."""
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(return_value=SimpleNamespace(data=[], usage=None))
-    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, async_client=async_client)
+    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-2", api_key=SECRET, async_client=async_client)
 
     with pytest.raises(EmbedderRequestError):
         await embedder.async_get_embedding("hello")
@@ -197,7 +197,7 @@ async def test_async_batch_short_response_raises() -> None:
     async_client.embeddings.create = AsyncMock(
         return_value=SimpleNamespace(data=[SimpleNamespace(embedding=[1.0])], usage=None),
     )
-    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, async_client=async_client)
+    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-2", api_key=SECRET, async_client=async_client)
 
     with pytest.raises(EmbedderRequestError) as excinfo:
         await embedder.async_get_embeddings_batch_and_usage(["hello", "world"])
@@ -216,7 +216,7 @@ async def test_async_batch_empty_vector_raises() -> None:
             usage=None,
         ),
     )
-    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, async_client=async_client)
+    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-2", api_key=SECRET, async_client=async_client)
 
     with pytest.raises(EmbedderRequestError):
         await embedder.async_get_embeddings_batch_and_usage(["hello", "world"])
@@ -248,7 +248,7 @@ def test_file_reference_like_inputs_are_sent_as_literal_text() -> None:
     text = "files/bootsel.service#L9> If the embedded daemons do not start"
     client = MagicMock()
     client.embeddings.create.side_effect = [_success_response(), _success_response(count=2)]
-    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, openai_client=client)
+    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-2", api_key=SECRET, openai_client=client)
 
     assert embedder.get_embedding(text) == [1.0, 2.0]
     assert embedder.get_embeddings_batch(["ordinary text", text]) == [[1.0, 2.0], [1.0, 2.0]]
@@ -264,7 +264,7 @@ async def test_async_success_clears_recorded_failure() -> None:
     capture_embedder_health_recorder().record(EMBEDDER_AUTH_FAILED_DETAIL)
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(return_value=_success_response())
-    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-001", api_key=SECRET, async_client=async_client)
+    embedder = MindRoomOpenAIEmbedder(id="gemini-embedding-2", api_key=SECRET, async_client=async_client)
 
     assert await embedder.async_get_embedding("hello") == [1.0, 2.0]
     assert get_embedder_failure() is None

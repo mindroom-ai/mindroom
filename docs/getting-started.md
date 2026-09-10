@@ -57,8 +57,8 @@ Run `codex login` before starting MindRoom when using `--provider codex`.
 `--provider azure` uses Azure OpenAI through your deployment name.
 Set `models.default.id` to the Azure deployment name you created.
 
-`--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
-Run `ollama pull gemma4` and `ollama pull qwen3.6:27b` before starting MindRoom.
+`--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.8:27b`.
+Run `ollama pull gemma4` and `ollama pull qwen3.8:27b` before starting MindRoom.
 
 `--provider llama.cpp` uses a local OpenAI-compatible llama.cpp server on `http://localhost:8080/v1`.
 Start `llama-server` with one of the configured Unsloth GGUF refs before starting MindRoom.
@@ -224,7 +224,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.6
+    id: gpt-6-astra
 
 defaults:
   tools: [scheduler]

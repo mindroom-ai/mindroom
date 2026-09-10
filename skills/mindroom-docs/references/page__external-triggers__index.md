@@ -54,7 +54,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.6
+    id: gpt-6-astra
 
 external_trigger_policy:
   enabled: true
