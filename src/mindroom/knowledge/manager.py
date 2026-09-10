@@ -8,7 +8,7 @@ import json
 import os
 import time
 import uuid
-from contextlib import suppress
+from contextlib import closing, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -101,6 +101,7 @@ if TYPE_CHECKING:
 
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
+    from chromadb.api.client import Client
     from chromadb.api.types import Embeddings, Metadata
 
     from mindroom.config.main import Config
@@ -1350,11 +1351,17 @@ class KnowledgeManager:
         bounded by the in-flight file rather than the whole copied corpus.
         """
         vector_db = build_vector_db(self._collections, checkpoint.collection, embedder=embedder)
-        if not vector_db.exists():
+        try:
+            client = cast("Client", vector_db.client)
+        except Exception:
+            # Preserve the client-open failure behavior of ChromaDb.exists().
             return False
-        collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        has_rows = bool(collection.get(limit=1, include=[])["ids"])
-        return not checkpoint.completed and has_rows
+        with closing(client):
+            if not vector_db.exists():
+                return False
+            collection = client.get_collection(name=vector_db.collection_name)
+            has_rows = bool(collection.get(limit=1, include=[])["ids"])
+            return not checkpoint.completed and has_rows
 
     async def _inspect_candidate_shape(
         self,

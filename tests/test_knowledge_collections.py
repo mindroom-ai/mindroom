@@ -1,22 +1,31 @@
-"""Real Chroma resource ownership at knowledge collection cleanup boundaries."""
+"""Real Chroma resource ownership at temporary knowledge collection boundaries."""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Never, cast
 
 import pytest
 from agno.knowledge.embedder.base import Embedder
 from chromadb.api.client import Client
+from chromadb.api.models.Collection import Collection
 from chromadb.config import Settings
 
+from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
+from mindroom.knowledge.candidate_checkpoint import CandidateCheckpoint
 from mindroom.knowledge.collections import (
     CollectionSpace,
     build_vector_db,
     cleanup_superseded_collections,
     delete_collection,
+    require_chroma_vector_db,
 )
+from mindroom.knowledge.manager import KnowledgeManager
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -117,3 +126,72 @@ def test_superseded_cleanup_releases_owned_clients_and_preserves_reader(
     if deletion_fails:
         expected.add(space.default_collection)
     _assert_storage_released(space, expected)
+
+
+@contextmanager
+def _candidate_manager(tmp_path: Path) -> Iterator[KnowledgeManager]:
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={"docs": KnowledgeBaseConfig(path=str(tmp_path / "docs"))},
+        memory={"embedder": {"provider": "openai", "config": {"api_key": "synthetic-test-key"}}},
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    try:
+        yield manager
+    finally:
+        cast("Client", require_chroma_vector_db(manager._knowledge).client).close()
+
+
+@pytest.mark.parametrize(
+    ("candidate_state", "expected"),
+    [("missing", False), ("empty", False), ("unclaimed", True), ("claimed", False)],
+)
+def test_candidate_inspection_releases_owned_client(tmp_path: Path, candidate_state: str, *, expected: bool) -> None:
+    """Every candidate-shape result must release only the temporary inspection client."""
+    with _candidate_manager(tmp_path) as manager:
+        space = manager._collections
+        reader = require_chroma_vector_db(manager._knowledge).client
+        candidate_name = f"{space.default_collection}_candidate_test"
+        expected_collections = {space.default_collection}
+        if candidate_state != "missing":
+            candidate = reader.create_collection(candidate_name)
+            expected_collections.add(candidate_name)
+            if candidate_state != "empty":
+                candidate.add(ids=["document"], embeddings=[[1.0, 0.0]])
+        checkpoint = CandidateCheckpoint(
+            collection=candidate_name,
+            settings=manager._indexing_settings,
+            completed={"document.md": (1, 1, "digest")} if candidate_state == "claimed" else {},
+        )
+
+        assert manager._candidate_holds_unclaimed_rows(checkpoint, embedder=Embedder()) is expected
+        assert reader.get_collection(space.default_collection).count() == 0
+
+    _assert_storage_released(space, expected_collections)
+
+
+def test_candidate_inspection_error_releases_owned_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed candidate row lookup must propagate and release the inspection client."""
+    with _candidate_manager(tmp_path) as manager:
+        space = manager._collections
+        reader = require_chroma_vector_db(manager._knowledge).client
+        candidate_name = f"{space.default_collection}_candidate_test"
+        reader.create_collection(candidate_name)
+        checkpoint = CandidateCheckpoint(collection=candidate_name, settings=manager._indexing_settings)
+
+        def fail_get(self: Collection, **kwargs: object) -> Never:  # noqa: ARG001
+            message = "candidate row lookup failed"
+            raise RuntimeError(message)
+
+        monkeypatch.setattr(Collection, "get", fail_get)
+        with pytest.raises(RuntimeError, match="candidate row lookup failed"):
+            manager._candidate_holds_unclaimed_rows(checkpoint, embedder=Embedder())
+        assert reader.get_collection(space.default_collection).count() == 0
+
+    _assert_storage_released(space, {space.default_collection, candidate_name})
