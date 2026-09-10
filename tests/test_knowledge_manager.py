@@ -13,6 +13,7 @@ import traceback
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from io import BufferedIOBase
 from pathlib import Path
 from threading import Event, get_ident
 from types import SimpleNamespace
@@ -49,7 +50,6 @@ from mindroom.constants import (
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_embedder_api_key
 from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
-from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
 from mindroom.knowledge.collections import build_vector_db, candidate_collection_name
@@ -70,7 +70,9 @@ from mindroom.knowledge.redaction import (
     redact_url_credentials,
 )
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
-from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
+from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
+from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.registry import (
     PublishedIndexState,
     get_published_index,
@@ -80,7 +82,7 @@ from mindroom.knowledge.registry import (
     resolve_published_index_key,
     save_published_index_state,
 )
-from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
+from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -5683,7 +5685,7 @@ async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
 
 
 @pytest.mark.asyncio
-async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
+async def test_refresh_scheduler_refresh_now_uses_subprocess_with_force_reindex(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5706,12 +5708,20 @@ async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
             availability=KnowledgeAvailability.READY,
         )
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     result = await scheduler.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
 
     assert result.indexed_count == 1
     assert seen_force_reindex == [True]
+
+
+def _write_subprocess_result(kwargs: dict[str, object]) -> None:
+    """Model the small worker result alongside the existing process lifecycle fakes."""
+    output = kwargs["stdout"]
+    assert isinstance(output, BufferedIOBase)
+    output.write(b'{"indexed_count":0,"index_published":true,"availability":"ready","last_error":null}')
+    output.flush()
 
 
 @pytest.mark.asyncio
@@ -5765,6 +5775,7 @@ async def test_scheduled_refresh_subprocess_receives_config_snapshot(
 
     async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _Process:
         nonlocal captured_args, captured_env, captured_stdin
+        _write_subprocess_result(kwargs)
         captured_args = args
         raw_env = kwargs["env"]
         assert isinstance(raw_env, dict)
@@ -5824,6 +5835,7 @@ async def test_subprocess_refresh_serializes_request_off_event_loop(
         return b"{}"
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> MagicMock:
+        _write_subprocess_result(_kwargs)
         return process
 
     async def _fake_terminate(_process: object) -> None:
@@ -5895,6 +5907,7 @@ async def test_scheduled_refreshes_reuse_parent_github_app_token(
     process.wait = AsyncMock(return_value=0)
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> MagicMock:
+        _write_subprocess_result(_kwargs)
         return process
 
     async def _fake_send(_process: object, payload: bytes) -> None:
@@ -6011,7 +6024,7 @@ async def test_subprocess_refresh_primes_parent_github_app_token(
         )
 
     monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
-    monkeypatch.setattr(knowledge_refresh_runner, "refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_knowledge_binding", _fake_refresh)
 
     result = await knowledge_refresh_runner._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
 
@@ -6111,7 +6124,7 @@ async def test_subprocess_refresh_rejects_parent_token_after_credentials_rotate(
         )
 
     monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
-    monkeypatch.setattr(knowledge_refresh_runner, "refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_knowledge_binding", _fake_refresh)
 
     result = await knowledge_refresh_runner._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
 
@@ -6171,7 +6184,7 @@ async def test_subprocess_applies_runtime_knowledge_base_after_authored_validati
             availability=KnowledgeAvailability.READY,
         )
 
-    monkeypatch.setattr(knowledge_refresh_runner, "refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr(knowledge_refresh_runner, "_refresh_knowledge_binding", _fake_refresh)
 
     result = await knowledge_refresh_runner._run_subprocess_refresh_request(payload)
 
@@ -6261,6 +6274,7 @@ async def test_cancelled_subprocess_refresh_reconciles_running_state(
             return self.returncode or 0
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(process: _Process) -> None:
@@ -6341,6 +6355,7 @@ async def test_successful_refresh_subprocess_drains_its_process_group(
             return 0
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(_process: _Process) -> None:
@@ -6449,6 +6464,7 @@ async def test_wedged_subprocess_refresh_is_terminated_after_timeout(
             raise AssertionError
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(process: _Process) -> None:
@@ -6513,6 +6529,7 @@ async def test_blocked_refresh_request_is_terminated_after_timeout(
             raise AssertionError(msg)
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(process: _Process) -> None:
@@ -6586,6 +6603,7 @@ async def test_timeout_cleanup_finishes_before_cancellation_propagates(
             raise AssertionError
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(process: _Process) -> None:
@@ -6727,6 +6745,7 @@ async def test_failed_subprocess_refresh_reconciles_running_state(
             return self.returncode
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     terminated: list[_Process] = []
@@ -6802,6 +6821,7 @@ async def test_failed_subprocess_refresh_does_not_overwrite_newer_success(
             return self.returncode
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(_process: _Process) -> None:
@@ -6875,6 +6895,7 @@ async def test_failed_subprocess_refresh_reconciles_running_state_after_newer_pu
             return self.returncode
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
+        _write_subprocess_result(_kwargs)
         return _Process()
 
     async def _fake_terminate(_process: _Process) -> None:
@@ -6932,6 +6953,7 @@ async def test_refresh_subprocess_receives_conservative_thread_env(
             return self.returncode
 
     async def _fake_create_subprocess_exec(*_args: object, **kwargs: object) -> _Process:
+        _write_subprocess_result(kwargs)
         captured_env.update(kwargs["env"])
         return _Process()
 
@@ -6996,7 +7018,7 @@ async def test_refresh_scheduler_does_not_schedule_after_shutdown(
         calls += 1
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_knowledge_binding", _fake_refresh)
 
     await scheduler.shutdown()
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
@@ -9169,7 +9191,7 @@ async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
             availability=KnowledgeAvailability.READY,
         )
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_knowledge_binding", _fake_refresh)
     monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("docs", config=old_config, runtime_paths=runtime_paths)
@@ -9560,3 +9582,76 @@ def test_redacting_a_non_ascii_basic_token_does_not_raise() -> None:
     replaces the Git failure it was called to sanitise.
     """
     assert redact_credentials_in_text("Authorization: Basic éééé") == "Authorization: Basic ***"
+
+
+@pytest.mark.asyncio
+async def test_refresh_subprocess_returns_exact_result(tmp_path: Path) -> None:
+    """A real child returns the manual refresh result without rebuilding it from metadata."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "one.md").write_text("one", encoding="utf-8")
+    (docs / "two.md").write_text("two", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"])
+    config.knowledge_bases["docs"].mode = "files"
+    runtime_paths = runtime_paths_for(config)
+    result = await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        force_reindex=True,
+    )
+    assert result.indexed_count == 0  # Files mode does not index vectors.
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert result.last_error is None
+    assert result.key == resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_manual_refresh_returns_failed_candidate_result_and_tracks_parent_activity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The child outcome, including a failed candidate's count, is authoritative."""
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    target = knowledge_registry.refresh_target_for_published_index_key(key)
+    process = MagicMock(returncode=0)
+    process.stdin.drain = AsyncMock()
+    process.stdin.wait_closed = AsyncMock()
+    process.wait = AsyncMock(return_value=0)
+
+    async def spawn(*_args: object, **kwargs: object) -> MagicMock:
+        assert knowledge_refresh_locks.is_refresh_active(target)
+        output = kwargs["stdout"]
+        assert isinstance(output, BufferedIOBase)
+        output.write(
+            json.dumps(
+                {
+                    "indexed_count": 7,
+                    "index_published": False,
+                    "availability": "refresh_failed",
+                    "last_error": "embedding unavailable",
+                },
+            ).encode(),
+        )
+        output.flush()
+        return process
+
+    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", AsyncMock())
+    result = await KnowledgeRefreshScheduler().refresh_now(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        force_reindex=True,
+    )
+    assert result == knowledge_refresh_runner.KnowledgeRefreshResult(
+        key=key,
+        indexed_count=7,
+        index_published=False,
+        availability=KnowledgeAvailability.REFRESH_FAILED,
+        last_error="embedding unavailable",
+    )
+    assert not knowledge_refresh_locks.is_refresh_active(target)

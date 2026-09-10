@@ -33,7 +33,9 @@ from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_url_credentials
 from mindroom.knowledge.refresh_locks import refresh_source_root_lock
 from mindroom.knowledge.refresh_runner import (
-    refresh_knowledge_binding,
+    _refresh_knowledge_binding as refresh_knowledge_binding,
+)
+from mindroom.knowledge.refresh_runner import (
     refresh_knowledge_binding_in_subprocess,
 )
 from mindroom.knowledge.registry import (

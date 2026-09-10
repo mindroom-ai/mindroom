@@ -126,7 +126,7 @@ class KnowledgeRefreshScheduler:
         force_reindex: bool = False,
     ) -> KnowledgeRefreshResult:
         """Run a refresh immediately and wait for it."""
-        from mindroom.knowledge.refresh_runner import refresh_knowledge_binding  # noqa: PLC0415
+        from mindroom.knowledge.refresh_runner import refresh_knowledge_binding_in_subprocess  # noqa: PLC0415
 
         with suppress(ValueError):
             key = resolve_refresh_target(
@@ -137,7 +137,7 @@ class KnowledgeRefreshScheduler:
                 create=False,
             )
             self._pending.pop(key, None)
-        return await refresh_knowledge_binding(
+        return await refresh_knowledge_binding_in_subprocess(
             base_id,
             config=config,
             runtime_paths=runtime_paths,

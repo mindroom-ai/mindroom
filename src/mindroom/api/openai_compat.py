@@ -80,7 +80,7 @@ from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import render_prepared_team_messages_text
 from mindroom.history.runtime import ScopeSessionContext, close_team_runtime_state_dbs, open_bound_scope_session_context
-from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
+from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,

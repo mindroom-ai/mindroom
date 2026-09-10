@@ -188,8 +188,8 @@ if TYPE_CHECKING:
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.event_journal import PrincipalStore
     from mindroom.history.types import HistoryScope
-    from mindroom.knowledge import KnowledgeAccessSupport
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.post_response_effects import PostResponseEffectsDeps

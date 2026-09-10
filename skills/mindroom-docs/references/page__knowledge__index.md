@@ -463,6 +463,19 @@ Collections whose ownership cannot be proven from the base identity are preserve
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 
+## Process isolation
+
+Published semantic searches and collection probes run in short-lived subprocesses.
+Embedding credentials and provider health stay in the application; only query vectors and document data cross the process boundary.
+Each child exits after one operation, releasing its native Chroma memory.
+At most two read children run at once, with a 30-second wait for a slot and a 30-second execution timeout.
+A timed-out child is killed and reaped; cancelling an async caller leaves its already-started read bounded by that timeout.
+Native database stalls therefore do not hold the application process's Python lock.
+Fresh processes add startup and index-loading cost to each read.
+
+Manual reindexing and scheduled refreshes share the existing refresh subprocess and its timeout and process-group cleanup.
+These boundaries also cover semantic file-memory knowledge overlays; the separate Mem0 backend is unchanged.
+
 ## Dashboard Management
 
 The web dashboard provides a Knowledge tab for managing knowledge bases without editing YAML:

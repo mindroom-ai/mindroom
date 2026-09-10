@@ -44,7 +44,8 @@ from mindroom.api.workers import router as workers_router
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.embedder_health import get_embedder_failure
-from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.legacy_private_storage import migrate_private_storage
 from mindroom.logging_config import get_logger

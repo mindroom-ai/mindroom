@@ -11,7 +11,7 @@ import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
 
-import mindroom.knowledge.chroma_client as knowledge_chroma_client
+import mindroom.knowledge.read_proxy as knowledge_read_proxy
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
@@ -220,6 +220,11 @@ class _VectorDb:
         return self.search(query=query, limit=limit, filters=filters)
 
 
+class _ReadProxy(_VectorDb):
+    def __init__(self, *, collection_name: str, path: str, embedder: Embedder) -> None:
+        super().__init__(collection=collection_name, path=path, embedder=embedder)
+
+
 class _Knowledge:
     def __init__(self, vector_db: _VectorDb | None = None) -> None:
         self.vector_db = vector_db
@@ -293,9 +298,17 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "mindroom.knowledge.manager.create_configured_embedder",
         lambda *_args, **_kwargs: _FakeEmbedder(),
     )
-    monkeypatch.setattr(knowledge_chroma_client, "ChromaDb", _VectorDb)
+    monkeypatch.setattr(knowledge_read_proxy, "ChromaReadProxy", _ReadProxy)
+    monkeypatch.setattr(
+        knowledge_read_proxy,
+        "collection_exists",
+        lambda _path, collection: _VectorDb(collection=collection).exists(),
+    )
     monkeypatch.setattr("mindroom.knowledge.registry.StrictSearchKnowledge", _Knowledge)
-    monkeypatch.setattr("mindroom.knowledge.registry.create_configured_embedder", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "mindroom.knowledge.registry.create_configured_embedder",
+        lambda *_args, **_kwargs: _FakeEmbedder(),
+    )
     knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()
     knowledge_refresh_locks._refresh_locks.clear()

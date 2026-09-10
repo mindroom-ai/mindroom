@@ -43,7 +43,8 @@ from mindroom.hooks import (
     build_hook_room_state_querier,
     emit,
 )
-from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.legacy_private_storage import migrate_private_storage
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room

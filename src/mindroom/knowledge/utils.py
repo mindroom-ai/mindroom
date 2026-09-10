@@ -34,6 +34,18 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+__all__ = [
+    "KnowledgeAccessSupport",
+    "KnowledgeAvailabilityDetail",
+    "KnowledgeBaseAccessResolution",
+    "format_knowledge_availability_notice",
+    "knowledge_runtime_identity",
+    "resolve_agent_knowledge_access",
+    "resolve_agent_knowledge_access_async",
+    "resolve_knowledge_base_access",
+    "resolve_knowledge_base_access_async",
+]
+
 logger = get_logger(__name__)
 _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
 _MAX_MERGED_SOURCE_COVERAGE_RESULTS = 20

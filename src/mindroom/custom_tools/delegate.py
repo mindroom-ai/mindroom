@@ -17,7 +17,7 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import ResponseTurnContext, ai_response
 from mindroom.authorization import is_sender_allowed_for_responder
-from mindroom.knowledge import resolve_agent_knowledge_access_async
+from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,

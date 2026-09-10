@@ -97,7 +97,6 @@ class PublishedIndexResolution:
 
 
 class _PublishedIndexVectorDb(Protocol):
-    client: object | None
     collection_name: str
 
     def exists(self) -> bool:
@@ -375,16 +374,12 @@ def _build_published_index_vector_db(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _PublishedIndexVectorDb:
-    from mindroom.knowledge.chroma_client import ChromaDb  # noqa: PLC0415
+    from mindroom.knowledge.read_proxy import ChromaReadProxy  # noqa: PLC0415
 
-    return cast(
-        "_PublishedIndexVectorDb",
-        ChromaDb(
-            collection=_state_collection_name(state),
-            path=str(published_index_storage_path(key)),
-            persistent_client=True,
-            embedder=create_configured_embedder(config, runtime_paths),
-        ),
+    return ChromaReadProxy(
+        collection_name=_state_collection_name(state),
+        path=str(published_index_storage_path(key)),
+        embedder=create_configured_embedder(config, runtime_paths),
     )
 
 
