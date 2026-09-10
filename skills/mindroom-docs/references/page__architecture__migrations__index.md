@@ -34,7 +34,7 @@ The remaining rows were already focused boundaries and complete the current map.
 | [`src/mindroom/legacy_approval_payloads.py`][legacy-approval] | Approval claim or resume encounters missing historical context or the older card ID. | Current approval ownership, authorization, exact-call checks, transaction settlement, and failure handling remain with current owners. |
 | [`src/mindroom/matrix/legacy_sync_continuity.py`][legacy-sync] | `SyncContinuityStore` loads a valid v2 or v3 record. | The helper validates the old shape, discards its checkpoint, increments revision once, and lets the store rewrite v4 under lock. |
 | [`src/mindroom/script_runs/legacy_migrations.py`][script-migrations] | `ScriptRunStore` finds missing resource snapshot columns. | Schema creation and the transaction stay in the store; old rows receive the established null or empty-map values. |
-| [`src/mindroom/knowledge/legacy_metadata.py`][knowledge-legacy] | Knowledge parsing sees absent or empty optional filter fields. | Current parsing still rejects unknown fields, and missing corpus-affecting settings still force rebuilds. |
+| [`src/mindroom/knowledge/legacy_metadata.py`][knowledge-legacy] | Knowledge parsing sees absent or empty optional filter fields. | Current parsing still rejects unknown fields; missing corpus settings retain empty historical sentinels and rebuild only when the corresponding current corpus-compatibility value differs. |
 | [`src/mindroom/matrix/legacy_state.py`][matrix-legacy-state] | Matrix state has accounts without a domain or a noncanonical serialized shape. | Runtime-domain resolution, parsing, caching, and atomic persistence stay in `matrix/state.py`; rewrites happen only when data differs. |
 | [`src/mindroom/config/legacy_fields.py`][config-legacy] | Agent or defaults validation sees a retired field. | Pydantic remains the strict validation boundary and the helper provides directed replacement errors. |
 | [`src/mindroom/event_journal/upgrade.py`][journal-upgrade] | A journal has `journal_events` but lacks Nio-owned `matrix_sync_consumers`. | One schema transaction preserves history, handled turns, generation, and visible projection while retiring obsolete pending execution. |
@@ -71,7 +71,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | --- | --- | --- |
 | S1 | Isolated | [`script_runs/legacy_migrations.py`][script-migrations] adds old missing resource columns inside the current store transaction. |
 | S2 | Isolated | [`knowledge/legacy_metadata.py`][knowledge-legacy] normalizes absent or empty optional filters. |
-| S3 | Isolated | [`knowledge/legacy_metadata.py`][knowledge-legacy] leaves missing corpus settings incompatible so the index rebuilds. |
+| S3 | Isolated | [`knowledge/legacy_metadata.py`][knowledge-legacy] retains empty historical sentinels for missing corpus settings, rebuilding only when the corresponding current corpus-compatibility value differs. |
 | S4 | Tiny retained default | [`knowledge/index_metadata.py`][knowledge-index] keeps sparse publication, job, and failure lifecycle fields. |
 | S5 | Current behavior | [`knowledge/collections.py`][knowledge-collections] protects current default and live collections as well as older published layouts. |
 | S6 | Tiny retained default | [`memory/auto_flush.py`][auto-flush] discards two retired location fields while current worker identity sanitation and queue defaults remain. |
@@ -156,7 +156,8 @@ Migration owners reject those failures rather than converting them into deletion
 Explicitly versioned stores reject unsupported versions, while several sparse readers deliberately ignore unknown fields or drop malformed reconstructible records.
 
 Additional small compatibility branches stay with current readers.
-[`streaming.py`][streaming] recognizes old ` [cancelled]` and ` [error]` body suffixes when stream status metadata is absent, and [`execution_preparation.py`][execution-preparation] cleans those markers before interrupted replies re-enter model context.
+[`execution_preparation.py`][execution-preparation] classifies structured stream status first and uses the old ` [cancelled]` and ` [error]` body markers recognized by [`streaming.py`][streaming] only as a fallback.
+Interrupted visible replies are excluded; eligible in-progress text is cleaned before it is included in model context.
 [`external_triggers/replay_store.py`][replay-store] supplies an empty `threads` map for replay stores written before thread keys existed.
 
 A journal replacement must coordinate its generation binding with the next Nio baseline.
