@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
     from pathlib import Path
 
+    from chromadb.api.client import Client
+
     from mindroom.config.knowledge import KnowledgeBaseMode
     from mindroom.config.main import Config
 
@@ -241,7 +243,17 @@ def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
         # The base Embedder raises on every embed call, so a probe can never embed content.
         embedder=Embedder(),
     )
-    return vector_db.exists()
+    # The probe owns this client. Dropping ChromaDb leaves its native system
+    # alive; closing the client releases only this owner's shared reference.
+    try:
+        client = cast("Client", vector_db.client)
+    except Exception:
+        # Match ChromaDb.exists(), which also treats client-open errors as missing.
+        return False
+    try:
+        return vector_db.exists()
+    finally:
+        client.close()
 
 
 def _safe_identifier(value: str) -> str:

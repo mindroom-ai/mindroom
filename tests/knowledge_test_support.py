@@ -166,6 +166,9 @@ class _Collection:
 
 
 class _Client:
+    def close(self) -> None:
+        """The in-memory fake has no external resources to release."""
+
     def get_collection(self, name: str) -> _Collection:
         return _Collection(name)
 

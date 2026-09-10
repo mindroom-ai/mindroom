@@ -180,6 +180,9 @@ class _FakeCollection:
 
 
 class _FakeClient:
+    def close(self) -> None:
+        """The in-memory fake has no external resources to release."""
+
     def get_collection(self, name: str) -> _FakeCollection:
         with _FakeVectorDb.lock:
             if name not in _FakeVectorDb.store:

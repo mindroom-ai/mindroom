@@ -4523,7 +4523,7 @@ requires-dist = [
     { name = "browserbase", marker = "extra == 'browserbase'" },
     { name = "cartesia", marker = "extra == 'cartesia'" },
     { name = "cerebras-cloud-sdk", specifier = ">=1.46" },
-    { name = "chromadb", specifier = ">=1.0.15" },
+    { name = "chromadb", specifier = ">=1.5.8" },
     { name = "claude-agent-sdk", marker = "extra == 'claude-agent'", specifier = ">=0.1.35" },
     { name = "composio-agno", marker = "extra == 'composio'" },
     { name = "crawl4ai", marker = "extra == 'crawl4ai'", specifier = ">=0.7.3" },
