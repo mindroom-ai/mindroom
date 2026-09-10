@@ -2057,10 +2057,13 @@ class TestRoomRetryBackoff:
         finally:
             await worker.stop()
 
+    @pytest.mark.parametrize("lose_after_first_sweep", [False, True])
     async def test_fallback_sweep_reaches_owners_beyond_one_probe_batch(
         self,
         alice: PrincipalStore,
         monkeypatch: pytest.MonkeyPatch,
+        *,
+        lose_after_first_sweep: bool,
     ) -> None:
         """A quiet backlog is swept in yielding batches without waiting extra periods."""
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 2)
@@ -2070,6 +2073,7 @@ class TestRoomRetryBackoff:
         block_discovery = False
         discovery_blocked = asyncio.Event()
         release_discovery = asyncio.Event()
+        last_owner_probed = asyncio.Event()
 
         class SlowDiscovery(_FlakyReplayView):
             async def pending(
@@ -2094,12 +2098,17 @@ class TestRoomRetryBackoff:
             attempts.append(event.event_id)
             return event.event_id in lost
 
+        def owner_is_live(event: JournalEvent) -> bool:
+            if discovery_blocked.is_set() and event.event_id == sources[-1]:
+                last_owner_probed.set()
+            return event.event_id not in lost
+
         for event_id in sources:
             await TestPendingEventWorker._admit(alice, text_event(event_id))
         worker = PendingEventWorker(
             store=SlowDiscovery(alice),
             handle=handle,
-            deferral_is_live=lambda event: event.event_id not in lost,
+            deferral_is_live=owner_is_live,
             deferral_scan_seconds=0.01,
         )
         worker.start()
@@ -2108,6 +2117,8 @@ class TestRoomRetryBackoff:
             block_discovery = True
             worker.wake()
             await asyncio.wait_for(discovery_blocked.wait(), timeout=5)
+            if lose_after_first_sweep:
+                await asyncio.wait_for(last_owner_probed.wait(), timeout=5)
             lost.add(sources[-1])
             await _eventually(lambda: attempts.count(sources[-1]) == 2, seconds=5)
             assert attempts == [*sources, sources[-1]]

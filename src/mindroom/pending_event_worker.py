@@ -495,11 +495,12 @@ class PendingEventWorker:
         )
 
     async def _scan_after_deferral_delay(self) -> None:
-        await asyncio.sleep(self.deferral_scan_seconds)
-        for _ in range(0, len(self._deferred), _BATCH_SIZE):
-            self._queue_lost_owners()
-            await asyncio.sleep(0)
-        self._wake.set()
+        while self._deferred:
+            await asyncio.sleep(self.deferral_scan_seconds)
+            for _ in range(0, len(self._deferred), _BATCH_SIZE):
+                self._queue_lost_owners()
+                await asyncio.sleep(0)
+            self._wake.set()
 
     def _schedule_retry(self) -> None:
         if self._stopped or (self._retry is not None and not self._retry.done()):
