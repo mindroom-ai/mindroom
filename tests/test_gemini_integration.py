@@ -31,7 +31,7 @@ class TestGeminiIntegration:
         config.models = {
             "test_model": MagicMock(
                 provider="gemini",
-                id="gemini-3.6-flash",
+                id="gemini-3.8-flash",
                 host=None,
             ),
         }
@@ -39,7 +39,7 @@ class TestGeminiIntegration:
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}):
             model = get_model_instance(config, runtime_paths, "test_model")
             assert isinstance(model, MindRoomGoogleGemini)
-            assert model.id == "gemini-3.6-flash"
+            assert model.id == "gemini-3.8-flash"
             assert model.provider == "Google"
 
     def test_google_provider_creates_gemini_instance(self) -> None:
@@ -65,7 +65,7 @@ class TestGeminiIntegration:
         config.models = {
             "test_model": MagicMock(
                 provider="gemini",
-                id="gemini-3.6-flash",
+                id="gemini-3.8-flash",
                 host=None,
             ),
         }
@@ -97,7 +97,7 @@ class TestGeminiIntegration:
 
         # Test various Gemini model configurations
         gemini_configs = [
-            ("gemini", "gemini-3.6-flash"),
+            ("gemini", "gemini-3.8-flash"),
             ("gemini", "gemini-3.5-flash-lite"),
             ("google", "gemini-3.1-pro-preview"),
             ("google", "gemini-3.1-flash-image"),

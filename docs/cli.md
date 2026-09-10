@@ -1054,7 +1054,7 @@ mindroom config init --force
 Use `--print` to preview the generated `config.yaml` in the terminal with YAML syntax highlighting.
 It does not create or modify `config.yaml`, `.env`, or starter workspace files.
 
-The `--provider codex` preset generates `provider: codex` with `id: gpt-5.6` and `context_window: 258000`.
+The `--provider codex` preset generates `provider: codex` with `id: gpt-6-astra` and `context_window: 258000`.
 They set `extra_kwargs.reasoning_effort: medium`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
@@ -1062,12 +1062,12 @@ Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
 The `--provider kimi` preset generates `provider: kimi` with `id: k3` and `context_window: 1048576`.
 Run `kimi` and `/login` first so MindRoom can read `~/.kimi-code/credentials/kimi-code.json`.
 
-The `--provider ollama` preset generates `provider: ollama` with `id: gemma4`, an additional `qwen3_6_27b` model using `qwen3.6:27b`, and `OLLAMA_HOST=http://localhost:11434`.
+The `--provider ollama` preset generates `provider: ollama` with `id: gemma4`, an additional `qwen3_8_27b` model using `qwen3.8:27b`, and `OLLAMA_HOST=http://localhost:11434`.
 Pull both local models before running MindRoom:
 
 ```bash
 ollama pull gemma4
-ollama pull qwen3.6:27b
+ollama pull qwen3.8:27b
 ```
 
 The `--provider llama.cpp` preset generates OpenAI-compatible local server config for Unsloth GGUF models.
@@ -1075,7 +1075,7 @@ Start llama.cpp with one of the configured model refs before running MindRoom:
 
 ```bash
 llama-server -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M --host 127.0.0.1 --port 8080
-llama-server -hf unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL --host 127.0.0.1 --port 8080
+llama-server -hf unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL --host 127.0.0.1 --port 8080
 ```
 
 ### config show

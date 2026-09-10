@@ -200,9 +200,7 @@ describe("VoiceConfig", () => {
 
     render(<VoiceConfig />);
 
-    expect(document.getElementById("stt-model")).toHaveValue(
-      "gpt-4o-transcribe",
-    );
+    expect(document.getElementById("stt-model")).toHaveValue("gpt-transcribe");
   });
 
   it("shows an error toast when saving fails", async () => {

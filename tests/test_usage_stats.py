@@ -86,7 +86,7 @@ def _run(
     run_id: str | None = "run-1",
     total_tokens: int = 10,
     model_provider: str | None = "openai",
-    model: str | None = "gpt-5.6",
+    model: str | None = "gpt-6-astra",
 ) -> UsageRunNode:
     return UsageRunNode(
         team_id=None,
@@ -180,7 +180,7 @@ def test_self_usage_is_requester_scoped_and_small(tmp_path: Path, monkeypatch: p
     assert payload["model_breakdown"] == [
         {
             "provider": "openai",
-            "model": "gpt-5.6",
+            "model": "gpt-6-astra",
             "totals": {
                 **_metrics(),
                 "cache_read_tokens": 0,
@@ -302,7 +302,7 @@ def test_admin_usage_uses_member_inclusive_session_metrics(
             agent_source.path_label: (
                 _row(
                     agent_source,
-                    _run(total_tokens=7, model_provider="openai", model="gpt-5.6"),
+                    _run(total_tokens=7, model_provider="openai", model="gpt-6-astra"),
                     session_metrics=_metrics(10),
                 ),
             ),
@@ -327,7 +327,7 @@ def test_admin_usage_uses_member_inclusive_session_metrics(
     assert [
         (row.model_provider, row.model, row.totals.total_tokens, row.run_count) for row in report.model_breakdown
     ] == [
-        ("openai", "gpt-5.6", 7, 1),
+        ("openai", "gpt-6-astra", 7, 1),
         ("vertexai", "claude-opus-5", 5, 1),
     ]
 
@@ -376,7 +376,7 @@ def test_model_breakdown_groups_runs_and_uses_unknown_for_missing_identity(
     assert [
         (row.model_provider, row.model, row.totals.total_tokens, row.run_count) for row in report.model_breakdown
     ] == [
-        ("openai", "gpt-5.6", 20, 2),
+        ("openai", "gpt-6-astra", 20, 2),
         ("unknown", "unknown", 5, 1),
     ]
 
@@ -475,7 +475,7 @@ def test_invalid_model_run_does_not_discard_authoritative_admin_totals(
         requester_id="@alice:example.test",
         run_id="invalid",
         model_provider="openai",
-        model="gpt-5.6",
+        model="gpt-6-astra",
         metrics=MappingProxyType({"total_tokens": -1}),
     )
     _wire(

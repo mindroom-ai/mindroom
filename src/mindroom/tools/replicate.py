@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.model_defaults import REPLICATE_VIDEO
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
             label="Model",
             type="text",
             required=False,
-            default="minimax/video-01",
+            default=REPLICATE_VIDEO,
         ),
         ConfigField(
             name="enable_generate_media",

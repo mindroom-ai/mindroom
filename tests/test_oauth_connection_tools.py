@@ -70,7 +70,7 @@ def _tool_and_context(
             ),
         },
         authorization=AuthorizationConfig(aliases=aliases or {}),
-        models={"default": {"provider": "openai", "id": "gpt-5.6"}},
+        models={"default": {"provider": "openai", "id": "gpt-6-astra"}},
     )
     config_path = tmp_path / "config.yaml"
     write_config_yaml(config, config_path)

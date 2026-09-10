@@ -36,7 +36,7 @@ def _safeguard_refusal_message() -> AnthropicMessage:
     return AnthropicMessage(
         id="msg-refusal",
         content=[],
-        model="claude-fable-5",
+        model="claude-fable-5-1",
         role="assistant",
         stop_reason="refusal",
         stop_sequence=None,
@@ -50,11 +50,11 @@ def test_first_party_openai_gpt_5_4_and_newer_use_responses(tmp_path: Path) -> N
     config = bind_runtime_paths(
         Config(
             models={
-                "current": ModelConfig(provider="openai", id="gpt-5.6", extra_kwargs={"api_key": "dummy-key"}),
+                "current": ModelConfig(provider="openai", id="gpt-6-astra", extra_kwargs={"api_key": "dummy-key"}),
                 "older": ModelConfig(provider="openai", id="gpt-4o", extra_kwargs={"api_key": "dummy-key"}),
                 "compatible": ModelConfig(
                     provider="openai",
-                    id="gpt-5.6",
+                    id="gpt-6-astra",
                     extra_kwargs={"api_key": "dummy-key", "base_url": "http://localhost:9292/v1"},
                 ),
             },
@@ -96,7 +96,7 @@ def test_custom_openai_endpoint_requires_explicit_responses_selection(tmp_path: 
     [
         ("reasoning-alias", "responses", "http://localhost:9292/v1", MindRoomOpenAIResponses),
         ("gpt-6-astra", "responses", "http://localhost:9292/v1", MindRoomOpenAIResponses),
-        ("gpt-5.6", "chat_completions", None, MindRoomOpenAIChat),
+        ("gpt-6-astra", "chat_completions", None, MindRoomOpenAIChat),
         ("gpt-6-astra", "chat_completions", "http://localhost:9292/v1", MindRoomOpenAIChat),
     ],
 )
@@ -277,10 +277,10 @@ def test_bedrock_current_claude_uses_mantle_endpoint(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("provider", "model_id", "extra_kwargs"),
     [
-        ("anthropic", "claude-fable-5", {"api_key": "dummy-key"}),
+        ("anthropic", "claude-fable-5-1", {"api_key": "dummy-key"}),
         (
             "bedrock_claude",
-            "anthropic.claude-fable-5",
+            "anthropic.claude-fable-5-1",
             {
                 "aws_region": "us-east-1",
                 "aws_access_key": "dummy-access",
@@ -326,7 +326,7 @@ def test_google_tool_loop_preserves_provider_call_ids(tmp_path: Path) -> None:
             models={
                 "gemini": ModelConfig(
                     provider="google",
-                    id="gemini-3.6-flash",
+                    id="gemini-3.8-flash",
                     extra_kwargs={"api_key": "dummy-key"},
                 ),
             },
@@ -370,7 +370,7 @@ def test_google_tool_loop_omits_invalid_ids_without_shifting_valid_ids(tmp_path:
             models={
                 "gemini": ModelConfig(
                     provider="google",
-                    id="gemini-3.6-flash",
+                    id="gemini-3.8-flash",
                     extra_kwargs={"api_key": "dummy-key"},
                 ),
             },
@@ -429,7 +429,10 @@ def test_google_tool_loop_omits_invalid_ids_without_shifting_valid_ids(tmp_path:
     assert function_responses[1].id == "call-123"
 
 
-@pytest.mark.parametrize("model_id", ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"])
+@pytest.mark.parametrize(
+    "model_id",
+    ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5"],
+)
 def test_current_direct_claude_omits_non_default_sampling_controls(tmp_path: Path, model_id: str) -> None:
     """Current Claude requests must omit sampling controls rejected by the provider."""
     config = bind_runtime_paths(
@@ -458,7 +461,7 @@ def test_current_direct_claude_omits_non_default_sampling_controls(tmp_path: Pat
     assert "top_k" not in request_params
 
 
-@pytest.mark.parametrize("model_id", ["gemini-3.6-flash", "gemini-3.5-flash-lite"])
+@pytest.mark.parametrize("model_id", ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"])
 def test_current_direct_gemini_omits_deprecated_sampling_controls(tmp_path: Path, model_id: str) -> None:
     """Current direct Gemini requests must omit deprecated sampling controls."""
     config = bind_runtime_paths(
@@ -517,7 +520,7 @@ def test_usage_telemetry_is_installed_when_full_request_logging_is_disabled(tmp_
             models={
                 "default": ModelConfig(
                     provider="openai",
-                    id="gpt-5.6",
+                    id="gpt-6-astra",
                     extra_kwargs={"api_key": "dummy-key"},
                 ),
             },

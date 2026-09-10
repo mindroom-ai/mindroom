@@ -102,7 +102,7 @@ def test_chat_models_drop_sparse_stream_placeholders(
     _agno_cls: type[OpenAIChat],
 ) -> None:
     """A missing lower stream index must not become an id-only assistant tool call."""
-    parsed = model_cls(id="gpt-5.6", api_key="test-key").parse_tool_calls([_sparse_tool_call_delta()])
+    parsed = model_cls(id="gpt-6-astra", api_key="test-key").parse_tool_calls([_sparse_tool_call_delta()])
 
     assert parsed == [
         {
@@ -121,7 +121,7 @@ def test_chat_models_supply_missing_tool_arguments_without_mutating_history(
     """Chat Completions replay must repair zero-argument calls from another provider."""
     assistant = _assistant_with_argumentless_tool_call()
 
-    formatted = model_cls(id="gpt-5.6", api_key="test-key")._format_all_messages([assistant])
+    formatted = model_cls(id="gpt-6-astra", api_key="test-key")._format_all_messages([assistant])
 
     assert formatted[0]["tool_calls"][0]["function"]["arguments"] == "{}"
     assert "arguments" not in assistant.tool_calls[0]["function"]
@@ -149,7 +149,7 @@ def test_openai_responses_supplies_missing_tool_arguments_without_mutating_histo
     """Responses replay must repair zero-argument calls from another provider."""
     assistant = _assistant_with_argumentless_tool_call()
 
-    formatted = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")._format_messages([assistant])
+    formatted = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")._format_messages([assistant])
 
     assert formatted[0]["arguments"] == "{}"
     assert "arguments" not in assistant.tool_calls[0]["function"]
@@ -230,7 +230,7 @@ def test_chat_models_leave_combined_tool_results_for_agno_normalization(
     """Argument repair must not consume non-assistant combined tool results."""
     tool_results = _legacy_combined_tool_results()
 
-    formatted = model_cls(id="gpt-5.6", api_key="test-key")._format_all_messages([tool_results])
+    formatted = model_cls(id="gpt-6-astra", api_key="test-key")._format_all_messages([tool_results])
 
     assert formatted == [
         {"role": "tool", "content": "first result", "tool_call_id": "toolu_1"},
@@ -242,7 +242,7 @@ def test_openai_responses_leaves_combined_tool_results_for_agno_normalization() 
     """Responses replay must preserve Agno's combined-result normalization path."""
     tool_results = _legacy_combined_tool_results()
 
-    formatted = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")._format_messages([tool_results])
+    formatted = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")._format_messages([tool_results])
 
     assert formatted == [
         {"type": "function_call_output", "call_id": "toolu_1", "output": "first result"},
@@ -258,7 +258,7 @@ def test_chat_models_remove_persisted_sparse_placeholder_and_orphan_result(
     """Replay must retain real calls while removing a saved placeholder pair."""
     messages = _messages_with_sparse_stream_placeholder()
 
-    formatted = model_cls(id="gpt-5.6", api_key="test-key")._format_all_messages(messages)
+    formatted = model_cls(id="gpt-6-astra", api_key="test-key")._format_all_messages(messages)
 
     assert formatted == [
         {
@@ -280,7 +280,7 @@ def test_openai_responses_removes_persisted_sparse_placeholder_and_orphan_result
     """Responses replay must retain real calls while removing a saved placeholder pair."""
     messages = _messages_with_sparse_stream_placeholder()
 
-    formatted = MindRoomOpenAIResponses(id="gpt-5.6", api_key="test-key")._format_messages(messages)
+    formatted = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")._format_messages(messages)
 
     assert len(formatted) == 2
     assert formatted[0]["type"] == "function_call"

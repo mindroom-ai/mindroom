@@ -96,7 +96,7 @@ def test_matrix_agents_get_zero_argument_invite_router_in_standard_tool_environm
                     include_default_tools=False,
                 ),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
         ),
         test_runtime_paths(tmp_path),
     )
@@ -143,7 +143,7 @@ def test_matrix_runtime_ignores_authored_invite_router_function_filters(tmp_path
                     include_default_tools=False,
                 ),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
         ),
         test_runtime_paths(tmp_path),
     )
@@ -174,7 +174,7 @@ def test_invite_router_stays_hidden_without_matrix_room_context(tmp_path: Path) 
     config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Write code")},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
         ),
         test_runtime_paths(tmp_path),
     )
@@ -230,7 +230,7 @@ def test_matrix_agents_reject_local_invite_router_function_collisions(
                     include_default_tools=False,
                 ),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
         ),
         test_runtime_paths(tmp_path),
     )

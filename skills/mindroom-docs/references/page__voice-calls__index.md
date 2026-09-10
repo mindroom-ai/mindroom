@@ -119,11 +119,11 @@ calls:
       model: call_fast
       stt:
         provider: openai
-        model: gpt-4o-transcribe
+        model: gpt-transcribe
         credentials_service: openai-voice
       tts:
         provider: openai
-        model: tts-1
+        model: gpt-4o-mini-tts
         credentials_service: openai-voice
         extra_kwargs:
           voice: ash
@@ -147,13 +147,13 @@ calls:
       backend: cascaded
       stt:
         provider: openai
-        model: gpt-4o-transcribe
+        model: gpt-transcribe
         credentials_service: openai-voice
         extra_kwargs:
           language: en
       tts:
         provider: openai
-        model: tts-1
+        model: gpt-4o-mini-tts
         credentials_service: openai-voice
         extra_kwargs:
           voice: ash
@@ -163,7 +163,7 @@ calls:
 
 Each speech component has its own `provider`, `model`, `credentials_service`, `api_key`, `host`, and `extra_kwargs`.
 The two speech legs may select the same named credential or different ones.
-The current OpenAI model catalog documents [`gpt-4o-transcribe`](https://developers.openai.com/api/docs/models/gpt-4o-transcribe) for transcription and [`tts-1`](https://developers.openai.com/api/docs/models/tts-1) for text-to-speech.
+The current OpenAI model catalog documents [`gpt-transcribe`](https://developers.openai.com/api/docs/models/gpt-transcribe) for transcription and [`gpt-4o-mini-tts`](https://developers.openai.com/api/docs/models/gpt-4o-mini-tts) for text-to-speech.
 
 ## Completely local example
 

@@ -30,7 +30,7 @@ voice:
   visible_router_echo: true
   stt:
     provider: openai
-    model: gpt-4o-transcribe
+    model: gpt-transcribe
     # Optional: custom service root or /v1 base URL
     # host: http://localhost:8080
   intelligence:
@@ -55,7 +55,7 @@ voice:
   enabled: true
   stt:
     provider: openai
-    model: gpt-4o-transcribe
+    model: gpt-transcribe
 ```
 
 Requires `voice.stt.api_key` or a named `voice.stt.credentials_service`; the default OpenAI credential service can resolve stored credentials or `OPENAI_API_KEY`.

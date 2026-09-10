@@ -1141,7 +1141,7 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machi
     ("provider", "model_id"),
     [
         ("anthropic", "claude-opus-5"),
-        ("openai", "gpt-5.6"),
+        ("openai", "gpt-6-astra"),
     ],
 )
 def test_native_tool_search_prompt_lists_deferred_capability_domains(
@@ -1172,7 +1172,7 @@ def test_native_tool_search_prompt_lists_deferred_capability_domains(
     ("provider", "model_id", "deferred_names_attr"),
     [
         ("anthropic", "claude-opus-5", _DEFERRED_TOOL_NAMES_ATTR),
-        ("openai", "gpt-5.6", _OPENAI_DEFERRED_TOOL_NAMES_ATTR),
+        ("openai", "gpt-6-astra", _OPENAI_DEFERRED_TOOL_NAMES_ATTR),
     ],
 )
 @pytest.mark.parametrize("collide_all", [False, True], ids=["partial-collision", "full-collision"])
@@ -1412,7 +1412,7 @@ def test_homegrown_load_tool_makes_toolkit_instructions_available(
     assert instruction_marker in _render_system_prompt(loaded_agent)
 
 
-@pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-5.6"), ("openai", "gpt-5.6")])
+@pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-6-astra"), ("openai", "gpt-6-astra")])
 def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(
     tmp_path: Path,
     provider: str,
@@ -1455,7 +1455,7 @@ def test_explicit_openai_api_keeps_homegrown_tool_discovery_when_native_is_unava
     raw = _base_config_data()
     raw["models"]["gpt"] = {  # type: ignore[index]
         "provider": "openai",
-        "id": "gpt-5.6",
+        "id": "gpt-6-astra",
         "api": api,
         "extra_kwargs": {"base_url": base_url},
     }
@@ -1474,7 +1474,7 @@ def test_explicit_openai_api_keeps_homegrown_tool_discovery_when_native_is_unava
 def test_codex_deferred_browser_uses_non_reserved_function_name(tmp_path: Path) -> None:
     """The deferred browser function must not collide with Codex's reserved browser namespace."""
     raw = _base_config_data()
-    raw["models"]["codex"] = {"provider": "codex", "id": "gpt-5.6"}  # type: ignore[index]
+    raw["models"]["codex"] = {"provider": "codex", "id": "gpt-6-astra"}  # type: ignore[index]
     raw["agents"]["code"]["model"] = "codex"  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [{"browser": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
@@ -1545,7 +1545,7 @@ def test_eager_tool_filter_drops_fully_filtered_deferred_toolkit(tmp_path: Path)
     ("provider", "model_id", "extra_kwargs"),
     [
         ("openai", "gpt-4o-mini", None),
-        ("openai", "gpt-5.6", {"base_url": "http://localhost:9292/v1"}),
+        ("openai", "gpt-6-astra", {"base_url": "http://localhost:9292/v1"}),
         ("codex", "gpt-4.1", None),
         ("anthropic", "claude-opus-4-1", None),
     ],

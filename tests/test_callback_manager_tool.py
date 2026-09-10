@@ -41,7 +41,7 @@ def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) ->
 def _config(*, enabled: bool = True) -> Config:
     return Config.model_validate(
         {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             "agents": {
                 "coder": {
                     "display_name": "Coder",

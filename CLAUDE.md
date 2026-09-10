@@ -20,25 +20,35 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Provider | Use | Preferred model | Model string to use |
 | --- | --- | --- | --- |
 | Anthropic | Balanced default | Claude Sonnet 5 | `claude-sonnet-5` |
-| Anthropic | Max intelligence | Claude Fable 5 | `claude-fable-5` |
+| Anthropic | Max intelligence | Claude Fable 5.1 | `claude-fable-5-1` |
 | Anthropic | Flagship default | Claude Opus 5 | `claude-opus-5` |
 | Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
 | OpenAI | Frontier default | GPT-6 Astra | `gpt-6-astra` |
-| OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-5.6 | `gpt-5.6` |
+| OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-6 Astra | `gpt-6-astra` |
+| DeepSeek (OpenRouter) | Fast / cheap | DeepSeek V4.1 Flash | `deepseek/deepseek-v4.1-flash` |
+| Z.ai (OpenRouter) | Flagship | GLM-5.3 | `z-ai/glm-5.3` |
+| OpenAI | Image generation / editing | GPT Image 2.5 Sunburst | `gpt-image-2.5-sunburst` |
+| OpenAI | File transcription | GPT Transcribe | `gpt-transcribe` |
+| Google (Vertex AI) | Video generation | Veo 3.1 | `veo-3.1-generate-001` |
+| Qwen | Local 27B | Qwen3.8-27B | `qwen3.8:27b` (Ollama), `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL` (llama.cpp) |
 | Moonshot Kimi Code login | Frontier via Kimi Code CLI | Kimi K3 | `k3` |
 | Google (Gemini API) | Max intelligence | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
-| Google (Gemini API) | Standard text / coding | Gemini 3.6 Flash | `gemini-3.6-flash` |
+| Google (Gemini API) | Standard text / coding | Gemini 3.8 Flash | `gemini-3.8-flash` |
 | Google (Gemini API) | Fast / cheap text | Gemini 3.5 Flash-Lite | `gemini-3.5-flash-lite` |
 | Google (Gemini API) | Image generation / editing | Nano Banana 2 | `gemini-3.1-flash-image` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
+Model IDs were checked against provider catalogs on September 10, 2026.
+OpenRouter uses `anthropic/claude-fable-5.1`, while the direct Anthropic, Bedrock, and Vertex IDs use `claude-fable-5-1`.
+DeepSeek direct API aliases remain `deepseek-v4-flash` and `deepseek-v4-pro`; do not substitute the OpenRouter V4.1 ID on the direct API.
+
 For `anthropic`, prefer `claude-sonnet-5`, `claude-opus-5`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
-Use `claude-fable-5` when you need Anthropic's highest available capability.
-Claude Fable 5 is generally available on the direct Anthropic API and the documented cloud platforms.
+Use `claude-fable-5-1` when you need Anthropic's highest available capability.
+Claude Fable 5.1 is generally available on the direct Anthropic API and the documented cloud platforms.
 For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
-Current docs list bare Vertex IDs for current Claude models such as `claude-fable-5`, `claude-opus-5`, and `claude-sonnet-5`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
+Current docs list bare Vertex IDs for current Claude models such as `claude-fable-5-1`, `claude-opus-5`, and `claude-sonnet-5`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
-For Gemini API text and coding work, prefer `gemini-3.6-flash` as the standard stable model unless you intentionally need the cheaper `gemini-3.5-flash-lite` tier.
+For Gemini API text and coding work, prefer `gemini-3.8-flash` as the standard stable model unless you intentionally need the cheaper `gemini-3.5-flash-lite` tier.
 Use `gemini-3.1-pro-preview` only when you need the highest Gemini API intelligence tier and accept a preview model.
 The Google rows above are for the Gemini API / AI Studio `google` provider, not for Vertex AI.
 For `vertexai`, verify the current Vertex AI docs instead of assuming Gemini API names or defaults carry over unchanged.
@@ -328,7 +338,7 @@ voice:
   enabled: false
   stt:
     provider: openai
-    model: gpt-4o-transcribe
+    model: gpt-transcribe
 
 mindroom_user:
   username: mindroom_user

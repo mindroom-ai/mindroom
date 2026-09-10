@@ -103,7 +103,7 @@ def _config_payload(
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "administrators": [_OWNER] if owner_authorized else [],
-        "models": {"default": {"provider": "openai", "id": "gpt-5.6"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             "research": {

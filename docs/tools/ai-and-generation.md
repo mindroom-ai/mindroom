@@ -43,8 +43,8 @@ The current upstream SDK implementations also honor provider env vars such as `O
 ### What It Does
 
 `openai` exposes `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`.
-`transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `gpt-4o-transcribe`.
-`generate_image()` uses the configured `image_model`, defaults to `gpt-image-2`, and returns attached image bytes rather than only a remote URL.
+`transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `gpt-transcribe`.
+`generate_image()` uses the configured `image_model`, defaults to `gpt-image-2.5-sunburst`, and returns attached image bytes rather than only a remote URL.
 The current implementation handles both `gpt-image-*` style models and older DALL-E response formats internally.
 `generate_speech()` uses the configured OpenAI TTS model, voice, and output format and returns an attached audio artifact.
 
@@ -57,11 +57,11 @@ The current implementation handles both `gpt-image-*` style models and older DAL
 | `enable_image_generation` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_speech_generation` | `boolean` | `no` | `true` | Enable `generate_speech()`. |
 | `all` | `boolean` | `no` | `false` | Enable all three OpenAI media functions. |
-| `transcription_model` | `text` | `no` | `gpt-4o-transcribe` | Model used by `transcribe_audio()`. |
+| `transcription_model` | `text` | `no` | `gpt-transcribe` | Model used by `transcribe_audio()`. |
 | `text_to_speech_voice` | `text` | `no` | `alloy` | Default voice for `generate_speech()`. |
 | `text_to_speech_model` | `text` | `no` | `gpt-4o-mini-tts` | Default TTS model for `generate_speech()`. |
 | `text_to_speech_format` | `text` | `no` | `mp3` | Output format for generated speech, such as `mp3`, `wav`, or `opus`. |
-| `image_model` | `text` | `no` | `gpt-image-2` | Image generation model for `generate_image()`. |
+| `image_model` | `text` | `no` | `gpt-image-2.5-sunburst` | Image generation model for `generate_image()`. |
 | `image_quality` | `text` | `no` | `null` | Optional image quality override passed through to the API. |
 | `image_size` | `text` | `no` | `null` | Optional image size override passed through to the API. |
 | `image_style` | `text` | `no` | `null` | Optional image style override passed through to the API. |
@@ -73,8 +73,8 @@ agents:
   creator:
     tools:
       - openai:
-          transcription_model: gpt-4o-transcribe
-          image_model: gpt-image-2
+          transcription_model: gpt-transcribe
+          image_model: gpt-image-2.5-sunburst
           text_to_speech_voice: alloy
 ```
 
@@ -98,7 +98,7 @@ generate_speech("Status update complete.")
 
 `gemini` exposes `generate_image(prompt)` and `generate_video(prompt)`.
 `generate_image()` uses the Gemini content-generation API with the configured `image_generation_model`, which defaults to Nano Banana 2 (`gemini-3.1-flash-image`), and returns attached image bytes.
-`generate_video()` uses the configured `video_generation_model`, which defaults to Veo 3.1 Preview (`veo-3.1-generate-preview`), polls until the long-running operation completes, and returns attached video artifacts.
+`generate_video()` uses the configured `video_generation_model`, which defaults to Veo 3.1 (`veo-3.1-generate-001`), polls until the long-running operation completes, and returns attached video artifacts.
 The current implementation requires Vertex AI mode for video generation and returns an error if `vertexai` is not enabled.
 In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 
@@ -111,7 +111,7 @@ In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 | `project_id` | `text` | `no` | `null` | Vertex project override. Falls back to `GOOGLE_CLOUD_PROJECT` when omitted. |
 | `location` | `text` | `no` | `null` | Vertex location override. Falls back to `GOOGLE_CLOUD_LOCATION` when omitted. |
 | `image_generation_model` | `text` | `no` | `gemini-3.1-flash-image` | Model used by `generate_image()`. |
-| `video_generation_model` | `text` | `no` | `veo-3.1-generate-preview` | Model used by `generate_video()`. |
+| `video_generation_model` | `text` | `no` | `veo-3.1-generate-001` | Model used by `generate_video()`. |
 | `enable_generate_image` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_generate_video` | `boolean` | `no` | `true` | Enable `generate_video()`. |
 | `all` | `boolean` | `no` | `false` | Enable both generation functions. |
@@ -127,7 +127,7 @@ agents:
           project_id: my-gcp-project
           location: us-central1
           image_generation_model: gemini-3.1-flash-image
-          video_generation_model: veo-3.1-generate-preview
+          video_generation_model: veo-3.1-generate-001
 ```
 
 ```python
@@ -160,8 +160,8 @@ All three functions use the Groq SDK directly and require a Groq API key.
 | `api_key` | `password` | `no` | `null` | Groq API key, with `GROQ_API_KEY` as the upstream SDK fallback. |
 | `transcription_model` | `text` | `no` | `whisper-large-v3` | Model used by `transcribe_audio()`. |
 | `translation_model` | `text` | `no` | `whisper-large-v3` | Model used by `translate_audio()`. |
-| `tts_model` | `text` | `no` | `playai-tts` | Model used by `generate_speech()`. |
-| `tts_voice` | `text` | `no` | `Chip-PlayAI` | Voice used by `generate_speech()`. |
+| `tts_model` | `text` | `no` | `canopylabs/orpheus-v1-english` | Model used by `generate_speech()`. |
+| `tts_voice` | `text` | `no` | `troy` | Voice used by `generate_speech()`. |
 | `enable_transcribe_audio` | `boolean` | `no` | `true` | Enable `transcribe_audio()`. |
 | `enable_translate_audio` | `boolean` | `no` | `true` | Enable `translate_audio()`. |
 | `enable_generate_speech` | `boolean` | `no` | `true` | Enable `generate_speech()`. |
@@ -175,8 +175,8 @@ agents:
     tools:
       - groq:
           transcription_model: whisper-large-v3
-          tts_model: playai-tts
-          tts_voice: Chip-PlayAI
+          tts_model: canopylabs/orpheus-v1-english
+          tts_voice: troy
 ```
 
 ```python
@@ -207,7 +207,7 @@ Generated artifacts are attached by remote URL rather than downloaded into MindR
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Replicate API key, with `REPLICATE_API_KEY` as the upstream fallback. |
-| `model` | `text` | `no` | `minimax/video-01` | Replicate model ref used by `generate_media()`. |
+| `model` | `text` | `no` | `minimax/h3` | Replicate model ref used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `generate_media()`. |
 
@@ -218,7 +218,7 @@ agents:
   video:
     tools:
       - replicate:
-          model: minimax/video-01
+          model: minimax/h3
 ```
 
 ```python
@@ -247,7 +247,7 @@ The current implementation streams queue log messages to the MindRoom process lo
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Fal API key, with `FAL_API_KEY` as the upstream fallback. |
-| `model` | `text` | `no` | `fal-ai/hunyuan-video` | Model used by `generate_media()`. |
+| `model` | `text` | `no` | `fal-ai/hunyuan-video-v1.5/text-to-video` | Model used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `enable_image_to_image` | `boolean` | `no` | `false` | Enable `image_to_image()`. |
 | `all` | `boolean` | `no` | `false` | Enable both Fal functions. |
@@ -259,7 +259,7 @@ agents:
   visuals:
     tools:
       - fal:
-          model: fal-ai/hunyuan-video
+          model: fal-ai/hunyuan-video-v1.5/text-to-video
           enable_image_to_image: true
 ```
 
@@ -280,6 +280,7 @@ image_to_image(
 ## [`dalle`]
 
 `dalle` is the dedicated DALL-E image generation wrapper.
+For current OpenAI image generation, use the [`openai`] toolkit with `gpt-image-2.5-sunburst`; this legacy wrapper only accepts the DALL-E model family.
 
 ### What It Does
 
@@ -341,7 +342,7 @@ The current implementation hardcodes MP3 output at 44.1 kHz and 128 kbps.
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Cartesia API key, with `CARTESIA_API_KEY` as the upstream SDK fallback. |
-| `model_id` | `text` | `no` | `sonic-2` | Model used by `text_to_speech()`. |
+| `model_id` | `text` | `no` | `sonic-3.6` | Model used by `text_to_speech()`. |
 | `default_voice_id` | `text` | `no` | `78ab82d5-25be-4f7d-82b3-7ad64e5b85b2` | Default source voice for localization and TTS when no call-specific `voice_id` is supplied. |
 | `enable_text_to_speech` | `boolean` | `no` | `true` | Enable `text_to_speech()`. |
 | `enable_list_voices` | `boolean` | `no` | `true` | Enable `list_voices()`. |
@@ -355,7 +356,7 @@ agents:
   voice:
     tools:
       - cartesia:
-          model_id: sonic-2
+          model_id: sonic-3.6
           enable_localize_voice: true
 ```
 
@@ -395,7 +396,7 @@ If `target_directory` is set, the current implementation also saves generated au
 | `voice_id` | `text` | `no` | `JBFqnCBsd6RMkjVDRZzb` | Default voice used by `text_to_speech()`. |
 | `api_key` | `password` | `no` | `null` | ElevenLabs API key, with `ELEVEN_LABS_API_KEY` as the upstream fallback. |
 | `target_directory` | `text` | `no` | `null` | Optional directory where generated audio is also saved locally. |
-| `model_id` | `text` | `no` | `eleven_multilingual_v2` | Model used by `text_to_speech()`. |
+| `model_id` | `text` | `no` | `eleven_v3` | Model used by `text_to_speech()`. |
 | `output_format` | `text` | `no` | `mp3_44100_64` | Output codec and bitrate preset for generated audio. |
 | `enable_get_voices` | `boolean` | `no` | `true` | Enable `get_voices()`. |
 | `enable_generate_sound_effect` | `boolean` | `no` | `true` | Enable `generate_sound_effect()`. |
@@ -409,7 +410,7 @@ agents:
   audio_fx:
     tools:
       - eleven_labs:
-          model_id: eleven_multilingual_v2
+          model_id: eleven_v3
           output_format: mp3_44100_64
           target_directory: generated-audio
 ```
@@ -422,6 +423,7 @@ text_to_speech("The build succeeded.")
 
 ### Notes
 
+- The default [Eleven v3 model](https://elevenlabs.io/docs/overview/models) accepts up to 5,000 characters per request.
 - `target_directory` is optional and only affects local file saving, not the returned attachment.
 - The current implementation always emits `audio/mpeg` artifacts, even when you choose a PCM- or u-law-style output format.
 - `generate_sound_effect()` is useful when you want non-speech audio from the same provider toolkit.

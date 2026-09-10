@@ -341,7 +341,7 @@ class TestDelegateTools:
                         rooms=["grant"],
                     ),
                 },
-                models={"default": ModelConfig(provider="openai", id="gpt-5.6")},
+                models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             ),
             "worker",
             members_of_rooms=["grant"],

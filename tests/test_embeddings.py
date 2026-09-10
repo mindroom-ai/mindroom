@@ -41,7 +41,7 @@ def test_custom_host_non_openai_model_omits_dimensions() -> None:
     """OpenAI-compatible custom models should not inherit OpenAI's 1536-d fallback."""
     client = _mock_openai_client()
     embedder = MindRoomOpenAIEmbedder(
-        id="gemini-embedding-001",
+        id="gemini-embedding-2",
         api_key="sk-test",
         base_url="http://example.com/v1",
         openai_client=client,
@@ -88,7 +88,7 @@ def test_custom_host_explicit_dimensions_override_is_preserved() -> None:
     """Explicit dimensions should still be forwarded for custom-host models."""
     client = _mock_openai_client()
     embedder = MindRoomOpenAIEmbedder(
-        id="gemini-embedding-001",
+        id="gemini-embedding-2",
         api_key="sk-test",
         base_url="http://example.com/v1",
         dimensions=3072,
@@ -115,7 +115,7 @@ async def test_custom_host_batch_embedding_omits_dimensions() -> None:
         ),
     )
     embedder = MindRoomOpenAIEmbedder(
-        id="gemini-embedding-001",
+        id="gemini-embedding-2",
         api_key="sk-test",
         base_url="http://example.com/v1",
         async_client=async_client,
@@ -427,22 +427,22 @@ def test_mem0_custom_openai_compatible_signature_keeps_implicit_dimensions_unset
     """Custom OpenAI-compatible models should not be keyed as explicit 1536-d vectors."""
     assert effective_mem0_embedder_signature(
         "openai",
-        "gemini-embedding-001",
+        "gemini-embedding-2",
         host="http://example.com/v1",
     ) == (
         "openai",
-        "gemini-embedding-001",
+        "gemini-embedding-2",
         "http://example.com/v1",
         "",
     )
     assert effective_mem0_embedder_signature(
         "openai",
-        "gemini-embedding-001",
+        "gemini-embedding-2",
         host="http://example.com/v1",
         dimensions=1536,
     ) == (
         "openai",
-        "gemini-embedding-001",
+        "gemini-embedding-2",
         "http://example.com/v1",
         "1536",
     )

@@ -68,7 +68,7 @@ def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
     error = ModelSafeguardRefusalError(
         message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
         model_name="Claude",
-        model_id="claude-fable-5",
+        model_id="claude-fable-5-1",
     )
 
     message = get_user_friendly_error_message(error, "mind")

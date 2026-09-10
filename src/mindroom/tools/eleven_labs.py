@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.model_defaults import ELEVENLABS_TTS
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -47,7 +48,7 @@ if TYPE_CHECKING:
             label="Model ID",
             type="text",
             required=False,
-            default="eleven_multilingual_v2",
+            default=ELEVENLABS_TTS,
         ),
         ConfigField(
             name="output_format",
