@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
+from livekit import rtc
 from livekit.plugins.openai.realtime import GPTLiveSession
 
 from mindroom.matrix_rtc.call_tools import CallAgentResponse
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from livekit.agents import Agent, AgentSession
+    from livekit.agents.llm import InputTranscriptionCompleted
 
 
 class _ProviderSocket:
@@ -182,6 +184,75 @@ async def test_live_sdk_routes_delegation_and_closes_owned_work(provider: _Provi
     assert provider.socket.closed
     assert provider.closed
     room.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finalize_retry", [False, True], ids=["pending-retry", "finalized-retry"])
+async def test_live_sdk_identical_spoken_retry_survives_delegate_failure(
+    provider: _ProviderHTTP,
+    finalize_retry: bool,
+) -> None:
+    """A new utterance may repeat a failed request without losing its words."""
+    prompts: list[str] = []
+    transcript: list[tuple[str, str]] = []
+    retry_transcribed = asyncio.Event()
+
+    async def respond(prompt: str, _on_tools: Callable[[list[str]], None] | None) -> CallAgentResponse:
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            message = "delegated request failed"
+            raise RuntimeError(message)
+        return CallAgentResponse("Done.")
+
+    def on_transcribed(event: InputTranscriptionCompleted) -> None:
+        if not event.is_final:
+            retry_transcribed.set()
+
+    options = LiveVoiceAgentOptions(
+        instructions="Delegate requests.",
+        model="gpt-live-1",
+        api_key="test-api-key",
+        voice="marin",
+        respond=respond,
+        on_conversation_turn=lambda speaker, text: transcript.append((speaker, text)),
+    )
+    bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
+    bridge._room = SimpleNamespace(disconnect=AsyncMock())
+    try:
+        await bridge.start_agent(options)
+        await provider.socket.next_event("session.start")
+        provider.socket.feed(
+            {"type": "session.input_transcript.delta", "delta": "Send the update.", "start_ms": 0, "end_ms": 100},
+        )
+        provider.socket.feed({"type": "session.delegation.created", "delegation": {"id": "first", "target": "client"}})
+        failure = await provider.socket.next_event("session.commentary.append")
+        assert failure["delegation_id"] == "first"
+        assert "could not complete" in failure["content"]
+
+        agent = cast("Agent", bridge._live_agent)
+        session = agent.duplex_session
+        assert isinstance(session, GPTLiveSession)
+        session.on("input_audio_transcription_completed", on_transcribed)
+        # The gap makes the SDK finalize the original before starting the
+        # identical retry. Both its transcript and delegation wiring stay real.
+        provider.socket.feed(
+            {"type": "session.input_transcript.delta", "delta": "Send the update.", "start_ms": 2000, "end_ms": 2100},
+        )
+        await asyncio.wait_for(retry_transcribed.wait(), timeout=2)
+        if finalize_retry:
+            session.push_audio(
+                rtc.AudioFrame(data=bytes(48000), sample_rate=24000, num_channels=1, samples_per_channel=24000),
+            )
+        assert transcript.count(("user", "Send the update.")) == 1 + int(finalize_retry)
+        provider.socket.feed({"type": "session.delegation.created", "delegation": {"id": "retry", "target": "client"}})
+        reply = await provider.socket.next_event("session.commentary.append")
+
+        assert reply["delegation_id"] == "retry"
+        assert reply["content"] == "Done."
+        assert len(prompts) == 2
+        assert all(prompt.count("Send the update.") == 1 for prompt in prompts)
+    finally:
+        await asyncio.wait_for(bridge.aclose(), timeout=3)
 
 
 @pytest.mark.asyncio
