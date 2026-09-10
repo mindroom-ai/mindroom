@@ -20,6 +20,16 @@ logger = get_logger(__name__)
 
 _LEDGER_RECORDS_KEY = "records"
 
+# Legacy format: Schema-version-1 handled turns without source or suppressed revision summaries.
+# Last legacy release: v2026.7.252; replacement: v2026.7.253 added optional source-level summaries.
+# Handling: Accept absent summaries without inventing revision identity that the old writer never persisted.
+# Coverage: tests/test_handled_turns.py::test_a_pre_database_ledger_is_adopted_on_first_load.
+
+# Legacy format: Source-level revision summaries without per-revision replay state.
+# Last legacy release: v2026.9.42; replacement: v2026.9.43 added revision_replay.
+# Handling: Reconstruct reduced replay facts and label their summary-only provenance.
+# Coverage: tests/test_handled_turns.py::test_v2026_9_42_turn_record_restores_revision_replay_through_store_reopen.
+
 
 def legacy_responses_file_path(storage_path: Path, agent_name: str) -> Path:
     """Return where a pre-journal MindRoom kept this agent's handled turns.
@@ -73,6 +83,16 @@ async def import_legacy_ledger(
     """
     if path is None or not path.exists():
         return ()
+
+    # Legacy format: Top-level event-to-record handled-turn JSON map.
+    # Last legacy release: v2026.7.101; replacement: v2026.7.102 intentionally rejected this shape.
+    # Handling: Process as zero rows and preserve exact bytes under .imported without restoring its reader.
+    # Coverage: tests/test_handled_turns.py::test_released_unversioned_ledger_cutoff_preserves_bytes_without_adoption.
+
+    # Legacy format: Schema-version-1 handled-turn JSON ledger before journal ownership.
+    # Last legacy release: v2026.8.30; replacement: v2026.8.31 moved records into turn_records.
+    # Handling: Adopt missing indexes and rename only after the full pass; .imported means processed, not adopted.
+    # Coverage: tests/test_handled_turns.py::test_interrupted_legacy_ledger_import_retries_missing_indexes_before_rename.
     raw = json.loads(path.read_text())
     raw_records = raw.get(_LEDGER_RECORDS_KEY) if isinstance(raw, Mapping) else None
     decoded = (

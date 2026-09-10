@@ -1686,8 +1686,8 @@ def test_pending_approval_from_card_event_requires_approver_user_id() -> None:
 
 
 @pytest.mark.parametrize("legacy_approval_id", [None, "", 1])
-def test_pending_approval_from_old_card_uses_tool_call_id_as_approval_id(legacy_approval_id: object) -> None:
-    """Cards written before approval_id retain their exact approval identity."""
+def test_pending_approval_from_sparse_card_uses_tool_call_id_as_approval_id(legacy_approval_id: object) -> None:
+    """External or malformed cards can retain identity through the defensive alias."""
     card = _approval_card(approval_id="call-old")
     if legacy_approval_id is None:
         card["content"].pop("approval_id")

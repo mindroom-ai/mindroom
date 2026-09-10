@@ -264,6 +264,10 @@ def _format_stream_error_note(error: Exception) -> str:
 
 def is_interrupted_partial_reply(text: object) -> bool:
     """Return True when text carries a terminal interrupted partial-reply marker."""
+    # Legacy format: Body-only cancellation, error, and interruption markers without stream_status.
+    # Last legacy release: v2026.3.121; replacement: v2026.3.122 wrote structured stream status.
+    # Handling: Recognize and strip the bounded historical marker forms for stable interrupted replay.
+    # Coverage: tests/test_streaming_behavior.py::TestStreamingBehavior::test_is_interrupted_partial_reply_detects_terminal_markers.
     if not isinstance(text, str):
         return False
     trimmed_text = text.rstrip()

@@ -5883,6 +5883,44 @@ class TestOutbox:
         assert stored is not None
         assert stored.result == legacy_result
 
+    async def test_legacy_inline_edit_prefers_visible_replacement_outcome(self, alice: PrincipalStore) -> None:
+        """Recovery uses the outcome users saw rather than stale edit-wrapper state."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="turn-1",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("current preview"),
+            result={"body": "current local result", "source": "local"},
+        )
+        old_payload = {
+            "msgtype": "m.text",
+            "body": "* visible preview",
+            DURABLE_FINAL_OUTCOME_KEY: {"body": "stale wrapper result", "source": "outer"},
+            "m.new_content": {
+                "msgtype": "m.text",
+                "body": "visible preview",
+                DURABLE_FINAL_OUTCOME_KEY: {"body": "visible result", "source": "replacement"},
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        }
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                """
+                UPDATE matrix_delivery_outbox
+                SET payload_json = ?
+                WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+                """,
+                (json.dumps(old_payload), "agent@alice", "turn-1", "final"),
+            ),
+        )
+
+        stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
+
+        assert stored is not None
+        assert stored.payload == old_payload
+        assert stored.result == {"body": "visible result", "source": "replacement"}
+
     async def test_a_legacy_reenqueue_replaces_a_new_writers_local_result(
         self,
         alice: PrincipalStore,

@@ -9,6 +9,11 @@ if TYPE_CHECKING:
 
     from .backend import Transaction
 
+# Legacy format: Schema-version-1 JSON turns adopted into journal turn_records.
+# Last legacy release: v2026.8.30; replacement: v2026.8.31 made turn_records authoritative.
+# Handling: Preserve occupied indexes, fill absent indexes, and leave retryable partial imports intact.
+# Coverage: tests/test_handled_turns.py::test_interrupted_legacy_ledger_import_retries_missing_indexes_before_rename.
+
 
 def adopt_missing(
     transaction: Transaction,

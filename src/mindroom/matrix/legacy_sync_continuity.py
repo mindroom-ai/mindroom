@@ -10,6 +10,16 @@ if TYPE_CHECKING:
 
 _LEGACY_RECORD_VERSIONS = ("mindroom-sync-continuity-v2", "mindroom-sync-continuity-v3")
 
+# Legacy format: v2 sync continuity with a cache-generation checkpoint and pending join fences.
+# Last legacy release: v2026.8.30; replacement: v2026.8.31 wrote v3 store-generation checkpoints.
+# Handling: Validate the complete record, discard the obsolete checkpoint, and preserve fences in v4.
+# Coverage: tests/test_sync_continuity_store.py::test_old_checkpoint_records_upgrade_preserving_join_fences.
+
+# Legacy format: v3 sync continuity with a store-generation checkpoint and pending join fences.
+# Last legacy release: v2026.9.28; replacement: v2026.9.29 removed the checkpoint in v4.
+# Handling: v2026.9.30 added conversion that validates the complete record and preserves only fences in v4.
+# Coverage: tests/test_sync_continuity_store.py::test_interrupted_legacy_conversion_retries_without_losing_fences.
+
 
 def normalize_legacy_sync_continuity_payload(
     payload: Mapping[str, object],
