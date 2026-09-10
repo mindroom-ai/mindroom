@@ -3043,6 +3043,7 @@ depends_on = [
     "mindroom.matrix_rtc.events",
     "mindroom.matrix_rtc.focus",
     "mindroom.matrix_rtc.key_transport",
+    "mindroom.matrix_rtc.live_voice_agent",
     "mindroom.matrix_rtc.transcript",
     "mindroom.matrix_rtc.voice_agent",
     "mindroom.model_defaults",
@@ -3069,6 +3070,13 @@ depends_on = [
     "mindroom.tool_approval",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.live_voice_agent"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.matrix_rtc.voice_agent",
 ]
 
 [[modules]]

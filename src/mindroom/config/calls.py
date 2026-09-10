@@ -27,6 +27,24 @@ class RealtimeCallProfile(BaseModel):
         return validate_service_name(value)
 
 
+class LiveCallProfile(BaseModel):
+    """One OpenAI Live voice session delegating tasks to a normal agent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend: Literal["live"]
+    model: str = Field(description="OpenAI Live speech-to-speech model")
+    credentials_service: str = Field(description="Named credential service containing the Live API key")
+    voice: str = Field(description="Live model voice preset")
+    agent_model: str | None = Field(default=None, description="Configured LLM alias for delegated agent turns")
+
+    @field_validator("credentials_service")
+    @classmethod
+    def _validate_credentials_service(cls, value: str) -> str:
+        """Normalize the strict Live credential binding."""
+        return validate_service_name(value)
+
+
 class CascadedCallProfile(BaseModel):
     """One STT, normal agent turn, and TTS call profile."""
 
@@ -38,7 +56,7 @@ class CascadedCallProfile(BaseModel):
     tts: SpeechServiceConfig = Field(description="Text-to-speech service")
 
 
-CallProfile = Annotated[RealtimeCallProfile | CascadedCallProfile, Field(discriminator="backend")]
+CallProfile = Annotated[RealtimeCallProfile | LiveCallProfile | CascadedCallProfile, Field(discriminator="backend")]
 
 
 class CallsConfig(BaseModel):

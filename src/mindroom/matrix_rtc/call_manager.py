@@ -47,10 +47,12 @@ from mindroom.matrix_rtc.events import (
 )
 from mindroom.matrix_rtc.focus import OpenIDToken, discover_livekit_service_url, request_sfu_grant
 from mindroom.matrix_rtc.key_transport import ToDeviceFrameKeyTransport
+from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.matrix_rtc.voice_agent import (
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
+    LiveVoiceAgentOptions,
     RealtimeVoiceBridge,
     SpeechServiceOptions,
     VoiceAgentOptions,
@@ -69,7 +71,7 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.config.calls import CallProfile, CascadedCallProfile, RealtimeCallProfile
+    from mindroom.config.calls import CallProfile, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
     from mindroom.config.main import Config
     from mindroom.config.voice import SpeechServiceConfig
     from mindroom.constants import RuntimePaths
@@ -89,6 +91,10 @@ def _default_cascaded_bridge_factory(local_identity: str, e2ee_enabled: bool) ->
     return CascadedVoiceBridge(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
 
 
+def _default_live_bridge_factory(local_identity: str, e2ee_enabled: bool) -> LiveVoiceBridge:
+    return LiveVoiceBridge(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
+
+
 _CALL_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
 _MAX_PENDING_KEYS_PER_ROOM = 64
 _PENDING_KEY_TTL_MS = 120_000
@@ -102,6 +108,13 @@ _VOICE_STYLE_ADDENDUM = (
     "You are participating in a live voice call. Everything you say is spoken "
     "aloud: keep responses short, conversational, and natural, and never use markdown, "
     "lists, or other written formatting."
+)
+
+_LIVE_VOICE_INSTRUCTIONS = (
+    "You are the voice interface for a MindRoom agent. Speak briefly and naturally. "
+    "Delegate every substantive request to the agent, including questions, research, "
+    "memory, and actions. Relay its answer conversationally. Never claim to have "
+    "checked information or completed work until the agent returns the result."
 )
 
 
@@ -122,7 +135,7 @@ class _LogicalCallState:
     """State that survives media-session reconnects for one logical call."""
 
     requester_id: str
-    cascaded_session_id: str | None
+    agent_session_id: str | None
     join_blocked: bool = False
 
 
@@ -203,8 +216,13 @@ class CallManager:
         self._client = client
         self._runtime_paths = runtime_paths
         self._ssl_verify = ssl_verify
-        self._bridge_factory = bridge_factory or (
-            _default_cascaded_bridge_factory if self._call_config.backend == "cascaded" else _default_bridge_factory
+        self._bridge_factory = (
+            bridge_factory
+            or {
+                "realtime": _default_bridge_factory,
+                "cascaded": _default_cascaded_bridge_factory,
+                "live": _default_live_bridge_factory,
+            }[self._call_config.backend]
         )
         self._tool_support = tool_support
         self._get_invited_rooms_by_agent = get_invited_rooms_by_agent
@@ -724,7 +742,6 @@ class CallManager:
             tooling = await self._build_tooling(
                 room_id,
                 requester_id=requester_id,
-                cascaded=self._call_config.backend == "cascaded",
             )
             transcript = CallTranscript.start(
                 agent_name=self._agent_name,
@@ -1008,11 +1025,15 @@ class CallManager:
         room_id: str,
         *,
         requester_id: str,
-        cascaded: bool,
     ) -> CallAgentTooling:
         """Build agent tools with the sole caller as the Matrix requester."""
         logical_call = self._logical_calls[room_id]
-        session_id = logical_call.cascaded_session_id if cascaded else None
+        enable_responder = self._call_config.backend in {"cascaded", "live"}
+        active_model_name = None
+        if self._call_config.backend == "live":
+            active_model_name = cast("LiveCallProfile", self._call_config).agent_model
+        elif self._call_config.backend == "cascaded":
+            active_model_name = self._call_config.model
         return await build_call_tools(
             agent_name=self._agent_name,
             config=self._config,
@@ -1024,10 +1045,11 @@ class CallManager:
                 room_id,
                 requester_id,
             ),
-            session_id=session_id,
-            enable_responder=cascaded,
-            voice_instructions=_VOICE_STYLE_ADDENDUM if cascaded else None,
-            active_model_name=self._call_config.model if cascaded else None,
+            session_id=logical_call.agent_session_id,
+            enable_responder=enable_responder,
+            voice_instructions=_VOICE_STYLE_ADDENDUM if enable_responder else None,
+            active_model_name=active_model_name,
+            reconcile_spoken_response=self._call_config.backend != "live",
         )
 
     @asynccontextmanager
@@ -1054,9 +1076,9 @@ class CallManager:
     def _start_logical_call(self, room_id: str, requester_id: str) -> _LogicalCallState:
         """Create the state shared by every media attempt for one caller presence."""
         session_id = None
-        if self._call_config.backend == "cascaded":
+        if self._call_config.backend in {"cascaded", "live"}:
             session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}"
-        logical_call = _LogicalCallState(requester_id=requester_id, cascaded_session_id=session_id)
+        logical_call = _LogicalCallState(requester_id=requester_id, agent_session_id=session_id)
         self._logical_calls[room_id] = logical_call
         return logical_call
 
@@ -1077,8 +1099,8 @@ class CallManager:
         warn_if_unavailable: bool = True,
     ) -> _ResolvedVoiceBackend | None:
         """Resolve backend-specific credentials without affecting call lifecycle."""
-        if self._call_config.backend == "realtime":
-            realtime_config = cast("RealtimeCallProfile", self._call_config)
+        if self._call_config.backend in {"realtime", "live"}:
+            realtime_config = cast("RealtimeCallProfile | LiveCallProfile", self._call_config)
             api_key = get_api_key_for_service(
                 realtime_config.credentials_service,
                 self._runtime_paths,
@@ -1141,6 +1163,24 @@ class CallManager:
                 voice=realtime_config.voice,
                 greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 tools=tooling.tools,
+                on_conversation_turn=transcript.record,
+                on_tools_executed=transcript.record_tool_use,
+                on_session_terminated=on_session_terminated,
+                on_session_error=on_session_error,
+            )
+        if self._call_config.backend == "live":
+            live_config = cast("LiveCallProfile", self._call_config)
+            if backend.realtime_api_key is None or tooling.responder is None:
+                msg = "Live call agent was not fully materialized"
+                raise RuntimeError(msg)
+            return LiveVoiceAgentOptions(
+                instructions=_LIVE_VOICE_INSTRUCTIONS,
+                model=live_config.model,
+                api_key=backend.realtime_api_key,
+                voice=live_config.voice,
+                respond=tooling.responder,
+                close_responder=tooling.close,
+                greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 on_conversation_turn=transcript.record,
                 on_tools_executed=transcript.record_tool_use,
                 on_session_terminated=on_session_terminated,

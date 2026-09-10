@@ -20,7 +20,7 @@ import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
-from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile
+from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -86,7 +86,21 @@ def _calls_for(
     )
 
 
-def _cascaded_calls_for(agent_name: str, *, model: str | None) -> CallsConfig:
+def _delegated_calls_for(agent_name: str, *, model: str | None, backend: str) -> CallsConfig:
+    if backend == "live":
+        return CallsConfig(
+            enabled=True,
+            profiles={
+                "voice": LiveCallProfile(
+                    backend="live",
+                    model="gpt-live-1",
+                    credentials_service="openai_live",
+                    voice="marin",
+                    agent_model=model,
+                ),
+            },
+            agents={agent_name: "voice"},
+        )
     speech_service = SpeechServiceConfig(
         provider="openai_compatible",
         model="local-speech",
@@ -2113,8 +2127,9 @@ def test_config_update_plan_restarts_call_agent_when_worker_routing_changes() ->
     assert plan.entities_to_restart == {"general"}
 
 
-def test_config_update_plan_restarts_cascaded_call_agent_when_referenced_model_changes() -> None:
-    """An active cascaded call rebuilds when its named model definition changes."""
+@pytest.mark.parametrize("backend", ["cascaded", "live"])
+def test_config_update_plan_restarts_delegated_call_agent_when_referenced_model_changes(backend: str) -> None:
+    """An active delegated call rebuilds when its named model definition changes."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
@@ -2122,7 +2137,7 @@ def test_config_update_plan_restarts_cascaded_call_agent_when_referenced_model_c
                 "default": ModelConfig(provider="openai", id="default-model"),
                 "call": ModelConfig(provider="openai", id="old-model"),
             },
-            calls=_cascaded_calls_for("general", model="call"),
+            calls=_delegated_calls_for("general", model="call", backend=backend),
             router=RouterConfig(model="default"),
         ),
     )
@@ -2133,7 +2148,7 @@ def test_config_update_plan_restarts_cascaded_call_agent_when_referenced_model_c
                 "default": ModelConfig(provider="openai", id="default-model"),
                 "call": ModelConfig(provider="openai", id="new-model"),
             },
-            calls=_cascaded_calls_for("general", model="call"),
+            calls=_delegated_calls_for("general", model="call", backend=backend),
             router=RouterConfig(model="default"),
         ),
     )
@@ -2181,8 +2196,9 @@ def test_config_update_plan_restarts_realtime_call_agent_when_agent_model_change
     assert plan.entities_to_restart == {"general"}
 
 
-def test_config_update_plan_restarts_implicit_cascaded_call_agent_when_room_model_changes() -> None:
-    """Implicit cascaded model selection rebuilds when configured room routing changes."""
+@pytest.mark.parametrize("backend", ["cascaded", "live"])
+def test_config_update_plan_restarts_implicit_delegated_call_agent_when_room_model_changes(backend: str) -> None:
+    """Implicit delegated model selection rebuilds when configured room routing changes."""
     models = {
         "default": ModelConfig(provider="openai", id="default-model"),
         "focused": ModelConfig(provider="openai", id="focused-model"),
@@ -2193,7 +2209,7 @@ def test_config_update_plan_restarts_implicit_cascaded_call_agent_when_room_mode
             agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
             models=models,
             room_models={"lobby": "focused"},
-            calls=_cascaded_calls_for("general", model=None),
+            calls=_delegated_calls_for("general", model=None, backend=backend),
             router=RouterConfig(model="default"),
         ),
     )
@@ -2202,7 +2218,7 @@ def test_config_update_plan_restarts_implicit_cascaded_call_agent_when_room_mode
             agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
             models=models,
             room_models={"lobby": "fast"},
-            calls=_cascaded_calls_for("general", model=None),
+            calls=_delegated_calls_for("general", model=None, backend=backend),
             router=RouterConfig(model="default"),
         ),
     )

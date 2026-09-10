@@ -379,6 +379,7 @@ async def build_call_tools(
     authorize_operation: _CallAuthorizationGuard,
     session_id: str | None = None,
     enable_responder: bool = False,
+    reconcile_spoken_response: bool = True,
     voice_instructions: str | None = None,
     active_model_name: str | None = None,
 ) -> CallAgentTooling:
@@ -460,13 +461,14 @@ async def build_call_tools(
             agent_cache=agent_cache,
             active_model_name=active_model_name,
             authorize_operation=authorize_operation,
+            reconcile_spoken_response=reconcile_spoken_response,
         )
         return CallAgentTooling(
             tools=(),
             instructions="",
             execution_identity=execution_identity,
             responder=responder,
-            finalize_spoken_response=response_tracker.finalize,
+            finalize_spoken_response=response_tracker.finalize if reconcile_spoken_response else None,
             close=functools.partial(_close_cascaded_call_resources, response_tracker, agent_cache),
         )
 
@@ -571,6 +573,7 @@ async def _run_call_agent(
     agent_cache: _CallAgentCache,
     active_model_name: str | None,
     authorize_operation: _CallAuthorizationGuard,
+    reconcile_spoken_response: bool = True,
 ) -> CallAgentResponse:
     """Run one finalized transcript only while its current caller remains authorized."""
     await response_tracker.wait_for_settlements()
@@ -593,6 +596,7 @@ async def _run_call_agent(
             response_tracker=response_tracker,
             agent_cache=agent_cache,
             active_model_name=active_model_name,
+            reconcile_spoken_response=reconcile_spoken_response,
         )
 
 
@@ -613,6 +617,7 @@ async def _run_authorized_call_agent(
     response_tracker: _CallResponseTracker,
     agent_cache: _CallAgentCache,
     active_model_name: str | None,
+    reconcile_spoken_response: bool = True,
 ) -> CallAgentResponse:
     """Run one admitted call transcript through the normal MindRoom agent."""
     from mindroom.ai import ResponseTurnContext, ai_response  # noqa: PLC0415 - heavy optional call path
@@ -698,8 +703,10 @@ async def _run_authorized_call_agent(
         if on_tools_executed is not None and tool_names:
             on_tools_executed(list(tool_names))
     state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
-    turn_id = response_tracker.register(state) if response else None
-    if not response and state.outcome == "interrupted":
+    # Live commentary can be paraphrased or omitted; only cascaded TTS owns a
+    # one-to-one mapping between this answer and the eventual spoken turn.
+    turn_id = response_tracker.register(state) if response and reconcile_spoken_response else None
+    if (not response or not reconcile_spoken_response) and state.outcome == "interrupted":
         await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
     return CallAgentResponse(text=response, tool_names=tool_names, turn_id=turn_id)
 
