@@ -259,6 +259,23 @@ def test_unknown_or_corrupt_fence_record_fails_closed(tmp_path: Path, payload: b
         SyncContinuityStore(tmp_path, "code").load()
 
 
+@pytest.mark.parametrize("version", [[], {}])
+def test_unhashable_continuity_versions_raise_the_standard_unsupported_version_error(
+    tmp_path: Path,
+    version: object,
+) -> None:
+    """Malformed JSON version values must not escape legacy-version detection."""
+    path = tmp_path / "sync_continuity" / "code.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"version": version, "revision": 0, "pending_join_decrypt_fences": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported version"):
+        SyncContinuityStore(tmp_path, "code").load()
+
+
 def test_mutation_rejects_invalid_continuity_without_repair(tmp_path: Path) -> None:
     """A fence update cannot erase an unreadable record."""
     path = tmp_path / "sync_continuity" / "code.json"
