@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.knowledge.document import Document
 
-from mindroom.knowledge.read_process import read_chroma
+from mindroom.knowledge.read_process import read_chroma, read_chroma_async
 from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.logging_config import get_logger
 
@@ -66,5 +66,14 @@ class ChromaReadProxy:
         limit: int = 5,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
-        """Keep both synchronous provider embedding and native IPC off the event loop."""
-        return await asyncio.to_thread(self.search, query, limit, filters)
+        """Start native imports while the parent obtains the query embedding."""
+
+        async def prepare_request() -> ReadRequest:
+            try:
+                embedding = await self.embedder.async_get_embedding(query)
+            except NotImplementedError:
+                embedding = await asyncio.to_thread(self.embedder.get_embedding, query)
+            return ReadRequest(self.path, self.collection_name, query, embedding, limit, _dict_filters(filters))
+
+        result = await read_chroma_async(prepare_request)
+        return [Document(**asdict(document)) for document in result.documents]

@@ -20,6 +20,7 @@ from chromadb.api.client import Client
 from chromadb.config import Settings
 
 import mindroom.knowledge.chroma_client as native_chroma
+from mindroom.knowledge import read_process
 from mindroom.knowledge.indexing_config import chroma_collection_exists
 from mindroom.knowledge.read_process import read_chroma
 from mindroom.knowledge.read_protocol import ReadRequest
@@ -127,9 +128,11 @@ async def test_merged_search_covers_more_sources_than_reader_slots(published_ind
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("async_read", [False, True])
 async def test_locked_database_does_not_freeze_parent_and_timeout_reaps_child(
     published_index: Path,
     capture_read_processes: list[subprocess.Popen[bytes]],
+    async_read: bool,
 ) -> None:
     """A native lock wait stays outside Python's parent GIL and has a bounded lifetime."""
     # A separate lock owner releases even if a regression holds the parent's GIL.
@@ -145,8 +148,14 @@ async def test_locked_database_does_not_freeze_parent_and_timeout_reaps_child(
     assert await lock_owner.stdout.readline() == b"locked\n"
     processes = capture_read_processes
     processes.clear()  # The lock owner is not a read worker.
+
+    async def prepare_request() -> ReadRequest:
+        return ReadRequest(str(published_index), "published")
+
     task = asyncio.create_task(
-        asyncio.to_thread(read_chroma, ReadRequest(str(published_index), "published"), timeout=1.5),
+        read_process.read_chroma_async(prepare_request, timeout=1.5)
+        if async_read
+        else asyncio.to_thread(read_chroma, ReadRequest(str(published_index), "published"), timeout=1.5),
     )
     intervals: list[float] = []
     previous = time.monotonic()
@@ -169,11 +178,11 @@ async def test_locked_database_does_not_freeze_parent_and_timeout_reaps_child(
 
 
 @pytest.mark.asyncio
-async def test_embedding_failure_propagates_before_starting_child(
+async def test_embedding_failure_reaps_started_child(
     published_index: Path,
     capture_read_processes: list[subprocess.Popen[bytes]],
 ) -> None:
-    """Provider errors stay in the parent, where credential health is recorded."""
+    """Provider errors stay in the parent and clean up the child started during embedding."""
 
     class FailingEmbedder(Embedder):
         def get_embedding(self, text: str) -> list[float]:
@@ -184,7 +193,116 @@ async def test_embedding_failure_propagates_before_starting_child(
     proxy = ChromaReadProxy("published", str(published_index), FailingEmbedder())
     with pytest.raises(PermissionError, match="embedding credentials expired"):
         await proxy.async_search("alpha")
-    assert capture_read_processes == []
+    assert len(capture_read_processes) == 1
+    assert capture_read_processes[0].poll() is not None
+
+
+@pytest.mark.asyncio
+async def test_async_embedding_overlaps_child_startup(
+    published_index: Path,
+    capture_read_processes: list[subprocess.Popen[bytes]],
+) -> None:
+    """A child must already be starting while the embedding request is in flight."""
+    embedding_started = asyncio.Event()
+    release_embedding = asyncio.Event()
+
+    class BlockingEmbedder(Embedder):
+        async def async_get_embedding(self, text: str) -> list[float]:
+            assert text == "alpha"
+            embedding_started.set()
+            await release_embedding.wait()
+            return [1.0, 0.0]
+
+    proxy = ChromaReadProxy("published", str(published_index), BlockingEmbedder())
+    task = asyncio.create_task(proxy.async_search("alpha", limit=1))
+    try:
+        await asyncio.wait_for(embedding_started.wait(), timeout=2)
+        assert len(capture_read_processes) == 1
+        assert capture_read_processes[0].poll() is None
+    finally:
+        release_embedding.set()
+        documents = await task
+    assert documents[0].id == "a"
+    assert capture_read_processes[0].poll() is not None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_embedding_reaps_child_and_releases_capacity(
+    published_index: Path,
+    capture_read_processes: list[subprocess.Popen[bytes]],
+) -> None:
+    """Cancelled provider requests must not leave children or consume reader slots."""
+    embedding_started = asyncio.Event()
+
+    class BlockingEmbedder(Embedder):
+        async def async_get_embedding(self, text: str) -> list[float]:
+            assert text == "alpha"
+            embedding_started.set()
+            await asyncio.Event().wait()
+            return [1.0, 0.0]
+
+    for _ in range(3):
+        embedding_started.clear()
+        task = asyncio.create_task(
+            ChromaReadProxy("published", str(published_index), BlockingEmbedder()).async_search("alpha"),
+        )
+        await asyncio.wait_for(embedding_started.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert capture_read_processes[-1].poll() is not None
+    assert len(capture_read_processes) == 3
+    assert await ChromaReadProxy("published", str(published_index), _Embedder()).async_search("alpha")
+
+
+@pytest.mark.asyncio
+async def test_stalled_embedding_deadline_reaps_child(
+    published_index: Path,
+    capture_read_processes: list[subprocess.Popen[bytes]],
+) -> None:
+    """The read deadline must cover provider preparation as well as native execution."""
+
+    async def prepare_request() -> ReadRequest:
+        await asyncio.Event().wait()
+        return ReadRequest(str(published_index), "published", "alpha", [1.0, 0.0])
+
+    for _ in range(3):
+        with pytest.raises(TimeoutError, match="Knowledge read timed out"):
+            await read_process.read_chroma_async(prepare_request, timeout=0.05)
+        assert capture_read_processes[-1].poll() is not None
+    assert len(capture_read_processes) == 3
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sync_embedder_fallback_reaps_child_before_provider_returns(
+    published_index: Path,
+    capture_read_processes: list[subprocess.Popen[bytes]],
+) -> None:
+    """A provider thread that cannot be cancelled must not retain the native child."""
+    started = asyncio.Event()
+    release = Event()
+    loop = asyncio.get_running_loop()
+
+    class BlockingEmbedder(Embedder):
+        def get_embedding(self, text: str) -> list[float]:
+            assert text == "alpha"
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(timeout=5)
+            return [1.0, 0.0]
+
+    task = asyncio.create_task(
+        ChromaReadProxy("published", str(published_index), BlockingEmbedder()).async_search("alpha"),
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(capture_read_processes) == 1
+        assert capture_read_processes[0].poll() is not None
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
