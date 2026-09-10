@@ -504,6 +504,7 @@ path = "mindroom.agent_storage"
 depends_on = [
     "mindroom.agno_session_persistence_patch",
     "mindroom.constants",
+    "mindroom.legacy_session_storage",
     "mindroom.runtime_resolution",
     "mindroom.session_storage_preflight",
 ]
@@ -520,6 +521,19 @@ visibility = [
     "mindroom.teams",
     "mindroom.turn_store",
 ]
+
+[[modules]]
+path = "mindroom.legacy_session_storage"
+depends_on = []
+visibility = [
+    "mindroom.agent_storage",
+    "mindroom.usage_stats_storage",
+]
+
+[[modules]]
+path = "mindroom.legacy_openai_tool_replay"
+depends_on = []
+visibility = ["mindroom.openai_models"]
 
 [[modules]]
 path = "mindroom.agno_session_persistence_patch"
