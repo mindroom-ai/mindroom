@@ -104,7 +104,7 @@ async def test_snapshots_bound_duplicate_tasks_deep_chains_and_strings() -> None
     try:
         await asyncio.sleep(0)
         snapshots = _capture_sync_task_snapshots(agent_name)
-        assert 0 < len(snapshots) <= 4
+        assert len(snapshots) == 1
         for snapshot in snapshots:
             assert len(snapshot.task_name) <= 240
             assert 0 < len(snapshot.await_chain) <= 32

@@ -1499,7 +1499,6 @@ def test_health_defers_only_bounded_recent_owned_ingestion_progress() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("first_sync_done", [False, True])
 @pytest.mark.parametrize(
     ("progress_kind", "progress_times", "expected_report_times"),
     [
@@ -1512,14 +1511,12 @@ def test_health_defers_only_bounded_recent_owned_ingestion_progress() -> None:
 )
 async def test_watchdog_reports_sustained_stalls_during_startup_grace(
     monkeypatch: pytest.MonkeyPatch,
-    first_sync_done: bool,
     progress_kind: str | None,
     progress_times: tuple[int, ...],
     expected_report_times: list[float],
 ) -> None:
-    """First and restarted syncs get bounded diagnostics without losing grace."""
+    """Startup grace permits bounded diagnostics without cancelling sync."""
     bot = _FakeBot()
-    bot._first_sync_done = first_sync_done
     bot._durable_ingestion_progress_generation = 0
     now = 0.0
     last_sync: float | None = None

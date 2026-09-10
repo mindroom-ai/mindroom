@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _STALL_REPORT_INTERVAL_SECONDS = 90.0
-_MAX_TASKS = 4
 _MAX_FRAMES = 32
 _MAX_STRING_LENGTH = 240
 
@@ -65,7 +64,8 @@ def _capture_sync_task_snapshots(agent_name: str) -> list[_SyncTaskSnapshot]:
     for task in asyncio.all_tasks():
         if task.get_name() in names and not task.done():
             snapshots.append(_snapshot_task(task))
-            if len(snapshots) == _MAX_TASKS:
+            names.remove(task.get_name())
+            if not names:
                 break
     return sorted(snapshots, key=lambda snapshot: snapshot.task_name)
 
