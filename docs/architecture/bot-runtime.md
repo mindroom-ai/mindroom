@@ -85,6 +85,8 @@ Global journal scans discover rooms; a reserved room lane reads its own pending 
 The journal query remains authoritative for replay eligibility, including approval continuations, and the global scan cursor never selects the next callback within a room.
 Each room retains its page position across bounded passes, and its continuation runs independently of global discovery.
 Callback and room-read failures pause only that room with exponential retry delays from one to thirty seconds; other rooms continue, and admissions or recovery drains cannot bypass the cooldown.
+Revisiting an eligible receipt at or before the room's latest admitted receipt also starts a cooldown, preventing immediate downstream handoffs from trapping recovery in a retry loop.
+This receipt marker survives bounded page passes and resets when the cooldown ends, using constant memory per room.
 Successful progress past the failed receipt resets that room's retry delay.
 Downstream handoffs retain live ownership, while lost owners rewind the room's query before later callbacks run.
 Retry handoffs carry their room ID and invalidate that room's current page synchronously, without waiting for a source lookup or affecting another room's progress.

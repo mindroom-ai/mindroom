@@ -1338,6 +1338,14 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
     await harness.runner.settle_inbox_responses()
     await obligation_runner.drain_once()
 
+    obligation_runner.start()
+    try:
+        async with asyncio.timeout(5):
+            while await obligation_runner.store.unsettled_event_ids():  # noqa: ASYNC110 - settlement has no event signal
+                await asyncio.sleep(0.01)
+    finally:
+        await obligation_runner.stop()
+
     assert not await obligation_runner.store.is_pending(first.event_id)
     assert not await obligation_runner.store.is_pending(second.event_id)
 
