@@ -258,7 +258,7 @@ def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:
 
 
 def test_runtime_dependency_requires_released_durable_nio() -> None:
-    """The wheel pins the released durable sync, history, and byte-accounting fixes."""
+    """The wheel pins the released durable sync, history, byte-accounting, and membership-error fixes."""
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     dependencies = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
     requirement = Requirement(
@@ -271,6 +271,7 @@ def test_runtime_dependency_requires_released_durable_nio() -> None:
     assert Version("0.40.0") not in requirement.specifier
     assert Version("1.0.0") not in requirement.specifier
     assert Version("1.0.1") not in requirement.specifier
-    assert Version("1.0.2") in requirement.specifier
-    assert Version("1.0.3") not in requirement.specifier
+    assert Version("1.0.2") not in requirement.specifier
+    assert Version("1.0.3") in requirement.specifier
+    assert Version("1.0.4") not in requirement.specifier
     assert Version("2.0.0") not in requirement.specifier
