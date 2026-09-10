@@ -20,7 +20,7 @@ When a call starts in a room, the configured agent:
 
 The voice agent is the same agent you chat with.
 Realtime carries the agent's rendered prompt and effective tools into OpenAI Realtime.
-Live uses a short voice prompt and delegates questions, research, memory, and actions to the normal MindRoom agent, which retains its full instructions, knowledge, skills, hooks, and tools.
+Live uses a short voice prompt and delegates questions, research, memory, and supported actions to the normal MindRoom agent, which retains the instructions, knowledge, skills, hooks, and tools available during voice calls.
 The voice model relays the agent's results conversationally.
 Cascaded sends each finalized transcript through the normal MindRoom agent response path, preserving model resolution, the rendered system prompt, instructions, knowledge, skills, hooks, tools, requester identity, history storage, and tool execution behavior.
 A cascaded profile may explicitly override the resolved LLM while preserving all other agent behavior.

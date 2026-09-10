@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _DELEGATION_ERROR = "Voice call error: the agent could not complete the delegated request. Please try again."
+_EMPTY_DELEGATION_RESPONSE = "No response is available from the agent for this request."
 
 
 def _exception_frames(error: BaseException) -> list[str]:
@@ -75,7 +76,7 @@ class _LiveDelegationRunner:
         task.add_done_callback(self._on_task_done)
 
     def _prompt(self, messages: tuple[tuple[str, str, str], ...], pending: str) -> tuple[str, str]:
-        """Compute a delta against requests the delegate has already answered."""
+        """Compute a delta against requests already dispatched to the delegate."""
         lines: list[str] = []
         previous_pending = self._pending_transcript
         for identifier, role, content in messages:
@@ -110,14 +111,15 @@ class _LiveDelegationRunner:
             if self._closed or generation != self._generation:
                 return
             prompt, pending = self._prompt(messages, delegation.pending_transcript.strip())
+            # An attempted request can complete tools without returning text,
+            # or fail after side effects. Never label it as new context again.
+            self._message_ids.update(identifier for identifier, _, _ in messages)
+            self._pending_transcript = pending
             try:
                 response = await self._options.respond(prompt, self._options.on_tools_executed)
                 if self._closed or generation != self._generation:
                     return
-                if response.text:
-                    self._message_ids.update(identifier for identifier, _, _ in messages)
-                    self._pending_transcript = pending
-                for chunk in _commentary_chunks(response.text):
+                for chunk in _commentary_chunks(response.text or _EMPTY_DELEGATION_RESPONSE):
                     self._session.append_commentary(chunk, delegation_id=delegation.id)
             except Exception as error:
                 logger.warning(

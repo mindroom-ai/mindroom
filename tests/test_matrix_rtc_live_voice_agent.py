@@ -71,6 +71,51 @@ async def test_live_delegations_capture_new_context_and_pending_speech_once() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pending", [False, True], ids=["finalized", "pending"])
+@pytest.mark.parametrize(
+    "first_result",
+    [CallAgentResponse("", tool_names=("send_message",)), RuntimeError("failed after an action")],
+    ids=["empty-result", "partial-failure"],
+)
+async def test_live_dispatched_request_cannot_replay_an_action(
+    first_result: CallAgentResponse | Exception,
+    pending: bool,
+) -> None:
+    """An attempted request may have side effects even without a response text."""
+    respond = AsyncMock(side_effect=[first_result, CallAgentResponse("Done.")])
+    runner = _LiveDelegationRunner(_options(respond), cast("GPTLiveSession", CommentarySink()))
+    context = ChatContext.empty()
+    if not pending:
+        context.add_message(role="user", content="Send the update.")
+    runner.submit(GPTLiveDelegation("one", "Send the update." if pending else ""), context)
+    if pending:
+        context.add_message(role="user", content="Send the update.")
+    context.add_message(role="user", content="What is the weather?")
+    runner.submit(GPTLiveDelegation("two", ""), context)
+    await asyncio.gather(*runner._tasks)
+
+    assert "Send the update." in respond.await_args_list[0].args[0]
+    assert "Send the update." not in respond.await_args_list[1].args[0]
+    assert "What is the weather?" in respond.await_args_list[1].args[0]
+    await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_empty_result_still_answers_without_claiming_completion() -> None:
+    """An empty result also represents denied work, so it cannot claim success."""
+    sink = CommentarySink()
+    runner = _LiveDelegationRunner(
+        _options(AsyncMock(return_value=CallAgentResponse(""))),
+        cast("GPTLiveSession", sink),
+    )
+    runner.submit(GPTLiveDelegation("one", "Perform a task."), ChatContext.empty())
+    await asyncio.gather(*runner._tasks)
+
+    assert sink.results == [("No response is available from the agent for this request.", "one")]
+    await runner.aclose()
+
+
+@pytest.mark.asyncio
 async def test_live_serializes_responder_admission_and_cancels_queued_work() -> None:
     """Only the active delegation enters the caller authorization boundary."""
     started = asyncio.Event()
