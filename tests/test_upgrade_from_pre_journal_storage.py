@@ -32,7 +32,8 @@ from mindroom.event_journal_open import (
     open_event_journal,
     read_event_journal_binding,
 )
-from mindroom.handled_turns import HandledTurnLedger, legacy_responses_file_path
+from mindroom.handled_turns import HandledTurnLedger
+from mindroom.legacy_handled_turns import legacy_responses_file_path
 
 if TYPE_CHECKING:
     from pathlib import Path

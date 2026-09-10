@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.history.types import HistoryScope
+from mindroom.legacy_approval_payloads import resolve_legacy_visibility
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 from . import journal, membership_state, outbox
@@ -554,16 +555,16 @@ def claim(
     current = get(transaction, principal_id, approval_id=approval_id)
     if current is None or current.state != "ready":
         return None
-    if not current.show_tool_calls_is_frozen and legacy_show_tool_calls is None:
-        msg = "Legacy approval continuation visibility must be resolved before claim"
-        raise RuntimeError(msg)
+    show_tool_calls = resolve_legacy_visibility(
+        show_tool_calls=current.show_tool_calls,
+        is_frozen=current.show_tool_calls_is_frozen,
+        current_policy=legacy_show_tool_calls,
+    )
     claimed_continuation = replace(
         current,
         state="claimed",
         runtime_generation=runtime_generation,
-        show_tool_calls=(
-            current.show_tool_calls if current.show_tool_calls_is_frozen else bool(legacy_show_tool_calls)
-        ),
+        show_tool_calls=show_tool_calls,
         show_tool_calls_is_frozen=True,
     )
     claimed = transaction.fetchone(

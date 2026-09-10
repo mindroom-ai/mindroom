@@ -257,6 +257,10 @@ def _empty_store() -> _SerializedReplayStore:
     return {"nonces": {}, "events": {}, "threads": {}}
 
 
+# Legacy format: External-trigger replay stores contained nonce and event claims but no threads section.
+# Last legacy release: v2026.9.20; replacement: v2026.9.21 persisted thread-key claims.
+# Handling: Treat the missing section as empty and preserve existing dedup claims on the next store write.
+# Coverage: tests/test_external_trigger_replay_store.py::test_store_without_threads_section_is_accepted.
 def _normalize_store(raw_store: object) -> _SerializedReplayStore:
     if not isinstance(raw_store, Mapping):
         raise _invalid_store_structure()
@@ -265,7 +269,6 @@ def _normalize_store(raw_store: object) -> _SerializedReplayStore:
         raise _invalid_store_structure()
     raw_nonces = store_mapping["nonces"]
     raw_events = store_mapping["events"]
-    # Stores written before thread keys existed have no "threads" section.
     raw_threads = store_mapping.get("threads", {})
     if (
         not isinstance(raw_nonces, Mapping)

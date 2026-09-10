@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
 from mindroom import constants
-from mindroom.config.access_migration import validate_access_migration_source
+from mindroom.config.legacy_access import validate_access_migration_source
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
     Config,

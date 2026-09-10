@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.private_instance_identity_store import load_private_instance_identity
-from mindroom.private_storage_compat import (
+from mindroom.legacy_private_storage_aliases import (
     historical_private_instance_worker_key,
     load_private_instance_legacy_alias,
 )
+from mindroom.private_instance_identity_store import load_private_instance_identity
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
 
 if TYPE_CHECKING:

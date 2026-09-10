@@ -1686,6 +1686,20 @@ def test_pending_approval_from_card_event_requires_approver_user_id() -> None:
         PendingApproval.from_card_event(card, room_id="!room:localhost")
 
 
+@pytest.mark.parametrize("legacy_approval_id", [None, "", 1])
+def test_pending_approval_from_sparse_card_uses_tool_call_id_as_approval_id(legacy_approval_id: object) -> None:
+    """External or malformed cards can retain identity through the defensive alias."""
+    card = _approval_card(approval_id="call-old")
+    if legacy_approval_id is None:
+        card["content"].pop("approval_id")
+    else:
+        card["content"]["approval_id"] = legacy_approval_id
+
+    pending = PendingApproval.from_card_event(card, room_id="!room:localhost")
+
+    assert pending.approval_id == "call-old"
+
+
 def test_pending_approval_preserves_distinct_requester_and_approver() -> None:
     card = _approval_card(requester="@requester:localhost", approver="@approver:localhost")
 

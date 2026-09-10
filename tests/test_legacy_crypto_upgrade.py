@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 from nio import LocalProtocolError
-from nio.crypto import InboundGroupSession, OlmAccount, OutboundGroupSession
+from nio.crypto import InboundGroupSession, OlmAccount, OlmDevice, OutboundGroupSession, TrustState
 from nio.durable import DurableSyncConfig
 from nio.store import DefaultStore
 from nio.store._sqlite_lease import FileLease
@@ -23,6 +23,8 @@ from tests.test_matrix_agent_manager import _runtime_paths
 ACCOUNT = "@bot:example.org"
 ROOM = "!room:example.org"
 DEVICE = "DEVICE"
+TRUSTED_ACCOUNT = "@trusted:example.org"
+TRUSTED_DEVICE = "TRUSTED"
 _SCHEMA = Path(__file__).parent / "fixtures" / "pre_nio1_recovery.sql"
 
 
@@ -40,6 +42,13 @@ def _legacy_crypto(path: Path, recovery: str) -> tuple[dict[str, str], InboundGr
         ROOM,
     )
     store.save_inbound_group_session(inbound)
+    trusted = OlmDevice(
+        TRUSTED_ACCOUNT,
+        TRUSTED_DEVICE,
+        {"curve25519": "trusted-curve", "ed25519": "trusted-signing"},
+    )
+    store.save_device_keys({TRUSTED_ACCOUNT: {TRUSTED_DEVICE: trusted}})
+    assert store.verify_device(trusted)
     store.database.close()
     outbound.mark_as_shared()
     ciphertext = outbound.encrypt("retained encrypted history")
@@ -92,6 +101,10 @@ async def test_owned_startup_retires_legacy_recovery_without_changing_keys(tmp_p
                 retained = opened.client.olm.inbound_group_store.get(ROOM, inbound.sender_key, inbound.id)
                 assert retained is not None
                 assert retained.decrypt(ciphertext)[0] == "retained encrypted history"
+                trusted = opened.client.olm.device_store[TRUSTED_ACCOUNT].get(TRUSTED_DEVICE)
+                assert trusted is not None
+                assert trusted.keys == {"curve25519": "trusted-curve", "ed25519": "trusted-signing"}
+                assert trusted.trust_state is TrustState.verified
                 if first_consumer is None:
                     first_consumer = opened.consumer
                 else:

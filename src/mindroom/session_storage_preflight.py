@@ -25,6 +25,10 @@ _REQUIRED_SESSION_COLUMNS = frozenset(
 )
 
 
+# Legacy format: Owned Agno session databases may lack columns required by the installed schema.
+# Last legacy release: schema-based boundary with no single release cutoff or safe row conversion.
+# Handling: Archive the reconstructable sessions directory before creating a current store; preserve its bytes.
+# Coverage: tests/test_agent_session_storage_recovery.py::test_incompatible_session_schema_is_archived_before_real_session_use.
 @contextmanager
 def session_storage_preflight(
     state_root: Path,

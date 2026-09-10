@@ -10,7 +10,7 @@ import pytest
 
 def test_access_migration_leaves_current_schema_unchanged() -> None:
     """A current config must not trigger a rewrite."""
-    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import migrate_access_config_data  # noqa: PLC0415
 
     data = {
         "administrators": ["@owner:example.com"],
@@ -31,7 +31,7 @@ def test_access_migration_leaves_current_schema_unchanged() -> None:
 
 def test_access_migration_splits_legacy_owner_permissions() -> None:
     """One legacy owner must become four explicit capabilities."""
-    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import migrate_access_config_data  # noqa: PLC0415
 
     result = migrate_access_config_data(
         {
@@ -69,7 +69,7 @@ def test_access_migration_splits_legacy_owner_permissions() -> None:
 
 def test_access_migration_removes_mode_marker_and_is_idempotent() -> None:
     """A migrated config must not retain a mode switch or change again."""
-    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import migrate_access_config_data  # noqa: PLC0415
 
     first = migrate_access_config_data(
         {
@@ -89,7 +89,7 @@ def test_access_migration_removes_mode_marker_and_is_idempotent() -> None:
 
 def test_access_migration_materializes_wildcard_responder_policy() -> None:
     """A wildcard policy must become explicit access on every responder it covers."""
-    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import migrate_access_config_data  # noqa: PLC0415
 
     result = migrate_access_config_data(
         {
@@ -128,7 +128,7 @@ def test_access_migration_materializes_wildcard_responder_policy() -> None:
 
 def test_access_migration_maps_room_permissions_and_matrix_defaults() -> None:
     """Retired room controls must become explicit defaults and room overrides."""
-    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import migrate_access_config_data  # noqa: PLC0415
 
     result = migrate_access_config_data(
         {
@@ -177,7 +177,7 @@ def test_access_migration_maps_room_permissions_and_matrix_defaults() -> None:
 
 def test_access_migration_preserves_explicit_new_schema_grants() -> None:
     """Migration must combine list grants without replacing explicit new values."""
-    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import migrate_access_config_data  # noqa: PLC0415
 
     result = migrate_access_config_data(
         {
@@ -216,7 +216,7 @@ def test_access_migration_preserves_explicit_new_schema_grants() -> None:
 
 def test_access_migration_maps_default_room_access_to_current_membership() -> None:
     """Broad retired room access must become explicit current-room access."""
-    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import migrate_access_config_data  # noqa: PLC0415
 
     result = migrate_access_config_data(
         {
@@ -239,7 +239,7 @@ def test_access_migration_maps_default_room_access_to_current_membership() -> No
 
 def test_access_migration_coerces_legacy_boolean_values_before_mapping() -> None:
     """Legacy boolean spellings must keep the meaning accepted by the retired schema."""
-    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import migrate_access_config_data  # noqa: PLC0415
 
     result = migrate_access_config_data(
         {
@@ -264,7 +264,7 @@ def test_access_migration_rejects_malformed_reply_policies(
     field_name: str,
 ) -> None:
     """A malformed retired policy must not become partial or character-level grants."""
-    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
 
     with pytest.raises(AccessMigrationError, match=field_name):
         migrate_access_config_data(
@@ -277,7 +277,7 @@ def test_access_migration_rejects_malformed_reply_policies(
 
 def test_access_migration_rejects_malformed_current_grants_in_mixed_config() -> None:
     """Migration must not discard malformed current grants while combining retired ones."""
-    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
 
     with pytest.raises(AccessMigrationError, match=r"agents\.talent\.access\.users"):
         migrate_access_config_data(
@@ -308,7 +308,7 @@ def test_access_migration_rejects_malformed_retired_sections(
     field_name: str,
 ) -> None:
     """A malformed retired section must not disappear during migration."""
-    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
 
     with pytest.raises(AccessMigrationError, match=field_name):
         migrate_access_config_data(legacy_config)
@@ -316,7 +316,7 @@ def test_access_migration_rejects_malformed_retired_sections(
 
 def test_access_migration_rejects_unknown_room_permission_key() -> None:
     """A room-scoped grant must never migrate onto an unmanaged room key."""
-    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
 
     with pytest.raises(
         AccessMigrationError,
@@ -334,7 +334,7 @@ def test_access_migration_rejects_unknown_room_permission_key() -> None:
 
 def test_access_migration_rejects_unknown_invite_only_room_reference() -> None:
     """An invite-only reference must identify a configured managed room key."""
-    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
 
     with pytest.raises(
         AccessMigrationError,
@@ -373,7 +373,7 @@ def test_access_migration_rejects_non_concrete_identity_grants(
     field_name: str,
 ) -> None:
     """Legacy grants that require concrete IDs must fail with editing guidance."""
-    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
 
     with pytest.raises(AccessMigrationError) as exc_info:
         migrate_access_config_data(legacy_config)
@@ -385,7 +385,7 @@ def test_access_migration_rejects_non_concrete_identity_grants(
 
 def test_access_migration_rejects_unknown_reply_policy_entity() -> None:
     """A retired responder policy must not disappear when its entity is unknown."""
-    from mindroom.config.access_migration import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
 
     with pytest.raises(AccessMigrationError, match="contains unknown entities: missing"):
         migrate_access_config_data(
@@ -400,7 +400,7 @@ def test_access_migration_rejects_unknown_reply_policy_entity() -> None:
 
 def test_access_migration_resolves_unambiguous_room_alias() -> None:
     """A full alias whose localpart is a managed key must migrate to that key."""
-    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import migrate_access_config_data  # noqa: PLC0415
 
     result = migrate_access_config_data(
         {
@@ -423,7 +423,7 @@ def test_access_migration_resolves_unambiguous_room_alias() -> None:
 
 def test_access_migration_maps_matrix_access_without_authorization() -> None:
     """Retired Matrix room settings must migrate without an authorization section."""
-    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import migrate_access_config_data  # noqa: PLC0415
 
     result = migrate_access_config_data(
         {
@@ -446,7 +446,7 @@ def test_access_migration_maps_matrix_access_without_authorization() -> None:
 
 def test_access_migration_removes_authorization_emptied_by_migration() -> None:
     """Removing the last retired field must not leave an empty mapping behind."""
-    from mindroom.config.access_migration import migrate_access_config_data  # noqa: PLC0415
+    from mindroom.config.legacy_access import migrate_access_config_data  # noqa: PLC0415
 
     result = migrate_access_config_data(
         {"authorization": {"global_users": ["@owner:example.com"]}},
@@ -462,18 +462,122 @@ def test_load_config_migrates_single_file_after_validation(tmp_path: Path) -> No
     from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
 
     config_path = Path(tmp_path) / "config.yaml"
-    original = "authorization:\n  global_users:\n    - '@owner:example.com'\n"
+    original = """agents:
+  code:
+    display_name: Code
+    role: Writes code
+    rooms: [lobby, dev]
+    access:
+      current_room_members: true
+      members_of_rooms: [existing]
+      users: ['@current:example.com']
+    credential_managers: ['@manager:example.com']
+rooms:
+  existing: {}
+  lobby:
+    invite_users: ['@current-room:example.com']
+  dev: {}
+administrators: ['@current-admin:example.com']
+room_defaults:
+  join_policy: knock
+  listed: true
+  encrypted: false
+  invite_users: ['@current-default:example.com']
+  admins: ['@current-room-admin:example.com']
+authorization:
+  global_users: ['@owner:example.com']
+  agent_reply_permissions:
+    code:
+      users: ['@legacy-agent:example.com']
+      joined_rooms: [lobby]
+  room_permissions:
+    dev: ['@legacy-room:example.com']
+  default_room_access: true
+matrix_room_access:
+  mode: multi_user
+  multi_user_join_rule: public
+  publish_to_room_directory: false
+  encrypt_managed_rooms: true
+  invite_only_rooms: [dev]
+  room_admins: ['@legacy-admin:example.com']
+"""
     config_path.write_text(original, encoding="utf-8")
+    config_path.chmod(0o640)
 
     config = load_config(resolve_runtime_paths(config_path=config_path))
 
     migrated = yaml_io.safe_load(config_path.read_text(encoding="utf-8"))
-    assert migrated["administrators"] == ["@owner:example.com"]
-    assert migrated["room_defaults"]["invite_users"] == ["@owner:example.com"]
+    assert migrated == {
+        "agents": {
+            "code": {
+                "display_name": "Code",
+                "role": "Writes code",
+                "rooms": ["lobby", "dev"],
+                "access": {
+                    "current_room_members": True,
+                    "members_of_rooms": ["existing", "lobby"],
+                    "users": ["@current:example.com", "@legacy-agent:example.com"],
+                },
+                "credential_managers": ["@manager:example.com", "@legacy-agent:example.com"],
+            },
+        },
+        "rooms": {
+            "existing": {},
+            "lobby": {"invite_users": ["@current-room:example.com"]},
+            "dev": {
+                "invite_users": ["@legacy-room:example.com"],
+                "join_policy": "invite",
+                "listed": False,
+            },
+        },
+        "administrators": ["@current-admin:example.com", "@owner:example.com"],
+        "room_defaults": {
+            "join_policy": "knock",
+            "listed": True,
+            "encrypted": False,
+            "invite_users": ["@current-default:example.com", "@owner:example.com"],
+            "admins": ["@current-room-admin:example.com", "@legacy-admin:example.com"],
+        },
+    }
     assert "authorization" not in migrated
-    assert config.administrators == ["@owner:example.com"]
+    assert config.administrators == ["@current-admin:example.com", "@owner:example.com"]
     backup_path = config_path.with_name(f"{config_path.name}.pre-membership-access")
-    assert backup_path.read_text(encoding="utf-8") == original
+    assert backup_path.read_bytes() == original.encode()
+    assert config_path.stat().st_mode & 0o777 == 0o640
+    assert backup_path.stat().st_mode & 0o777 == 0o640
+    first_config_bytes = config_path.read_bytes()
+    first_config_stat = config_path.stat()
+    first_backup_stat = backup_path.stat()
+
+    reopened = load_config(resolve_runtime_paths(config_path=config_path))
+
+    assert reopened == config
+    assert config_path.read_bytes() == first_config_bytes
+    assert backup_path.read_bytes() == original.encode()
+    reopened_config_stat = config_path.stat()
+    reopened_backup_stat = backup_path.stat()
+    assert (
+        reopened_config_stat.st_ino,
+        reopened_config_stat.st_mtime_ns,
+        reopened_config_stat.st_mode,
+        reopened_config_stat.st_size,
+    ) == (
+        first_config_stat.st_ino,
+        first_config_stat.st_mtime_ns,
+        first_config_stat.st_mode,
+        first_config_stat.st_size,
+    )
+    assert (
+        reopened_backup_stat.st_ino,
+        reopened_backup_stat.st_mtime_ns,
+        reopened_backup_stat.st_mode,
+        reopened_backup_stat.st_size,
+    ) == (
+        first_backup_stat.st_ino,
+        first_backup_stat.st_mtime_ns,
+        first_backup_stat.st_mode,
+        first_backup_stat.st_size,
+    )
 
 
 def test_load_config_directs_bind_mount_migration_to_the_host(
@@ -482,7 +586,7 @@ def test_load_config_directs_bind_mount_migration_to_the_host(
 ) -> None:
     """An unreplaceable bind-mounted config must identify the host-side remedy."""
     from mindroom import yaml_io  # noqa: PLC0415
-    from mindroom.config.access_migration import AccessMigrationError  # noqa: PLC0415
+    from mindroom.config.legacy_access import AccessMigrationError  # noqa: PLC0415
     from mindroom.config.main import load_config  # noqa: PLC0415
     from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
 
@@ -506,7 +610,7 @@ def test_load_config_directs_bind_mount_migration_to_the_host(
 
 def test_load_config_rejects_access_migration_with_include(tmp_path: Path) -> None:
     """A composed legacy config must fail before validation or persistence."""
-    from mindroom.config.access_migration import AccessMigrationError  # noqa: PLC0415
+    from mindroom.config.legacy_access import AccessMigrationError  # noqa: PLC0415
     from mindroom.config.main import load_config  # noqa: PLC0415
     from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
 
@@ -527,7 +631,7 @@ def test_load_config_rejects_access_migration_with_include(tmp_path: Path) -> No
 
 def test_load_config_does_not_persist_invalid_migration(tmp_path: Path) -> None:
     """Validation failure must leave the original file untouched and create no backup."""
-    from mindroom.config.access_migration import AccessMigrationError  # noqa: PLC0415
+    from mindroom.config.legacy_access import AccessMigrationError  # noqa: PLC0415
     from mindroom.config.main import load_config  # noqa: PLC0415
     from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
 

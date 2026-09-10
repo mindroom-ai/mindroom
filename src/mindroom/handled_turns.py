@@ -38,10 +38,10 @@ from typing import Any
 
 from mindroom import constants
 from mindroom.history.types import HistoryScope
+from mindroom.legacy_handled_turns import import_legacy_ledger, restore_legacy_revision_replay
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.turn_record import (
-    RevisionReplay,
     SourceEventMetadata,
     SourceEventRevision,
     TurnRecord,
@@ -68,30 +68,12 @@ __all__ = [
     "TurnRecord",
     "TurnRecordCodec",
     "canonicalize_turn_record",
-    "legacy_responses_file_path",
     "merge_edit_facts",
     "resolve_turn_record",
     "with_user_stop",
 ]
 
 _TURN_RECORD_SCHEMA_VERSION = 1
-_LEDGER_RECORDS_KEY = "records"
-
-
-def legacy_responses_file_path(storage_path: Path, agent_name: str) -> Path:
-    """Return where a pre-journal MindRoom kept this agent's handled turns.
-
-    Named rather than spelled out at the one call site because it is half of a
-    contract with a version that is no longer in this tree: the writer is gone,
-    so nothing here fails if the reader drifts off the path that writer used.
-    It would simply find no file, import nothing, and re-answer the backlog of
-    every installation being upgraded -- silently, and only in production.
-    Giving the path a name is what lets a test pin it against the bytes the old
-    version actually wrote.
-
-    See ``HandledTurnLedger._import_legacy_ledger`` for what is done with it.
-    """
-    return storage_path / "tracking" / f"{agent_name}_responded.json"
 
 
 def with_user_stop(
@@ -259,20 +241,7 @@ class TurnRecordCodec:
         )
         if event_id not in turn_record.indexed_event_ids:
             return None
-        if "revision_replay" not in record and turn_record.source_event_revisions:
-            turn_record = canonicalize_turn_record(
-                turn_record,
-                revision_replay={
-                    revision_id: RevisionReplay(
-                        turn_record.prompt_source_event_id(source),
-                        timestamp,
-                        legacy_summary_provenance=True,
-                    )
-                    for source, (timestamp, revision_id) in turn_record.source_event_revisions.items()
-                    if revision_id != turn_record.prompt_source_event_id(source)
-                },
-            )
-        return turn_record
+        return restore_legacy_revision_replay(turn_record, record)
 
     @staticmethod
     def to_run_metadata(record: TurnRecord) -> dict[str, object]:  # noqa: C901
@@ -427,7 +396,7 @@ class HandledTurnLedger:
     records: TurnRecordStore
     # Where this agent's records were kept before they moved into the journal
     # database. Present so an installation that has been running can be
-    # upgraded; see ``_import_legacy_ledger``. ``None`` means there is no
+    # upgraded; see ``legacy_handled_turns.import_legacy_ledger``. ``None`` means there is no
     # history to inherit, which is true for a fresh install and for tests that
     # start from an empty database.
     legacy_responses_file: Path | None = None
@@ -508,7 +477,13 @@ class HandledTurnLedger:
     async def _load_locked(self) -> None:
         """Read storage into the shared map, with the write lock already held."""
         stored = await self.records.load_all()
-        if imported := await self._import_legacy_ledger({index_event_id for index_event_id, _, _ in stored}):
+        if imported := await import_legacy_ledger(
+            path=self.legacy_responses_file,
+            agent_name=self.agent_name,
+            records=self.records,
+            already_stored={index_event_id for index_event_id, _, _ in stored},
+            codec=TurnRecordCodec,
+        ):
             stored = imported
         with self._state.lock:
             self._responses = {
@@ -707,88 +682,6 @@ class HandledTurnLedger:
         with self._state.lock:
             self._require_loaded()
             return self._has_responded_locked(event_id)
-
-    async def _import_legacy_ledger(self, already_stored: set[str]) -> tuple[tuple[str, str, str], ...]:
-        """Adopt an agent's pre-database records, once, and return them as stored rows.
-
-        Skipping this is not a missing nicety, it is the worst failure this
-        module has. An installation that has been answering messages holds all
-        of its terminal truth in a JSON file; a version that reads only the new
-        table sees an empty ledger, concludes nothing has ever been answered,
-        and re-answers the entire backlog the first time it replays.
-
-        The presence of the file is the only trigger, and its rename is the
-        only marker. Gating on an empty table instead would look safer and be
-        worse: an import that crashed partway leaves rows behind, so the gate
-        would never fire again and every turn it had not yet reached would stay
-        missing for good -- which for those turns is identical to never having
-        imported at all.
-
-        What keeps that safe is `adopt_missing`, which fills only the indexes
-        with no record yet. A record already here was written by this runtime or
-        by an earlier pass, so it is at least as current as the file's copy and
-        must not be overwritten.
-
-        Ordinary `upsert` cannot express that. A legacy record can overlap a
-        stored one only *partially* -- it indexes two sources of one coalesced
-        turn, the runtime has a newer record under the first, the second is
-        absent -- and upserting the whole record overwrites the newer one, after
-        which the file is renamed and that copy is gone. Filtering such records
-        out instead leaves the absent source with no record, so a message that
-        was answered can be answered again. Filling the gaps and leaving every
-        occupied index alone is the only option that loses neither.
-
-        The rename is atomic, so it either happens or does not, and a renamed
-        file is never read again. That is also what stops a later compaction
-        from resurrecting history it deliberately dropped: by then there is no
-        file left to re-import.
-
-        The same codec reads the file and writes the rows, so the round trip is
-        lossless by construction. A field the current codec has retired is
-        dropped exactly as it would be on any other load.
-        """
-        legacy_file = self.legacy_responses_file
-        if legacy_file is None or not legacy_file.exists():
-            return ()
-        raw = json.loads(legacy_file.read_text())
-        records = raw.get(_LEDGER_RECORDS_KEY) if isinstance(raw, Mapping) else None
-        decoded = (
-            {
-                event_id: record
-                for event_id, raw_record in records.items()
-                if (record := TurnRecordCodec._from_ledger_record(event_id, raw_record)) is not None
-            }
-            if isinstance(records, Mapping)
-            else {}
-        )
-        # One row per distinct turn, not per index: `upsert` already stores a
-        # record under every event that indexes it, and writing it once per
-        # index would re-delete and re-insert the same siblings repeatedly.
-        unseen = {
-            record.indexed_event_ids: record
-            for record in decoded.values()
-            if not already_stored.issuperset(record.indexed_event_ids)
-        }
-        adopted = 0
-        for record in unseen.values():
-            # Canonicalizing derives an anchor for a record written before one
-            # was always stored, which is exactly the vintage this import
-            # exists to read. Dropping such a record instead would lose the
-            # proof that its message was answered.
-            imported = canonicalize_turn_record(record)
-            assert imported.anchor_event_id is not None
-            adopted += await self.records.adopt_missing(
-                index_event_ids=imported.indexed_event_ids,
-                anchor_event_id=imported.anchor_event_id,
-                record_json=json.dumps(TurnRecordCodec._to_ledger_record(imported)),
-            )
-        legacy_file.replace(legacy_file.with_suffix(f"{legacy_file.suffix}.imported"))
-        logger.info(
-            "handled_turn_ledger_imported",
-            agent=self.agent_name,
-            imported_event_count=adopted,
-        )
-        return await self.records.load_all()
 
     def _restore_superseded(
         self,

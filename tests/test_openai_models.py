@@ -13,6 +13,7 @@ from agno.models.openrouter import OpenRouter
 from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall, ChoiceDeltaToolCallFunction
 
 from mindroom.azure_openai_model import MindRoomAzureOpenAI
+from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
 from mindroom.openai_models import (
     MindRoomDeepSeek,
     MindRoomLlamaCpp,
@@ -290,3 +291,20 @@ def test_openai_responses_removes_persisted_sparse_placeholder_and_orphan_result
         "call_id": formatted[0]["call_id"],
         "output": "ready",
     }
+
+
+def test_legacy_openai_tool_replay_keeps_unchanged_messages_by_identity() -> None:
+    """Replay repair avoids copying an already valid historical message."""
+    message = Message(
+        role="assistant",
+        tool_calls=[
+            {
+                "id": "call_abcdefghijklmnopqrstuvwx",
+                "type": "function",
+                "function": {"name": "get_status", "arguments": "{}"},
+            },
+        ],
+    )
+
+    assert repair_legacy_openai_tool_replay([message]) == [message]
+    assert repair_legacy_openai_tool_replay([message])[0] is message

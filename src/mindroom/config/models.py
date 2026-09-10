@@ -8,6 +8,7 @@ from typing import Any, Literal, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
+from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
@@ -483,17 +484,7 @@ class DefaultsConfig(BaseModel):
     @classmethod
     def reject_legacy_defaults_fields(cls, data: object) -> object:
         """Reject removed legacy fields to prevent silent misconfiguration."""
-        if isinstance(data, dict):
-            if "sandbox_tools" in data:
-                msg = "defaults.sandbox_tools was removed. Use defaults.worker_tools instead."
-                raise ValueError(msg)
-            if "allowed_toolkits" in data:
-                msg = "defaults.allowed_toolkits was removed. Use defaults.tools instead."
-                raise ValueError(msg)
-            if "initial_toolkits" in data:
-                msg = "defaults.initial_toolkits was removed. Use defaults.tools instead."
-                raise ValueError(msg)
-        return data
+        return reject_legacy_defaults_fields(data)
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:

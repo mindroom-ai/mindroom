@@ -178,6 +178,58 @@ def test_report_publishing_store_creates_revocable_public_link(tmp_path: Path) -
         store.report_asset_path(store.get_public_report(report.slug))
 
 
+def test_report_publishing_store_upgrades_legacy_html_record_on_revoke(tmp_path: Path) -> None:
+    """A pre-artifact-kind record serves its file and rewrites without losing publication metadata."""
+    storage_root = tmp_path / "mindroom_data"
+    artifact_path = storage_root / "reports" / "legacy.html"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_bytes(b"<!doctype html><h1>Legacy report</h1>\n")
+    slug = "pub_00000000000000000000000000000000"
+    record_path = storage_root / "report_publishing" / "public_reports" / f"{slug}.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(
+        json.dumps(
+            {
+                "slug": slug,
+                "source_type": "dynamic_workflow_run",
+                "source": {"workflow_id": "weekly-report", "run_id": "run-7"},
+                "artifact_path": "reports/legacy.html",
+                "title": "Weekly report",
+                "requested_by": "@alice:localhost",
+                "published_by": "@publisher:localhost",
+                "published_at": "2026-06-20T12:00:00+00:00",
+                "public_url": "https://example.test/reports/public/" + slug,
+                "revoked_at": None,
+                "revoked_by": None,
+            },
+        ),
+        encoding="utf-8",
+    )
+    store = ReportPublishingStore(storage_root)
+
+    loaded = store.get_public_report(slug)
+    served_path = store.report_asset_path(loaded)
+    revoked = store.revoke_public_report(slug, revoked_by="@admin:localhost")
+
+    assert loaded.artifact_kind == "html_file"
+    assert served_path == artifact_path
+    assert served_path.read_bytes() == b"<!doctype html><h1>Legacy report</h1>\n"
+    assert revoked.source_type == "dynamic_workflow_run"
+    assert revoked.source == {"workflow_id": "weekly-report", "run_id": "run-7"}
+    assert revoked.title == "Weekly report"
+    assert revoked.requested_by == "@alice:localhost"
+    assert revoked.published_by == "@publisher:localhost"
+    assert revoked.published_at == "2026-06-20T12:00:00+00:00"
+    assert revoked.public_url == "https://example.test/reports/public/" + slug
+
+    persisted = json.loads(record_path.read_text(encoding="utf-8"))
+    assert persisted["artifact_kind"] == "html_file"
+    reopened = ReportPublishingStore(storage_root)
+    reloaded = reopened.get_public_report(slug, include_revoked=True)
+    assert reloaded == revoked
+    assert reopened.report_asset_path(reloaded).read_bytes() == b"<!doctype html><h1>Legacy report</h1>\n"
+
+
 def test_report_publishing_store_rejects_artifacts_outside_storage_root(tmp_path: Path) -> None:
     """Public links should never publish arbitrary filesystem paths."""
     storage_root = tmp_path / "mindroom_data"

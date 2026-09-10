@@ -115,6 +115,7 @@ from mindroom.tool_system.approval_exemptions import register_tool_approval_exem
 from mindroom.tool_system.events import ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.turn_origin import SenderKind, TurnIntent, TurnTrust
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import EditPreparation, canonicalize_turn_record
 from tests.conftest import (
@@ -5252,6 +5253,60 @@ async def test_approval_request_restores_exact_hook_envelope_after_store_reload(
     assert restored.response_envelope.hook_source == "plugin:message_received"
     assert restored.response_envelope.dispatch_policy_source_kind == "plugin"
     assert restored.response_envelope.message_received_depth == 3
+
+
+@pytest.mark.parametrize(
+    ("transport_sender_id", "expected_sender_kind", "expected_intent", "expected_trust"),
+    [
+        ("@user:localhost", SenderKind.USER, TurnIntent.USER_MESSAGE, TurnTrust.EXTERNAL),
+        (
+            "@router:localhost",
+            SenderKind.MANAGED_ENTITY,
+            TurnIntent.ROUTER_HANDOFF,
+            TurnTrust.TRUSTED_INTERNAL,
+        ),
+    ],
+)
+def test_sparse_approval_continuation_restores_origin(
+    tmp_path: Path,
+    transport_sender_id: str,
+    expected_sender_kind: SenderKind,
+    expected_intent: TurnIntent,
+    expected_trust: TurnTrust,
+) -> None:
+    """Sparse continuation context retains human and router-relay attribution."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    continuation = ApprovalContinuation(
+        approval_id="approval-sparse-origin",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        source_event_ids=("$source",),
+        calls=(),
+        state="ready",
+        request_body="resume me",
+        transport_sender_id=transport_sender_id,
+        source_kind="message",
+        origin=None,
+    )
+
+    restored = runner._approval_response_request(
+        continuation,
+        target=_target(thread_id="$thread", reply_to_event_id="$source"),
+    )
+    origin = restored.response_envelope.origin
+
+    assert origin.transport_sender_id == transport_sender_id
+    assert origin.requester_id == "@user:localhost"
+    assert origin.sender_kind == expected_sender_kind
+    assert origin.intent == expected_intent
+    assert origin.source_kind == "message"
+    assert origin.trust == expected_trust
 
 
 @pytest.mark.asyncio

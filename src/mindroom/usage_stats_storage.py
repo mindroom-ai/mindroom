@@ -13,6 +13,11 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.constants import RuntimePaths, resolve_session_state_root
+from mindroom.legacy_session_storage import (
+    decode_persisted_session_json,
+    legacy_session_runs_projection,
+    merge_legacy_run_payloads,
+)
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import worker_dir_name
 
@@ -345,12 +350,9 @@ def iter_usage_storage_rows(
                 return
             table = _quote_identifier(source.expected_session_table)
             payload_columns = (
-                "session_data AS session_payload, length(CAST(session_data AS BLOB)) AS session_payload_bytes"
+                "session_data AS session_payload, length(CAST(session_data AS BLOB)) AS session_payload_bytes, "
+                f"{legacy_session_runs_projection(schema)}"
             )
-            if schema.legacy_runs_column:
-                payload_columns += (
-                    ", runs AS legacy_runs_payload, length(CAST(runs AS BLOB)) AS legacy_runs_payload_bytes"
-                )
             query = (
                 "SELECT session_id, session_type, agent_id, team_id, user_id, "  # noqa: S608
                 f"{payload_columns} FROM {table}"
@@ -359,7 +361,7 @@ def iter_usage_storage_rows(
             read_runs = mode != "session_metrics" and _table_exists(connection, runs_table)
             for row in connection.execute(query):
                 session_payload_bytes = row["session_payload_bytes"]
-                legacy_payload_bytes = row["legacy_runs_payload_bytes"] if schema.legacy_runs_column else None
+                legacy_payload_bytes = row["legacy_runs_payload_bytes"]
                 if not _is_valid_payload_size(session_payload_bytes) or not _is_valid_payload_size(
                     legacy_payload_bytes,
                 ):
@@ -373,7 +375,7 @@ def iter_usage_storage_rows(
                         persisted_runs=_persisted_runs(connection, runs_table, row["session_id"])
                         if read_runs
                         else _PersistedRuns(),
-                        legacy_runs_payload=row["legacy_runs_payload"] if schema.legacy_runs_column else None,
+                        legacy_runs_payload=row["legacy_runs_payload"],
                         legacy_payload_bytes=legacy_payload_bytes or 0,
                         session_payload_bytes=session_payload_bytes or 0,
                     )
@@ -391,13 +393,6 @@ def _is_valid_payload_size(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-@dataclass(frozen=True, slots=True)
-class _SessionSchema:
-    """Which optional run storage shapes one retained session database carries."""
-
-    legacy_runs_column: bool
-
-
 @dataclass(slots=True)
 class _PersistedRuns:
     """Raw run payloads for one session, in run-table order."""
@@ -409,7 +404,7 @@ class _PersistedRuns:
 def _validate_schema(
     connection: sqlite3.Connection,
     source: UsageStorageSource,
-) -> _SessionSchema | UsageStorageDiagnostic:
+) -> set[str] | UsageStorageDiagnostic:
     table = source.expected_session_table
     if _IDENTIFIER.fullmatch(table) is None:
         return _source_diagnostic(source, "unsupported_schema", "session table unavailable")
@@ -423,7 +418,7 @@ def _validate_schema(
         _table_columns(connection, runs_table),
     ):
         return _source_diagnostic(source, "unsupported_schema", "runs schema unsupported")
-    return _SessionSchema(legacy_runs_column="runs" in columns)
+    return columns
 
 
 def _runs_table(session_table: str) -> str:
@@ -526,12 +521,10 @@ def _extract_runs(
     Run-table rows come first and win on ``run_id``; legacy-only runs are
     appended. Aggregation does not depend on the order.
     """
-    raw_runs = [_decode_agno_json(payload) for payload in run_payloads]
-    seen_run_ids = {run_id for run_id in map(_raw_run_id, raw_runs) if run_id is not None}
-    for legacy_run in _decode_runs(legacy_runs_payload):
-        if _raw_run_id(legacy_run) in seen_run_ids:
-            continue
-        raw_runs.append(legacy_run)
+    raw_runs = merge_legacy_run_payloads(
+        [decode_persisted_session_json(payload) for payload in run_payloads],
+        legacy_runs_payload,
+    )
     runs: list[UsageRunNode] = []
     for raw_run in raw_runs:
         extracted = _extract_run(raw_run, row_requester=row_requester)
@@ -540,24 +533,8 @@ def _extract_runs(
     return tuple(runs)
 
 
-def _raw_run_id(raw_run: object) -> str | None:
-    if not isinstance(raw_run, dict):
-        return None
-    run_id = cast("dict[str, object]", raw_run).get("run_id")
-    return run_id if isinstance(run_id, str) else None
-
-
-def _decode_runs(raw_value: object) -> list[object]:
-    decoded = _decode_agno_json(raw_value)
-    if decoded is None:
-        return []
-    if not isinstance(decoded, list):
-        raise TypeError
-    return cast("list[object]", decoded)
-
-
 def _decode_session_metrics(raw_value: object) -> Mapping[str, _MetricValue]:
-    decoded = _decode_agno_json(raw_value)
+    decoded = decode_persisted_session_json(raw_value)
     if decoded is None:
         return MappingProxyType({})
     if not isinstance(decoded, dict):
@@ -568,15 +545,6 @@ def _decode_session_metrics(raw_value: object) -> Mapping[str, _MetricValue]:
     if not isinstance(raw_metrics, dict):
         raise TypeError
     return _select_metrics(cast("dict[str, object]", raw_metrics))
-
-
-def _decode_agno_json(raw_value: object) -> object:
-    if raw_value is None:
-        return None
-    if not isinstance(raw_value, (str, bytes, bytearray)):
-        raise TypeError
-    decoded = json.loads(raw_value)
-    return json.loads(decoded) if isinstance(decoded, str) else decoded
 
 
 def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode | None:

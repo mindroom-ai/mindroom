@@ -1,14 +1,16 @@
-"""One-time OAuth schema migration and local transaction-maintained byte accounting."""
+"""One-time OAuth schema migrations and local transaction-maintained byte accounting."""
 
 # SQL fragments use only the closed schema constants below, never request data.
 # ruff: noqa: S608
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import sqlite3
+    from collections.abc import Callable
 
 # The allowance covers fixed columns, row/index bookkeeping, and numeric counters.
 # Grants also reserve one requester-counter row and its key, conservatively once per grant.
@@ -86,8 +88,24 @@ def _install_triggers(connection: sqlite3.Connection, table: str, *, lifecycle: 
         connection.execute(f"CREATE TRIGGER {table}_usage_{name} AFTER {event} ON {table} BEGIN {statements} END")
 
 
-def migrate_accounting(connection: sqlite3.Connection, now: float) -> None:
+def _migrate_client_expiry(connection: sqlite3.Connection, registration_expires_at: Callable[[], float]) -> None:
+    """Give legacy client registrations the current fixed retention deadline once."""
+    # Legacy format: staged `clients` rows had no registration expiry column.
+    # Last legacy release: pre-release schema; v2026.9.33 already completed this upgrade.
+    # Handling: assign one durable registration deadline and index it without sliding on reopen.
+    # Coverage: tests/test_mcp_gateway_oauth.py::test_legacy_registration_migration_grants_one_durable_grace_period.
+    if "expires_at" not in {row["name"] for row in connection.execute("PRAGMA table_info(clients)")}:
+        connection.execute("ALTER TABLE clients ADD COLUMN expires_at REAL NOT NULL DEFAULT 0")
+        connection.execute("UPDATE clients SET expires_at = ?", (registration_expires_at(),))
+    connection.execute("CREATE INDEX IF NOT EXISTS clients_expiry ON clients(expires_at)")
+
+
+def _migrate_accounting(connection: sqlite3.Connection, now: float) -> None:
     """Backfill once under the caller's writer transaction; reopening never resets timestamps."""
+    # Legacy format: staged gateway tables had no byte charges, counters, requester ownership, or issuance time.
+    # Last legacy release: pre-release schema; v2026.9.33 already completed this upgrade.
+    # Handling: backfill fields and counters once inside the store's writer transaction.
+    # Coverage: tests/test_mcp_gateway_oauth_capacity.py::test_legacy_migration_backfills_once_and_over_budget_authority_remains_revocable.
     if connection.execute("PRAGMA user_version").fetchone()[0] >= 1:
         return
     for table in _FIELDS:
@@ -150,8 +168,65 @@ def migrate_accounting(connection: sqlite3.Connection, now: float) -> None:
     connection.execute("PRAGMA user_version = 1")
 
 
-def migrate_lifecycle_accounting(connection: sqlite3.Connection) -> None:
+def _migrate_lifecycle(connection: sqlite3.Connection) -> None:
+    """Preserve existing absolute deadlines and leave unknown creation/activity dates null."""
+    # Legacy format: staged grants and pending consent lacked lifecycle dates and account bindings.
+    # Last legacy release: pre-release schema; v2026.9.33 already completed this upgrade.
+    # Handling: preserve absolute expiry, leave unknown history null, and add nullable account ownership.
+    # Coverage: tests/test_mcp_gateway_lifecycle.py::test_legacy_metadata_stays_unknown_and_absolute_expiry_never_extends.
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(grants)")}
+    if "idle_expires_at" in columns:
+        return
+    for declaration in (
+        "created_at REAL",
+        "last_used_at REAL",
+        "last_activity_at REAL",
+        "idle_expires_at REAL",
+        "account_id TEXT",
+    ):
+        connection.execute("ALTER TABLE grants ADD COLUMN " + declaration)
+    connection.execute("UPDATE grants SET idle_expires_at = expires_at")
+    connection.execute("ALTER TABLE pending ADD COLUMN account_id TEXT")
+    for statement in (
+        "CREATE INDEX grants_idle_expiry ON grants(idle_expires_at)",
+        "CREATE INDEX grants_account ON grants(account_id)",
+        "CREATE INDEX pending_account ON pending(account_id)",
+        "CREATE INDEX capabilities_access_expiry ON capabilities(expires_at) WHERE kind = 'access'",
+        """CREATE INDEX grants_owner ON grants(requester_id,
+            json_extract(payload, '$.authenticated_user_id'), json_extract(payload, '$.agent_name'),
+            json_extract(payload, '$.resource'))""",
+        "CREATE INDEX pending_owner ON pending(requester_id, authenticated_user_id, agent_name)",
+    ):
+        connection.execute(statement)
+
+
+def _migrate_accounts(connection: sqlite3.Connection) -> None:
+    """Create the directory inside the caller's migration transaction."""
+    # Legacy format: staged gateway schemas had no account directory.
+    # Last legacy release: pre-release schema; v2026.9.33 already created the directory during initialization.
+    # Handling: create the account directory in the same migration transaction.
+    # Coverage: tests/test_mcp_gateway_accounts.py.
+    connection.execute("""CREATE TABLE IF NOT EXISTS gateway_accounts (
+        account_id TEXT PRIMARY KEY, user_name TEXT UNIQUE NOT NULL,
+        active INTEGER NOT NULL CHECK(active IN (0, 1)),
+        created_at REAL NOT NULL, updated_at REAL NOT NULL,
+        profile TEXT NOT NULL DEFAULT '{}', token_valid_after REAL NOT NULL
+    )""")
+    # Legacy format: released six-column gateway accounts had no external-token cutoff.
+    # Last legacy release: v2026.9.46; `token_valid_after` introduced in v2026.9.47.
+    # Handling: assign one durable migration-time cutoff so older external tokens remain rejected.
+    # Coverage: tests/test_mcp_gateway_accounts.py::test_migration_does_not_revive_preexisting_tokens.
+    if "token_valid_after" not in {row["name"] for row in connection.execute("PRAGMA table_info(gateway_accounts)")}:
+        connection.execute("ALTER TABLE gateway_accounts ADD COLUMN token_valid_after REAL NOT NULL DEFAULT 0")
+        connection.execute("UPDATE gateway_accounts SET token_valid_after = ?", (time.time(),))
+
+
+def _migrate_lifecycle_accounting(connection: sqlite3.Connection) -> None:
     """Compact consumed refresh bindings and install their bounded charge once."""
+    # Legacy format: staged accounting v1 retained full payloads on consumed refresh rows.
+    # Last legacy release: pre-release schema; v2026.9.33 already completed accounting v2.
+    # Handling: compact only consumed refresh payloads, replace triggers, and reconcile byte counters atomically.
+    # Coverage: tests/test_mcp_gateway_oauth_capacity.py::test_v1_accounting_upgrade_compacts_historical_refresh_and_preserves_replay.
     if connection.execute("PRAGMA user_version").fetchone()[0] >= 2:
         return
     connection.execute("UPDATE capabilities SET payload = '{}' WHERE kind = 'refresh' AND consumed = 1")
@@ -162,3 +237,17 @@ def migrate_lifecycle_accounting(connection: sqlite3.Connection) -> None:
         field = "metadata" if table == "clients" else "payload"
         connection.execute(f"UPDATE {table} SET {field} = {field}")
     connection.execute("PRAGMA user_version = 2")
+
+
+def migrate_schema(
+    connection: sqlite3.Connection,
+    *,
+    clock: Callable[[], float],
+    registration_expires_at: Callable[[], float],
+) -> None:
+    """Upgrade every historical gateway schema inside the caller's writer transaction."""
+    _migrate_client_expiry(connection, registration_expires_at)
+    _migrate_accounting(connection, clock())
+    _migrate_lifecycle(connection)
+    _migrate_accounts(connection)
+    _migrate_lifecycle_accounting(connection)

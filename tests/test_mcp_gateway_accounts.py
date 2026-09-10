@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import mindroom.mcp_gateway.accounts as accounts_module
+import mindroom.mcp_gateway.legacy_schema as legacy_schema_module
 from mindroom.mcp_gateway.accounts import AccountConflictError, GatewayAccounts
 from mindroom.mcp_gateway.store import GatewayOAuthStore
 
@@ -154,14 +155,64 @@ async def test_external_profile_update_preserves_access(tmp_path: Path, monkeypa
 
 async def test_migration_does_not_revive_preexisting_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Adding a cutoff to a legacy account requires fresh credentials once, durably."""
-    directory = _directory(tmp_path)
-    account = await directory.create({"userName": "Alice@example.org", "active": True})
-    with sqlite3.connect(directory.store.path) as connection:
-        connection.execute("ALTER TABLE gateway_accounts DROP COLUMN token_valid_after")
-    monkeypatch.setattr(accounts_module.time, "time", lambda: 200.5)
+    database_path = tmp_path / "mcp_gateway" / "oauth.sqlite3"
+    database_path.parent.mkdir(parents=True)
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE gateway_accounts (
+                account_id TEXT PRIMARY KEY,
+                user_name TEXT UNIQUE NOT NULL,
+                active INTEGER NOT NULL CHECK(active IN (0, 1)),
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                profile TEXT NOT NULL DEFAULT '{}'
+            );
+            INSERT INTO gateway_accounts VALUES (
+                'active-account', 'Alice@example.org', 1, 100.25, 110.5,
+                '{"userName":"Alice@example.org","active":true,"displayName":"Alice 历史"}'
+            );
+            INSERT INTO gateway_accounts VALUES (
+                'inactive-account', 'Disabled@example.org', 0, 120.25, 130.5,
+                '{"userName":"Disabled@example.org","active":false,"displayName":"Disabled"}'
+            );
+            """,
+        )
+    monkeypatch.setattr(legacy_schema_module.time, "time", lambda: 200.5)
     migrated = _directory(tmp_path)
     assert await migrated.resolve_external("Alice@example.org", 200.4) is None
     assert await migrated.resolve_external("Alice@example.org", 260.5) is None
-    assert await migrated.resolve_external("Alice@example.org", 260.6) == account["id"]
-    monkeypatch.setattr(accounts_module.time, "time", lambda: 261.5)
-    assert await _directory(tmp_path).resolve_external("Alice@example.org", 260.6) == account["id"]
+    assert await migrated.resolve_external("Alice@example.org", 260.6) == "active-account"
+    assert await migrated.resolve_external("Disabled@example.org", 260.6) is None
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            """
+            SELECT account_id, user_name, active, created_at, updated_at, profile, token_valid_after
+            FROM gateway_accounts ORDER BY account_id
+            """,
+        ).fetchall() == [
+            (
+                "active-account",
+                "Alice@example.org",
+                1,
+                100.25,
+                110.5,
+                '{"userName":"Alice@example.org","active":true,"displayName":"Alice 历史"}',
+                200.5,
+            ),
+            (
+                "inactive-account",
+                "Disabled@example.org",
+                0,
+                120.25,
+                130.5,
+                '{"userName":"Disabled@example.org","active":false,"displayName":"Disabled"}',
+                200.5,
+            ),
+        ]
+    monkeypatch.setattr(legacy_schema_module.time, "time", lambda: 261.5)
+    assert await _directory(tmp_path).resolve_external("Alice@example.org", 260.6) == "active-account"
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT account_id, token_valid_after FROM gateway_accounts ORDER BY account_id",
+        ).fetchall() == [("active-account", 200.5), ("inactive-account", 200.5)]

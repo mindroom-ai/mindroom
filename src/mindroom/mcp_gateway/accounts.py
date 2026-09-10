@@ -33,19 +33,6 @@ class AccountValidationError(Exception):
     """A supported account field is invalid; never include submitted values."""
 
 
-def migrate_accounts(connection: sqlite3.Connection) -> None:
-    """Create the directory inside the caller's migration transaction."""
-    connection.execute("""CREATE TABLE IF NOT EXISTS gateway_accounts (
-        account_id TEXT PRIMARY KEY, user_name TEXT UNIQUE NOT NULL,
-        active INTEGER NOT NULL CHECK(active IN (0, 1)),
-        created_at REAL NOT NULL, updated_at REAL NOT NULL,
-        profile TEXT NOT NULL DEFAULT '{}', token_valid_after REAL NOT NULL
-    )""")
-    if "token_valid_after" not in {row["name"] for row in connection.execute("PRAGMA table_info(gateway_accounts)")}:
-        connection.execute("ALTER TABLE gateway_accounts ADD COLUMN token_valid_after REAL NOT NULL DEFAULT 0")
-        connection.execute("UPDATE gateway_accounts SET token_valid_after = ?", (time.time(),))
-
-
 def account_is_active(connection: sqlite3.Connection, account_id: str | None) -> bool:
     """Require a currently active immutable account, with no status cache."""
     return (

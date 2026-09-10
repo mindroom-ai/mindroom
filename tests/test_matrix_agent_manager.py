@@ -1223,6 +1223,53 @@ class TestAgentUserCreation:
 
     @pytest.mark.asyncio
     @patch("mindroom.matrix.users._register_user")
+    async def test_create_internal_user_legacy_state_uses_actual_username_as_original_request(
+        self,
+        mock_register: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """An account predating requested_username reuses only its persisted actual username."""
+        runtime_paths = _runtime_paths(tmp_path)
+        state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
+        state_file.parent.mkdir(parents=True)
+        state_file.write_text(
+            """accounts:
+  agent_user:
+    username: legacy_internal
+    password: existing_pass
+    domain: localhost
+    device_id: DEVICE
+    access_token: stored-token
+rooms: {}
+space_room_id: null
+""",
+            encoding="utf-8",
+        )
+
+        reused = await create_agent_user(
+            "http://localhost:8008",
+            INTERNAL_USER_AGENT_NAME,
+            "MindRoomUser",
+            runtime_paths,
+            username="legacy_internal",
+        )
+
+        assert reused.user_id == "@legacy_internal:localhost"
+        assert reused.password == "existing_pass"  # noqa: S105
+        assert reused.device_id == "DEVICE"
+        assert reused.access_token == "stored-token"  # noqa: S105
+        with pytest.raises(PermanentMatrixStartupError, match=r"mindroom_user\.username cannot be changed"):
+            await create_agent_user(
+                "http://localhost:8008",
+                INTERNAL_USER_AGENT_NAME,
+                "MindRoomUser",
+                runtime_paths,
+                username="different_internal",
+            )
+        mock_register.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.matrix.users._register_user")
     @patch("mindroom.matrix.users._get_agent_credentials")
     async def test_create_internal_user_allows_persisted_actual_username_drift(
         self,
