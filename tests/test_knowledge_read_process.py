@@ -338,9 +338,9 @@ async def test_native_error_logs_redacted_child_diagnostics(
 
 @pytest.mark.asyncio
 async def test_saturated_reads_leave_executor_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two blocked native reads must not let queued reads starve unrelated application work."""
+    """Four blocked native reads must not let queued reads starve unrelated application work."""
     release = Event()
-    active = [Event(), Event()]
+    active = [Event() for _ in range(4)]
     started: list[int] = []
 
     def blocked_child(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
@@ -352,10 +352,10 @@ async def test_saturated_reads_leave_executor_available(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(subprocess, "run", blocked_child)
     loop = asyncio.get_running_loop()
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         loop.set_default_executor(executor)
         tasks = [
-            asyncio.create_task(asyncio.to_thread(read_chroma, ReadRequest("unused", "published"))) for _ in range(4)
+            asyncio.create_task(asyncio.to_thread(read_chroma, ReadRequest("unused", "published"))) for _ in range(6)
         ]
         try:
             for _ in range(200):

@@ -468,7 +468,7 @@ The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can
 Published semantic searches and collection probes run in short-lived subprocesses.
 Embedding credentials and provider health stay in the application; query vectors, filters, and document data cross the typed read boundary.
 Each child exits after one operation, releasing its native Chroma memory.
-At most two read children run at once, with a 30-second timeout.
+At most four read children run at once, with a 30-second timeout.
 Async searches start the child while the parent obtains the query embedding, overlapping provider latency with child imports.
 Their deadline covers both embedding and native execution; synchronous searches and collection probes use the deadline for native execution.
 Queries spanning multiple bases search those bases sequentially so one query cannot exhaust the child limit.
