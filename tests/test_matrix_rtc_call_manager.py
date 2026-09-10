@@ -12,11 +12,12 @@ import aiohttp
 import httpx
 import nio
 import pytest
+from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.calls import CallsConfig, CascadedCallProfile, RealtimeCallProfile
+from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
@@ -42,10 +43,12 @@ from mindroom.matrix_rtc.events import (
     membership_state_key,
 )
 from mindroom.matrix_rtc.focus import SfuGrant
+from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
 from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
+    LiveVoiceAgentOptions,
     RealtimeVoiceBridge,
     VoiceAgentOptions,
 )
@@ -370,6 +373,30 @@ def _manager(
     )
 
 
+def _live_config(*, agent_model: str | None = None) -> Config:
+    """Configure Live credentials independently from the normal agent model."""
+    config = _config()
+    if agent_model is not None:
+        config.models[agent_model] = ModelConfig(provider="anthropic", id="claude-sonnet-5")
+    config.calls = CallsConfig.model_validate(
+        {
+            "enabled": True,
+            "profiles": {
+                "live": {
+                    "backend": "live",
+                    "model": "gpt-live-1",
+                    "credentials_service": "openai_live",
+                    "voice": "marin",
+                    "agent_model": agent_model,
+                },
+            },
+            "agents": {"helper": "live"},
+            "livekit_service_url": SERVICE_URL,
+        },
+    )
+    return config
+
+
 def _room(*, encrypted: bool = False, room_id: str = ROOM_ID) -> nio.MatrixRoom:
     room = nio.MatrixRoom(room_id=room_id, own_user_id=BOT_USER)
     room.encrypted = encrypted
@@ -428,6 +455,7 @@ def _stub_join_externals(monkeypatch: pytest.MonkeyPatch) -> None:
             tools=(),
             instructions="You are Helper.",
             execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=AsyncMock(return_value=CallAgentResponse("answer")),
         )
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
@@ -699,6 +727,89 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("agent_model", [None, "delegate"])
+async def test_manager_selects_live_backend_with_normal_agent_delegate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    agent_model: str | None,
+) -> None:
+    """Live gets its own credential and preserves the selected delegate and authorization."""
+    tooling_kwargs: dict[str, object] = {}
+    close_responder = AsyncMock()
+
+    async def respond(
+        transcript: str,
+        _on_tools_executed: Callable[[list[str]], None] | None,
+    ) -> CallAgentResponse:
+        return CallAgentResponse(f"Completed: {transcript}")
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tooling_kwargs.update(kwargs)
+        return CallAgentTooling(
+            tools=(),
+            instructions="Detailed private agent workspace instructions.",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=respond,
+            close=close_responder,
+        )
+
+    services: list[str] = []
+
+    def get_key(service: str, _runtime_paths: RuntimePaths) -> str | None:
+        services.append(service)
+        return {"openai_live": "sk-live", "openai": "sk-other"}.get(service)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_service", get_key)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, _live_config(agent_model=agent_model))
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+
+    options = bridge.agent_options
+    assert isinstance(options, LiveVoiceAgentOptions)
+    assert options.model == "gpt-live-1"
+    assert options.api_key == "sk-live"
+    assert options.voice == "marin"
+    assert options.respond is respond
+    assert options.close_responder is close_responder
+    assert "Detailed private agent workspace instructions." not in options.instructions
+    assert await options.respond("Check status", None) == CallAgentResponse("Completed: Check status")
+    assert services == ["openai_live"]
+    assert tooling_kwargs["enable_responder"] is True
+    assert tooling_kwargs["active_model_name"] == agent_model
+    assert tooling_kwargs["reconcile_spoken_response"] is False
+    assert str(tooling_kwargs["session_id"]).startswith(f"{ROOM_ID}:call:")
+    assert tooling_kwargs["requester_id"] == "@alice:example.org"
+    assert callable(tooling_kwargs["authorize_operation"])
+    assert options.on_conversation_turn is not None
+    assert options.on_tools_executed is not None
+    assert options.on_session_error is not None
+    assert options.on_session_terminated is not None
+    await manager.shutdown()
+
+
+def test_live_backend_requires_its_named_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A generic OpenAI key cannot silently satisfy the explicit Live binding."""
+    services: list[str] = []
+
+    def get_key(service: str, _runtime_paths: RuntimePaths) -> str | None:
+        services.append(service)
+        return "sk-other" if service == "openai" else None
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_service", get_key)
+    manager = _manager(_client(), FakeBridge(), tmp_path, _live_config())
+
+    assert manager.voice_backend_available is False
+    assert services == ["openai_live"]
+
+
+@pytest.mark.asyncio
 async def test_cascaded_agent_start_failure_tears_down_and_retries(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -925,6 +1036,7 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path) ->
         agents={
             "helper": AgentConfig(display_name="Helper"),
             "other": AgentConfig(display_name="Other"),
+            "speaker": AgentConfig(display_name="Speaker"),
         },
         models={},
         calls=CallsConfig(
@@ -937,10 +1049,17 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path) ->
                     voice="marin",
                 ),
                 "cascaded": CascadedCallProfile(backend="cascaded", stt=stt, tts=tts),
+                "live": LiveCallProfile(
+                    backend="live",
+                    model="gpt-live-1",
+                    credentials_service="openai_live",
+                    voice="marin",
+                ),
             },
             agents={
                 "helper": "realtime",
                 "other": "cascaded",
+                "speaker": "live",
             },
         ),
     )
@@ -971,9 +1090,23 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path) ->
 
     realtime_bridge = realtime_manager._bridge_factory("@helper:example.org:BOTDEV", False)
     cascaded_bridge = cascaded_manager._bridge_factory("@other:example.org:BOTDEV", False)
+    live_manager = CallManager(
+        agent_name="speaker",
+        config=config,
+        client=_client(),
+        runtime_paths=test_runtime_paths(tmp_path),
+        ssl_verify=True,
+        tool_support=object(),  # type: ignore[arg-type]
+        get_invited_rooms_by_agent=dict,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        response_admission_gate=ResponseAdmissionGate(),
+        wait_for_admission_or_shutdown=_admission_available,
+    )
+    live_bridge = live_manager._bridge_factory("@speaker:example.org:BOTDEV", False)
 
     assert isinstance(realtime_bridge, RealtimeVoiceBridge)
     assert isinstance(cascaded_bridge, CascadedVoiceBridge)
+    assert isinstance(live_bridge, LiveVoiceBridge)
     assert realtime_manager._call_config.backend == "realtime"
     assert realtime_manager._call_config.model == "gpt-realtime-custom"
     assert realtime_manager._call_config.voice == "marin"
@@ -1093,12 +1226,13 @@ async def test_manager_ignores_calls_outside_agent_rooms(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_manager_rejects_unauthorized_call_members(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", ["realtime", "live"])
+async def test_manager_rejects_unauthorized_call_members(tmp_path: Path, backend: str) -> None:
     """A participant must pass normal room authorization before the agent joins."""
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
-    config = _config()
+    config = _live_config() if backend == "live" else _config()
     _set_helper_access(config)
     manager = _manager(client, bridge, tmp_path, config)
 
@@ -1158,13 +1292,14 @@ async def test_manager_accepts_call_member_authorized_by_grant_room(tmp_path: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", ["realtime", "live"])
+async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_path: Path, backend: str) -> None:
     """A grant-room departure must end an active call without another call-room event."""
     grant_room_id = "!grant:example.org"
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
-    config = _config()
+    config = _live_config() if backend == "live" else _config()
     config.agents["helper"].rooms = [ROOM_ID, "grant"]
     _set_helper_access(config, members_of_rooms=["grant"])
     runtime_paths = test_runtime_paths(tmp_path)
@@ -3136,9 +3271,11 @@ async def test_call_events_cannot_bypass_pending_join_backoff(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_cascaded_retries_reuse_logical_call_session_id(
+@pytest.mark.parametrize("backend", ["cascaded", "live"])
+async def test_delegated_call_retries_reuse_logical_call_session_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    backend: str,
 ) -> None:
     """Media reconnects retain chat history until the remote call empties."""
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager._RECONCILE_RETRY_DELAYS_S", (0.0,))
@@ -3155,11 +3292,12 @@ async def test_cascaded_retries_reuse_logical_call_session_id(
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    manager = _manager(client, FakeBridge(), tmp_path, _cascaded_config())
+    config = _live_config() if backend == "live" else _cascaded_config()
+    manager = _manager(client, FakeBridge(), tmp_path, config)
     results = iter(("retry", "joined", "joined"))
 
     async def fake_join(room: nio.MatrixRoom, members: list[CallMember]) -> str:
-        await manager._build_tooling(room.room_id, requester_id=members[0].user_id, cascaded=True)
+        await manager._build_tooling(room.room_id, requester_id=members[0].user_id)
         return next(results)
 
     manager._join = fake_join  # type: ignore[method-assign]
@@ -3920,6 +4058,74 @@ def test_calls_config_rejects_unknown_cascaded_model() -> None:
                 agents={"helper": "voice"},
             ),
         )
+
+
+def test_live_calls_validate_delegate_model_separately_from_voice_model() -> None:
+    """Live accepts a provider model while its delegate must name a configured alias."""
+    calls = {
+        "profiles": {
+            "voice": {
+                "backend": "live",
+                "model": "gpt-live-1",
+                "credentials_service": "openai_live",
+                "voice": "marin",
+                "agent_model": "delegate",
+            },
+        },
+        "agents": {"helper": "voice"},
+    }
+    config = Config.model_validate(
+        {
+            "agents": {"helper": {"display_name": "Helper"}},
+            "models": {"delegate": {"provider": "anthropic", "id": "claude-sonnet-5"}},
+            "calls": calls,
+        },
+    )
+    assert config.calls.model_dump(exclude_defaults=True) == calls
+
+    calls["profiles"]["voice"]["agent_model"] = "missing"
+    with pytest.raises(ValueError, match=r"voice -> missing"):
+        Config.model_validate(
+            {"agents": {"helper": {"display_name": "Helper"}}, "models": {}, "calls": calls},
+        )
+
+
+@pytest.mark.parametrize("missing_field", ["credentials_service", "voice"])
+def test_live_calls_require_explicit_credentials_and_voice(missing_field: str) -> None:
+    """Live cannot select credentials or a voice implicitly."""
+    profile = {
+        "backend": "live",
+        "model": "gpt-live-1",
+        "credentials_service": "openai_live",
+        "voice": "marin",
+    }
+    profile.pop(missing_field)
+    with pytest.raises(ValidationError) as error:
+        CallsConfig.model_validate({"profiles": {"voice": profile}})
+    assert [(item["loc"], item["type"]) for item in error.value.errors()] == [
+        (("profiles", "voice", "live", missing_field), "missing"),
+    ]
+
+
+@pytest.mark.parametrize("service", ["", "../openai", "openai/live"])
+def test_live_calls_reject_invalid_credential_service(service: str) -> None:
+    """Live credential bindings use the same strict service names as realtime."""
+    with pytest.raises(ValidationError) as error:
+        CallsConfig.model_validate(
+            {
+                "profiles": {
+                    "voice": {
+                        "backend": "live",
+                        "model": "gpt-live-1",
+                        "credentials_service": service,
+                        "voice": "marin",
+                    },
+                },
+            },
+        )
+    assert [(item["loc"], item["type"]) for item in error.value.errors()] == [
+        (("profiles", "voice", "live", "credentials_service"), "value_error"),
+    ]
 
 
 def test_openai_compatible_speech_config_requires_endpoint() -> None:

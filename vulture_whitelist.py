@@ -333,6 +333,7 @@ _.load_or_create_ingestion_consumer  # inactive checkpoint contract (src/mindroo
 _.bind_ingestion_stream  # inactive checkpoint contract (src/mindroom/event_journal/store.py)
 AudioInput  # type-only SDK interface for the custom MatrixRTC audio stream
 _.on_attached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)
+_.on_enter  # LiveKit Agent lifecycle callback (src/mindroom/matrix_rtc/live_voice_agent.py)
 _.on_detached  # LiveKit AgentInput callback (src/mindroom/matrix_rtc/voice_agent.py)
 _.validate_extra_kwargs  # Pydantic validator (src/mindroom/config/voice.py)
 _.validate_host  # Pydantic validator (src/mindroom/config/voice.py)

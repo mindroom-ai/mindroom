@@ -35,7 +35,7 @@ from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.calls import CallsConfig, CascadedCallProfile
+from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -630,7 +630,7 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_call_agents(self) -> Config:
-        """Ensure call agents and cascaded model references are valid."""
+        """Ensure call agents and normal-agent model references are valid."""
         unknown_agents = sorted(set(self.calls.agents) - set(self.agents))
         if unknown_agents:
             msg = f"calls.agents references unknown agent(s): {', '.join(unknown_agents)}"
@@ -645,6 +645,17 @@ class Config(BaseModel):
         )
         if invalid_models:
             msg = "calls.profiles references unknown cascaded model(s): " + ", ".join(invalid_models)
+            raise ValueError(msg)
+
+        invalid_live_models = sorted(
+            f"{profile_name} -> {profile.agent_model}"
+            for profile_name, profile in self.calls.profiles.items()
+            if isinstance(profile, LiveCallProfile)
+            and profile.agent_model is not None
+            and profile.agent_model not in self.models
+        )
+        if invalid_live_models:
+            msg = "calls.profiles references unknown Live agent model(s): " + ", ".join(invalid_live_models)
             raise ValueError(msg)
 
         agents_by_room: dict[str, list[str]] = {}

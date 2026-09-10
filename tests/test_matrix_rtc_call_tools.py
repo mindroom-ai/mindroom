@@ -882,9 +882,11 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
 
 
 @pytest.mark.asyncio
-async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_functions(  # noqa: PLR0915
+@pytest.mark.parametrize("reconcile_spoken_response", [True, False], ids=["cascaded", "live"])
+async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_functions(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    reconcile_spoken_response: bool,
 ) -> None:
     """Cascaded transcripts reuse ai_response with full identity and a function-level call policy."""
     config = _config()
@@ -982,6 +984,11 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
         "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
         lambda **kwargs: persisted_interruptions.append(kwargs),
     )
+    if not reconcile_spoken_response:
+        monkeypatch.setattr(
+            "mindroom.matrix_rtc.call_tools._CallResponseTracker.register",
+            MagicMock(side_effect=AssertionError("Live results must not wait for speech reconciliation")),
+        )
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
@@ -992,6 +999,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
         authorize_operation=authorize_operation,
         session_id="!room:example.org:call:one",
         enable_responder=True,
+        reconcile_spoken_response=reconcile_spoken_response,
         voice_instructions="Speak briefly.",
         active_model_name="call_fast",
     )
@@ -1004,7 +1012,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
 
     assert response.text == "It is sunny."
     assert response.tool_names == ("weather",)
-    assert response.turn_id is not None
+    assert (response.turn_id is not None) == reconcile_spoken_response
     assert recorded_tool_uses == [["weather"]]
     authorization_allowed = False
     denied = await tooling.responder("Run another turn", recorded_tool_uses.append)
@@ -1035,25 +1043,32 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     )
-    assert tooling.finalize_spoken_response is not None
-    finalize = tooling.finalize_spoken_response(response.turn_id, "It is", True)
-    assert finalize is not None
-    await finalize
-    assert persisted_interruptions == [
-        {
-            "scope_context": SimpleNamespace(),
-            "session_id": "!room:example.org:call:one",
-            "run_id": "call-run-1",
-            "user_message": "What is the weather?",
-            "user_message_is_structured": False,
-            "partial_text": "It is",
-            "completed_tools": tuple(completed_tools),
-            "interrupted_tools": (),
-            "run_metadata": {"model": "same-chat-model"},
-            "is_team": False,
-            "original_status": RunStatus.cancelled,
-        },
-    ]
+    if reconcile_spoken_response:
+        assert tooling.finalize_spoken_response is not None
+        finalize = tooling.finalize_spoken_response(response.turn_id, "It is", True)
+        assert finalize is not None
+        await finalize
+    else:
+        assert tooling.finalize_spoken_response is None
+    assert persisted_interruptions == (
+        [
+            {
+                "scope_context": SimpleNamespace(),
+                "session_id": "!room:example.org:call:one",
+                "run_id": "call-run-1",
+                "user_message": "What is the weather?",
+                "user_message_is_structured": False,
+                "partial_text": "It is",
+                "completed_tools": tuple(completed_tools),
+                "interrupted_tools": (),
+                "run_metadata": {"model": "same-chat-model"},
+                "is_team": False,
+                "original_status": RunStatus.cancelled,
+            },
+        ]
+        if reconcile_spoken_response
+        else []
+    )
 
     async def cancel_before_playout(_turn: ResponseTurnContext, **cancel_kwargs: object) -> str:
         run_id_callback = cast("Callable[[str], None]", cancel_kwargs["run_id_callback"])
@@ -1089,12 +1104,16 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
 
     monkeypatch.setattr("mindroom.ai.ai_response", return_error_without_run_id)
     error_response = await tooling.responder("Trigger an error", recorded_tool_uses.append)
-    assert error_response.turn_id is not None
-    persist_error = tooling.finalize_spoken_response(error_response.turn_id, "provider failed", False)
-    assert persist_error is not None
-    await persist_error
+    if reconcile_spoken_response:
+        assert error_response.turn_id is not None
+        assert tooling.finalize_spoken_response is not None
+        persist_error = tooling.finalize_spoken_response(error_response.turn_id, "provider failed", False)
+        assert persist_error is not None
+        await persist_error
+    else:
+        assert error_response.turn_id is None
     assert str(persisted_interruptions[-1]["run_id"]).startswith("!room:example.org:call:one:turn:")
-    assert persisted_interruptions[-1]["partial_text"] == "provider failed"
+    assert persisted_interruptions[-1]["partial_text"] == ("provider failed" if reconcile_spoken_response else "")
     assert persisted_interruptions[-1]["original_status"] is RunStatus.error
 
     tool_filter = cast("Callable[[Function], bool]", kwargs["tool_function_filter"])

@@ -304,7 +304,24 @@ class CascadedVoiceAgentOptions:
     on_session_error: Callable[[str], None] | None = None
 
 
-type CallVoiceAgentOptions = VoiceAgentOptions | CascadedVoiceAgentOptions
+@dataclass(frozen=True)
+class LiveVoiceAgentOptions:
+    """GPT-Live speech with delegation to the normal MindRoom agent."""
+
+    instructions: str
+    model: str
+    api_key: str
+    voice: str
+    respond: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]]
+    close_responder: Callable[[], Awaitable[None]] | None = None
+    greeting_instructions: str | None = None
+    on_conversation_turn: Callable[[str, str], None] | None = None
+    on_tools_executed: Callable[[list[str]], None] | None = None
+    on_session_terminated: Callable[[bool], None] | None = None
+    on_session_error: Callable[[str], None] | None = None
+
+
+type CallVoiceAgentOptions = VoiceAgentOptions | CascadedVoiceAgentOptions | LiveVoiceAgentOptions
 
 
 class RealtimeVoiceBridge:
