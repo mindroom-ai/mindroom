@@ -1849,11 +1849,21 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["ready", "failing"])
+@pytest.mark.parametrize(
+    ("state", "failure_reason"),
+    [
+        ("waiting", None),
+        ("ready", None),
+        ("claimed", None),
+        ("failing", None),
+        ("failing", response_runner._INTERRUPTED_APPROVAL_RECOVERY_REASON),
+    ],
+)
 @pytest.mark.parametrize("cards_expired", [True, False])
 async def test_deleted_approval_recovery_expires_cards_without_editing_or_executing(
     tmp_path: Path,
     state: str,
+    failure_reason: str | None,
     *,
     cards_expired: bool,
 ) -> None:
@@ -1889,6 +1899,7 @@ async def test_deleted_approval_recovery_expires_cards_without_editing_or_execut
         source_event_ids=("$source",),
         calls=(),
         state=state,
+        failure_reason=failure_reason,
     )
     assert await store.create_approval_continuation(continuation) is not None
     await bot._journal_store.backend.write(
@@ -1926,6 +1937,7 @@ async def test_deleted_approval_recovery_expires_cards_without_editing_or_execut
     with (
         patch("mindroom.approval_response.approval_manager.get_approval_store", return_value=manager),
         patch.object(DeliveryGateway, "edit_text", new=edit),
+        patch("mindroom.response_runner.fetch_latest_visible_body", new=AsyncMock(return_value=None)) as fetch_body,
     ):
         handled, _ = await runner._recover_nonready_approval(
             continuation,
@@ -1935,6 +1947,7 @@ async def test_deleted_approval_recovery_expires_cards_without_editing_or_execut
     assert handled
     expire.assert_awaited_once_with(continuation.approval_id)
     edit.assert_not_awaited()
+    fetch_body.assert_not_awaited()
     assert await store.is_pending("$source") is not cards_expired
     remaining = await store.approval_continuation(continuation.approval_id)
     assert (remaining is None) is cards_expired

@@ -1589,6 +1589,12 @@ class ResponseRunner:
             if requested is None:
                 return False
             failing = requested
+        initial = await self.deps.approval_store.load_matrix_delivery(
+            delivery_id=failing.source_event_ids[0],
+            stage=DeliveryStage.INITIAL,
+        )
+        if initial is not None and initial.retired:
+            return await self._approval_responses.settle_failure(failing, reason)
         update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
         if update is None:
             return False
