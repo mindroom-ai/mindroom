@@ -62,6 +62,8 @@ def load_private_instance_legacy_alias(base_storage_path: Path, worker_key: str)
         info = alias.lstat()
     except FileNotFoundError:
         return None
+    if stat.S_ISDIR(info.st_mode):
+        return None  # An unmigrated directory grants no additional mount access.
     if not stat.S_ISLNK(info.st_mode):
         _raise_invalid_record("legacy alias must be a symlink")
     # Read the literal target: Path normalization would accept './name' as 'name'.

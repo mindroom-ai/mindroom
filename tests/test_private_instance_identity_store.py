@@ -73,7 +73,7 @@ def test_load_alias_requires_existing_namespace_provenance(tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     "damage",
-    ["absolute", "relative_dot", "chain", "missing", "real", "owner", "canonical_link", "wrong_hash"],
+    ["absolute", "relative_dot", "chain", "missing", "file", "owner", "canonical_link", "wrong_hash"],
 )
 def test_load_alias_rejects_invalid_owner_or_link(tmp_path: Path, damage: str) -> None:
     """Aliases must bind one literal sibling name to its real current owner directory."""
@@ -86,8 +86,8 @@ def test_load_alias_rejects_invalid_owner_or_link(tmp_path: Path, damage: str) -
     elif damage == "chain":
         (old.parent / "chain").symlink_to(new.name)
         old.symlink_to("chain")
-    elif damage == "real":
-        old.mkdir()
+    elif damage == "file":
+        old.write_bytes(b"not a scope or alias")
     else:
         old.symlink_to(new.name)
         if damage == "missing":
