@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadExportConfig
 from mindroom.config.main import Config
@@ -200,6 +201,27 @@ async def test_startup_preserves_recordless_scopes_without_adopting_them(
     if verified_neighbor:
         assert neighbor.is_symlink()
         assert load_private_instance_identity(paths.storage_root, neighbor.resolve()).requester_id == "bob"
+
+
+@pytest.mark.asyncio
+async def test_empty_recordless_primary_warns_for_retained_session_history(tmp_path: Path) -> None:
+    """Operators must hear about retained data even when only its session mirror is populated."""
+    migration = importlib.import_module("mindroom.legacy_private_storage")
+    paths = _paths(tmp_path)
+    primary = private_instance_scope_root_path(paths.storage_root, _OLD)
+    primary.mkdir(parents=True)
+    mirror = resolve_session_state_root(primary, paths)
+    mirror.mkdir(parents=True)
+    history = mirror / "history.db"
+    history.write_bytes(b"retained session history")
+
+    with capture_logs() as logs:
+        await migration.migrate_private_storage(paths)
+
+    assert any(entry["log_level"] == "warning" and entry.get("scope") == str(primary) for entry in logs)
+    assert history.read_bytes() == b"retained session history"
+    assert list(primary.iterdir()) == []
+    assert not private_instance_scope_root_path(paths.storage_root, _NEW).exists()
 
 
 @pytest.mark.asyncio

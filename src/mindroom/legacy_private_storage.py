@@ -227,8 +227,7 @@ def _discover(roots: tuple[Path, Path]) -> list[_Intent]:
         record = scope / _RECORD
         payload = load_private_instance_record_payload(record)
         if payload is None and not record.exists():
-            if any(scope.iterdir()):
-                logger.warning("Preserving private scope without an owner record; not migrating", scope=str(scope))
+            logger.warning("Preserving private scope without an owner record; not migrating", scope=str(scope))
             # Retain its session mirror too, without claiming either directory.
             known_names.add(scope.name)
             continue
