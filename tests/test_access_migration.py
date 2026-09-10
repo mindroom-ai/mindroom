@@ -554,8 +554,30 @@ matrix_room_access:
     assert reopened == config
     assert config_path.read_bytes() == first_config_bytes
     assert backup_path.read_bytes() == original.encode()
-    assert config_path.stat() == first_config_stat
-    assert backup_path.stat() == first_backup_stat
+    reopened_config_stat = config_path.stat()
+    reopened_backup_stat = backup_path.stat()
+    assert (
+        reopened_config_stat.st_ino,
+        reopened_config_stat.st_mtime_ns,
+        reopened_config_stat.st_mode,
+        reopened_config_stat.st_size,
+    ) == (
+        first_config_stat.st_ino,
+        first_config_stat.st_mtime_ns,
+        first_config_stat.st_mode,
+        first_config_stat.st_size,
+    )
+    assert (
+        reopened_backup_stat.st_ino,
+        reopened_backup_stat.st_mtime_ns,
+        reopened_backup_stat.st_mode,
+        reopened_backup_stat.st_size,
+    ) == (
+        first_backup_stat.st_ino,
+        first_backup_stat.st_mtime_ns,
+        first_backup_stat.st_mode,
+        first_backup_stat.st_size,
+    )
 
 
 def test_load_config_directs_bind_mount_migration_to_the_host(

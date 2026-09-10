@@ -17704,6 +17704,39 @@ The remaining rows were already focused boundaries and complete the current map.
 | [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
 
+## Python provenance and regression coverage
+
+Each historical Python boundary carries a source block naming its legacy format, last native old writer and replacement, current handling, and meaningful regression coverage.
+Those source blocks are authoritative for exact release details and test node IDs; this index groups boundaries that share a behavioral test surface.
+`Last legacy release` means the final stable tagged release whose native writer or typed model emitted the old representation, not the final reader that accepted it.
+Continued acceptance or reader removal belongs in `Handling`, separate from the writer cutoff and replacement release.
+When no stable tag contained an old native writer, the block uses an honest unreleased, unversioned external-input, or no-tagged-model classification; schema-based recovery likewise states that it has no single release cutoff.
+
+| Boundary owners | Behavioral evidence |
+| --- | --- |
+| [`mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | [Gateway OAuth][gateway-oauth-tests], [capacity][gateway-capacity-tests], [lifecycle][gateway-lifecycle-tests], and [account][gateway-account-tests] tests exercise the staged schema upgrades and released token cutoff. |
+| [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover precedence and retained duplicates. |
+| [`legacy_openai_tool_replay.py`][legacy-openai] | [OpenAI model tests][openai-model-tests] cover missing arguments, streamed placeholders, matching orphan results, copying, and input nonmutation. |
+| [`legacy_handled_turns.py`][legacy-handled] and [`event_journal/legacy_turn_records.py`][legacy-turn-records] | [Handled-turn tests][handled-turn-tests] cover released JSON shapes, the deliberate unversioned cutoff, interrupted adoption, occupied indexes, reopen behavior, and reconstructed replay facts. |
+| [`event_journal/legacy_schema.py`][journal-legacy-schema] | [Journal upgrade tests][journal-upgrade-tests] start from literal pre-Nio DDL and verify retained history and terminal facts, retired unfinished work, and stable repeat opening. |
+| [`legacy_delivery_payloads.py`][legacy-delivery] and [`legacy_approval_payloads.py`][legacy-approval] | [Journal store][journal-store-tests], [response runner][response-runner-tests], and [approval][approval-tests] tests cover visible-result precedence, wire sanitation, frozen visibility, origin recovery, and sparse card identity. |
+| [`matrix/legacy_sync_continuity.py`][legacy-sync] and [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | [Sync-continuity tests][sync-continuity-tests] cover complete v2/v3 conversion and retry, while [crypto upgrade tests][crypto-upgrade-tests] verify that identity, keys, and trust survive retirement of transport recovery. |
+| [`script_runs/legacy_schema.py`][script-legacy-schema] | [Script-run tests][script-run-tests] rebuild the literal old table, preserve every old value, add empty resource snapshots, and verify a second open. |
+| [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
+| [`matrix/legacy_state.py`][matrix-legacy-state] and [`matrix/users.py`][matrix-users] | [Matrix identity][matrix-identity-tests] and [agent manager][matrix-agent-tests] tests preserve durable account state, verify stable reloads, and exercise the missing-request fallback without network registration. |
+| [`config/legacy_access.py`][access-legacy] and [`config/legacy_fields.py`][config-legacy] | [Access migration tests][access-migration-tests] cover validated conversion, exact backup bytes, stable publication, and rejection paths; [configuration tests][agent-config-tests] cover every directed retired-field error. |
+| [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
+| [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
+| [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
+| [`execution_preparation.py`][execution-preparation] and [`streaming.py`][streaming] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical markers, current structured-status precedence, and interruption classification. |
+| [`session_storage_preflight.py`][session-preflight] | [Session recovery tests][session-recovery-tests] cover schema-based archive, locks, rollback recovery, unrelated tables, current corruption, and byte preservation without inventing one release cutoff. |
+| [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert exact shared-domain and host-only expiry cookies on both endpoints and retain current host-only behavior for localhost, IP addresses, and single-label hosts. |
+
+This index intentionally excludes current authoring shorthands, protocol adapters, recovery rules, and caches that tolerate unknown versions because those are active interfaces rather than evidence of a retired native writer.
+Sparse publication, job, and failure fields in [`knowledge/index_metadata.py`][knowledge-index] remain a current writer contract: the writer still omits optional values and the reader accepts those sparse in-progress and failed records.
+Dependency-owned schemas remain attributed to their dependency, and removed readers remain documented as removed rather than recreated only to obtain conversion coverage.
+The coverage delivered here is limited to Python owners, including the SSO route; inventoried SQL migrations, browser cleanup, and infrastructure setup below remain outside this implementation and carry no new annotation or test claim.
+
 ## Journal, delivery, approvals, and sync
 
 Journal IDs use `J` to avoid colliding with credential IDs.
@@ -17732,7 +17765,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S1 | Isolated | [`script_runs/legacy_schema.py`][script-legacy-schema] adds old missing resource columns inside the current store transaction. |
 | S2 | Isolated | [`knowledge/legacy_metadata.py`][knowledge-legacy] normalizes absent or empty optional filters. |
 | S3 | Isolated | [`knowledge/legacy_metadata.py`][knowledge-legacy] retains empty historical sentinels for missing corpus settings, rebuilding only when the corresponding current corpus-compatibility value differs. |
-| S4 | Tiny retained default | [`knowledge/index_metadata.py`][knowledge-index] keeps sparse publication, job, and failure lifecycle fields. |
+| S4 | Current behavior | [`knowledge/index_metadata.py`][knowledge-index] deliberately writes and reads sparse publication, job, and failure lifecycle fields. |
 | S5 | Current behavior | [`knowledge/collections.py`][knowledge-collections] protects current default and live collections as well as older published layouts. |
 | S6 | Tiny retained default | [`memory/auto_flush.py`][auto-flush] discards two retired location fields while current worker identity sanitation and queue defaults remain. |
 | S7 | Removed/superseded | [`memory/functions.py`][memory-functions] no longer contains or exports the monolithic memory-prompt wrapper. |
@@ -17912,6 +17945,37 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [workflow-api]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/api/dynamic_workflows.py
 [execution-preparation]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/execution_preparation.py
 [streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/streaming.py
+[access-migration-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_access_migration.py
+[agent-config-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agents.py
+[agent-runs-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agent_storage_runs.py
+[approval-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_tool_approval.py
+[cli-connect-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_cli_connect.py
+[crypto-upgrade-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_legacy_crypto_upgrade.py
+[gateway-account-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_mcp_gateway_accounts.py
+[gateway-capacity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_mcp_gateway_oauth_capacity.py
+[gateway-lifecycle-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_mcp_gateway_lifecycle.py
+[gateway-oauth-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_mcp_gateway_oauth.py
+[handled-turn-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_handled_turns.py
+[journal-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_event_journal_store.py
+[journal-upgrade-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_journal_upgrade_boundary.py
+[knowledge-indexing-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_knowledge_indexing_config.py
+[matrix-agent-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_agent_manager.py
+[matrix-identity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_matrix_identity.py
+[memory-flush-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_memory_auto_flush.py
+[oauth-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_oauth_credential_store.py
+[openai-model-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_openai_models.py
+[partial-reply-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_partial_reply_context.py
+[private-storage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_private_storage_migration.py
+[report-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_report_publishing.py
+[response-runner-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_response_runner_focused.py
+[script-run-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_script_run_store.py
+[session-recovery-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agent_session_storage_recovery.py
+[sso-cookie-tests]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/tests/test_sso_cookie_attrs.py
+[streaming-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_streaming_behavior.py
+[sync-continuity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_sync_continuity_store.py
+[trigger-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_external_trigger_replay_store.py
+[usage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_usage_stats_storage.py
+[workflow-scheduling-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_workflow_scheduling.py
 
 # Deployment
 
