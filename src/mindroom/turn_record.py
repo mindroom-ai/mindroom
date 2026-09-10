@@ -9,6 +9,7 @@ from enum import Enum
 from types import MappingProxyType
 
 from mindroom.history.types import HistoryScope
+from mindroom.legacy_revision_replay import preserve_summary_provenance
 from mindroom.message_target import MessageTarget
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 
@@ -761,8 +762,7 @@ def sanitize_revision_replay(  # noqa: C901
             )
         elif old.response_event_id is not None and new.response_event_id is None:
             replay[event_id] = replace(new, response_event_id=old.response_event_id)
-        if old.legacy_summary_provenance:
-            replay[event_id] = replace(replay[event_id], legacy_summary_provenance=True)
+        replay[event_id] = preserve_summary_provenance(replay[event_id], old)
     for event_id in tombstoned_event_ids:
         value = replay.get(event_id)
         if value is not None and not value.redacted:

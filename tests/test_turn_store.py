@@ -3722,20 +3722,35 @@ async def test_edit_snapshot_rechecks_after_awaited_source_preparation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("explicit_revision_replay", "historical_summary_owner"),
+    [
+        pytest.param(None, True, id="historical-summary-only"),
+        pytest.param(
+            RevisionReplay("$user_msg", 10, response_event_id="$reply"),
+            False,
+            id="modern-per-revision",
+        ),
+    ],
+)
 async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     journal_store: EventJournalStore,
     tmp_path: Path,
+    explicit_revision_replay: RevisionReplay | None,
+    historical_summary_owner: bool,
 ) -> None:
-    """Legacy summaries lacking physical IDs are invalidated only through retained owners."""
+    """Only legacy summaries lacking physical IDs use retained source ownership."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="agent", scope_id="agent")
     original = replace(
         _owned_turn_record(target),
         source_event_prompts={"$user_msg": "DELETED_EDIT_MARKER"},
         source_event_revisions={"$user_msg": (10, "$physical-edit")},
+        revision_replay=(None if explicit_revision_replay is None else {"$physical-edit": explicit_revision_replay}),
     )
     raw = TurnRecordCodec._to_ledger_record(original)
-    raw.pop("revision_replay")
+    if explicit_revision_replay is None:
+        raw.pop("revision_replay")
     await journal_store.turn_records("agent").upsert(
         index_event_ids=original.indexed_event_ids,
         anchor_event_id="$user_msg",
@@ -3764,6 +3779,13 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     storage = storage_factory()
     persisted = get_agent_session(storage, target.session_id)
     assert persisted is not None
-    assert persisted.summary is None
-    assert store.get_turn_record("$user_msg").replay_source_event_ids == ("$user_msg",)
+    if historical_summary_owner:
+        assert persisted.summary is None
+    else:
+        assert persisted.summary is not None
+        assert persisted.summary.summary == "DELETED_EDIT_MARKER"
+    owner = store.get_turn_record("$user_msg")
+    assert owner is not None
+    assert owner.replay_source_event_ids == ("$user_msg",)
+    assert owner.revision_replay["$physical-edit"].legacy_summary_provenance is historical_summary_owner
     storage.close()
