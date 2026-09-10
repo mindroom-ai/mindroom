@@ -1336,6 +1336,39 @@ class TestPendingEventWorker:
         assert handled == ["$first"]
         assert {event.event_id for event in await alice.pending()} == {"$first", "$second"}
 
+    async def test_owner_lost_within_one_page_rewinds_before_later_callback(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An earlier handoff can die while the same page checks its next source."""
+        owner_live = True
+        handled: list[str] = []
+
+        class OwnerLostDuringRead(_FlakyReplayView):
+            async def is_pending(self, event_id: str) -> bool:
+                nonlocal owner_live
+                if event_id == "$later":
+                    owner_live = False
+                return await super().is_pending(event_id)
+
+        async def handle(event: JournalEvent) -> bool:
+            handled.append(event.event_id)
+            return event.event_id != "$earlier" or not owner_live
+
+        for event_id in ("$earlier", "$later"):
+            await self._admit(alice, text_event(event_id))
+        worker = PendingEventWorker(
+            store=OwnerLostDuringRead(alice),
+            handle=handle,
+            deferral_is_live=lambda _event: owner_live,
+        )
+        try:
+            await asyncio.wait_for(worker.drain_once(), timeout=5)
+            assert handled == ["$earlier", "$earlier", "$later"]
+            assert await alice.unsettled_event_ids() == frozenset()
+        finally:
+            await worker.stop()
+
     @pytest.mark.parametrize("boundary", ["handler", "pending_check"])
     async def test_shutdown_stops_admission_after_cancellation_is_absorbed(
         self,

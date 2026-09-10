@@ -369,11 +369,11 @@ class PendingEventWorker:
         ):
             del self._room_retries[room_id]
 
-    def _reclaim_room_deferrals(self, room_id: str, seen: set[str]) -> None:
+    def _reclaim_room_deferrals(self, room_id: str, newly_unowned: set[str]) -> None:
         """Only the reserved lane can replace a dead owner with room replay."""
         progress = self._rooms[room_id]
         for event in tuple(self._deferred.values()):
-            if event.room_id != room_id or event.event_id in seen or self.deferral_is_live(event):
+            if event.room_id != room_id or event.event_id in newly_unowned or self.deferral_is_live(event):
                 continue
             rewind = event.receipt_order - 1
             previous = progress.rewind_before
@@ -398,13 +398,13 @@ class PendingEventWorker:
         # the cursor was already before the newly eligible source.
         return True
 
-    async def _run_room_event(self, event: JournalEvent, seen: set[str]) -> bool:
+    async def _run_room_event(self, event: JournalEvent, seen: set[str], newly_unowned: set[str]) -> bool:
         """Admit against current ownership; False stops the current page."""
         if self._stopped:
             return False
         room_id = event.room_id
         progress = self._rooms[room_id]
-        self._reclaim_room_deferrals(room_id, seen)
+        self._reclaim_room_deferrals(room_id, newly_unowned)
         if self._apply_rewind(progress):
             return False
         if event.event_id in self._deferred:
@@ -415,13 +415,18 @@ class PendingEventWorker:
         pending = await self.store.is_pending(event.event_id)
         if self._stopped:
             return False
-        self._reclaim_room_deferrals(room_id, seen)
+        self._reclaim_room_deferrals(room_id, newly_unowned)
         if self._apply_rewind(progress):
             return False
         if not pending:
             self._deferred.pop(event.event_id, None)
         elif not await self.handle(event):
             self._deferred[event.event_id] = event
+            if not self.deferral_is_live(event):
+                # The downstream owner can finish before the callback returns.
+                # Leave an already ownerless handoff to the next probe, avoiding
+                # repeated dispatch within this pass.
+                newly_unowned.add(event.event_id)
         else:
             self._deferred.pop(event.event_id, None)
             await self.store.settle(event.event_id)
@@ -433,11 +438,12 @@ class PendingEventWorker:
         """Own selection, callback order, and the continuation of one room."""
         progress = self._rooms[room_id]
         seen: set[str] = set()
+        newly_unowned: set[str] = set()
         event: JournalEvent | None = None
         try:
             for _ in range(_MAX_SCAN_PAGES):
                 event = None
-                self._reclaim_room_deferrals(room_id, seen)
+                self._reclaim_room_deferrals(room_id, newly_unowned)
                 self._apply_rewind(progress)
                 page = await self.store.pending(
                     room_id=room_id,
@@ -447,14 +453,14 @@ class PendingEventWorker:
                 )
                 if self._stopped:
                     return _RoomPass(len(seen))
-                self._reclaim_room_deferrals(room_id, seen)
+                self._reclaim_room_deferrals(room_id, newly_unowned)
                 if self._apply_rewind(progress):
                     continue
                 for event in page:
-                    if not await self._run_room_event(event, seen):
+                    if not await self._run_room_event(event, seen, newly_unowned):
                         return _RoomPass(len(seen), more=not self._stopped)
                 progress.cursor = page.resume_after
-                self._reclaim_room_deferrals(room_id, seen)
+                self._reclaim_room_deferrals(room_id, newly_unowned)
                 if self._apply_rewind(progress):
                     continue
                 if page.reached_end:
