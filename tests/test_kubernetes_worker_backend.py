@@ -3026,6 +3026,66 @@ def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
     assert handle.worker_id not in core_api.secrets
 
 
+@pytest.mark.parametrize("stored_status", ["ready", "starting", "failed"])
+def test_kubernetes_backend_unready_workers_respect_idle_expiry(stored_status: str) -> None:
+    """Only previously ready workers expire after losing pod readiness."""
+    backend, apps_api, core_api = _backend(idle_timeout_seconds=5.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    deployment = apps_api.deployments[handle.worker_id]
+    deployment.status.ready_replicas = 0
+    deployment.metadata.annotations["mindroom.ai/worker-status"] = stored_status
+
+    assert backend.cleanup_idle_workers(now=4.0) == []
+    assert deployment.spec.replicas == 1
+    cleaned = backend.cleanup_idle_workers(now=10.0)
+
+    if stored_status == "ready":
+        assert [worker.worker_id for worker in cleaned] == [handle.worker_id]
+        assert deployment.spec.replicas == 0
+        assert handle.worker_id not in core_api.services
+        assert handle.worker_id not in core_api.secrets
+    else:
+        assert cleaned == []
+        assert deployment.spec.replicas == 1
+        assert handle.worker_id in core_api.services
+        assert handle.worker_id in core_api.secrets
+
+
+def test_kubernetes_backend_cleanup_skips_locked_worker() -> None:
+    """Maintenance must leave an in-flight ensure alone and continue other cleanup."""
+    backend, apps_api, _core_api = _backend(idle_timeout_seconds=5.0)
+    held = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    free = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_B), now=0.0)
+
+    with backend._worker_lock(held.worker_key):
+        cleaned = backend.cleanup_idle_workers(now=10.0)
+
+    assert [worker.worker_id for worker in cleaned] == [free.worker_id]
+    assert apps_api.deployments[held.worker_id].spec.replicas == 1
+
+
+@pytest.mark.parametrize("change", ["touch", "ensure", "delete"])
+def test_kubernetes_backend_cleanup_revalidates_list_snapshot(change: str) -> None:
+    """A stale idle nomination cannot undo newer worker use or recreate deleted state."""
+    backend, apps_api, core_api = _backend(idle_timeout_seconds=5.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    stale_deployment = deepcopy(apps_api.deployments[handle.worker_id])
+    if change == "touch":
+        backend.touch_worker(handle.worker_key, now=9.0)
+    elif change == "ensure":
+        backend.ensure_worker(WorkerSpec(handle.worker_key), now=9.0)
+    else:
+        del apps_api.deployments[handle.worker_id]
+
+    cleaned = backend._cleanup_idle_deployments([stale_deployment], now=10.0)
+
+    assert cleaned == []
+    assert handle.worker_id in core_api.services
+    assert handle.worker_id in core_api.secrets
+    if change != "delete":
+        assert apps_api.deployments[handle.worker_id].spec.replicas == 1
+
+
 def test_kubernetes_backend_cleanup_is_idempotent_for_already_idle_workers() -> None:
     """Cleanup should not report or patch workers that are already scaled to zero."""
     backend, apps_api, _core_api = _backend(idle_timeout_seconds=5.0)
@@ -3174,7 +3234,8 @@ def test_kubernetes_backend_failure_invalidates_ready_cache() -> None:
     assert _kubernetes_api_call_counts(apps_api, core_api) != calls_after_failure
 
 
-def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Path) -> None:
+@pytest.mark.parametrize("crashed", [False, True])
+def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Path, *, crashed: bool) -> None:
     """Reconciliation should recreate scaled-down workers whose pod template drifted from current config."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -3182,7 +3243,10 @@ def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Pa
     )
     backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
-    backend.cleanup_idle_workers(now=80.0)
+    if crashed:
+        apps_api.deployments[handle.worker_id].status.ready_replicas = 0
+    else:
+        backend.cleanup_idle_workers(now=80.0)
 
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)

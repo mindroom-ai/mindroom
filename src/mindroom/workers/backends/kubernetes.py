@@ -643,29 +643,41 @@ class KubernetesWorkerBackend:
         *,
         now: float,
     ) -> list[WorkerHandle]:
-        """Scale idle workers from one already-loaded Deployment snapshot."""
+        """Nominate idle workers from a snapshot, then recheck under their startup lock."""
         cleaned: list[WorkerHandle] = []
         for deployment in deployments:
             handle = self._handle_from_deployment(deployment, now=now)
             if handle.status != "idle" or int(deployment.spec.replicas or 0) == 0:
                 continue
-            annotations = dict(deployment.metadata.annotations or {})
-            resources.apply_lifecycle_annotations(
-                annotations,
-                mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=now)),
-            )
-            self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
-            self._resources.delete_service(handle.worker_id)
-            self._resources.delete_secret(handle.worker_id)
-            self._invalidate_ready_worker(handle.worker_key)
-            cleaned.append(
-                self._handle_from_deployment(
-                    deployment,
-                    now=now,
-                    annotations_override=annotations,
-                    replicas_override=0,
-                ),
-            )
+            worker_lock = self._worker_lock(handle.worker_key)
+            if not worker_lock.acquire(blocking=False):
+                continue
+            try:
+                live = self._resources.read_deployment(handle.worker_id)
+                if live is None:
+                    continue
+                handle = self._handle_from_deployment(live, now=now)
+                if handle.status != "idle" or int(live.spec.replicas or 0) == 0:
+                    continue
+                annotations = dict(live.metadata.annotations or {})
+                resources.apply_lifecycle_annotations(
+                    annotations,
+                    mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=now)),
+                )
+                self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
+                self._resources.delete_service(handle.worker_id)
+                self._resources.delete_secret(handle.worker_id)
+                self._invalidate_ready_worker(handle.worker_key)
+                cleaned.append(
+                    self._handle_from_deployment(
+                        live,
+                        now=now,
+                        annotations_override=annotations,
+                        replicas_override=0,
+                    ),
+                )
+            finally:
+                worker_lock.release()
         return cleaned
 
     def _reconcile_drifted_deployments(
@@ -1063,7 +1075,10 @@ class KubernetesWorkerBackend:
         replicas = int(deployment.spec.replicas or 0) if replicas_override is None else replicas_override
         if replicas == 0:
             return "idle"
+        last_used_at = resources.parse_annotation_float(annotations, resources.ANNOTATION_LAST_USED_AT, now)
+        idle_status = effective_idle_status("ready", last_used_at, self.idle_timeout_seconds, now)
+        if stored_status == "ready" and idle_status == "idle":
+            return "idle"
         if not self._deployment_ready(deployment):
             return "starting"
-        last_used_at = resources.parse_annotation_float(annotations, resources.ANNOTATION_LAST_USED_AT, now)
-        return effective_idle_status("ready", last_used_at, self.idle_timeout_seconds, now)
+        return idle_status
