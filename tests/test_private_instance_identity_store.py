@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import private_instance_identity_store as store
+from mindroom import private_storage_compat as compat
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ def _owner(base: Path, key: str = _NEW, requester: str = _REQUESTER) -> Path:
 )
 def test_reconstruct_historical_key(key: str, requester: str, expected: str) -> None:
     """Exact historical and current private shapes reconstruct the same retained name."""
-    assert store.historical_private_instance_worker_key(key, requester) == expected
+    assert compat.historical_private_instance_worker_key(key, requester) == expected
 
 
 @pytest.mark.parametrize(
@@ -55,17 +56,17 @@ def test_reconstruct_historical_key(key: str, requester: str, expected: str) -> 
 def test_reconstruct_historical_key_rejects_mismatched_shape(key: str) -> None:
     """A scope prefix alone cannot hide a different requester or extra key segments."""
     with pytest.raises(store.PrivateInstanceIdentityError):
-        store.historical_private_instance_worker_key(key, "alice")
+        compat.historical_private_instance_worker_key(key, "alice")
 
 
 def test_load_alias_requires_existing_namespace_provenance(tmp_path: Path) -> None:
     """Current owner records do not imply that an old path was ever owned."""
-    assert store.load_private_instance_legacy_alias(tmp_path, _NEW) is None
+    assert compat.load_private_instance_legacy_alias(tmp_path, _NEW) is None
     new = _owner(tmp_path)
-    assert store.load_private_instance_legacy_alias(tmp_path, _NEW) is None
+    assert compat.load_private_instance_legacy_alias(tmp_path, _NEW) is None
     old = private_instance_scope_root_path(tmp_path, _OLD)
     old.symlink_to(new.name, target_is_directory=True)
-    assert store.load_private_instance_legacy_alias(tmp_path, _NEW) == old
+    assert compat.load_private_instance_legacy_alias(tmp_path, _NEW) == old
     with pytest.raises(store.PrivateInstanceIdentityError):
         store.load_private_instance_identity(tmp_path, old)
 
@@ -106,7 +107,7 @@ def test_load_alias_rejects_invalid_owner_or_link(tmp_path: Path, damage: str) -
                 old.unlink()
                 old.symlink_to(saved.name)
     with pytest.raises(store.PrivateInstanceIdentityError):
-        store.load_private_instance_legacy_alias(tmp_path, _NEW)
+        compat.load_private_instance_legacy_alias(tmp_path, _NEW)
 
 
 def test_historical_collision_never_selects_another_owner(tmp_path: Path) -> None:
@@ -121,7 +122,7 @@ def test_historical_collision_never_selects_another_owner(tmp_path: Path) -> Non
     old.symlink_to(first.name)
     (first / "credentials.bin").write_bytes(b"first owner")
     (second / "credentials.bin").write_bytes(b"second owner")
-    assert store.load_private_instance_legacy_alias(tmp_path, first_key) == old
-    assert store.load_private_instance_legacy_alias(tmp_path, second_key) is None
+    assert compat.load_private_instance_legacy_alias(tmp_path, first_key) == old
+    assert compat.load_private_instance_legacy_alias(tmp_path, second_key) is None
     assert store.load_private_instance_identity(tmp_path, second).requester_id == second_requester
     assert (second / "credentials.bin").read_bytes() == b"second owner"

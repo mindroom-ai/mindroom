@@ -108,8 +108,8 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
-    "mindroom.api.sandbox_worker_prep",
-    "mindroom.workers.backends._dedicated_worker_common",
+    "mindroom.private_storage_compat",
+    "mindroom.private_storage_paths",
     "mindroom.private_storage_migration",
     "mindroom.private_instance_identity",
     "mindroom.runtime_resolution",
@@ -752,13 +752,26 @@ visibility = [
 [[modules]]
 path = "mindroom.oauth.credential_store"
 depends_on = [
-    "mindroom.credential_policy",
-    "mindroom.tool_system.worker_routing",
     "mindroom.credentials",
-    "mindroom.logging_config",
+    "mindroom.oauth.credential_compat",
     "mindroom.oauth.providers",
 ]
 visibility = ["mindroom.oauth.credential_lifecycle"]
+
+[[modules]]
+path = "mindroom.oauth.credential_compat"
+depends_on = [
+    "mindroom.credential_policy",
+    "mindroom.credentials",
+    "mindroom.logging_config",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.oauth.credential_store"]
+
+[[modules]]
+path = "mindroom.oauth.credential_store_types"
+depends_on = []
+visibility = ["mindroom.oauth.credential_store", "mindroom.oauth.credential_compat"]
 
 [[modules]]
 path = "mindroom.oauth.credential_lifecycle"
@@ -1266,7 +1279,7 @@ path = "mindroom.api.sandbox_worker_prep"
 depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.logging_config",
-    "mindroom.private_instance_identity_store",
+    "mindroom.private_storage_paths",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backend",
@@ -5251,6 +5264,7 @@ depends_on = [
     "mindroom.durable_write",
     "mindroom.file_locks",
     "mindroom.private_instance_identity_store",
+    "mindroom.private_storage_compat",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.storage_preflight",
 ]
@@ -5265,3 +5279,20 @@ depends_on = [
     "mindroom.workers.backends.kubernetes",
 ]
 visibility = ["mindroom.private_storage_migration"]
+
+[[modules]]
+path = "mindroom.private_storage_compat"
+depends_on = [
+    "mindroom.private_instance_identity_store",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.private_storage_migration", "mindroom.private_storage_paths"]
+
+[[modules]]
+path = "mindroom.private_storage_paths"
+depends_on = [
+    "mindroom.private_instance_identity_store",
+    "mindroom.private_storage_compat",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.api.sandbox_worker_prep", "mindroom.workers.backends._dedicated_worker_common"]
