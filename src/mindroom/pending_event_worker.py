@@ -656,5 +656,8 @@ class PendingEventWorker:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                # Retry ownership replaces deferral; the ordered journal scan
+                # must encounter this failed head before admitting its tail.
+                self._deferred.pop(event.event_id, None)
                 self._schedule_room_retry(event)
                 return

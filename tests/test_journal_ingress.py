@@ -2096,12 +2096,15 @@ class TestRoomRetryBackoff:
             await worker.stop()
 
     @pytest.mark.parametrize("cooldown_passes", [0, 4])
+    @pytest.mark.parametrize("earlier_fails", [False, True])
     async def test_reclaimed_earlier_event_does_not_release_later_slice_before_failed_head(
         self,
         alice: PrincipalStore,
         retry_sleeps: list[tuple[float, asyncio.Event]],
         monkeypatch: pytest.MonkeyPatch,
         cooldown_passes: int,
+        *,
+        earlier_fails: bool,
     ) -> None:
         """Reclaimed work before the failure cannot make a later scan slice safe."""
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
@@ -2112,6 +2115,9 @@ class TestRoomRetryBackoff:
         async def handle(event: JournalEvent) -> bool:
             attempts.append(event.event_id)
             if event.event_id == "$earlier":
+                if earlier_fails and not owner_live and attempts.count("$earlier") == 2:
+                    msg = "earlier callback unavailable"
+                    raise RuntimeError(msg)
                 return not owner_live
             if event.event_id == "$failed" and attempts.count("$failed") == 1:
                 msg = "callback unavailable"
@@ -2129,9 +2135,17 @@ class TestRoomRetryBackoff:
                 await _dispatch_worker_pass(worker)
             retry_sleeps[0][1].set()
             await asyncio.sleep(0)
+            if earlier_fails:
+                await _dispatch_worker_pass(worker)
+                assert attempts == ["$earlier", "$failed", "$earlier"]
+                retry_sleeps[-1][1].set()
+                await asyncio.sleep(0)
             for _ in range(8):
                 await _dispatch_worker_pass(worker)
-            assert attempts == ["$earlier", "$failed", "$earlier", "$failed", "$later", "$last"]
+            if earlier_fails:
+                assert attempts == ["$earlier", "$failed", "$earlier", "$earlier", "$failed", "$later", "$last"]
+            else:
+                assert attempts == ["$earlier", "$failed", "$earlier", "$failed", "$later", "$last"]
         finally:
             await worker.stop()
 
