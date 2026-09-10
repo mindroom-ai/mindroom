@@ -47,6 +47,7 @@ from mindroom.knowledge.candidate_checkpoint import (
     load_candidate_checkpoint,
     save_candidate_checkpoint,
 )
+from mindroom.knowledge.chroma_client import require_chroma_client
 from mindroom.knowledge.collections import (
     SOURCE_DIGEST_KEY,
     SOURCE_MTIME_NS_KEY,
@@ -101,7 +102,6 @@ if TYPE_CHECKING:
 
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
-    from chromadb.api.client import Client
     from chromadb.api.types import Embeddings, Metadata
 
     from mindroom.config.main import Config
@@ -1352,10 +1352,11 @@ class KnowledgeManager:
         """
         vector_db = build_vector_db(self._collections, checkpoint.collection, embedder=embedder)
         try:
-            client = cast("Client", vector_db.client)
+            unverified_client = vector_db.client
         except Exception:
             # Preserve the client-open failure behavior of ChromaDb.exists().
             return False
+        client = require_chroma_client(unverified_client)
         with closing(client):
             if not vector_db.exists():
                 return False

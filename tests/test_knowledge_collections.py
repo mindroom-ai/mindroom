@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Never, cast
+from typing import TYPE_CHECKING, Never
 
 import pytest
 from agno.knowledge.embedder.base import Embedder
@@ -98,7 +98,8 @@ def test_superseded_cleanup_releases_owned_clients_and_preserves_reader(
     retained_name = f"{space.default_collection}_candidate_current"
     stale_candidate = f"{space.default_collection}_candidate_stale"
     vector_db = build_vector_db(space, retained_name)
-    client = cast("Client", vector_db.client)
+    client = vector_db.client
+    assert isinstance(client, Client)
     try:
         retained = client.create_collection(retained_name)
         retained.add(ids=["document"], embeddings=[[1.0, 0.0]])
@@ -145,7 +146,9 @@ def _candidate_manager(tmp_path: Path) -> Iterator[KnowledgeManager]:
     try:
         yield manager
     finally:
-        cast("Client", require_chroma_vector_db(manager._knowledge).client).close()
+        client = require_chroma_vector_db(manager._knowledge).client
+        assert isinstance(client, Client)
+        client.close()
 
 
 @pytest.mark.parametrize(

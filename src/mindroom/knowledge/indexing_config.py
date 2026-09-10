@@ -21,8 +21,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
     from pathlib import Path
 
-    from chromadb.api.client import Client
-
     from mindroom.config.knowledge import KnowledgeBaseMode
     from mindroom.config.main import Config
 
@@ -236,6 +234,8 @@ def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
     """Check collection existence without constructing Agno Knowledge."""
     from agno.vectordb.chroma import ChromaDb  # noqa: PLC0415
 
+    from mindroom.knowledge.chroma_client import require_chroma_client  # noqa: PLC0415
+
     vector_db = ChromaDb(
         collection=collection_name,
         path=str(storage_path),
@@ -246,10 +246,11 @@ def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
     # The probe owns this client. Dropping ChromaDb leaves its native system
     # alive; closing the client releases only this owner's shared reference.
     try:
-        client = cast("Client", vector_db.client)
+        unverified_client = vector_db.client
     except Exception:
         # Match ChromaDb.exists(), which also treats client-open errors as missing.
         return False
+    client = require_chroma_client(unverified_client)
     try:
         return vector_db.exists()
     finally:

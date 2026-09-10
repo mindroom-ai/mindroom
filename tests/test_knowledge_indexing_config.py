@@ -10,12 +10,27 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 from typing import Never
+from unittest.mock import Mock
 
 import pytest
+from agno.vectordb.chroma import ChromaDb
+from chromadb.api import ClientAPI
 from chromadb.api.client import Client
 from chromadb.config import Settings
 
 from mindroom.knowledge.indexing_config import IndexingSettings, chroma_collection_exists, storage_key_for_base
+
+
+def test_collection_probe_rejects_client_without_concrete_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsupported provider client must fail at the typed ownership boundary."""
+    client = Mock(spec_set=ClientAPI)
+    monkeypatch.setattr(ChromaDb, "client", property(lambda _self: client))
+
+    with pytest.raises(TypeError, match="Expected a concrete Chroma client"):
+        chroma_collection_exists(tmp_path, "collection")
 
 
 def _assert_probe_storage_released(storage_path: Path) -> None:

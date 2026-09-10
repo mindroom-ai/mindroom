@@ -6,11 +6,13 @@ from itertools import count
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar, cast
+from unittest.mock import Mock
 
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
 from agno.vectordb import chroma as agno_chroma
+from chromadb.api.client import Client
 
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 import mindroom.knowledge.registry as knowledge_registry
@@ -183,7 +185,7 @@ class _VectorDb:
 
     def __init__(self, *, collection: str, **_: object) -> None:
         self.collection_name = collection
-        self.client = _Client()
+        self.client = Mock(spec_set=Client, wraps=_Client())
 
     def delete(self) -> bool:
         with self.lock:

@@ -19,11 +19,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from unittest.mock import Mock
 
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
 from agno.vectordb import chroma as agno_chroma
+from chromadb.api.client import Client
 from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
@@ -228,7 +230,7 @@ class _FakeVectorDb:
     def __init__(self, *, collection: str, embedder: Embedder | None = None, **_: object) -> None:
         self.collection_name = collection
         self.embedder = embedder
-        self.client = _FakeClient()
+        self.client = Mock(spec_set=Client, wraps=_FakeClient())
 
     def exists(self) -> bool:
         with self.lock:
