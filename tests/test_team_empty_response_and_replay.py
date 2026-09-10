@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,12 +16,13 @@ from agno.run.base import RunStatus
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 
-from mindroom import ai_runtime
+from mindroom import ai_runtime, teams
 from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.teams import TeamMode, team_response, team_response_stream
+from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
 from tests.test_team_dynamic_continuation import _dynamic_tool_team_output
@@ -68,6 +70,7 @@ def _completed_team_run(content: str) -> TeamRunOutput:
 async def test_team_response_retries_once_after_empty_completed_run() -> None:
     """One empty completed team run is discarded and retried before answering."""
     orchestrator, _config = _make_orchestrator()
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room:localhost")
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(side_effect=[_empty_team_run("team-run-1"), _completed_team_run("Recovered answer")])
 
@@ -81,10 +84,12 @@ async def test_team_response_retries_once_after_empty_completed_run() -> None:
             orchestrator=orchestrator,
             execution_identity=None,
             ctx=make_turn_context(session_id="session-1"),
+            pipeline_timing=timing,
         )
 
     assert "Recovered answer" in response
     assert mock_team.arun.await_count == 2
+    assert 0 < timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
 
 
 @pytest.mark.asyncio
@@ -166,9 +171,21 @@ async def test_team_response_returns_fallback_notice_when_retry_is_also_empty() 
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_yields_fallback_notice_when_retry_is_also_empty() -> None:
+async def test_team_response_stream_yields_fallback_notice_when_retry_is_also_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The streaming empty-run guard retries once, then yields the notice chunk."""
     orchestrator, config = _make_orchestrator()
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room:localhost")
+    context_prepared_at: list[float] = []
+    render_input = teams._team_run_input_text
+
+    def render(run_input: str | list[Message]) -> str:
+        result = render_input(run_input)
+        context_prepared_at.append(time.perf_counter())
+        return result
+
+    monkeypatch.setattr(teams, "_team_run_input_text", render)
 
     async def empty_stream(run_id: str) -> AsyncIterator[object]:
         yield _empty_team_run(run_id)
@@ -188,10 +205,14 @@ async def test_team_response_stream_yields_fallback_notice_when_retry_is_also_em
                 orchestrator=orchestrator,
                 execution_identity=None,
                 ctx=make_turn_context(session_id="session-1"),
+                pipeline_timing=timing,
             )
         ]
 
     assert mock_team.arun.call_count == 2
+    assert context_prepared_at[0] <= timing.marks["first_model_request_sent"]
+    assert context_prepared_at[-1] <= timing.marks["model_request_sent"]
+    assert 0 < timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
     assert ai_runtime.EMPTY_RESPONSE_NOTICE in rendered
     # The discarded attempts' fallback documents must not leak ahead of the notice.

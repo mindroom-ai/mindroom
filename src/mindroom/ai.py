@@ -881,6 +881,7 @@ async def _run_cached_agent_attempt(
     run_id_callback: Callable[[str], None] | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> RunOutput:
     """Run one non-streaming Agno request with timing instrumentation."""
     return await ai_runtime.cached_agent_run(
@@ -892,6 +893,7 @@ async def _run_cached_agent_attempt(
         run_id_callback=run_id_callback,
         media=media,
         metadata=metadata,
+        pipeline_timing=pipeline_timing,
     )
 
 
@@ -906,8 +908,6 @@ async def _run_non_streaming_agent_attempts(
     """Run one non-streaming agent response attempt."""
     agent = run_context.prepared_run.agent
     try:
-        if pipeline_timing is not None:
-            pipeline_timing.mark_model_request()
         with bind_llm_request_log_context(
             **_attempt_request_log_context(
                 run_context.turn,
@@ -927,6 +927,7 @@ async def _run_non_streaming_agent_attempts(
                 run_id_callback=run_id_callback,
                 media=attempt.attempt_media_inputs,
                 metadata=run_context.metadata,
+                pipeline_timing=pipeline_timing,
             )
         if response.status == RunStatus.error:
             logger.warning(
@@ -1738,8 +1739,6 @@ async def _stream_agent_attempt_chunks(
     """Start and consume one streaming agent attempt."""
     agent = run_context.prepared_run.agent
     try:
-        if pipeline_timing is not None:
-            pipeline_timing.mark_model_request()
         ai_runtime.note_attempt_run_id(run_id_callback, attempt.attempt_run_id)
         request_context = _attempt_request_log_context(
             run_context.turn,
@@ -1754,6 +1753,8 @@ async def _stream_agent_attempt_chunks(
                 attempt.attempt_prompt,
                 attempt.attempt_media_inputs,
             )
+            if pipeline_timing is not None:
+                pipeline_timing.mark_model_request()
             stream_generator = agent.arun(
                 prepared_input,
                 session_id=run_context.session_id,
