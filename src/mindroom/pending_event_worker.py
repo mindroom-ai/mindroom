@@ -398,14 +398,14 @@ class PendingEventWorker:
 
     def _schedule_room_retry(self, event: JournalEvent) -> None:
         """Keep each room's cooldown independent of admissions and other rooms."""
-        if self._stopped:
-            return
         logger.exception(
             "pending_event_failed",
             event_id=event.event_id,
             kind=event.kind.value,
             room_id=event.room_id,
         )
+        if self._stopped:
+            return
         room_id = event.room_id
         previous = self._room_retries.get(room_id)
         delay = (

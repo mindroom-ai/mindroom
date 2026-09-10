@@ -2317,8 +2317,13 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
     assert await validator.precheck_event(room, event, is_edit=kind == "edit") == _SENDER
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
     await memberships.refresh(config, runtime_paths_for(config), client)
-    await dispatcher.drain_once()
-    await dispatcher.stop()
+    dispatcher.start()
+    try:
+        async with asyncio.timeout(5):
+            while await dispatcher.store.is_pending(event.event_id):  # noqa: ASYNC110 - journal settlement has no event signal
+                await asyncio.sleep(0.01)
+    finally:
+        await dispatcher.stop()
     assert await dispatcher.store.pending() == ()
     assert harness.turn_store.is_handled(event.event_id)
     assert harness.runner.requests == []

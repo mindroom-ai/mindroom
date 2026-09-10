@@ -148,7 +148,7 @@ class JournalDispatcher:
         return await self._worker.wait_stopped(timeout_seconds=timeout_seconds)
 
     async def drain_once(self) -> int:
-        """Run everything currently pending to completion.
+        """Run currently eligible pending work, respecting room retry cooldowns.
 
         This is the explicit recovery entry point, so it releases turn replay.
         What it deliberately does not do is forget which sources are in flight.
