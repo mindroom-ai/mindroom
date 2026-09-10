@@ -72,7 +72,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.identity_helpers import persist_entity_accounts
 
-_TEST_MODEL = "openai:gpt-5.4"
+_TEST_MODEL = "openai:gpt-6-astra"
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 
@@ -283,7 +283,7 @@ def test_load_config_uses_dynamic_runtime_config_path(
     """OpenAI-compatible config loading should follow the active runtime config path."""
     config_path = tmp_path / "alt-config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\n"
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
         "agents:\n  only_alt:\n    display_name: OnlyAlt\n    role: alt\n    rooms: []\n"
         "router:\n  model: default\n",
         encoding="utf-8",
@@ -326,7 +326,7 @@ def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> Non
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents:\n"
@@ -348,7 +348,7 @@ def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> Non
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents:\n"
@@ -616,7 +616,7 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents:\n"
@@ -691,7 +691,7 @@ def test_list_models_tolerate_missing_plugin_path(tmp_path: Path) -> None:
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents: {}\n"
@@ -750,7 +750,7 @@ def test_chat_completions_tolerate_missing_plugin_path_during_model_validation(t
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents:\n"

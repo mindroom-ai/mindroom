@@ -40,13 +40,13 @@ __all__ = (
     "OLLAMA_GEMMA",
     "OLLAMA_HOST_DEFAULT",
     "OLLAMA_QWEN",
-    "OPENAI_DALLE",
     "OPENAI_EMBEDDING_DIMENSIONS",
     "OPENAI_EMBEDDING_LARGE",
     "OPENAI_EMBEDDING_SMALL",
     "OPENAI_GPT_LUNA",
     "OPENAI_GPT_TERRA",
     "OPENAI_IMAGE",
+    "OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
     "OPENAI_REALTIME",
     "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
     "OPENAI_TRANSCRIPTION",
@@ -105,6 +105,7 @@ CODEX_GPT_ALIAS = "gpt-5.6"
 CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
 KIMI_K3 = "k3"
 _OPENAI_GPT = "gpt-6-astra"
+OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (_OPENAI_GPT,)
 # OpenAI's Responses-API tool_search tool requires gpt-5.4 or newer; gating
 # parses the gpt-N.M version from the model id so new releases take the
 # native tool-search path without a list update.
@@ -168,7 +169,6 @@ OPENAI_TRANSCRIPTION = "gpt-transcribe"
 OPENAI_TTS = "gpt-4o-mini-tts"
 OPENAI_REALTIME = "gpt-realtime-2.1"
 OPENAI_IMAGE = "gpt-image-2.5-sunburst"
-OPENAI_DALLE = "dall-e-3"
 
 GROQ_TRANSCRIPTION = "whisper-large-v3"
 GROQ_TTS = "canopylabs/orpheus-v1-english"

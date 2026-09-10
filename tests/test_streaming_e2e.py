@@ -50,7 +50,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
     runtime_config = bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"])},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             router=RouterConfig(model="default"),
         ),
         orchestrator_runtime_paths(tmp_path),
@@ -316,7 +316,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                 "helper": AgentConfig(display_name="HelperAgent", rooms=[test_room_id]),
                 "calculator": AgentConfig(display_name="CalculatorAgent", rooms=[test_room_id]),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             defaults=DefaultsConfig(thread_summary_first_threshold=100),
             memory={"backend": "none"},
             router=RouterConfig(model="default"),

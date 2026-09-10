@@ -40,7 +40,7 @@ MindRoom supports multiple model providers:
 models:
   default:  # Default model used when agent doesn't specify one
     provider: "ollama"
-    id: "devstral:24b"
+    id: "devstral-small-2:24b"
 
   anthropic:
     provider: "anthropic"
@@ -48,7 +48,7 @@ models:
 
   ollama:
     provider: "ollama"
-    id: "devstral:24b"
+    id: "devstral-small-2:24b"
     # For ollama, you can add:
     # host: "http://localhost:11434"
 
@@ -473,7 +473,7 @@ Below is a representative selection:
 - **thread_model** - Show, switch, or reset the model override for the current Matrix thread (applies from the next message)
 
 ### AI & Generation Tools
-- **dalle** - Generate images with DALL-E
+- **openai** - Generate images with GPT Image 2.5 Sunburst
 - **gemini** - Google Gemini multimodal capabilities
 - **claude_agent** - Spawn Claude sub-agents
 - **subagents** - Delegate tasks to other MindRoom agents
@@ -633,7 +633,7 @@ memory:
 models:
   default:
     provider: "ollama"
-    id: "devstral:24b"
+    id: "devstral-small-2:24b"
 
   smart:
     provider: "anthropic"

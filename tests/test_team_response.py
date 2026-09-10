@@ -104,7 +104,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
-_TEST_MODEL = "openai:gpt-5.4"
+_TEST_MODEL = "openai:gpt-6-astra"
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 
@@ -4352,7 +4352,7 @@ def _build_private_team_orchestrator(*, include_private_member: bool) -> tuple[C
                 ),
             },
             models={
-                "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
+                "default": ModelConfig(provider="openai", id="gpt-5.6-luna"),
             },
         ),
         runtime_paths,

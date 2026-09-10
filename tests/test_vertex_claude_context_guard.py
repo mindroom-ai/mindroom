@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 def _model() -> MindroomVertexAIClaude:
     return MindroomVertexAIClaude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         project_id="demo-project",
         region="us-central1",
         cache_system_prompt=False,
@@ -231,7 +231,7 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
         },
     }
     request_kwargs = {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "messages": [
             {
                 "role": "assistant",
@@ -297,7 +297,7 @@ def test_vertex_token_count_request_preserves_native_tool_search_as_countable_te
 def test_vertex_token_count_adapts_search_history_without_current_search_tool() -> None:
     """Replayed search blocks remain countable after the current tool surface changes."""
     request_kwargs = {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "messages": [
             {
                 "role": "assistant",
@@ -327,7 +327,7 @@ def test_vertex_token_count_adapts_search_history_without_current_search_tool() 
 def test_vertex_token_count_request_leaves_regular_requests_unchanged() -> None:
     """Requests without native search keep their original count payload."""
     request_kwargs = {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "messages": [{"role": "user", "content": "hello"}],
         "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
     }

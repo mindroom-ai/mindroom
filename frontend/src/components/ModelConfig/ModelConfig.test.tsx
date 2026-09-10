@@ -48,13 +48,16 @@ describe("ModelConfig", () => {
   const mockStore = {
     config: {
       models: {
-        default: { provider: "ollama", id: "devstral:24b" },
-        anthropic: { provider: "anthropic", id: "claude-3-5-haiku-latest" },
-        openrouter: { provider: "openrouter", id: "z-ai/glm-4.5-air:free" },
-        openrouter_backup: { provider: "openrouter", id: "openai/gpt-4o-mini" },
+        default: { provider: "ollama", id: "devstral-small-2:24b" },
+        anthropic: { provider: "anthropic", id: "claude-haiku-4-5" },
+        openrouter: { provider: "openrouter", id: "z-ai/glm-5.3" },
+        openrouter_backup: {
+          provider: "openrouter",
+          id: "openai/gpt-5.6-terra",
+        },
         openai_local: {
           provider: "openai",
-          id: "gpt-4.1-mini",
+          id: "gpt-5.6-terra",
           api: "responses",
           context_window: 16384,
           extra_kwargs: { base_url: "http://localhost:9292/v1" },
@@ -144,7 +147,7 @@ describe("ModelConfig", () => {
     fireEvent.click(screen.getByText("anthropic"));
 
     expect(screen.getByDisplayValue("anthropic")).toBeTruthy();
-    expect(screen.getByDisplayValue("claude-3-5-haiku-latest")).toBeTruthy();
+    expect(screen.getByDisplayValue("claude-haiku-4-5")).toBeTruthy();
   });
 
   it("saves inline name and model-id edits", async () => {
@@ -158,8 +161,8 @@ describe("ModelConfig", () => {
     fireEvent.change(within(row).getByDisplayValue("anthropic"), {
       target: { value: "anthropic-fast" },
     });
-    fireEvent.change(within(row).getByDisplayValue("claude-3-5-haiku-latest"), {
-      target: { value: "claude-3-5-sonnet-latest" },
+    fireEvent.change(within(row).getByDisplayValue("claude-haiku-4-5"), {
+      target: { value: "claude-sonnet-5" },
     });
 
     fireEvent.click(within(row).getByRole("button", { name: "Save" }));
@@ -169,7 +172,7 @@ describe("ModelConfig", () => {
         "anthropic-fast",
         expect.objectContaining({
           provider: "anthropic",
-          id: "claude-3-5-sonnet-latest",
+          id: "claude-sonnet-5",
         }),
       );
       expect(mockStore.deleteModel).toHaveBeenCalledWith("anthropic");
@@ -222,19 +225,15 @@ describe("ModelConfig", () => {
     const row = screen.getByDisplayValue("anthropic").closest("tr");
     if (!row) throw new Error("row not found");
 
-    const modelIdInput = within(row).getByDisplayValue(
-      "claude-3-5-haiku-latest",
-    );
+    const modelIdInput = within(row).getByDisplayValue("claude-haiku-4-5");
     modelIdInput.focus();
     expect(modelIdInput).toHaveFocus();
 
     fireEvent.change(modelIdInput, {
-      target: { value: "claude-3-5-haiku-latesta" },
+      target: { value: "claude-haiku-4-5a" },
     });
 
-    const updatedInput = within(row).getByDisplayValue(
-      "claude-3-5-haiku-latesta",
-    );
+    const updatedInput = within(row).getByDisplayValue("claude-haiku-4-5a");
     expect(updatedInput).toBe(modelIdInput);
     expect(updatedInput).toHaveFocus();
   });
@@ -282,7 +281,7 @@ describe("ModelConfig", () => {
         "openai_local",
         expect.objectContaining({
           provider: "openai",
-          id: "gpt-4.1-mini",
+          id: "gpt-5.6-terra",
           context_window: 32768,
           api: "responses",
           extra_kwargs: { base_url: "http://localhost:11434/v1" },
@@ -304,7 +303,7 @@ describe("ModelConfig", () => {
     await waitFor(() => {
       expect(mockStore.updateModel).toHaveBeenCalledWith("openai_local", {
         provider: "anthropic",
-        id: "gpt-4.1-mini",
+        id: "gpt-5.6-terra",
         api: null,
         context_window: 16384,
       });
@@ -430,7 +429,7 @@ describe("ModelConfig", () => {
       target: { value: "new-model" },
     });
     fireEvent.change(screen.getByPlaceholderText("provider model id"), {
-      target: { value: "gpt-4o-mini" },
+      target: { value: "openai/gpt-5.6-terra" },
     });
     fireEvent.change(screen.getByPlaceholderText("optional context window"), {
       target: { value: "200000" },
@@ -441,7 +440,7 @@ describe("ModelConfig", () => {
     await waitFor(() => {
       expect(mockStore.updateModel).toHaveBeenCalledWith("new-model", {
         provider: "openrouter",
-        id: "gpt-4o-mini",
+        id: "openai/gpt-5.6-terra",
         context_window: 200000,
       });
     });
@@ -461,7 +460,7 @@ describe("ModelConfig", () => {
       target: { value: "openai_default" },
     });
     fireEvent.change(within(addRow).getByPlaceholderText("provider model id"), {
-      target: { value: "gpt-4.1-mini" },
+      target: { value: "gpt-5.6-terra" },
     });
 
     expect(
@@ -472,7 +471,7 @@ describe("ModelConfig", () => {
     await waitFor(() => {
       expect(mockStore.updateModel).toHaveBeenCalledWith("openai_default", {
         provider: "openai",
-        id: "gpt-4.1-mini",
+        id: "gpt-5.6-terra",
       });
     });
   });
@@ -493,7 +492,7 @@ describe("ModelConfig", () => {
       target: { value: "openai_compat" },
     });
     fireEvent.change(within(addRow).getByPlaceholderText("provider model id"), {
-      target: { value: "gpt-4.1-mini" },
+      target: { value: "gpt-5.6-terra" },
     });
     fireEvent.change(
       within(addRow).getByPlaceholderText("https://api.openai.com/v1"),
@@ -529,7 +528,7 @@ describe("ModelConfig", () => {
       target: { value: "openai_compat" },
     });
     fireEvent.change(within(addRow).getByPlaceholderText("provider model id"), {
-      target: { value: "gpt-4.1-mini" },
+      target: { value: "gpt-5.6-terra" },
     });
     fireEvent.change(
       within(addRow).getByPlaceholderText("https://api.openai.com/v1"),
@@ -543,7 +542,7 @@ describe("ModelConfig", () => {
     await waitFor(() => {
       expect(mockStore.updateModel).toHaveBeenCalledWith("openai_compat", {
         provider: "openai",
-        id: "gpt-4.1-mini",
+        id: "gpt-5.6-terra",
         extra_kwargs: { base_url: "http://localhost:9292/v1" },
       });
     });

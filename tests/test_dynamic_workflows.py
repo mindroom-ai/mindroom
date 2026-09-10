@@ -95,7 +95,7 @@ def _workflow_spec(**overrides: object) -> dict[str, object]:
                 "id": "writer",
                 "kind": "ephemeral_agent",
                 "name": "Report Writer",
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "tools": [],
             },
         ],
@@ -112,7 +112,7 @@ def _workflow_spec(**overrides: object) -> dict[str, object]:
             "max_runtime_seconds": 1800,
             "max_concurrent_agents": 4,
             "max_total_agents": 16,
-            "models": ["claude-sonnet-4-6"],
+            "models": ["claude-sonnet-5"],
             "tools": [],
             "data": {
                 "matrix_history": "none",
@@ -141,7 +141,7 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
     config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"])},
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         runtime_paths,
     )
@@ -171,7 +171,7 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
                 "general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"]),
                 "specialist": AgentConfig(display_name="Specialist Agent"),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         runtime_paths,
     )
@@ -211,7 +211,7 @@ def _make_private_context(tmp_path: Path, *, requester_id: str) -> ToolRuntimeCo
                     private=AgentPrivateConfig(per="user_agent", root="mind_data"),
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         runtime_paths,
     )
@@ -606,7 +606,7 @@ def test_validate_workflow_spec_normalizes_tool_grants(tmp_path: Path) -> None:
                     "id": "writer",
                     "kind": "ephemeral_agent",
                     "name": "Report Writer",
-                    "model": "claude-sonnet-4-6",
+                    "model": "claude-sonnet-5",
                     "tools": [" shell ", "website", "shell"],
                 },
             ],
@@ -1535,7 +1535,7 @@ def test_dynamic_workflow_tool_rejects_ephemeral_model_outside_caller_policy(tmp
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
-                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
                 "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
@@ -1573,7 +1573,7 @@ def test_dynamic_workflow_tool_enforces_permission_models_for_default_participan
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
-                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
                 "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
@@ -1610,7 +1610,7 @@ def test_dynamic_workflow_tool_defaults_ephemeral_model_to_caller_runtime_model(
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="opus")},
             models={
-                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
                 "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
@@ -1630,7 +1630,7 @@ def test_dynamic_workflow_tool_defaults_ephemeral_model_to_caller_runtime_model(
                             "tools": [],
                         },
                     ],
-                    permissions={"models": ["claude-sonnet-4-6"], "tools": []},
+                    permissions={"models": ["claude-sonnet-5"], "tools": []},
                 ),
             ),
         )
@@ -1740,7 +1740,7 @@ def test_dynamic_workflow_tool_revalidates_saved_revision_policy_before_run(tmp_
         Config(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
-                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
                 "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
@@ -1842,7 +1842,7 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
                 ),
             },
             models={
-                "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+                "default": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
                 "large": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
             room_models={"lobby": "large"},
@@ -2013,7 +2013,7 @@ def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> No
                     tools=[{"dynamic_workflow": {"allowed_tools": ["website"]}}],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         context.runtime_paths,
     )
@@ -2040,7 +2040,7 @@ def test_participant_run_config_wildcard_pre_approves_all_granted_tools(tmp_path
                     tools=[{"dynamic_workflow": {"allowed_tools": ["*"]}}],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         context.runtime_paths,
     )
@@ -2067,7 +2067,7 @@ def test_participant_run_config_does_not_pre_approve_colliding_function_names(tm
                     tools=[{"dynamic_workflow": {"allowed_tools": ["python"]}}],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         context.runtime_paths,
     )
@@ -2098,7 +2098,7 @@ def test_participant_run_config_never_pre_approves_system_mutating_tools(tmp_pat
                     tools=[{"dynamic_workflow": {"allowed_tools": ["*", "scheduler"]}}],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         context.runtime_paths,
     )
@@ -2125,7 +2125,7 @@ def test_participant_run_config_preserves_operator_rule_precedence(tmp_path: Pat
                     tools=[{"dynamic_workflow": {"allowed_tools": ["*"]}}],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
             tool_approval={"rules": [{"match": "run_shell_command", "action": "require_approval"}]},
         ),
         context.runtime_paths,
@@ -2156,7 +2156,7 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
                     worker_tools=["shell"],
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         context.runtime_paths,
     )
@@ -2168,11 +2168,11 @@ def test_ephemeral_participant_runs_with_granted_toolkits(tmp_path: Path) -> Non
                 "id": "writer",
                 "kind": "ephemeral_agent",
                 "name": "Report Writer",
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "tools": ["website", "shell"],
             },
         ],
-        permissions={"models": ["claude-sonnet-4-6"], "tools": ["website", "shell"]},
+        permissions={"models": ["claude-sonnet-5"], "tools": ["website", "shell"]},
     )
     sentinel_toolkits = {name: Toolkit(name=f"fake_{name}") for name in ("website", "shell")}
 
@@ -2218,8 +2218,8 @@ def test_ephemeral_participant_without_grants_runs_with_empty_tools(tmp_path: Pa
     tool = DynamicWorkflowTools()
     spec = _workflow_spec(
         participants=[
-            {"id": "writer", "kind": "ephemeral_agent", "model": "claude-sonnet-4-6", "tools": []},
-            {"id": "editor", "kind": "ephemeral_agent", "model": "claude-sonnet-4-6"},
+            {"id": "writer", "kind": "ephemeral_agent", "model": "claude-sonnet-5", "tools": []},
+            {"id": "editor", "kind": "ephemeral_agent", "model": "claude-sonnet-5"},
         ],
         workflow=[
             {"id": "write", "type": "agent_step", "participant": "writer", "prompt": "Write."},

@@ -21,7 +21,7 @@ from mindroom.custom_tools.self_config import SelfConfigTools
 from tests.conftest import load_config_yaml, write_config_yaml
 from tests.identity_helpers import persist_entity_accounts
 
-_DEFAULT_MODELS = {"default": ModelConfig(provider="openai", id="gpt-4o")}
+_DEFAULT_MODELS = {"default": ModelConfig(provider="openai", id="gpt-5.6-terra")}
 _BOUND_RUNTIME_PATHS: dict[int, RuntimePaths] = {}
 
 

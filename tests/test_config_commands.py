@@ -116,7 +116,7 @@ def test_validate_and_persist_config_payload_validates_and_writes_authored_paylo
     """Runtime config payload persistence should validate before writing."""
     config_path = tmp_path / "config.yaml"
     runtime_paths = _runtime_paths_for_config(config_path)
-    config = Config(models={"default": {"provider": "openai", "id": "gpt-5.4"}})
+    config = Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}})
     write_config_yaml(config, config_path)
     payload = config.authored_model_dump()
     payload["agents"] = {
@@ -144,7 +144,7 @@ def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_pat
     )
     config_path = tmp_path / "config.yaml"
     runtime_paths = _runtime_paths_for_config(config_path)
-    config = Config(models={"default": {"provider": "openai", "id": "gpt-5.4"}})
+    config = Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}})
     write_config_yaml(config, config_path)
     original_source = config_path.read_text(encoding="utf-8")
     payload = config.authored_model_dump()
@@ -1432,7 +1432,7 @@ async def test_handle_config_command_uses_explicit_runtime_paths(tmp_path: Path)
     config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"test_agent": {"display_name": "Runtime Agent", "role": "test"}},
             },
@@ -1460,7 +1460,7 @@ async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tm
     config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
             },
@@ -1498,7 +1498,7 @@ async def test_handle_config_command_show_tolerates_invalid_plugin_manifest(tmp_
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": ["./plugins/bad-name"],
@@ -1526,7 +1526,7 @@ async def test_handle_config_command_show_redacts_secrets(tmp_path: Path) -> Non
                 "models": {
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-5.4",
+                        "id": "gpt-6-astra",
                         "api_key": "sk-test-config-secret",
                     },
                 },
@@ -1555,7 +1555,7 @@ async def test_handle_config_command_get_redacts_secret_values(tmp_path: Path) -
                 "models": {
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-5.4",
+                        "id": "gpt-6-astra",
                         "api_key": "sk-test-config-secret",
                     },
                 },
@@ -1587,7 +1587,7 @@ async def test_handle_config_command_set_preview_redacts_secret_values(tmp_path:
                 "models": {
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-5.4",
+                        "id": "gpt-6-astra",
                         "api_key": "sk-old-config-secret",
                     },
                 },
@@ -1639,7 +1639,7 @@ async def test_handle_config_command_set_returns_invalid_plugin_manifest_error(t
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": [],
@@ -1671,7 +1671,7 @@ async def test_handle_config_command_set_returns_malformed_plugin_manifest_error
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": [],
@@ -1703,7 +1703,7 @@ async def test_apply_config_change_returns_invalid_plugin_manifest_error(tmp_pat
     config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": ["./plugins/bad-name"],
@@ -1842,7 +1842,7 @@ class TestConfigCommandHandling:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
                 "agents": {"test_agent": {"display_name": "Test Agent", "role": "Testing"}},
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)
@@ -1881,7 +1881,7 @@ class TestConfigCommandHandling:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
                 "agents": {"test_agent": {"display_name": "Old Name", "role": "Testing"}},
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)
@@ -1929,7 +1929,7 @@ class TestConfigCommandHandling:
                         "tools": ["shell"],
                     },
                 },
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)
@@ -1950,7 +1950,7 @@ class TestConfigCommandHandling:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
                 "defaults": {"markdown": True},
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)
@@ -1984,7 +1984,7 @@ class TestConfigCommandHandling:
     async def test_handle_config_parse_error(self) -> None:
         """Test handling config command with parse error."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"models": {"default": {"provider": "openai", "id": "gpt-4"}}}, f)
+            yaml.dump({"models": {"default": {"provider": "openai", "id": "gpt-6-astra"}}}, f)
             config_path = Path(f.name)
 
         try:
@@ -2011,7 +2011,7 @@ class TestConfigCommandHandling:
                         "tools": [],
                     },
                 },
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)
@@ -2041,7 +2041,7 @@ class TestConfigCommandHandling:
                         "tools": [],
                     },
                 },
-                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)

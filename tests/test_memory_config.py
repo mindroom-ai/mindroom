@@ -96,11 +96,11 @@ class TestMemoryConfig:
         # Create config with OpenAI embedder
         embedder_config = _MemoryEmbedderConfig(
             provider="openai",
-            config=EmbedderConfig(model="text-embedding-ada-002"),
+            config=EmbedderConfig(model="text-embedding-3-small"),
         )
         llm_config = _MemoryLLMConfig(
             provider="openai",
-            config={"model": "gpt-4", "temperature": 0.1, "top_p": 1},
+            config={"model": OPENAI_GPT_LUNA},
         )
         memory = MemoryConfig(embedder=embedder_config, llm=llm_config)
         config = Config(memory=memory, router=RouterConfig(model="default"))
@@ -111,12 +111,12 @@ class TestMemoryConfig:
 
         # Verify embedder config
         assert result["embedder"]["provider"] == "openai"
-        assert result["embedder"]["config"]["model"] == "text-embedding-ada-002"
+        assert result["embedder"]["config"]["model"] == "text-embedding-3-small"
         assert result["embedder"]["config"]["api_key"] == "test-key"
 
         # Verify LLM config
         assert result["llm"]["provider"] == "openai"
-        assert result["llm"]["config"]["model"] == "gpt-4"
+        assert result["llm"]["config"]["model"] == OPENAI_GPT_LUNA
         assert result["llm"]["config"]["api_key"] == "test-key"
 
     @pytest.mark.asyncio
@@ -125,6 +125,7 @@ class TestMemoryConfig:
         [
             (OPENAI_GPT_LUNA, None, False),
             (OPENAI_GPT_TERRA, None, False),
+            # Keep a legacy non-reasoning model as the sampling-control positive case.
             ("gpt-4", 0.8, False),
             (OPENAI_GPT_TERRA, None, True),
         ],

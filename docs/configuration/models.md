@@ -139,7 +139,7 @@ models:
     id: qwen/qwen3.8-27b
     context_window: 131042
 
-  # Cerebras
+  # Cerebras (65,536 tokens on the free tier; paid plans support 131,072)
   cerebras:
     provider: cerebras
     id: qwen-3.8-27b
@@ -291,9 +291,13 @@ MindRoom refreshes the access token when needed and sends requests to the Kimi C
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
-| Kimi K3 | `k3` | Flagship reasoning, long-horizon coding, and agent work with a 1M-token context |
+| Kimi K3 | `k3` | Flagship reasoning, long-horizon coding, and agent work with up to a 1M-token context |
 | Kimi K3 256k | `k3-256k` | The same K3 generation with a 256k-token context |
 | Kimi for Coding | `kimi-for-coding` | Coding-tuned tier exposed by the Kimi Code CLI |
+| Kimi for Coding Highspeed | `kimi-for-coding-highspeed` | Faster coding tier exposed by the Kimi Code CLI |
+
+[Kimi Code context limits depend on the subscription plan](https://www.kimi.com/code/docs/en/kimi-code/models.html): `k3` supports 1,048,576 tokens on Allegretto and higher plans, while Moderato is limited to 262,144 tokens.
+Set `context_window: 262144` for Moderato, or use `k3-256k` for a fixed 256k window.
 
 The CLI-config-style form `kimi-code/k3` is accepted as an alternative to the bare slug.
 If you keep Kimi Code state outside `~/.kimi-code`, set `KIMI_CODE_HOME` or pass `extra_kwargs.kimi_home`; user-home prefixes such as `~/custom-kimi` are expanded.
@@ -443,6 +447,9 @@ Common options include:
 
 Claude Fable 5.1, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
 MindRoom also omits those deprecated controls for direct Gemini 3.8 Flash and Gemini 3.5 Flash-Lite requests.
+[GPT-6 Astra does not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters); omit these from authored model options.
+Automatic thread summaries omit their temperature override for GPT-6 Astra, including its OpenRouter route.
+For Mem0 memory extraction with `provider: openai`, use GPT-5.6 Luna; the current Mem0 request builder does not support Astra's parameter requirements.
 
 ## Environment Variables
 

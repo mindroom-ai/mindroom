@@ -50,7 +50,7 @@ def _make_config(agents: dict[str, AgentConfig]) -> Config:
     """Create a minimal Config with the given agents."""
     return Config(
         agents=agents,
-        models={"default": ModelConfig(provider="openai", id="gpt-4")},
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
     )
 
 
@@ -496,7 +496,7 @@ class TestDelegateKnowledge:
                     knowledge_bases=["docs"],
                 ),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             knowledge_bases={"docs": {"path": "./docs"}},
         )
         config = _bind_runtime_paths(config, tmp_path)
@@ -591,7 +591,7 @@ class TestDelegateKnowledge:
                     knowledge_bases=["docs"],
                 ),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             knowledge_bases={"docs": {"path": "./docs"}},
         )
         config = _bind_runtime_paths(config, tmp_path)
@@ -1109,7 +1109,7 @@ class TestDelegateAutoInjection:
                 ),
                 "worker": AgentConfig(display_name="Worker", role="Work"),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             defaults=DefaultsConfig(tools=["delegate"]),
         )
         config = _bind_runtime_paths(config, tmp_path)

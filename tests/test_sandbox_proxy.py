@@ -1748,7 +1748,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution
     """Direct in-process Python execution should not emulate committed runtime env."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -1781,7 +1781,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
     """Direct file-backed Python execution should also avoid runtime env emulation."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -1858,7 +1858,7 @@ def test_shell_subprocess_env_path_passthrough_without_prepend(
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -1978,7 +1978,7 @@ def test_execution_env_payload_denies_provider_env_by_default_in_isolated_runtim
     monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text(
@@ -2019,7 +2019,7 @@ def test_execution_env_payload_keeps_provider_env_denied_even_with_worker_creden
     monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -2100,7 +2100,7 @@ async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path:
     """Direct shell execution should inherit committed runtime env values from the runtime `.env`."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -2136,7 +2136,7 @@ async def test_local_shell_exposes_configured_extra_parent_env_without_leaking_c
     monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -2182,7 +2182,7 @@ async def test_local_shell_does_not_expose_extra_parent_env_without_configuratio
     monkeypatch.setenv("WHISPER_URL", "https://whisper.example")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -2210,7 +2210,7 @@ async def test_local_shell_prepends_configured_path_entries(
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -2262,7 +2262,7 @@ async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_
     monkeypatch.setenv("GITEA_TOKEN", "visible-gitea-token")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     config_path.with_name(".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -2320,7 +2320,7 @@ async def test_proxy_shell_extra_env_passthrough_survives_sandbox_runner_rebuild
     monkeypatch.setenv("GITEA_TOKEN", "visible-gitea-token")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     config_path.with_name(".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -2382,7 +2382,7 @@ async def test_proxy_shell_path_prepend_survives_sandbox_runner_rebuild(
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -2433,7 +2433,7 @@ def test_dedicated_worker_runtime_config_resolves_include_tags(
 ) -> None:
     """Dedicated workers must load configs split across !include files."""
     (tmp_path / "models.yaml").write_text(
-        "default:\n  provider: openai\n  id: gpt-5.4\n",
+        "default:\n  provider: openai\n  id: gpt-6-astra\n",
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
@@ -2454,7 +2454,7 @@ def test_dedicated_worker_runtime_config_resolves_include_tags(
 
     config = sandbox_runner_module._dedicated_worker_runtime_config_or_empty(runtime_paths)
 
-    assert config.models["default"].id == "gpt-5.4"
+    assert config.models["default"].id == "gpt-6-astra"
 
 
 @pytest.mark.asyncio
@@ -2466,7 +2466,7 @@ async def test_inprocess_runner_shell_uses_request_scoped_extra_env_snapshot(
     monkeypatch.setenv("GITEA_TOKEN", "ambient-gitea-token")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     config_path.with_name(".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
@@ -4380,7 +4380,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nrouter:\n  model: default\nagents: {}\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nrouter:\n  model: default\nagents: {}\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -4624,7 +4624,7 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "agents: {}\n"
@@ -6165,7 +6165,7 @@ async def test_inprocess_runner_blocks_cross_runtime_secret_leakage(
     """Runner-only env vars must not leak via glob passthrough patterns."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     config_path.with_name(".env").write_text("", encoding="utf-8")

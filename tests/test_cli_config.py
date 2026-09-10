@@ -179,7 +179,7 @@ def test_activate_cli_runtime_explicit_path_keeps_exported_storage_override(
     config_path = tmp_path / "config.yaml"
     storage_path = tmp_path / "custom-storage"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
@@ -1767,7 +1767,7 @@ class TestConfigValidate:
         """Config validate does not warn when provider secrets are supplied via *_FILE."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\n"
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -1916,7 +1916,7 @@ class TestConfigValidate:
         """Config validate should honor the sibling .env of the exported active config path."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\n"
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -2864,7 +2864,7 @@ class TestDoctor:
             "models:\n"
             "  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
             "  fast:\n    provider: anthropic\n    id: claude-haiku-4-5\n"
-            "  gpt:\n    provider: openai\n    id: gpt-4o\n"
+            "  gpt:\n    provider: openai\n    id: gpt-5.6-terra\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -3248,7 +3248,7 @@ class TestDoctor:
             "  llm:\n"
             "    provider: openai\n"
             "    config:\n"
-            "      model: gpt-4o-mini\n",
+            "      model: gpt-5.6-luna\n",
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -3257,7 +3257,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "Memory LLM: openai/gpt-4o-mini API key valid" in result.output
+        assert "Memory LLM: openai/gpt-5.6-luna API key valid" in result.output
         assert "Memory embedder:" in result.output
 
     def test_memory_llm_missing_key_is_warning(
@@ -3275,7 +3275,7 @@ class TestDoctor:
             "  llm:\n"
             "    provider: openai\n"
             "    config:\n"
-            "      model: gpt-4o-mini\n",
+            "      model: gpt-5.6-luna\n",
         )
         storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")

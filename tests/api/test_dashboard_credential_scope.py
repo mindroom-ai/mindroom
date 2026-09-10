@@ -35,7 +35,7 @@ def _config(
     private_per: str | None = None,
 ) -> Config:
     payload: dict[str, object] = {
-        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-5.6-luna"}},
         "agents": {
             "general": {
                 "display_name": "General",

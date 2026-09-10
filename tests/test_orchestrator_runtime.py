@@ -300,7 +300,7 @@ async def test_unavailable_final_recovery_restores_offline_owner_account(tmp_pat
     """Startup cleanup must recover FINAL debt under a removed owner's persisted Matrix principal."""
     config = Config.model_validate(
         {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             "router": {"model": "default"},
         },
     )

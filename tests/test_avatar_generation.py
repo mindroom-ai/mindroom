@@ -95,7 +95,7 @@ def test_config_prompt_overrides_drive_avatar_prompt_generation(tmp_path: Path) 
     """Avatar generation should use root prompt overrides for avatar styles."""
     config = _config_with_runtime_paths(
         {
-            "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+            "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
             "router": {"model": "default"},
             "agents": {
                 "general": {
@@ -197,7 +197,7 @@ def test_has_missing_managed_avatars_detects_complete_avatar_set(
 ) -> None:
     """Existing managed workspace avatars should not be reported as missing."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -222,7 +222,7 @@ def test_has_missing_managed_avatars_ignores_direct_room_ids(
 ) -> None:
     """External room IDs should not be treated as managed avatar targets."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -248,7 +248,7 @@ def test_has_missing_managed_avatars_ignores_full_room_aliases(
 ) -> None:
     """External room aliases should not be treated as managed avatar targets."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -275,7 +275,7 @@ def test_has_missing_managed_avatars_treats_bundled_avatars_as_present(
 ) -> None:
     """Bundled runtime avatars should count as present for generation checks."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -315,7 +315,7 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
 ) -> None:
     """Existing managed avatars should skip generation even without Google credentials."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -349,7 +349,7 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_a
 ) -> None:
     """Bundled runtime avatars should skip generation without workspace overrides."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -408,7 +408,7 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
 ) -> None:
     """Startup avatar generation should fail when required assets remain missing."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -449,7 +449,7 @@ async def test_run_avatar_generation_accepts_null_optional_sections(
     """Avatar generation should accept legacy configs normalized by load_config_yaml()."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+        "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
         "agents:\n  a:\n    display_name: A\n    model: default\n"
         "router:\n  model: default\n"
         "teams: null\n"
@@ -629,7 +629,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
 ) -> None:
     """Generation should cover team-only rooms and the managed root space."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -701,7 +701,7 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
 ) -> None:
     """Matrix avatar sync should cover team-only rooms and the managed root space."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -770,7 +770,7 @@ async def test_set_room_avatars_in_matrix_skips_rooms_with_existing_matrix_avata
 ) -> None:
     """Matrix avatar sync should not rewrite room avatars that are already set."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -835,7 +835,7 @@ async def test_set_room_avatars_in_matrix_force_replaces_existing_matrix_avatar(
 ) -> None:
     """Forced Matrix avatar sync should replace an already-set room avatar."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -896,7 +896,7 @@ async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
 ) -> None:
     """Matrix avatar sync should fail the command when a room avatar update is rejected."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -954,7 +954,7 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
 ) -> None:
     """Matrix avatar sync must not mutate a stale root Space when the feature is disabled."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -1063,7 +1063,7 @@ async def test_generate_avatar_retries_with_fresh_prompt_when_no_image_returned(
         _runtime_paths(tmp_path),
         _config_with_runtime_paths(
             {
-                "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+                "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
                 "router": {"model": "default"},
                 "agents": {"a": {"display_name": "A", "model": "default"}},
             },
@@ -1096,7 +1096,7 @@ async def test_generate_avatar_raises_after_exhausting_image_attempts(
             _runtime_paths(tmp_path),
             _config_with_runtime_paths(
                 {
-                    "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+                    "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
                     "router": {"model": "default"},
                     "agents": {"a": {"display_name": "A", "model": "default"}},
                 },

@@ -56,14 +56,14 @@ def test_saas_default_config_models_match_central_defaults() -> None:
 def test_saas_default_uses_current_gemini_flash() -> None:
     """The SaaS default and named Flash preset should use the current Gemini Flash model."""
     expected_model = "google/gemini-3.8-flash"
-    retired_models = {
+    superseded_models = {
         "google/gemini-3-flash-preview",
         "google/gemini-3.5-flash",
     }
 
     assert model_defaults.SAAS_MODEL_PRESETS["default"].id == expected_model
     assert model_defaults.SAAS_MODEL_PRESETS["gemini_flash"].id == expected_model
-    assert retired_models.isdisjoint(preset.id for preset in model_defaults.SAAS_MODEL_PRESETS.values())
+    assert superseded_models.isdisjoint(preset.id for preset in model_defaults.SAAS_MODEL_PRESETS.values())
 
 
 def test_anthropic_frontier_presets_use_current_models() -> None:

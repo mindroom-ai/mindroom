@@ -218,13 +218,13 @@ def test_build_provider_message_blobs_from_messages_can_skip_cache_ladder() -> N
 
     raw_blobs_plain, normalized_blobs_plain, preview_plain = module.build_provider_message_blobs_from_messages(
         messages,
-        "claude-sonnet-4-6",
+        "claude-sonnet-5",
         {"cache_system_prompt": True, "extended_cache_time": True},
         apply_cache_ladder=False,
     )
     raw_blobs_hooked, normalized_blobs_hooked, preview_hooked = module.build_provider_message_blobs_from_messages(
         messages,
-        "claude-sonnet-4-6",
+        "claude-sonnet-5",
         {"cache_system_prompt": True, "extended_cache_time": True},
         apply_cache_ladder=True,
     )

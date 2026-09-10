@@ -4329,7 +4329,7 @@ class TestStreamingConfig:
         sc = StreamingConfig(update_interval=2.0, min_update_interval=0.3, interval_ramp_seconds=10.0, max_idle=0.7)
         config = Config(
             agents={"a": AgentConfig(display_name="A", rooms=["!r:localhost"])},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             router=RouterConfig(model="default"),
             defaults={"streaming": sc.model_dump()},
         )
@@ -4379,7 +4379,7 @@ class TestStreamingConfig:
         """Setting only update_interval via Config should keep other fields at defaults."""
         config = Config(
             agents={"a": AgentConfig(display_name="A", rooms=["!r:localhost"])},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             router=RouterConfig(model="default"),
             defaults={"streaming": {"update_interval": 2.0}},
         )

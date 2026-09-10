@@ -180,7 +180,7 @@ def _config_payload(
     aliases: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     payload = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -204,7 +204,7 @@ def _config_payload(
 def _mcp_oauth_config_payload(worker_scope: str | None = "user_agent") -> dict[str, Any]:
     return {
         "administrators": ["@alice:example.org"],
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             "general": {

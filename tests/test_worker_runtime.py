@@ -132,7 +132,7 @@ def test_serialized_dedicated_worker_validation_snapshot_loads_config_tolerantly
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "router:\n"
             "  model: default\n"
             "agents: {}\n"

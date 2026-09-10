@@ -899,7 +899,7 @@ def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (config_dir / ".env").write_text(
@@ -1813,7 +1813,9 @@ def test_docker_backend_commits_parent_runtime_env_into_worker_payload(
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     credentials_path = tmp_path / "google-credentials.json"
     credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
@@ -1881,7 +1883,9 @@ def test_docker_backend_excludes_internal_file_secrets_from_worker_payload(
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     secret_path = tmp_path / "control-secret.txt"
     secret_path.write_text("supersecret\n", encoding="utf-8")
@@ -1928,7 +1932,9 @@ def test_docker_backend_excludes_relative_file_backed_secrets_from_worker_payloa
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     secret_path = config_dir / "secrets" / "openai.key"
     secret_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1971,7 +1977,9 @@ def test_docker_backend_excludes_relative_process_file_backed_secrets_from_worke
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     secret_path = config_dir / "secrets" / "openai.key"
     secret_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2016,7 +2024,7 @@ def test_docker_backend_preserves_container_config_path_without_host_projection(
     """Dedicated Docker workers without a host config mount must keep the in-container config path."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
@@ -2082,7 +2090,9 @@ def test_docker_backend_ignores_symlinked_google_application_credentials_path(
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     runtime_storage = (tmp_path / "runtime-storage").resolve()
     real_credentials_path = tmp_path / "real-adc.json"
@@ -2124,7 +2134,9 @@ def test_docker_backend_does_not_overwrite_google_application_credentials_destin
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
-    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_text = (
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n"
+    )
     config_path.write_text(config_text, encoding="utf-8")
     runtime_storage = (tmp_path / "runtime-storage").resolve()
     credentials_path = tmp_path / "google-credentials.json"
@@ -2264,7 +2276,7 @@ def test_ensure_docker_dependencies_uses_explicit_runtime_paths(
     """Docker dependency bootstrap should honor the active runtime's config-adjacent .env."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("MINDROOM_NO_AUTO_INSTALL_TOOLS=true\n", encoding="utf-8")

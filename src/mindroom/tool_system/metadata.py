@@ -56,6 +56,18 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# These verified media defaults supersede older provider SDK constructor defaults.
+# Keep unrelated optional settings under their existing SDK/default semantics.
+_MEDIA_MODEL_DEFAULT_FIELDS = {
+    "openai": ("transcription_model", "text_to_speech_model", "image_model"),
+    "gemini": ("image_generation_model", "video_generation_model"),
+    "groq": ("tts_model", "tts_voice"),
+    "cartesia": ("model_id",),
+    "eleven_labs": ("model_id",),
+    "fal": ("model",),
+    "replicate": ("model",),
+}
+
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
 _TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "string[]", "text", "url"})
 _TOOLKIT_FILTER_CONFIG_FIELDS = (
@@ -488,8 +500,11 @@ def _build_tool_config_init_kwargs(
     runtime_overrides: dict[str, object] | None,
 ) -> dict[str, object]:
     """Collect safe config-field kwargs for one tool constructor."""
-    init_kwargs: dict[str, object] = {}
     fields = _tool_config_fields(metadata)
+    model_default_fields = _MEDIA_MODEL_DEFAULT_FIELDS.get(tool_name, ())
+    init_kwargs: dict[str, object] = {
+        field.name: field.default for field in fields if field.name in model_default_fields
+    }
     _apply_tool_config_init_values(init_kwargs, tool_name=tool_name, fields=fields, values=credentials)
     _apply_tool_config_init_values(
         init_kwargs,

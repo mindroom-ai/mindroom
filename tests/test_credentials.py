@@ -1341,7 +1341,7 @@ class TestGlobalCredentialsManager:
         """Dedicated workers should be able to configure a distinct shared credential mirror path."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         storage_path = (tmp_path / "worker-root").resolve()
@@ -1392,7 +1392,7 @@ class TestGlobalCredentialsManager:
         """Distinct runtime credential mirrors should not reuse the same cached manager."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         first_runtime_paths = constants_mod.resolve_runtime_paths(
@@ -1417,7 +1417,7 @@ class TestGlobalCredentialsManager:
         """Changing the explicit storage root should invalidate the cached manager."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         first_root = tmp_path / "one"
@@ -1442,7 +1442,7 @@ class TestGlobalCredentialsManager:
         base_manager = CredentialsManager(root / "credentials")
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
         execution_identity = ToolExecutionIdentity(

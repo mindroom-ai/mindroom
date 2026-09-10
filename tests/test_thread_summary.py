@@ -26,6 +26,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
+from mindroom.openai_models import MindRoomOpenAIResponses, MindRoomOpenRouter
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
@@ -2562,6 +2563,52 @@ class TestGenerateSummary:
         assert result == "🧪 ISSUE-148 matrix cache invalidate-and-refetch live test"
         assert mock_model.temperature == 0.1
 
+    async def test_generate_summary_omits_unsupported_direct_astra_temperature_from_request(self) -> None:
+        """Direct Astra summary requests must omit unsupported sampling controls."""
+        model = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="dummy-key", temperature=0.9)
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert "temperature" not in model.get_request_params()
+
+    async def test_generate_summary_omits_unsupported_openrouter_astra_temperature_from_request(self) -> None:
+        """OpenRouter Astra summary requests must omit unsupported sampling controls."""
+        model = MindRoomOpenRouter(
+            id="openai/gpt-6-astra",
+            api_key="dummy-key",
+            max_tokens=None,
+            temperature=0.9,
+        )
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert "temperature" not in model.get_request_params()
+
+    async def test_generate_summary_preserves_supported_openrouter_temperature_in_request(self) -> None:
+        """OpenRouter summary requests keep configured temperature for models that support it."""
+        model = MindRoomOpenRouter(
+            id="deepseek/deepseek-v4.1-flash",
+            api_key="dummy-key",
+            max_tokens=None,
+            temperature=0.9,
+        )
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert model.get_request_params()["temperature"] == 0.2
+
     @pytest.mark.parametrize(
         "model_id",
         [
@@ -2715,7 +2762,7 @@ class TestGenerateSummary:
         history = _make_thread_history(3)
         config = _mock_config(summary_temperature=0.4)
         rp = _mock_runtime_paths()
-        mock_model = VertexAIClaude(id="claude-sonnet-4@20250514", temperature=0.9)
+        mock_model = VertexAIClaude(id="claude-sonnet-5", temperature=0.9)
         mock_response = MagicMock()
         mock_response.content = _ThreadSummary(summary="🧵 ISSUE-200 vertex claude summary")
         monkeypatch.delenv("MINDROOM_LOG_FORMAT", raising=False)

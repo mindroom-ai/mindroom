@@ -14,34 +14,50 @@ Use these tools when you need OpenAI- or Google-style multimodal generation, pro
 - [`groq`] - Groq-backed audio transcription, translation, and speech generation.
 - [`replicate`] - Replicate-hosted image or video generation from prompt-driven models.
 - [`fal`] - Fal-hosted media generation and a fixed image-to-image workflow.
-- [`dalle`] - Dedicated OpenAI DALL-E image generation.
 - [`cartesia`] - Voice listing, voice localization, and text-to-speech.
 - [`eleven_labs`] - Voice listing, sound effect generation, and text-to-speech.
-- [`desi_vocal`] - Hindi and Indian-language voice listing and text-to-speech.
 - [`lumalabs`] - Luma AI video generation and image-to-video workflows.
 - [`modelslabs`] - ModelsLab media generation for PNG, JPG, MP4, GIF, MP3, and WAV outputs.
 
 ## Common Setup Notes
 
 Every tool on this page is `status=requires_config` in the live registry and is meant to be configured with provider credentials.
+For `openai`, `gemini`, `groq`, `cartesia`, `eleven_labs`, `fal`, and `replicate`, MindRoom applies the documented model defaults when no model is configured.
+Stored model settings and authored agent overrides take precedence over those defaults.
 These tools do not use an `auth_provider`, and `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes, so setup is done through stored tool credentials or provider SDK environment variables rather than a dedicated dashboard OAuth flow.
 Password fields such as `api_key` should be stored through the dashboard or credential store instead of inline YAML.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 Most generation calls on this page return `ToolResult` media attachments rather than only raw text, so they are best suited to agents that can pass generated images, videos, or audio back to the user.
-`openai` and `dalle` both use the OpenAI Python SDK and the same `OPENAI_API_KEY`, but they expose different tool surfaces.
+`openai` uses the OpenAI Python SDK and `OPENAI_API_KEY`.
 `gemini` uses `GOOGLE_API_KEY` in Gemini API mode, and MindRoom also maps provider name `gemini` to shared Google credentials in its provider credential helpers.
-The current upstream SDK implementations also honor provider env vars such as `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, `REPLICATE_API_KEY`, `FAL_API_KEY`, `CARTESIA_API_KEY`, `ELEVEN_LABS_API_KEY`, `DESI_VOCAL_API_KEY`, `LUMAAI_API_KEY`, and `MODELS_LAB_API_KEY`.
+The current upstream SDK implementations also honor provider env vars such as `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, `REPLICATE_API_KEY`, `FAL_API_KEY`, `CARTESIA_API_KEY`, `ELEVEN_LABS_API_KEY`, `LUMAAI_API_KEY`, and `MODELS_LAB_API_KEY`.
+
+The former `desi_vocal` toolkit was removed after [DesiVocal announced its June 30, 2026 sunset](https://www.desivocal.com/text-to-speech/punjabi).
+Use a supported speech toolkit such as `eleven_labs` or `openai`.
 
 ## [`openai`]
 
 `openai` is the general OpenAI media toolkit for audio transcription, image generation, and text-to-speech.
+The former `dalle` toolkit was removed because [DALL-E 3 is no longer available through the OpenAI API](https://developers.openai.com/api/docs/models/dall-e-3).
+Replace the entire old `dalle` configuration block with this image-only configuration to use GPT Image 2.5 Sunburst:
+
+```yaml
+agents:
+  illustrator:
+    tools:
+      - openai:
+          enable_transcription: false
+          enable_speech_generation: false
+```
+
+Old `dalle` options such as `model`, `n`, `size`, `quality`, `style`, and `enable_create_image` do not transfer directly.
+Use the `image_*` options in the configuration table below for supported overrides, and update instructions that call `create_image()` to use `generate_image()`.
 
 ### What It Does
 
 `openai` exposes `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`.
 `transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `gpt-transcribe`.
 `generate_image()` uses the configured `image_model`, defaults to `gpt-image-2.5-sunburst`, and returns attached image bytes rather than only a remote URL.
-The current implementation handles both `gpt-image-*` style models and older DALL-E response formats internally.
 `generate_speech()` uses the configured OpenAI TTS model, voice, and output format and returns an attached audio artifact.
 
 ### Configuration
@@ -82,9 +98,8 @@ generate_speech("Status update complete.")
 
 ### Notes
 
-- `openai` is the broad OpenAI media tool, while [`dalle`] is the narrower image-only wrapper.
 - `transcribe_audio()` expects a readable local path, not a URL.
-- If you only want image generation with explicit DALL-E-specific options like `n`, `size`, `quality`, and `style`, use [`dalle`] instead.
+- For image generation only, set `enable_transcription: false` and `enable_speech_generation: false`.
 
 ## [`gemini`]
 
@@ -234,9 +249,9 @@ generate_media("A short looping animation of code flowing across a terminal.")
 ### What It Does
 
 `fal` exposes `generate_media(prompt)` and, when enabled, `image_to_image(prompt, image_url=None)`.
-`generate_media()` calls `fal_client.subscribe()` with the configured `model` and a single `prompt` argument and returns the first `image` or `video` URL from the provider result.
-`image_to_image()` is a separate fixed workflow that always uses `fal-ai/flux/dev/image-to-image` rather than the configured `model`.
-The current implementation streams queue log messages to the MindRoom process logs while the job is running.
+`generate_media()` calls Fal with the configured `model` and a single `prompt` argument and returns the provider's image or video URLs as attachments.
+`image_to_image()` requires a source image URL and uses the fixed `fal-ai/flux-2/edit` workflow independently of the configured `model`.
+Both Fal methods use the configured API key and stream queue log messages to the MindRoom process logs while the job is running.
 
 ### Configuration
 
@@ -270,56 +285,8 @@ image_to_image(
 ### Notes
 
 - `model` only affects `generate_media()`.
-- `image_to_image()` ignores `model` and always calls Fal's `fal-ai/flux/dev/image-to-image` route on this branch.
+- `image_to_image()` uses [Fal's FLUX.2 edit route](https://fal.ai/models/fal-ai/flux-2/edit/api) and sends the source image in `image_urls`.
 - Returned media are attached by remote URL rather than stored bytes.
-
-## [`dalle`]
-
-`dalle` is the dedicated DALL-E image generation wrapper.
-For current OpenAI image generation, use the [`openai`] toolkit with `gpt-image-2.5-sunburst`; this legacy wrapper only accepts the DALL-E model family.
-
-### What It Does
-
-`dalle` exposes one call, `create_image(prompt)`.
-It uses the OpenAI image API directly with the configured `model`, `n`, `size`, `quality`, and `style`.
-Unlike [`openai`], this wrapper is image-only and exposes DALL-E-specific request options directly in the tool config.
-Generated images are returned as provider-hosted URLs with optional revised prompts when the API supplies them.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `model` | `text` | `no` | `dall-e-3` | DALL-E model used by `create_image()`. The current implementation only accepts `dall-e-3` or `dall-e-2`. |
-| `n` | `number` | `no` | `1` | Number of images to request. `dall-e-3` only supports `1` in the current implementation. |
-| `size` | `text` | `no` | `1024x1024` | Output size. The current implementation validates it against a fixed allowed set. |
-| `quality` | `text` | `no` | `standard` | Image quality, currently `standard` or `hd`. |
-| `style` | `text` | `no` | `vivid` | Image style, currently `vivid` or `natural`. |
-| `api_key` | `password` | `no` | `null` | OpenAI API key, with `OPENAI_API_KEY` as the upstream SDK fallback. |
-| `enable_create_image` | `boolean` | `no` | `true` | Enable `create_image()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `create_image()`. |
-
-### Example
-
-```yaml
-agents:
-  illustrator:
-    tools:
-      - dalle:
-          model: dall-e-3
-          size: 1792x1024
-          quality: hd
-          style: vivid
-```
-
-```python
-create_image("A cover illustration for a Matrix automation handbook.")
-```
-
-### Notes
-
-- Use [`dalle`] when you want explicit DALL-E request controls instead of the broader [`openai`] toolkit.
-- `dall-e-3` plus `n > 1` is rejected before the API call.
-- The current implementation does not expose image edits, variations, or `response_format` controls.
 
 ## [`cartesia`]
 
@@ -423,48 +390,6 @@ text_to_speech("The build succeeded.")
 - `target_directory` is optional and only affects local file saving, not the returned attachment.
 - The current implementation always emits `audio/mpeg` artifacts, even when you choose a PCM- or u-law-style output format.
 - `generate_sound_effect()` is useful when you want non-speech audio from the same provider toolkit.
-
-## [`desi_vocal`]
-
-`desi_vocal` is the speech toolkit for Hindi and other Indian-language voices.
-
-### What It Does
-
-`desi_vocal` exposes `get_voices()` and `text_to_speech(prompt, voice_id=None)`.
-`get_voices()` returns a provider voice list with ID, name, gender, voice type, supported languages, and preview URL.
-`text_to_speech()` posts the prompt to DesiVocal's generation API and returns the resulting audio as a remote URL attachment.
-The default `voice_id` can be overridden per call.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | DesiVocal API key. The current TTS request sends it as `X_API_KEY`, and the upstream implementation also checks `DESI_VOCAL_API_KEY`. |
-| `voice_id` | `text` | `no` | `f27d74e5-ea71-4697-be3e-f04bbd80c1a8` | Default voice used by `text_to_speech()`. |
-| `enable_get_voices` | `boolean` | `no` | `true` | Enable `get_voices()`. |
-| `enable_text_to_speech` | `boolean` | `no` | `true` | Enable `text_to_speech()`. |
-| `all` | `boolean` | `no` | `false` | Enable both DesiVocal functions. |
-
-### Example
-
-```yaml
-agents:
-  hindi_voice:
-    tools:
-      - desi_vocal:
-          voice_id: f27d74e5-ea71-4697-be3e-f04bbd80c1a8
-```
-
-```python
-get_voices()
-text_to_speech("नमस्ते, आपकी रिपोर्ट तैयार है।")
-```
-
-### Notes
-
-- This is the most language-specific TTS tool on this page and is the best fit when you want Hindi or Indian-language voices.
-- The current `get_voices()` implementation reads a public voice list endpoint, but `text_to_speech()` needs the API key.
-- Generated audio is returned as a provider-hosted URL rather than inline bytes.
 
 ## [`lumalabs`]
 
