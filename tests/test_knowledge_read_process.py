@@ -24,6 +24,7 @@ from mindroom.knowledge.indexing_config import chroma_collection_exists
 from mindroom.knowledge.read_process import read_chroma
 from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.knowledge.read_proxy import ChromaReadProxy
+from mindroom.knowledge.utils import _MultiKnowledgeVectorDb
 
 
 @dataclass
@@ -106,6 +107,23 @@ async def test_search_preserves_document_fields_and_filters(published_index: Pat
     )
     assert document.embedding == [1.0, 0.0]
     assert document.meta_data == {"team": "a", "similarity_score": 0.0, "distances": 0.0}
+
+
+@pytest.mark.asyncio
+async def test_merged_search_covers_more_sources_than_reader_slots(published_index: Path) -> None:
+    """One query must search every assigned base despite the native child limit."""
+    with Client(settings=Settings(is_persistent=True, persist_directory=str(published_index))) as client:
+        for name in ("second", "third"):
+            collection = client.create_collection(name)
+            collection.add(ids=[name], embeddings=[[1.0, 0.0]], documents=[name], metadatas=[{"team": "a"}])
+
+    merged = _MultiKnowledgeVectorDb(
+        vector_dbs=[
+            ChromaReadProxy(name, str(published_index), _Embedder()) for name in ("published", "second", "third")
+        ],
+    )
+    documents = await merged.async_search(query="alpha", limit=3, filters={"team": "a"})
+    assert [document.id for document in documents] == ["a", "second", "third"]
 
 
 @pytest.mark.asyncio

@@ -606,7 +606,7 @@ class _MultiKnowledgeVectorDb:
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
-        """Async variant of ``search`` that searches DBs concurrently."""
+        """Search sources sequentially so one query cannot exhaust native reader slots."""
 
         async def _search_one(
             vdb: _KnowledgeVectorDb,
@@ -629,7 +629,7 @@ class _MultiKnowledgeVectorDb:
                 return None, exc
             return results, None
 
-        outcomes = await asyncio.gather(*[_search_one(vdb) for vdb in self._resolved_vector_dbs()])
+        outcomes = [await _search_one(vdb) for vdb in self._resolved_vector_dbs()]
         results_by_db = [results for results, _error in outcomes if results is not None]
         if not results_by_db:
             for _results, error in outcomes:

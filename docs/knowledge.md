@@ -473,6 +473,7 @@ Published semantic searches and collection probes run in short-lived subprocesse
 Embedding credentials and provider health stay in the application; query vectors, filters, and document data cross the typed read boundary.
 Each child exits after one operation, releasing its native Chroma memory.
 At most two read children run at once, with a 30-second execution timeout.
+Queries spanning multiple bases search those bases sequentially so one query cannot exhaust the child limit.
 Excess reads fail immediately as busy so waiting knowledge requests cannot fill the application's shared thread pool.
 A timed-out child is killed and reaped; cancelling an async caller leaves its already-started read bounded by that timeout.
 Native database stalls therefore do not hold the application process's Python lock.
