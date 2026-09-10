@@ -925,7 +925,6 @@ depends_on = [
 path = "mindroom.custom_tools.delegate"
 depends_on = [
     "mindroom.knowledge.utils",
-    "mindroom.knowledge.refresh_scheduler",
     "mindroom.agent_run_context",
     "mindroom.agent_descriptions",
     "mindroom.ai",
@@ -1073,7 +1072,6 @@ depends_on = [
 path = "mindroom.api.openai_compat"
 depends_on = [
     "mindroom.knowledge.utils",
-    "mindroom.knowledge.refresh_scheduler",
     "mindroom.agent_run_context",
     "mindroom.ai",
     "mindroom.api.config_lifecycle",
@@ -2037,7 +2035,6 @@ depends_on = [
 path = "mindroom.teams"
 depends_on = [
     "mindroom.knowledge.utils",
-    "mindroom.knowledge.refresh_scheduler",
     "mindroom.agent_run_context",
     "mindroom.agent_storage",
     "mindroom.agents",
