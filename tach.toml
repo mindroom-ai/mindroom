@@ -3743,10 +3743,16 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.legacy_streaming"
+depends_on = []
+visibility = ["mindroom.streaming"]
+
+[[modules]]
 path = "mindroom.streaming"
 depends_on = [
     "mindroom.constants",
     "mindroom.interactive",
+    "mindroom.legacy_streaming",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.mentions",
     "mindroom.message_target",

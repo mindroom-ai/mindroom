@@ -756,6 +756,8 @@ class TestStreamingBehavior:
         """Interrupted partial-reply detection should recognize shared cancelled/error notes."""
         assert is_interrupted_partial_reply(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}")
         assert is_interrupted_partial_reply("Draft answer\n\n**[Response interrupted by an error: boom]**")
+        assert is_interrupted_partial_reply("Draft [cancelled]   ")
+        assert not is_interrupted_partial_reply("Discuss [error] in this sentence")
         assert not is_interrupted_partial_reply("Finished answer")
         assert not is_interrupted_partial_reply(None)
 
@@ -771,8 +773,22 @@ class TestStreamingBehavior:
         assert (
             clean_partial_reply_text("Draft answer\n\n**[Response interrupted by an error: boom]**") == "Draft answer"
         )
+        assert clean_partial_reply_text("Draft [error]") == "Draft"
         assert clean_partial_reply_text(_PROGRESS_PLACEHOLDER) == ""
         assert clean_partial_reply_text("...") == ""
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            ("Draft [cancelled] [error]", "Draft [cancelled]"),
+            ("Draft [error] [cancelled]", "Draft"),
+            ("Draft **[Response cancelled by user]** [error]", "Draft"),
+            ("Draft [error] **[Response cancelled by user]**", "Draft [error]"),
+        ],
+    )
+    def test_clean_partial_reply_text_preserves_marker_stripping_order(self, body: str, expected: str) -> None:
+        """Strip historical suffixes once in order before removing current notes."""
+        assert clean_partial_reply_text(body) == expected
 
     def test_clean_partial_reply_text_normalises_user_stop_label_to_interrupted_marker(self) -> None:
         """User-stop labels should collapse to the canonical interrupted replay marker."""
