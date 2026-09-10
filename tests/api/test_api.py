@@ -99,7 +99,7 @@ def _config_with_worker_scope(
 ) -> Config:
     payload: dict[str, Any] = {
         "administrators": ["@owner:example.org"],
-        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-5.6-luna"}},
         "agents": {
             "general": {
                 "display_name": "General",
@@ -123,7 +123,7 @@ def _config_with_worker_scope(
 
 def _authored_config_payload(agent_name: str) -> dict[str, Any]:
     return {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             agent_name: {
@@ -582,7 +582,7 @@ def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_pat
     first_runtime.config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
                 "defaults": {"markdown": True},
             },
@@ -592,7 +592,7 @@ def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_pat
     second_runtime.config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"second": {"display_name": "Second", "role": "r", "rooms": ["lobby"]}},
                 "defaults": {"markdown": True},
             },
@@ -619,7 +619,7 @@ def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: P
     runtime_one.config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
                 "defaults": {"markdown": True},
             },
@@ -654,7 +654,7 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
     second_runtime.config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"second": {"display_name": "Second", "role": "valid", "rooms": []}},
             },
@@ -727,7 +727,7 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
     first_runtime.config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"first": {"display_name": "First", "role": "old", "rooms": []}},
             },
@@ -737,7 +737,7 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
     second_runtime.config_path.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"second": {"display_name": "Second", "role": "new", "rooms": []}},
             },
@@ -767,7 +767,7 @@ def test_api_lifespan_loads_config_from_injected_runtime(
     config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"only_alt": {"display_name": "OnlyAlt", "role": "alt", "rooms": []}},
             },
@@ -824,7 +824,7 @@ async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatc
 
     await asyncio.sleep(0.02)
     first_timestamp = time.time() + 1
-    first_config_path.write_text("models: {default: {provider: openai, id: gpt-5.4}}\n", encoding="utf-8")
+    first_config_path.write_text("models: {default: {provider: openai, id: gpt-6-astra}}\n", encoding="utf-8")
     os.utime(first_config_path, (first_timestamp, first_timestamp))
     await asyncio.wait_for(load_event.wait(), timeout=1)
     assert loaded_paths == [first_config_path]
@@ -833,7 +833,7 @@ async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatc
     load_event.clear()
     await asyncio.sleep(0.02)
     second_timestamp = first_timestamp + 1
-    second_config_path.write_text("models: {default: {provider: openai, id: gpt-5.4}}\n", encoding="utf-8")
+    second_config_path.write_text("models: {default: {provider: openai, id: gpt-6-astra}}\n", encoding="utf-8")
     os.utime(second_config_path, (second_timestamp, second_timestamp))
     await asyncio.wait_for(load_event.wait(), timeout=1)
     assert loaded_paths == [first_config_path, second_config_path]
@@ -2891,7 +2891,7 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     config_path.write_text(
         yaml.dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
             },
@@ -2924,7 +2924,7 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
         response = client.put(
             "/api/config/save",
             json={
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
                 "mindroom_user": {"username": "mindroom_assistant_prod1", "display_name": "Owner"},
@@ -2960,7 +2960,7 @@ def test_save_config_rejects_plugin_with_invalid_dedicated_hooks_module(
     response = test_client.put(
         "/api/config/save",
         json={
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             "router": {"model": "default"},
             "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
             "plugins": ["./plugins/broken-hooks"],
@@ -2984,7 +2984,7 @@ def test_save_config_can_recover_from_invalid_reload(
     assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
 
     valid_config = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             "recovered_agent": {
@@ -3051,7 +3051,7 @@ def test_save_raw_config_source_can_recover_from_invalid_reload(
 
     valid_source = yaml.safe_dump(
         {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             "router": {"model": "default"},
             "agents": {
                 "recovered_agent": {
@@ -3262,7 +3262,7 @@ def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_confi
     temp_config_file.write_text(
         yaml.safe_dump(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": ["./plugins/missing"],
@@ -3360,7 +3360,7 @@ def test_api_cached_write_endpoints_refuse_stale_config_after_invalid_reload(
     response = api_key_client.put(
         "/api/config/models/default",
         headers={"Authorization": "Bearer test-key"},
-        json={"provider": "openai", "id": "gpt-5.4"},
+        json={"provider": "openai", "id": "gpt-6-astra"},
     )
 
     assert response.status_code == 422
@@ -3412,7 +3412,7 @@ def test_load_config_into_app_omits_legacy_null_optional_sections(tmp_path: Path
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "agents: {}\n"
         "teams: null\n"
         "plugins: null\n"
@@ -4018,7 +4018,7 @@ def test_update_team(test_client: TestClient, temp_config_file: Path) -> None:
         "role": "Updated role",
         "agents": ["test_agent", "new_agent"],
         "rooms": ["test-room", "new-room"],
-        "model": "gpt-4",
+        "model": "gpt-6-astra",
         "mode": "collaborate",
     }
 
@@ -4115,7 +4115,7 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
     """Test updating room-specific model overrides."""
     test_client.post("/api/config/load")
 
-    room_models = {"lobby": "gpt-4", "tech-room": "claude-3", "general": "default"}
+    room_models = {"lobby": "gpt-6-astra", "tech-room": "claude-sonnet-5", "general": "default"}
 
     response = test_client.put("/api/config/room-models", json=room_models)
     assert response.status_code == 200
@@ -4125,15 +4125,15 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
         saved_config = yaml.safe_load(f)
 
     assert "room_models" in saved_config
-    assert saved_config["room_models"]["lobby"] == "gpt-4"
-    assert saved_config["room_models"]["tech-room"] == "claude-3"
+    assert saved_config["room_models"]["lobby"] == "gpt-6-astra"
+    assert saved_config["room_models"]["tech-room"] == "claude-sonnet-5"
 
     # Verify we can retrieve the updated room models
     response = test_client.get("/api/config/room-models")
     assert response.status_code == 200
     retrieved_models = response.json()
-    assert retrieved_models["lobby"] == "gpt-4"
-    assert retrieved_models["tech-room"] == "claude-3"
+    assert retrieved_models["lobby"] == "gpt-6-astra"
+    assert retrieved_models["tech-room"] == "claude-sonnet-5"
 
 
 # ---------------------------------------------------------------------------
@@ -4203,7 +4203,7 @@ def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Pa
         process_env={"MINDROOM_API_KEY": "key-b"},
     )
     payload_a = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             "assistant": {
@@ -4214,7 +4214,7 @@ def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Pa
         },
     }
     payload_b = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             "assistant": {

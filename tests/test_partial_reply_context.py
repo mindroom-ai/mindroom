@@ -61,7 +61,7 @@ def _make_config() -> Config:
     config = Config.model_validate(
         {
             "agents": {"helper": {"display_name": "Helper", "role": "test"}},
-            "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         },
     )
     return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))

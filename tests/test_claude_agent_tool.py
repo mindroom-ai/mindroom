@@ -184,7 +184,7 @@ class _GatewayProbeClaudeSDKClient:
             headers["anthropic-beta"] = "tools-2024-04-04"
 
         body = {
-            "model": self.options.model or "claude-sonnet-4-5",
+            "model": self.options.model or "claude-sonnet-5",
             "max_tokens": 256,
             "messages": [{"role": "user", "content": prompt}],
         }
@@ -412,12 +412,12 @@ async def test_claude_send_uses_agent_model_when_tool_model_unset(
     """Agent model id should be used when tool-config model is not set."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = RunContext(run_id="run-1", session_id="session-1")
-    agent = SimpleNamespace(name="general", model=SimpleNamespace(id="claude-sonnet-4-5"))
+    agent = SimpleNamespace(name="general", model=SimpleNamespace(id="claude-sonnet-5"))
 
     await tools.claude_send("hello", run_context=run_context, agent=agent)
 
     options = _FakeClaudeSDKClient.instances[0].options
-    assert options.model == "claude-sonnet-4-5"
+    assert options.model == "claude-sonnet-5"
 
 
 @pytest.mark.asyncio
@@ -427,7 +427,7 @@ async def test_claude_send_tool_model_overrides_agent_model(
     """Explicit tool-config model should override the calling agent model id."""
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model="claude-opus-5")
     run_context = RunContext(run_id="run-1", session_id="session-1")
-    agent = SimpleNamespace(name="general", model=SimpleNamespace(id="claude-sonnet-4-5"))
+    agent = SimpleNamespace(name="general", model=SimpleNamespace(id="claude-sonnet-5"))
 
     await tools.claude_send("hello", run_context=run_context, agent=agent)
 

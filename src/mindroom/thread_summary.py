@@ -25,6 +25,7 @@ from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
 from mindroom.model_defaults import (
     CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
     GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
+    OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
 )
 from mindroom.model_instance_checks import isinstance_of_loaded
 from mindroom.thread_tag_vocabulary import (
@@ -137,6 +138,7 @@ def _summary_model_requires_provider_temperature(model: object) -> bool:
         isinstance(model, _IdentifiedModel)
         and (
             model.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
+            or model.id.casefold().endswith(OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
             or (
                 isinstance_of_loaded(model, _GOOGLE_GEMINI_CLASS)
                 and model.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)

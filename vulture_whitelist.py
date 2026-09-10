@@ -361,3 +361,6 @@ _.load_refresh_token
 _.exchange_authorization_code
 _.exchange_refresh_token
 _.revoke_token
+
+_.image_to_image  # FalTools registers this override as an image-editing tool (src/mindroom/custom_tools/fal.py)
+_.generate_media  # FalTools registers this override as a media-generation tool (src/mindroom/custom_tools/fal.py)

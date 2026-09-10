@@ -17,7 +17,7 @@ describe("ModelConfig - Add Row Behavior", () => {
       models: {
         existing: {
           provider: "openrouter",
-          id: "openai/gpt-4",
+          id: "openai/gpt-6-astra",
         },
       },
       agents: {},

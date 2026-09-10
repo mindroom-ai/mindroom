@@ -46,7 +46,7 @@ from tests.identity_helpers import persist_entity_accounts
 def _minimal_config_path(tmp_path: Path) -> Path:
     """Write a minimal valid config file for ConfigManager tool tests."""
     config_path = tmp_path / "config.yaml"
-    write_config_yaml(Config(models={"default": {"provider": "openai", "id": "gpt-4o"}}), config_path)
+    write_config_yaml(Config(models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}}), config_path)
     return config_path
 
 
@@ -102,7 +102,7 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
     write_config_yaml(
         Config(
             agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
             plugins=["./plugins/bad-name"],
         ),
         config_path,
@@ -140,7 +140,7 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
     write_config_yaml(
         Config(
             agents={},
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
             plugins=["./plugins/demo"],
         ),
         config_path,
@@ -284,7 +284,7 @@ class TestConsolidatedConfigManager:
                 models={
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-4o",
+                        "id": "gpt-5.6-terra",
                         "api_key": "sk-test-secret",
                     },
                 },
@@ -297,7 +297,7 @@ class TestConsolidatedConfigManager:
         assert "Authored MindRoom configuration" in result
         assert "authored values only" in result
         assert "api_key: '***redacted***'" in result
-        assert "id: gpt-4o" in result
+        assert "id: gpt-5.6-terra" in result
         assert "sk-test-secret" not in result
         assert str(config_path.resolve()) in result
 
@@ -309,7 +309,7 @@ class TestConsolidatedConfigManager:
                 models={
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-4o",
+                        "id": "gpt-5.6-terra",
                         # A secret that no token-shape regex matches, so only
                         # key-context redaction can catch it.
                         "api_key": "plain-local-secret",
@@ -351,7 +351,7 @@ class TestConsolidatedConfigManager:
                     "path": "/rooms/room~1a~0b",
                     "value": {"invite_users": ["@user:example.org"]},
                 },
-                {"op": "replace", "path": "/models/default/id", "value": "gpt-5"},
+                {"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"},
                 {"op": "add", "path": "/tool_approval", "value": {"default": "require_approval"}},
             ],
         )
@@ -360,7 +360,7 @@ class TestConsolidatedConfigManager:
         assert "Persisted: yes" in result
         assert "/tool_approval" in result
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert saved["models"]["default"]["id"] == "gpt-5"
+        assert saved["models"]["default"]["id"] == "gpt-5.6-sol"
         assert saved["rooms"]["room/a~b"]["invite_users"] == ["@user:example.org"]
         assert saved["tool_approval"]["default"] == "require_approval"
 
@@ -369,7 +369,7 @@ class TestConsolidatedConfigManager:
         config_path = tmp_path / "config.yaml"
         write_config_yaml(
             Config(
-                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
                 agents={"writer": AgentConfig(display_name="Writer", role="Writes", instructions=["first"])},
             ),
             config_path,
@@ -395,7 +395,7 @@ class TestConsolidatedConfigManager:
 
         result = _config_manager(config_path).manage_config(
             operation="patch",
-            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5"}],
+            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"}],
             dry_run=True,
         )
 
@@ -411,7 +411,7 @@ class TestConsolidatedConfigManager:
         result = _config_manager(config_path).manage_config(
             operation="patch",
             changes=[
-                {"op": "replace", "path": "/models/default/id", "value": "gpt-5"},
+                {"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"},
                 {"op": "remove", "path": "/models/missing"},
             ],
         )
@@ -491,7 +491,7 @@ class TestConsolidatedConfigManager:
         config_path = tmp_path / "config.yaml"
         write_config_yaml(
             Config(
-                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
                 agents={"writer": AgentConfig(display_name="Writer", role="Writes")},
             ),
             config_path,
@@ -512,7 +512,7 @@ class TestConsolidatedConfigManager:
         config_path = tmp_path / "config.yaml"
         write_config_yaml(
             Config(
-                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
                 defaults=DefaultsConfig(
                     tools=[{"shell": {"enable_run_shell_command": True}}],
                 ),
@@ -540,20 +540,20 @@ class TestConsolidatedConfigManager:
         config_path = tmp_path / "config.yaml"
         models_path = tmp_path / "models.yaml"
         config_path.write_text("models: !include models.yaml\n", encoding="utf-8")
-        models_path.write_text("default:\n  provider: openai\n  id: gpt-4o\n", encoding="utf-8")
+        models_path.write_text("default:\n  provider: openai\n  id: gpt-5.6-terra\n", encoding="utf-8")
         cm = _config_manager(config_path)
 
         inspected = cm.manage_config(operation="inspect", path="/models/default")
         rejected = cm.manage_config(
             operation="patch",
-            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5"}],
+            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"}],
         )
 
         assert "composed from multiple files" in inspected
         assert "structured patching is unavailable" in inspected
         assert "composed from multiple files" in rejected
         assert "Changes were NOT applied" in rejected
-        assert "gpt-4o" in models_path.read_text(encoding="utf-8")
+        assert "gpt-5.6-terra" in models_path.read_text(encoding="utf-8")
 
     def test_init_uses_explicit_config_path(self) -> None:
         """Initialization should preserve the explicitly provided config path."""
@@ -625,7 +625,7 @@ class TestConsolidatedConfigManager:
                 ),
                 "elsewhere": AgentConfig(display_name="Elsewhere Agent", role="Not here", model="default"),
             },
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -849,7 +849,7 @@ class TestConsolidatedConfigManager:
             administrators=["@alice:example.org"],
             agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
             defaults=DefaultsConfig(tools=[], worker_scope=worker_scope),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -923,7 +923,7 @@ class TestConsolidatedConfigManager:
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -964,7 +964,7 @@ class TestConsolidatedConfigManager:
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -991,7 +991,7 @@ class TestConsolidatedConfigManager:
             administrators=["@alice:example.org"],
             agents={"research": AgentConfig(display_name="Research", role="Research", worker_scope="user_agent")},
             defaults=DefaultsConfig(tools=[]),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -1021,7 +1021,7 @@ class TestConsolidatedConfigManager:
                 ),
             },
             defaults=DefaultsConfig(tools=["google_drive"], worker_scope="user_agent"),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -1061,7 +1061,7 @@ class TestConsolidatedConfigManager:
             administrators=["@alice:example.org"],
             agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
             defaults=DefaultsConfig(tools=[]),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -1097,7 +1097,7 @@ class TestConsolidatedConfigManager:
             administrators=["@alice:example.org"],
             agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
             defaults=DefaultsConfig(tools=[], worker_scope="user_agent"),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
             mcp_servers={"demo": mcp_server},
         )
         config_path = tmp_path / "config.yaml"
@@ -1127,7 +1127,7 @@ class TestConsolidatedConfigManager:
                 "research": AgentConfig(display_name="Research", role="Research"),
             },
             defaults=DefaultsConfig(tools=[]),
-            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
         )
         config_path = tmp_path / "config.yaml"
         write_config_yaml(config, config_path)
@@ -1285,7 +1285,7 @@ class TestConsolidatedConfigManager:
                 Config(
                     agents={},
                     mindroom_user=MindRoomUserConfig(username="mindroom_assistant"),
-                    models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                    models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
                 ),
                 config_path,
             )
@@ -1965,11 +1965,11 @@ class TestConsolidatedConfigManager:
                 models={
                     "default": {
                         "provider": "openai",
-                        "id": "gpt-4",
+                        "id": "gpt-6-astra",
                     },
                     "fast": {
                         "provider": "anthropic",
-                        "id": "claude-3-haiku",
+                        "id": "claude-haiku-4-5",
                     },
                 },
             )
@@ -1981,7 +1981,7 @@ class TestConsolidatedConfigManager:
             assert "Available Models" in result
             assert "default" in result
             assert "openai" in result
-            assert "gpt-4" in result
+            assert "gpt-6-astra" in result
             assert "fast" in result
             assert "anthropic" in result
         finally:
@@ -2026,7 +2026,7 @@ class TestWorkerGrantableCredentials:
         config_path = tmp_path / "config.yaml"
         write_config_yaml(
             Config(
-                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
                 defaults=DefaultsConfig(worker_grantable_credentials=["openai", "github_private"]),
             ),
             config_path,

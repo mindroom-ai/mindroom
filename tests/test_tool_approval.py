@@ -76,7 +76,7 @@ def _config(tmp_path: Path) -> Config:
     config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
         ),
         runtime_paths,
     )
@@ -1857,7 +1857,7 @@ def test_resolve_tool_approval_approver_rejects_internal_users(tmp_path: Path) -
             agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
             bot_accounts=["@bridge_bot:localhost"],
             mindroom_user=MindRoomUserConfig(),
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
         ),
         runtime_paths,
     )
@@ -1881,7 +1881,7 @@ async def test_evaluate_tool_approval_rule_action_requires_approval(tmp_path: Pa
     config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Help with coding")},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             tool_approval={"rules": [{"match": "read_*", "action": "require_approval"}]},
         ),
         runtime_paths,
@@ -1925,7 +1925,7 @@ async def test_evaluate_tool_approval_honors_tool_approval_exemption(
     config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Help with coding")},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             tool_approval={"rules": [{"match": "request_network_access", "action": "require_approval"}]},
         ),
         runtime_paths,
@@ -1948,7 +1948,7 @@ async def test_tool_approval_rule_matching_uses_first_matching_action_for_listin
     config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Help with coding")},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             tool_approval={
                 "default": "auto_approve",
                 "rules": [
@@ -1984,7 +1984,7 @@ async def test_tool_approval_script_rule_listing_requires_approval_but_evaluatio
     config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Help with coding")},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             tool_approval={
                 "default": "auto_approve",
                 "timeout_days": 4,
@@ -2024,7 +2024,7 @@ async def test_tool_approval_rule_matching_falls_back_to_default_for_listing(
     config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Help with coding")},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             tool_approval={
                 "default": default,
                 "rules": [{"match": "write_*", "action": "require_approval"}],
@@ -2057,7 +2057,7 @@ async def test_evaluate_tool_approval_script_error_is_sanitized(tmp_path: Path) 
     config = bind_runtime_paths(
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Help with coding")},
-            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
             tool_approval={"rules": [{"match": "read_file", "script": str(script_path)}]},
         ),
         runtime_paths,

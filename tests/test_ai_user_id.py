@@ -154,12 +154,12 @@ def test_serialize_metrics_preserves_zero_usage_fields_from_metrics() -> None:
 def test_ai_run_metadata_prefers_provider_counters_over_estimate_for_cache_token_providers() -> None:
     """Cache-token providers report context as raw input plus cache read/write, not the estimate."""
     metadata = build_ai_run_metadata_content(
-        config=_metadata_config("vertexai_claude", "claude-sonnet-4-6"),
+        config=_metadata_config("vertexai_claude", "claude-sonnet-5"),
         model_name="default",
         run_id="run-1",
         session_id="session-1",
         status="completed",
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         model_provider="google",
         context_input_tokens=30_210,
         context_raw_input_tokens=1_200,
@@ -200,12 +200,12 @@ def test_ai_run_metadata_context_uses_raw_input_for_non_cache_token_providers() 
 def test_ai_run_metadata_context_falls_back_to_estimate_without_provider_counters() -> None:
     """Without any provider usage counters, the pre-flight estimate still populates the context block."""
     metadata = build_ai_run_metadata_content(
-        config=_metadata_config("anthropic", "claude-sonnet-4-6"),
+        config=_metadata_config("anthropic", "claude-sonnet-5"),
         model_name="default",
         run_id="run-1",
         session_id="session-1",
         status="completed",
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         model_provider="Anthropic",
         context_input_tokens=30_210,
         prepared_history=PreparedHistoryState(prepared_context_tokens=30_210),
@@ -223,12 +223,12 @@ def test_ai_run_metadata_context_falls_back_to_estimate_without_provider_counter
 def test_ai_run_metadata_context_regression_cached_prefix_sample() -> None:
     """Regression: a 49,886-token cached prefix must not be reported as a 30,210-token context."""
     metadata = build_ai_run_metadata_content(
-        config=_metadata_config("vertexai_claude", "claude-sonnet-4-6"),
+        config=_metadata_config("vertexai_claude", "claude-sonnet-5"),
         model_name="default",
         run_id="run-1",
         session_id="session-1",
         status="completed",
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         model_provider="google",
         metrics={"input_tokens": 3_277, "cache_read_tokens": 99_772, "cache_write_tokens": 49_886},
         context_input_tokens=30_210,
@@ -1572,7 +1572,7 @@ class TestUserIdPassthrough:
     async def test_ai_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
         """Vertex Claude path should not silently drop non-PDF file media."""
         mock_agent = MagicMock()
-        mock_agent.model = VertexAIClaude(id="claude-sonnet-4@20250514")
+        mock_agent.model = VertexAIClaude(id="claude-sonnet-5")
         mock_agent.name = "GeneralAgent"
         mock_agent.add_history_to_context = False
 
@@ -1603,7 +1603,7 @@ class TestUserIdPassthrough:
     async def test_stream_agent_response_passes_all_files_for_vertex_claude(self, tmp_path: Path) -> None:
         """Streaming path should not silently drop non-PDF files for Vertex Claude."""
         mock_agent = MagicMock()
-        mock_agent.model = VertexAIClaude(id="claude-sonnet-4@20250514")
+        mock_agent.model = VertexAIClaude(id="claude-sonnet-5")
         mock_agent.name = "GeneralAgent"
         mock_agent.add_history_to_context = False
 
@@ -1642,7 +1642,7 @@ class TestUserIdPassthrough:
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "Claude"
-        mock_agent.model.id = "claude-sonnet-4-6"
+        mock_agent.model.id = "claude-sonnet-5"
         mock_agent.name = "GeneralAgent"
         mock_agent.add_history_to_context = False
         mock_agent.arun = AsyncMock(
@@ -1679,7 +1679,7 @@ class TestUserIdPassthrough:
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "Claude"
-        mock_agent.model.id = "claude-sonnet-4-6"
+        mock_agent.model.id = "claude-sonnet-5"
         mock_agent.name = "GeneralAgent"
         mock_agent.add_history_to_context = False
 
@@ -2618,7 +2618,7 @@ class TestUserIdPassthrough:
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "Claude"
-        mock_agent.model.id = "claude-sonnet-4-6"
+        mock_agent.model.id = "claude-sonnet-5"
         mock_agent.name = "GeneralAgent"
         mock_agent.add_history_to_context = False
 
@@ -2628,7 +2628,7 @@ class TestUserIdPassthrough:
         mock_run_output.run_id = "run-1"
         mock_run_output.session_id = "session1"
         mock_run_output.status = RunStatus.completed
-        mock_run_output.model = "claude-sonnet-4-6"
+        mock_run_output.model = "claude-sonnet-5"
         mock_run_output.model_provider = "Anthropic"
         mock_run_output.metrics = RunMetrics(
             input_tokens=3000,
@@ -2641,7 +2641,7 @@ class TestUserIdPassthrough:
 
         config = Config(
             agents={"general": AgentConfig(display_name="General")},
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6", context_window=200_000)},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5", context_window=200_000)},
         )
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
@@ -3868,14 +3868,14 @@ class TestUserIdPassthrough:
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "Claude"
-        mock_agent.model.id = "claude-sonnet-4-6"
+        mock_agent.model.id = "claude-sonnet-5"
         mock_agent.name = "GeneralAgent"
         mock_agent.add_history_to_context = False
 
         async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="step one")
             yield ModelRequestCompletedEvent(
-                model="claude-sonnet-4-6",
+                model="claude-sonnet-5",
                 model_provider="Anthropic",
                 input_tokens=3000,
                 output_tokens=50,
@@ -3885,7 +3885,7 @@ class TestUserIdPassthrough:
             )
             yield RunContentEvent(content="step two")
             yield ModelRequestCompletedEvent(
-                model="claude-sonnet-4-6",
+                model="claude-sonnet-5",
                 model_provider="Anthropic",
                 input_tokens=120,
                 output_tokens=20,
@@ -3898,7 +3898,7 @@ class TestUserIdPassthrough:
 
         config = Config(
             agents={"general": AgentConfig(display_name="General")},
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6", context_window=200_000)},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5", context_window=200_000)},
         )
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
@@ -3933,14 +3933,14 @@ class TestUserIdPassthrough:
         mock_agent = MagicMock()
         mock_agent.model = MagicMock()
         mock_agent.model.__class__.__name__ = "Claude"
-        mock_agent.model.id = "claude-sonnet-4-6"
+        mock_agent.model.id = "claude-sonnet-5"
         mock_agent.name = "GeneralAgent"
         mock_agent.add_history_to_context = False
 
         async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="step one")
             yield ModelRequestCompletedEvent(
-                model="claude-sonnet-4-6",
+                model="claude-sonnet-5",
                 model_provider="google",
                 input_tokens=120,
                 output_tokens=20,
@@ -3956,7 +3956,7 @@ class TestUserIdPassthrough:
             models={
                 "default": ModelConfig(
                     provider="vertexai_claude",
-                    id="claude-sonnet-4-6",
+                    id="claude-sonnet-5",
                     context_window=200_000,
                 ),
             },

@@ -972,7 +972,7 @@ async def test_orphaned_supervisor_exits_and_kills_children() -> None:
 def _make_runtime_paths(tmp_path: Path) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("", encoding="utf-8")
@@ -1074,7 +1074,7 @@ def test_subprocess_mode_shell_background_handle_across_requests(tmp_path: Path)
     """
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(

@@ -344,7 +344,7 @@ def test_rejects_max_concurrent_agents_above_cap() -> None:
 def test_rejects_non_string_permission_models() -> None:
     """permissions.models must be non-empty strings."""
     with pytest.raises(DynamicWorkflowError, match="'models' must be a list of non-empty strings"):
-        validate_workflow_spec(_spec(permissions={"models": ["claude-sonnet-4-6", 7]}))
+        validate_workflow_spec(_spec(permissions={"models": ["claude-sonnet-5", 7]}))
 
 
 def test_rejects_unknown_data_permission() -> None:

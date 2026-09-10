@@ -39,20 +39,20 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
 Model IDs were checked against provider catalogs on September 10, 2026.
-OpenRouter uses `anthropic/claude-fable-5.1`, while the direct Anthropic, Bedrock, and Vertex IDs use `claude-fable-5-1`.
+OpenRouter uses `anthropic/claude-fable-5.1`, Bedrock uses `anthropic.claude-fable-5-1`, and the direct Anthropic and Vertex APIs use `claude-fable-5-1`.
 DeepSeek direct API aliases remain `deepseek-v4-flash` and `deepseek-v4-pro`; do not substitute the OpenRouter V4.1 ID on the direct API.
 
 For `anthropic`, prefer `claude-sonnet-5`, `claude-opus-5`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
 Use `claude-fable-5-1` when you need Anthropic's highest available capability.
 Claude Fable 5.1 is generally available on the direct Anthropic API and the documented cloud platforms.
 For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
-Current docs list bare Vertex IDs for current Claude models such as `claude-fable-5-1`, `claude-opus-5`, and `claude-sonnet-5`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
+Current Google Cloud docs list bare Vertex IDs for `claude-fable-5-1`, `claude-opus-5`, `claude-sonnet-5`, and [`claude-haiku-4-5`](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude/haiku-4-5).
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
 For Gemini API text and coding work, prefer `gemini-3.8-flash` as the standard stable model unless you intentionally need the cheaper `gemini-3.5-flash-lite` tier.
 Use `gemini-3.1-pro-preview` only when you need the highest Gemini API intelligence tier and accept a preview model.
 The Google rows above are for the Gemini API / AI Studio `google` provider, not for Vertex AI.
 For `vertexai`, verify the current Vertex AI docs instead of assuming Gemini API names or defaults carry over unchanged.
-Current Vertex AI image docs prominently document `gemini-3-pro-image-preview`, `gemini-3.1-flash-image`, and `gemini-2.5-flash-image`, and the right default depends on the specific Vertex surface you are editing.
+Current [Vertex AI image docs](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/image-generation) document `gemini-3-pro-image`, `gemini-3.1-flash-image`, and `gemini-3.1-flash-lite-image`; choose the tier that fits the task.
 For Google image work, use the official product name from the docs for the provider surface you are editing.
 Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI docs use their own product naming and model tables.
 

@@ -41,8 +41,8 @@ describe("VoiceConfig", () => {
 
   const createConfig = (): Partial<Config> => ({
     models: {
-      default: { provider: "openai", id: "gpt-4o-mini" },
-      fast: { provider: "openai", id: "gpt-4.1-mini" },
+      default: { provider: "openai", id: "gpt-5.6-luna" },
+      fast: { provider: "openai", id: "gpt-5.6-terra" },
     },
     voice: {
       enabled: true,

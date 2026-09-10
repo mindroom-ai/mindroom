@@ -211,7 +211,7 @@ def _write_plugin_removal_test_files(tmp_path: Path) -> Path:
 def _write_plugin_removal_test_config(tmp_path: Path, *, with_plugin: bool) -> None:
     """Write one minimal config for config-reload plugin teardown tests."""
     config_data = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
         "agents": {
             "assistant": {

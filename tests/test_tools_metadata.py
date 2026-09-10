@@ -1011,7 +1011,7 @@ def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: 
             "models": {
                 "default": {
                     "provider": "openai",
-                    "id": "gpt-5.4",
+                    "id": "gpt-6-astra",
                 },
             },
             "agents": {},
@@ -1089,7 +1089,7 @@ def test_get_tool_by_name_rejects_invalid_mcp_assignment_overrides(tmp_path: Pat
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
-        "    id: gpt-5.4\n"
+        "    id: gpt-6-astra\n"
         "router:\n"
         "  model: default\n"
         "mcp_servers:\n"

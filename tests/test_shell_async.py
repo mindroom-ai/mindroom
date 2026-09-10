@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 def _make_runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("", encoding="utf-8")
@@ -915,7 +915,7 @@ async def test_env_passthrough_preserved(tmp_path: Path) -> None:
     """Runtime env values from .env should be visible in shell commands."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (tmp_path / ".env").write_text("MY_TEST_VAR=async-shell-works\n", encoding="utf-8")
@@ -951,7 +951,7 @@ async def test_login_bash_preserves_runtime_path_after_profile_reset(tmp_path: P
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(

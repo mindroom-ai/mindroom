@@ -53,7 +53,7 @@ def _workflow_spec() -> dict[str, object]:
                 "id": "writer",
                 "kind": "ephemeral_agent",
                 "name": "Report Writer",
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "tools": [],
             },
         ],
@@ -69,7 +69,7 @@ def _workflow_spec() -> dict[str, object]:
             "max_runtime_seconds": 1800,
             "max_concurrent_agents": 4,
             "max_total_agents": 16,
-            "models": ["claude-sonnet-4-6"],
+            "models": ["claude-sonnet-5"],
             "tools": [],
             "data": {
                 "matrix_history": "none",
@@ -107,7 +107,7 @@ def _make_context(
                     memory_backend=agent_memory_backend,
                 ),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
         runtime_paths,
     )

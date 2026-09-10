@@ -77,7 +77,7 @@ def test_model_config_with_extra_kwargs() -> None:
 
     model_config = ModelConfig(
         provider="openrouter",
-        id="openai/gpt-4",
+        id="openai/gpt-6-astra",
         extra_kwargs=extra_kwargs,
     )
 
@@ -91,7 +91,7 @@ def test_config_yaml_with_extra_kwargs() -> None:
         "models": {
             "test_model": {
                 "provider": "openrouter",
-                "id": "openai/gpt-4",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {
                     "request_params": {
                         "provider": {
@@ -152,7 +152,7 @@ def test_get_model_instance_with_extra_kwargs() -> None:
         "models": {
             "test_model": {
                 "provider": "openrouter",
-                "id": "openai/gpt-4",
+                "id": "deepseek/deepseek-v4.1-flash",
                 "extra_kwargs": {
                     "request_params": {
                         "provider": {
@@ -187,7 +187,7 @@ def test_get_model_instance_with_extra_kwargs() -> None:
     model = get_model_instance(config, runtime_paths, "test_model")
 
     # Check that the model has the correct parameters
-    assert model.id == "openai/gpt-4"
+    assert model.id == "deepseek/deepseek-v4.1-flash"
     assert model.request_params is not None
     assert model.request_params["provider"]["order"] == ["Cerebras"]
     assert model.request_params["provider"]["allow_fallbacks"] is False
@@ -227,7 +227,7 @@ def test_get_model_instance_supports_llama_cpp_provider() -> None:
         "models": {
             "local_model": {
                 "provider": "llama_cpp",
-                "id": "gemma-4:31b-q4-uncensored",
+                "id": "local-model",
                 "extra_kwargs": {
                     "api_key": "sk-no-key-required",
                     "base_url": "http://llama.local/v1",
@@ -246,7 +246,7 @@ def test_get_model_instance_supports_llama_cpp_provider() -> None:
     model = get_model_instance(config, runtime_paths, "local_model")
 
     assert isinstance(model, LlamaCpp)
-    assert model.id == "gemma-4:31b-q4-uncensored"
+    assert model.id == "local-model"
     assert model.api_key == "sk-no-key-required"
     assert model.base_url == "http://llama.local/v1"
     assert model.max_tokens == 32000
@@ -259,7 +259,7 @@ def test_llama_cpp_provider_does_not_auto_fetch_api_key(monkeypatch: pytest.Monk
         "models": {
             "local_model": {
                 "provider": "llama_cpp",
-                "id": "gemma-4:31b-q4-uncensored",
+                "id": "local-model",
                 "extra_kwargs": {
                     "base_url": "http://llama.local/v1",
                 },
@@ -353,7 +353,7 @@ def test_model_without_extra_kwargs() -> None:
         "models": {
             "simple_model": {
                 "provider": "openai",
-                "id": "gpt-3.5-turbo",
+                "id": "gpt-5.6-luna",
                 # No extra_kwargs
             },
         },
@@ -378,7 +378,7 @@ def test_model_without_extra_kwargs() -> None:
 
     # Should work without any issues
     model = get_model_instance(config, runtime_paths, "simple_model")
-    assert model.id == "gpt-3.5-turbo"
+    assert model.id == "gpt-5.6-luna"
     assert model.provider == "OpenAI"
 
 
@@ -388,7 +388,7 @@ def test_vertexai_claude_provider() -> None:
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4@20250514",
+                "id": "claude-sonnet-5",
                 "context_window": 200000,
                 "extra_kwargs": {
                     "project_id": "demo-project",
@@ -418,7 +418,7 @@ def test_vertexai_claude_provider() -> None:
 
     assert isinstance(model, VertexAIClaude)
     assert isinstance(model, MindroomVertexAIClaude)
-    assert model.id == "claude-sonnet-4@20250514"
+    assert model.id == "claude-sonnet-5"
     assert model.provider == "VertexAI"
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
@@ -821,7 +821,7 @@ def test_strip_vertex_claude_tool_strict_preserves_schema_and_input() -> None:
 def test_mindroom_vertexai_claude_request_kwargs_strip_tool_strict() -> None:
     """Mindroom's Vertex Claude model should not send strict in the provider tool payload."""
     model = MindroomVertexAIClaude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         project_id="demo-project",
         region="us-central1",
         cache_system_prompt=False,
@@ -914,7 +914,7 @@ async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_prov
 
 def _vertex_claude_model(*, extended_cache_time: bool = True) -> VertexAIClaude:
     return VertexAIClaude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         project_id="demo-project",
         region="us-central1",
         cache_system_prompt=True,
@@ -1159,7 +1159,7 @@ def test_prompt_cache_hook_inert_when_cache_disabled() -> None:
 
 def test_prompt_cache_hook_applies_to_direct_anthropic_claude() -> None:
     """The hook must ladder direct Anthropic Claude models, not only Vertex."""
-    model = Claude(id="claude-sonnet-4-6", api_key="test-key", cache_system_prompt=True)
+    model = Claude(id="claude-sonnet-5", api_key="test-key", cache_system_prompt=True)
     captured_kwargs = _install_fake_sync_client(model)
     install_claude_prompt_cache_hook(model)
 
@@ -1894,7 +1894,7 @@ def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatc
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4@20250514",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -1964,7 +1964,7 @@ def test_vertexai_claude_rejects_missing_runtime_google_application_credentials(
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4-6",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -1999,7 +1999,7 @@ def test_vertexai_claude_rejects_invalid_runtime_google_application_credentials(
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4-6",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",
@@ -2034,7 +2034,7 @@ def test_vertexai_claude_loads_service_account_credentials_directly(
         "models": {
             "vertex_claude_model": {
                 "provider": "vertexai_claude",
-                "id": "claude-sonnet-4-6",
+                "id": "claude-sonnet-5",
                 "extra_kwargs": {
                     "project_id": "demo-project",
                     "region": "us-central1",

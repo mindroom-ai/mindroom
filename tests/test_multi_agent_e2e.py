@@ -283,7 +283,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     """Test that agents respond in threads based on whether other agents are participating."""
     # Create the config first to get the actual domain
     mock_config = _make_config(tmp_path)
-    mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")}
+    mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-haiku-4-5")}
     mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
     fake_member = MagicMock()
     fake_member.name = "MockAgent"

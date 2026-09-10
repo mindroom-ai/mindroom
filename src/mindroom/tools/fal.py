@@ -9,7 +9,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.fal import FalTools
+    from mindroom.custom_tools.fal import MindRoomFalTools
 
 
 @register_tool_with_metadata(
@@ -62,8 +62,8 @@ if TYPE_CHECKING:
     docs_url="https://docs.agno.com/tools/toolkits/others/fal",  # URL without .md extension
     function_names=("generate_media", "image_to_image", "on_queue_update"),
 )
-def fal_tools() -> type[FalTools]:
+def fal_tools() -> type[MindRoomFalTools]:
     """Return Fal tools for AI model serving and media generation."""
-    from agno.tools.fal import FalTools
+    from mindroom.custom_tools.fal import MindRoomFalTools
 
-    return FalTools
+    return MindRoomFalTools

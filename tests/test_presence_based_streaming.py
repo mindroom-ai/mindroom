@@ -283,7 +283,7 @@ class TestBotIntegration:
                     agents={
                         "test_agent": AgentConfig(
                             display_name="Test Agent",
-                            model="gpt-4",
+                            model="gpt-6-astra",
                             rooms=["#test:localhost"],
                         ),
                     },
@@ -377,7 +377,7 @@ class TestBotIntegration:
                     agents={
                         "test_agent": AgentConfig(
                             display_name="Test Agent",
-                            model="gpt-4",
+                            model="gpt-6-astra",
                             rooms=["#test:localhost"],
                         ),
                     },

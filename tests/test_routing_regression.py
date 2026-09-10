@@ -1776,7 +1776,7 @@ class TestRoutingRegression:
                     },
                     teams={},
                     room_models={},
-                    models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
+                    models={"default": ModelConfig(provider="anthropic", id="claude-haiku-4-5")},
                     authorization={},
                 ),
             ),

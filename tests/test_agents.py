@@ -145,8 +145,8 @@ def _test_config() -> Config:
                 ),
             },
             models={
-                "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
-                "sonnet": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+                "default": ModelConfig(provider="openai", id="gpt-5.6-luna"),
+                "sonnet": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
             },
         ),
         runtime_paths,
@@ -299,7 +299,7 @@ def test_default_mind_role_includes_effective_matrix_homeserver(tmp_path: Path) 
                 "mind": AgentConfig(display_name="Mind", role="Setup assistant", tools=[]),
                 "general": AgentConfig(display_name="General", role="General assistant", tools=[]),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
         ),
         runtime_paths,
     )
@@ -325,7 +325,7 @@ def test_agent_identity_prompt_uses_persisted_current_matrix_id(tmp_path: Path) 
                     rooms=["lobby"],
                 ),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
         ),
         runtime_paths,
     )
@@ -394,7 +394,7 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
             "models": {
                 "default": {
                     "provider": "openai",
-                    "id": "gpt-4o-mini",
+                    "id": "gpt-5.6-luna",
                 },
             },
         },
@@ -2950,7 +2950,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
                 ],
             ),
         },
-        models={"default": ModelConfig(provider="openai", id="gpt-4")},
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
     )
 
     assert not agent_build_can_overlap_file_memory("mind", config, runtime_storage)
@@ -4892,7 +4892,7 @@ def test_config_rejects_git_backed_private_knowledge_inside_private_memory_tree(
                     memory_backend="file",
                 ),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
         )
 
 
@@ -4918,7 +4918,7 @@ def test_config_rejects_git_backed_private_knowledge_at_memory_entrypoint() -> N
                     memory_backend="file",
                 ),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
         )
 
 
@@ -4940,7 +4940,7 @@ def test_config_allows_git_backed_private_knowledge_in_dedicated_subtree() -> No
                 memory_backend="file",
             ),
         },
-        models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+        models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
     )
 
     assert config.agents["mind"].private is not None
@@ -4969,7 +4969,7 @@ def test_config_rejects_git_backed_private_knowledge_at_private_root() -> None:
                     memory_backend="mem0",
                 ),
             },
-            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
         )
 
 
@@ -5002,7 +5002,7 @@ def test_config_rejects_git_backed_private_knowledge_overlapping_template_conten
                         ),
                     ),
                 },
-                models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+                models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
             ),
             runtime_paths,
         )

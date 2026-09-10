@@ -478,7 +478,7 @@ describe("configStore", () => {
           },
           claude: {
             provider: "anthropic",
-            id: "claude-sonnet-4-6",
+            id: "claude-sonnet-5",
           },
         },
       };
@@ -629,7 +629,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -1960,7 +1960,7 @@ describe("configStore", () => {
           memory: {
             embedder: {
               provider: "openai",
-              config: { model: "text-embedding-ada-002" },
+              config: { model: "text-embedding-3-small" },
             },
           },
           defaults: { markdown: true },
@@ -2012,7 +2012,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2226,7 +2226,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2306,7 +2306,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2425,7 +2425,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2518,7 +2518,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2618,7 +2618,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2699,7 +2699,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2803,7 +2803,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2891,7 +2891,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -2987,7 +2987,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -3176,7 +3176,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -3240,7 +3240,7 @@ describe("configStore", () => {
           embedder: {
             provider: "openai",
             config: {
-              model: "text-embedding-ada-002",
+              model: "text-embedding-3-small",
             },
           },
         },
@@ -4321,7 +4321,7 @@ describe("configStore", () => {
             embedder: {
               provider: "openai",
               config: {
-                model: "text-embedding-ada-002",
+                model: "text-embedding-3-small",
               },
             },
           },
@@ -4361,7 +4361,7 @@ describe("configStore", () => {
             embedder: {
               provider: "openai",
               config: {
-                model: "text-embedding-ada-002",
+                model: "text-embedding-3-small",
               },
             },
           },
@@ -5136,7 +5136,7 @@ describe("configStore", () => {
           },
           claude: {
             provider: "anthropic",
-            id: "claude-sonnet-4-6",
+            id: "claude-sonnet-5",
           },
         },
         defaults: {
@@ -5287,7 +5287,7 @@ describe("configStore", () => {
           },
           claude: {
             provider: "anthropic",
-            id: "claude-sonnet-4-6",
+            id: "claude-sonnet-5",
           },
         },
         defaults: {
@@ -6254,7 +6254,7 @@ describe("configStore", () => {
           },
           claude: {
             provider: "anthropic",
-            id: "claude-sonnet-4-6",
+            id: "claude-sonnet-5",
           },
         },
         defaults: {

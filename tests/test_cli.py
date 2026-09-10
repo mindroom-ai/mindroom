@@ -455,7 +455,7 @@ def test_agent_and_team_names_must_not_overlap() -> None:
                     "model": "default",
                 },
             },
-            models={"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+            models={"default": {"provider": "openai", "id": "gpt-5.6-luna"}},
         )
 
 
@@ -471,7 +471,7 @@ def test_agent_and_team_names_reject_internal_entity_name(section: str, entity_n
             },
         },
         "teams": {},
-        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-5.6-luna"}},
     }
     config_data[section][entity_name] = {
         "display_name": entity_name.title(),

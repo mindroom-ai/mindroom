@@ -68,7 +68,7 @@ def _openai_tool_payload(function: Function, *, strict: bool) -> dict[str, objec
     copied = function.model_copy(deep=True)
     effective_strict = strict if copied.strict is None else copied.strict
     copied.process_entrypoint(strict=effective_strict)
-    formatted_tools = OpenAIChat(id="gpt-5.4", api_key="sk-test")._format_tools([copied])
+    formatted_tools = OpenAIChat(id="gpt-6-astra", api_key="sk-test")._format_tools([copied])
     payload = formatted_tools[0]["function"]
     assert isinstance(payload, dict)
     return payload

@@ -51,7 +51,7 @@ def runner_client(
     """Provide an authenticated runner with one real isolated supervisor."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(
@@ -321,7 +321,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-6-astra
 router:
   model: default
 """.lstrip(),
@@ -603,7 +603,7 @@ def test_worker_script_endpoint_rejects_mismatched_dedicated_worker_key(tmp_path
     previous_context = getattr(sandbox_runner_app.state, "sandbox_runner_context", None)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(

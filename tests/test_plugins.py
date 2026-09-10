@@ -274,7 +274,7 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_type_err
     with pytest.raises(TypeError, match="unexpected backend type error"):
         Config.validate_with_runtime(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
             },
@@ -298,7 +298,7 @@ def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_value_er
     with pytest.raises(ValueError, match="unexpected backend value error"):
         Config.validate_with_runtime(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
             },
@@ -1008,7 +1008,7 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
     try:
         bad_config = Config.model_validate(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": ["./plugins/demo"],
@@ -1023,7 +1023,7 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
 
         follow_up_config = Config.model_validate(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {
                     "assistant": {
@@ -1084,7 +1084,7 @@ def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp
         },
     )
     authored_config = {
-        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {
             "assistant": {
@@ -1147,7 +1147,7 @@ def test_validate_with_runtime_rejects_invalid_dedicated_hooks_module(tmp_path: 
     with pytest.raises(ConfigRuntimeValidationError, match=r"hooks\.py"):
         Config.validate_with_runtime(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
                 "plugins": ["./plugins/broken-hooks"],
@@ -1209,7 +1209,7 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
     try:
         validated = Config.validate_with_runtime(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {
                     "assistant": {
@@ -1288,7 +1288,7 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
 
         follow_up_config = Config.model_validate(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {
                     "assistant": {
@@ -1368,7 +1368,7 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
 
         follow_up_config = Config.model_validate(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {
                     "assistant": {
@@ -1683,7 +1683,7 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
 
         follow_up_config = Config.model_validate(
             {
-                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "router": {"model": "default"},
                 "agents": {
                     "assistant": {
@@ -1752,7 +1752,7 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -1824,7 +1824,7 @@ def test_load_config_tolerates_agent_reference_to_tool_declared_by_broken_plugin
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -1877,7 +1877,7 @@ def test_load_config_tolerates_unavailable_ast_plugin_tool_with_authored_overrid
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -2211,7 +2211,7 @@ def test_unavailable_plugin_tool_is_validation_only_not_runtime_metadata(tmp_pat
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -2266,7 +2266,7 @@ def test_load_config_tolerates_tool_declared_after_broken_plugin_registration(
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -2317,7 +2317,7 @@ def test_load_config_tolerates_deferred_reference_to_tool_declared_by_broken_plu
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -2367,7 +2367,7 @@ def test_broken_plugin_unavailable_tool_does_not_shadow_builtin_tool(tmp_path: P
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -2409,7 +2409,7 @@ def test_broken_plugin_unavailable_tool_does_not_shadow_healthy_plugin_tool(tmp_
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -2447,7 +2447,7 @@ def test_load_config_still_rejects_unknown_tool_without_broken_plugin_explanatio
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"
@@ -2480,7 +2480,7 @@ def test_load_config_still_rejects_unknown_deferred_tool_without_broken_plugin_e
             "models:\n"
             "  default:\n"
             "    provider: openai\n"
-            "    id: gpt-5.4\n"
+            "    id: gpt-6-astra\n"
             "router:\n"
             "  model: default\n"
             "agents:\n"

@@ -31,7 +31,7 @@ def _config_with_worker_scope(
     worker_grantable_credentials: list[str] | None = None,
 ) -> Config:
     payload: dict[str, object] = {
-        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "models": {"default": {"provider": "openai", "id": "gpt-5.6-luna"}},
         "administrators": administrators if administrators is not None else ["@alice:example.org"],
         "agents": {
             "general": {
@@ -1663,7 +1663,9 @@ class TestCredentialsAPI:
         _publish_committed_runtime_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
         runtime_paths.config_path.write_text(
-            ("models:\n  default:\n    provider: openai\n    id: gpt-4o-mini\nrouter:\n  model: default\nagents: {}\n"),
+            (
+                "models:\n  default:\n    provider: openai\n    id: gpt-5.6-luna\nrouter:\n  model: default\nagents: {}\n"
+            ),
             encoding="utf-8",
         )
 

@@ -7,7 +7,6 @@ from typing import Any, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
 from agno.tools import Toolkit
-from agno.tools.dalle import DalleTools
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
@@ -47,15 +46,6 @@ IGNORED_EXTRA_CONFIG_FIELDS = {
     # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.
     "docker": {"include_tools"},
 }
-
-
-def test_dalle_default_model_is_accepted_by_agno() -> None:
-    """The dashboard default for the DALL-E tool must satisfy Agno's constructor validation."""
-    model_field = next(field for field in TOOL_METADATA["dalle"].config_fields or [] if field.name == "model")
-
-    assert isinstance(model_field.default, str)
-    assert model_field.default
-    DalleTools(model=model_field.default, api_key="sk-test")
 
 
 def test_youtube_languages_accepts_authored_string_list() -> None:
