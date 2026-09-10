@@ -5023,6 +5023,7 @@ depends_on = [
     "mindroom.mcp_gateway.admission",
     "mindroom.mcp_gateway.accounts",
     "mindroom.mcp_gateway.consent",
+    "mindroom.mcp_gateway.external_auth",
     "mindroom.mcp_gateway.oauth",
     "mindroom.mcp_gateway.server",
     "mindroom.mcp_gateway.store",
@@ -5064,6 +5065,10 @@ depends_on = ["mindroom.mcp_gateway.accounts"]
 [[modules]]
 path = "mindroom.mcp_gateway.accounts"
 depends_on = []
+
+[[modules]]
+path = "mindroom.mcp_gateway.external_auth"
+depends_on = ["mindroom.matrix.identity"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.lifecycle"
