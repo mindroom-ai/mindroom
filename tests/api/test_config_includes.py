@@ -103,6 +103,41 @@ def split_app(split_runtime_paths: constants.RuntimePaths) -> FastAPI:
 class TestIncludeAwareSnapshots:
     """Committed snapshots track the full source-file set and its fingerprint."""
 
+    def test_expand_only_config_tracks_sources_and_blocks_structured_saves(self, tmp_path: Path) -> None:
+        """Expansion alone activates fingerprints and protects shared source files."""
+        config_path = tmp_path / "config.yaml"
+        source = "models:\n  default: {provider: ollama, id: test-model}\ndefaults:\n  tools: [!expand tools.yaml]\n"
+        config_path.write_text(source, encoding="utf-8")
+        shared = tmp_path / "tools.yaml"
+        shared.write_text("- calculator\n", encoding="utf-8")
+        runtime_paths = constants.resolve_primary_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path / "storage",
+            process_env={},
+        )
+        api_app = _make_api_app(runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        before = _snapshot(api_app)
+        assert before.source_files == frozenset({config_path.resolve(), shared.resolve()})
+        assert config_lifecycle.config_uses_includes(_request_for(api_app)) is True
+
+        shared.write_text("- file\n", encoding="utf-8")
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        after = _snapshot(api_app)
+        assert after.source_fingerprint != before.source_fingerprint
+        assert after.config_data["defaults"]["tools"] == ["file"]
+
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.replace_committed_config(
+                _request_for(api_app),
+                copy.deepcopy(after.config_data),
+                error_prefix="Failed to save configuration",
+            )
+
+        assert exc_info.value.status_code == 409
+        assert config_path.read_text(encoding="utf-8") == source
+        assert shared.read_text(encoding="utf-8") == "- file\n"
+
     def test_load_publishes_source_files_and_multi_file_fingerprint(self, split_app: FastAPI) -> None:
         """Loading an include-based config records every source file in the snapshot."""
         snapshot = _snapshot(split_app)

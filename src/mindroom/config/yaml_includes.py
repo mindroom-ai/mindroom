@@ -3,6 +3,8 @@
 Supported tags (Home Assistant semantics unless noted):
 
 - ``!include rel/path.yaml`` — replace the node with the parsed content of that file.
+- ``!expand rel/path.yaml`` — MindRoom extension: splice the file's list into the
+  surrounding list at this item, preserving order and duplicates.
 - ``!include_text rel/path.md`` — MindRoom extension: replace the node with the file's
   raw text (UTF-8, one trailing newline stripped).
 - ``!include_dir_list rel/dir`` — a list with one item per YAML file in the directory.
@@ -27,7 +29,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Never, cast
 
 import yaml
 
@@ -63,6 +65,18 @@ class _IncludeLoader(yaml.SafeLoader):
         self.files_read = files_read
         self.file_texts = file_texts
         self.include_chain = include_chain
+
+    def construct_sequence(self, node: yaml.Node, deep: bool = False) -> list[Any]:
+        """Construct a sequence, splicing only explicitly marked file expansions."""
+        if not isinstance(node, yaml.SequenceNode):
+            return super().construct_sequence(node, deep=deep)
+        items: list[Any] = []
+        for child in node.value:
+            if child.tag == "!expand":
+                items.extend(_expand_list(self, child))
+            else:
+                items.append(self.construct_object(child, deep=deep))
+        return items
 
 
 def _include_error(message: str, node: yaml.Node) -> ConfigIncludeError:
@@ -250,6 +264,26 @@ def _construct_include_text(loader: _IncludeLoader, node: yaml.Node) -> str:
     return _read_included_text(loader, path, node).removesuffix("\n")
 
 
+def _expand_list(loader: _IncludeLoader, node: yaml.Node) -> list[Any]:
+    """Load one expansion through the include machinery and require a YAML list."""
+    if not isinstance(node, yaml.ScalarNode):
+        msg = f"{node.tag} expects a relative file path"
+        raise _include_error(msg, node)
+    path = _resolve_include_path(loader, node)
+    content = _parse_included_yaml(loader, path, node)
+    if not isinstance(content, list):
+        display = _display_path(path, loader.root_dir)
+        msg = f"{node.tag}: '{display}' must contain a YAML list, got {type(content).__name__}"
+        raise _include_error(msg, node)
+    return content
+
+
+def _reject_misplaced_expand(_loader: _IncludeLoader, node: yaml.Node) -> Never:
+    """Expansion is handled by sequence construction, never as a standalone value."""
+    msg = "!expand is only allowed as a list item"
+    raise _include_error(msg, node)
+
+
 def _construct_include_dir_list(loader: _IncludeLoader, node: yaml.Node) -> list[Any]:
     """``!include_dir_list``: one list item per YAML file in the directory."""
     items = (_parse_included_yaml(loader, path, node) for path in _included_dir_files(loader, node))
@@ -318,6 +352,7 @@ def _construct_include_dir_merge_named(loader: _IncludeLoader, node: yaml.Node) 
 
 
 _IncludeLoader.add_constructor("!include", _construct_include)
+_IncludeLoader.add_constructor("!expand", _reject_misplaced_expand)
 _IncludeLoader.add_constructor("!include_text", _construct_include_text)
 _IncludeLoader.add_constructor("!include_dir_list", _construct_include_dir_list)
 _IncludeLoader.add_constructor("!include_dir_named", _construct_include_dir_named)
