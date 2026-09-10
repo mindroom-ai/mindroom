@@ -23,6 +23,7 @@ from mindroom.credentials import get_runtime_credentials_manager, save_scoped_cr
 from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, hook
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.manager import MCPServerManager
+from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.oauth.providers import OAuthConnectionRequired
@@ -34,6 +35,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
+from tests.oauth_test_utils import publish_oauth_credentials
 from tests.test_mcp_manager import _FakeClientSession, _patch_manager, _tool
 from tests.test_tool_hooks import _tool_runtime_context
 
@@ -642,8 +644,8 @@ def _connected_mcp_context(context: PersonalAgentContext, monkeypatch: pytest.Mo
     context = _mcp_context(context, oauth=True)
     credentials = get_runtime_credentials_manager(context.runtime_paths)
     credentials.save_credentials("mcp_example_oauth_client", {"client_id": "public-client"})
-    save_scoped_credentials(
-        "mcp_example_oauth",
+    publish_oauth_credentials(
+        mcp_oauth_provider("example", context.config.mcp_servers["example"]),
         {
             "token": "test-access",
             "client_id": "public-client",

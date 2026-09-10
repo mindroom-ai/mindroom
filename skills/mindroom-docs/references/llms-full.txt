@@ -1585,9 +1585,10 @@ PY
 When this variable is configured, `CredentialsManager` writes encrypted credential files with mode `0600` and creates credential directories with mode `0700`.
 Encrypted mode refuses plaintext credential JSON files for every credential service.
 Existing non-OAuth plaintext credentials become unreadable and cannot be overwritten while encryption is enabled, so back them up and recreate them under encryption or remove the key before reading them again.
-Encrypted mode refuses to copy plaintext legacy OAuth credential bytes into the encrypted SQLite store.
-No OAuth plaintext-to-encrypted migration is performed automatically; the legacy file remains available for operator recovery until an explicit reset or replacement commits, so configure the key before saving credentials that must be encrypted.
-If encryption is disabled again before that commit, MindRoom re-adopts the retained plaintext legacy credential into the unencrypted SQLite store.
+OAuth credentials are read only from their authoritative SQLite stores and use the active encryption setting when published.
+Legacy OAuth JSON files and sidecars are ignored and left unchanged, and changing the encryption setting never imports them.
+An OAuth connection that exists only in JSON must be reconnected with the intended encryption setting.
+Current encrypted SQLite credentials become readable again when their correct key is restored.
 
 ## Debug Logging
 
@@ -13763,10 +13764,9 @@ Automatic discovery first checks protected-resource metadata at the resource ori
 Dynamic client registration requires a provider-specific `client_config_services` entry and stores generated client configuration only in the primary runtime.
 
 OAuth token writes always resolve the provider's canonical credential target and publish through the OAuth credential lifecycle into that scope's private SQLite store.
-On first access, MindRoom adopts a scope's legacy `<credential_service>_credentials.json` token document into a sibling `<credential_service>_credentials.sqlite3` store and removes the legacy file only after its bytes are durably represented or an explicit reset or replacement commits.
-If enabling credential encryption leaves a plaintext legacy token unadopted, disabling encryption before reset or replacement lets MindRoom re-adopt that retained token into the unencrypted store.
-Back up both files during an upgrade if an immediate rollback may be necessary.
-Versions that predate the SQLite lifecycle ignore the new store, so downgrading can expose stale legacy state or require the user to reconnect rather than preserving changes made after adoption.
+The SQLite store is authoritative on every OAuth credential read.
+Legacy `<credential_service>_credentials.json` token documents and their sidecars are ignored and left unchanged.
+An OAuth connection that exists only in JSON must be reconnected to publish current SQLite state.
 Providers can declare that credentials follow the requester independently of agent worker reuse.
 GitHub uses that policy, so its managed token always lands in the requester's `user` scope and can never fall back to a shared or global token store.
 For providers without that policy, private-agent tokens follow the authenticated requester and the agent's saved `worker_scope`, shared-scope agent tokens use a per-agent primary-runtime store, and unscoped agents use the global credential store.
@@ -17083,7 +17083,7 @@ MindRoom's architecture consists of several key components working together.
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
-| `legacy_session_migration.py` | Post-readiness retirement of Agno 2 session run blobs |
+| `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
@@ -17132,12 +17132,12 @@ Historical formats stay with their storage or lifecycle owners, while current ca
 `private_storage_compat.py` owns historical requester spellings and verified aliases; only startup migration and `private_storage_paths.py` can import it.
 Worker mount planning and sandbox path validation use `private_storage_paths.py`, while `private_instance_identity_store.py` validates current identities.
 
-`oauth/credential_compat.py` owns legacy JSON adoption, publication-field normalization, lossless historical requester bindings, and obsolete-file cleanup.
+`oauth/credential_compat.py` owns publication-field normalization and lossless historical requester bindings.
 Only `oauth/credential_store.py` can import it; the store retains schema, scope validation, current credential state, transaction locks, retries, and commit ownership.
-Cleanup eligibility is captured inside initialization's transaction, and source files are removed only after successful initialization or a later credential replacement commits.
-Unreadable plaintext remains outside an encrypted database until it can be adopted or explicitly replaced or reset.
+OAuth credentials stored only in legacy JSON files require reconnection; those files and their obsolete sidecars remain untouched.
 
-Existing lifecycle adapters remain at their focused entry points: `private_storage_migration.py` at startup, `config/access_migration.py` during config loading, Nio journal and crypto adapters when their stores open, and `legacy_session_migration.py` after readiness.
+Existing lifecycle adapters remain at their focused entry points: `private_storage_migration.py` at startup, `config/access_migration.py` during config loading, and Nio journal and crypto adapters when their stores open.
+`session_storage_preflight.py` checks owned session databases before opening them and archives session directories whose tables lack required columns; see [Session Storage Recovery](https://docs.mindroom.chat/architecture/orchestration/#session-storage-recovery).
 Tach visibility rules keep compatibility internals behind their owning boundaries.
 
 ## Data Flow
@@ -17524,16 +17524,17 @@ main() entry
 - **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; `matrix_sync.mode: classic` uses Classic `/v3/sync`, while `sliding` uses MSC4186 Simplified Sliding Sync on a homeserver advertising `org.matrix.simplified_msc3575`
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
-## Session Storage Upgrades
+## Session Storage Recovery
 
-After the runtime becomes ready, MindRoom checks session databases for Agno 2 run blobs off the event loop.
-A child process starts only when legacy data exists, then migrates and verifies each session in its own transaction.
-The runtime remains available throughout.
-Logs report each table's total, progress every 100 sessions, and completion.
-Invalid or conflicting blobs stay intact on the compatibility read path and are reported for a later retry.
+Before opening an owned session database, `session_storage_preflight.py` checks any existing session table for the required Agno columns.
+If required columns are missing, it renames the entire `sessions/` directory to a unique `sessions.incompatible-*` sibling, including SQLite journals and sidecars, then recreates `sessions/` with its original permissions.
+The archive stays available for manual recovery, and logs report its path and the missing columns.
+Only session storage is archived; learning, authored files, credentials, and Matrix encryption keys remain separate.
+Permission failures, corruption, unexpected schema objects, and unsafe paths still raise errors rather than triggering an archive.
 
-The legacy column is cleared for successfully migrated sessions and retained for compatibility reads when migration fails.
-Removing the column is a separate explicit cleanup because changing a live SQLite table can block writes.
+Compatible Agno 2 and mixed-schema session data remains readable through Agno's compatibility reads.
+MindRoom no longer schedules background conversion or clears legacy run blobs.
+Run upgrades while MindRoom is stopped so recovery cannot overlap active session writers.
 
 ## Runtime Replacement Admission
 
@@ -19092,6 +19093,14 @@ MindRoom stores data in the `mindroom_data` directory by default:
 
 Keep `tracking/` on persistent storage and include it in backups.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
+
+Before opening an owned agent or team session database, MindRoom checks whether its session table contains the columns required by the installed Agno version.
+If required session columns are missing, MindRoom renames the complete `sessions/` directory to a unique sibling `sessions.incompatible-<id>/`, preserving the database and SQLite sidecars, and starts a fresh session store.
+These archives are retained for inspection or manual recovery; include them in backups and remove them only when no longer needed.
+Compatible history stays in place, including older readable run blobs alongside current run rows, extra columns, and stores awaiting lazy table creation.
+This check does not validate existing runs-table schemas or archive databases on permission, locking, I/O, or corruption errors.
+Learning, workspaces, credentials, encryption keys, custom stores, and durable journal state are outside this session recovery boundary.
+
 Dispatch-obligation databases retain one compact terminal row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
 The retained terminal rows have no automatic retention window because deleting them weakens replay deduplication.
 Pending rows temporarily retain the full event replay payload and should represent only actively deferred or retry-owned work, not completed ignore paths.
@@ -20881,11 +20890,11 @@ A warning is logged when that guard preserves existing target state because the 
 A complete room enumeration that returns zero threads preserves existing YAML exports for that room and logs a warning because an anomalous empty response cannot be distinguished from deletion of the final thread.
 After either warning, verify the source state and remove the preserved export manually only when the deletion is confirmed; workspace git history remains the recovery path for mistaken cleanup.
 Enabled targets whose resolved output directories are equal or nested are all skipped before Matrix work.
-MindRoom claims an output root by writing a `.mindroom-thread-exports` ownership marker, and it claims automatically when the root is empty or already holds a room directory containing an exported thread file.
-A directory that merely contains an `index.json` is not treated as evidence, so pointing `--output` at an unrelated project or build directory is refused rather than adopted.
-Unrelated entries beside those room directories, such as `.DS_Store`, a `.git` directory, or your own notes, neither block the claim nor ever get deleted.
-A root MindRoom cannot recognize is skipped for the entire pass, so it is neither exported to nor cleaned up, and the skip is reported as a target failure.
-Adopt such a root by creating `.mindroom-thread-exports` inside it containing exactly `{"format":"mindroom-thread-exports","version":1}` followed by a newline.
+MindRoom claims an empty output root by writing a `.mindroom-thread-exports` ownership marker.
+Any populated markerless root is refused and left unchanged, regardless of whether its contents resemble thread exports.
+To use an existing populated root, create `.mindroom-thread-exports` inside it containing exactly `{"format":"mindroom-thread-exports","version":1}` followed by a newline.
+Unrelated entries in a marked root, such as `.DS_Store`, a `.git` directory, or your own notes, are never deleted.
+A refused root is skipped for the entire pass, so it is neither exported to nor cleaned up, and the skip is reported as a target failure.
 Cleanup then removes only recognizable room directories and thread YAML files, leaving unrelated entries untouched and logged.
 Retracting a room whose directory still holds unrelated entries removes only the exported files and leaves the directory in place, and repeating the pass stays a quiet no-op.
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
@@ -21282,6 +21291,8 @@ Runs a series of checks in one pass:
 
 ## config
 
+`mindroom config migrate` applies the membership access migration and preserves retired starter-memory settings.
+
 Manage MindRoom configuration files.
 The `config` subgroup contains commands for creating, viewing, editing, and validating your `config.yaml`.
 
@@ -21312,7 +21323,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ validate   Validate config.yaml and check for common issues.                           │
 │ resolve    Print the fully merged config YAML with all !include tags resolved.         │
 │ path       Show the resolved config file path and search locations.                    │
-│ migrate    Apply supported migrations to config.yaml.                                  │
+│ migrate    Migrate config.yaml to membership access settings.                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

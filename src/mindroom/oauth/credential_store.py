@@ -84,12 +84,9 @@ class OAuthCredentialTransaction:
         self,
         context: OAuthCredentialStoreContext,
         connection: sqlite3.Connection,
-        *,
-        compatibility: credential_compat.OAuthCredentialCompatibility,
     ) -> None:
         self._context = context
         self._connection = connection
-        self._compatibility = compatibility
 
     def generations(self) -> _OAuthStoredGenerations:
         """Read revisions without decoding credential bytes."""
@@ -131,7 +128,6 @@ class OAuthCredentialTransaction:
             """,
             (payload, generation, connection_generation),
         )
-        self._compatibility.credentials_replaced()
         return _OAuthStoredCredentialSnapshot(
             credentials=published,
             generation=generation,
@@ -166,7 +162,6 @@ class OAuthCredentialTransaction:
                 """,
                 (operation_id, int(credential_existed)),
             )
-        self._compatibility.credentials_replaced()
         return credential_existed
 
     async def commit(self) -> None:
@@ -175,7 +170,6 @@ class OAuthCredentialTransaction:
             lambda: self._connection.execute("COMMIT"),
             operation="commit",
         )
-        self._compatibility.transaction_committed()
 
     def _decode_credentials(self, row: sqlite3.Row) -> dict[str, Any] | None:
         normalized = _decode_credentials(self._context, row)
@@ -198,7 +192,6 @@ class OAuthCredentialTransaction:
                 """,
                 (encoded,),
             )
-            self._compatibility.credentials_replaced()
         return normalized
 
 
@@ -272,13 +265,9 @@ async def oauth_credential_transaction(
         await _set_synchronous_extra(connection)
         await _enter_delete_journal(connection)
         await _begin_immediate(connection)
-        compatibility = await _initialize_store(context, connection)
+        await _initialize_store(context, connection)
         await _begin_immediate(connection)
-        transaction = OAuthCredentialTransaction(
-            context,
-            connection,
-            compatibility=compatibility,
-        )
+        transaction = OAuthCredentialTransaction(context, connection)
         yield transaction
     finally:
         if connection.in_transaction:
@@ -311,8 +300,8 @@ async def oauth_credential_reader(
 async def _initialize_store(
     context: OAuthCredentialStoreContext,
     connection: sqlite3.Connection,
-) -> credential_compat.OAuthCredentialCompatibility:
-    """Create and bind one database, adopting legacy credentials exactly once."""
+) -> None:
+    """Create and bind one authoritative SQLite credential database."""
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS oauth_credential_state (
@@ -349,9 +338,7 @@ async def _initialize_store(
     row = connection.execute(
         "SELECT * FROM oauth_credential_state WHERE singleton = 1",
     ).fetchone()
-    compatibility = credential_compat.OAuthCredentialCompatibility(context)
     if row is None:
-        initial = compatibility.initial_payload()
         connection.execute(
             """
             INSERT INTO oauth_credential_state(
@@ -368,25 +355,21 @@ async def _initialize_store(
                 expected_binding["routing_agent_name"],
                 secrets.token_hex(32),
                 secrets.token_hex(32),
-                initial.payload,
-                int(initial.present),
-                int(initial.unreadable),
+                None,
+                0,
+                0,
             ),
         )
     else:
         _validate_scope_binding(context, connection, row)
-        compatibility.adopt_deferred_payload(connection, row)
-    compatibility.prepare_initialization_commit(connection)
     await _commit_connection(connection)
-    compatibility.initialization_committed()
-    return compatibility
 
 
 async def _reader_requires_write_preparation(
     context: OAuthCredentialStoreContext,
     database_path: Path,
 ) -> bool:
-    """Return whether a reader needs store creation or deferred legacy adoption."""
+    """Return whether a reader needs store creation."""
     connection = sqlite3.connect(database_path, isolation_level=None, timeout=0)
     connection.row_factory = sqlite3.Row
     try:
@@ -402,7 +385,7 @@ async def _reader_requires_write_preparation(
         if row is None:
             return True
         _validate_initialized_store(context, connection, row=row)
-        return credential_compat.deferred_legacy_payload(context, row) is not None
+        return False
     finally:
         if connection.in_transaction:
             connection.execute("ROLLBACK")

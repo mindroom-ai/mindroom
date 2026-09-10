@@ -58,7 +58,7 @@ MindRoom's architecture consists of several key components working together.
 | `model_loading.py` | Authoritative model instantiation and provider-specific loader selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `agent_storage.py` | Agent session and learning SQLite storage construction helpers |
-| `legacy_session_migration.py` | Post-readiness retirement of Agno 2 session run blobs |
+| `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
@@ -107,12 +107,12 @@ Historical formats stay with their storage or lifecycle owners, while current ca
 `private_storage_compat.py` owns historical requester spellings and verified aliases; only startup migration and `private_storage_paths.py` can import it.
 Worker mount planning and sandbox path validation use `private_storage_paths.py`, while `private_instance_identity_store.py` validates current identities.
 
-`oauth/credential_compat.py` owns legacy JSON adoption, publication-field normalization, lossless historical requester bindings, and obsolete-file cleanup.
+`oauth/credential_compat.py` owns publication-field normalization and lossless historical requester bindings.
 Only `oauth/credential_store.py` can import it; the store retains schema, scope validation, current credential state, transaction locks, retries, and commit ownership.
-Cleanup eligibility is captured inside initialization's transaction, and source files are removed only after successful initialization or a later credential replacement commits.
-Unreadable plaintext remains outside an encrypted database until it can be adopted or explicitly replaced or reset.
+OAuth credentials stored only in legacy JSON files require reconnection; those files and their obsolete sidecars remain untouched.
 
-Existing lifecycle adapters remain at their focused entry points: `private_storage_migration.py` at startup, `config/access_migration.py` during config loading, Nio journal and crypto adapters when their stores open, and `legacy_session_migration.py` after readiness.
+Existing lifecycle adapters remain at their focused entry points: `private_storage_migration.py` at startup, `config/access_migration.py` during config loading, and Nio journal and crypto adapters when their stores open.
+`session_storage_preflight.py` checks owned session databases before opening them and archives session directories whose tables lack required columns; see [Session Storage Recovery](orchestration.md#session-storage-recovery).
 Tach visibility rules keep compatibility internals behind their owning boundaries.
 
 ## Data Flow

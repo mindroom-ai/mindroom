@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,9 +28,22 @@ from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, GOOGLE_DRIVE
 from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
     import pytest
+
+
+def _save_oauth_credentials(
+    credentials_manager: CredentialsManager,
+    credentials: Mapping[str, object],
+) -> None:
+    publish_oauth_credentials(
+        GoogleDriveTools._oauth_provider,
+        credentials,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
 
 
 class MinimalModel(Model):
@@ -471,8 +484,8 @@ def test_google_drive_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
             "_source": "ui",
         },
     )
-    credentials_manager.save_credentials(
-        "google_drive_oauth",
+    _save_oauth_credentials(
+        credentials_manager,
         {
             "token": expected_value,
             "refresh_token": "refresh-token",
@@ -495,8 +508,8 @@ def test_google_drive_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
 def test_google_drive_rejects_stored_token_missing_required_scopes(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     credentials_manager = CredentialsManager(tmp_path / "credentials")
-    credentials_manager.save_credentials(
-        "google_drive_oauth",
+    _save_oauth_credentials(
+        credentials_manager,
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
@@ -522,8 +535,8 @@ def test_google_drive_readonly_grant_keeps_reads_and_requires_reconnect_for_writ
         {"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
     )
     credentials_manager = CredentialsManager(tmp_path / "credentials")
-    credentials_manager.save_credentials(
-        "google_drive_oauth",
+    _save_oauth_credentials(
+        credentials_manager,
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
@@ -559,8 +572,8 @@ def test_google_drive_readonly_grant_blocks_direct_async_write_methods(tmp_path:
         {"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
     )
     credentials_manager = CredentialsManager(tmp_path / "credentials")
-    credentials_manager.save_credentials(
-        "google_drive_oauth",
+    _save_oauth_credentials(
+        credentials_manager,
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
@@ -628,8 +641,8 @@ def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp
         },
     )
     credentials_manager = CredentialsManager(tmp_path / "credentials")
-    credentials_manager.save_credentials(
-        "google_drive_oauth",
+    _save_oauth_credentials(
+        credentials_manager,
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
@@ -661,8 +674,8 @@ def test_google_drive_rejects_stored_token_missing_claims_when_identity_policy_c
         },
     )
     credentials_manager = CredentialsManager(tmp_path / "credentials")
-    credentials_manager.save_credentials(
-        "google_drive_oauth",
+    _save_oauth_credentials(
+        credentials_manager,
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
@@ -690,8 +703,8 @@ def test_google_drive_stored_token_without_client_config_connects_on_invocation(
         process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
     )
     credentials_manager = CredentialsManager(tmp_path / "credentials")
-    credentials_manager.save_credentials(
-        "google_drive_oauth",
+    _save_oauth_credentials(
+        credentials_manager,
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
@@ -722,8 +735,8 @@ def test_google_drive_mismatched_client_id_connects_on_invocation(tmp_path: Path
         {"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
     )
     credentials_manager = CredentialsManager(tmp_path / "credentials")
-    credentials_manager.save_credentials(
-        "google_drive_oauth",
+    _save_oauth_credentials(
+        credentials_manager,
         {
             "token": "access-token",
             "refresh_token": "refresh-token",

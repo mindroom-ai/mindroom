@@ -576,11 +576,11 @@ A warning is logged when that guard preserves existing target state because the 
 A complete room enumeration that returns zero threads preserves existing YAML exports for that room and logs a warning because an anomalous empty response cannot be distinguished from deletion of the final thread.
 After either warning, verify the source state and remove the preserved export manually only when the deletion is confirmed; workspace git history remains the recovery path for mistaken cleanup.
 Enabled targets whose resolved output directories are equal or nested are all skipped before Matrix work.
-MindRoom claims an output root by writing a `.mindroom-thread-exports` ownership marker, and it claims automatically when the root is empty or already holds a room directory containing an exported thread file.
-A directory that merely contains an `index.json` is not treated as evidence, so pointing `--output` at an unrelated project or build directory is refused rather than adopted.
-Unrelated entries beside those room directories, such as `.DS_Store`, a `.git` directory, or your own notes, neither block the claim nor ever get deleted.
-A root MindRoom cannot recognize is skipped for the entire pass, so it is neither exported to nor cleaned up, and the skip is reported as a target failure.
-Adopt such a root by creating `.mindroom-thread-exports` inside it containing exactly `{"format":"mindroom-thread-exports","version":1}` followed by a newline.
+MindRoom claims an empty output root by writing a `.mindroom-thread-exports` ownership marker.
+Any populated markerless root is refused and left unchanged, regardless of whether its contents resemble thread exports.
+To use an existing populated root, create `.mindroom-thread-exports` inside it containing exactly `{"format":"mindroom-thread-exports","version":1}` followed by a newline.
+Unrelated entries in a marked root, such as `.DS_Store`, a `.git` directory, or your own notes, are never deleted.
+A refused root is skipped for the entire pass, so it is neither exported to nor cleaned up, and the skip is reported as a target failure.
 Cleanup then removes only recognizable room directories and thread YAML files, leaving unrelated entries untouched and logged.
 Retracting a room whose directory still holds unrelated entries removes only the exported files and leaves the directory in place, and repeating the pass stays a quiet no-op.
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
@@ -977,6 +977,8 @@ Runs a series of checks in one pass:
 
 ## config
 
+`mindroom config migrate` applies the membership access migration and preserves retired starter-memory settings.
+
 Manage MindRoom configuration files.
 The `config` subgroup contains commands for creating, viewing, editing, and validating your `config.yaml`.
 
@@ -1007,7 +1009,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ validate   Validate config.yaml and check for common issues.                           │
 │ resolve    Print the fully merged config YAML with all !include tags resolved.         │
 │ path       Show the resolved config file path and search locations.                    │
-│ migrate    Apply supported migrations to config.yaml.                                  │
+│ migrate    Migrate config.yaml to membership access settings.                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

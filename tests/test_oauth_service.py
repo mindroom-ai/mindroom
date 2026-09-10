@@ -18,7 +18,6 @@ import pytest
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
     get_runtime_credentials_manager,
-    save_scoped_credentials,
     scoped_credentials_path,
 )
 from mindroom.oauth import credential_lifecycle, credential_store, reset_execution
@@ -48,6 +47,7 @@ from mindroom.oauth.providers import (
 )
 from mindroom.oauth.service import OAUTH_RESET_REQUIRED_REASON, oauth_connection_required
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -199,8 +199,8 @@ def _context(
 
 
 def _save(context: OAuthCredentialContext, credentials: dict[str, Any]) -> None:
-    save_scoped_credentials(
-        context.provider.credential_service,
+    publish_oauth_credentials(
+        context.provider,
         credentials,
         credentials_manager=context.credentials_manager,
         worker_target=context.worker_target,
@@ -646,12 +646,12 @@ def test_sqlite_state_requires_explicit_connection_generation(tmp_path: Path) ->
 
 @pytest.mark.parametrize("encrypted", [False, True], ids=("plaintext", "encrypted"))
 @pytest.mark.asyncio
-async def test_reset_deletes_unreadable_scoped_file_and_allows_reconnect(
+async def test_reset_deletes_unreadable_sqlite_credentials_and_allows_reconnect(
     tmp_path: Path,
     *,
     encrypted: bool,
 ) -> None:
-    """Reset must remove the exact file even when credential decoding fails."""
+    """Reset must clear current SQLite credentials even when decoding fails."""
 
     async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
         return None
@@ -672,16 +672,11 @@ async def test_reset_deletes_unreadable_scoped_file_and_allows_reconnect(
         credentials_manager=credentials_manager,
         worker_target=_worker_target(),
     )
-    credentials_path = scoped_credentials_path(
-        context.provider.credential_service,
-        credentials_manager=context.credentials_manager,
-        worker_target=context.worker_target,
-    )
-    credentials_path.parent.mkdir(parents=True, exist_ok=True)
-    credentials_path.write_bytes(b"not-a-readable-credential")
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    corrupt_oauth_credential_payload(_oauth_credential_database_path(context), b"not-a-readable-credential")
 
     assert await credential_lifecycle.reset_oauth_credentials(context) is True
-    assert not credentials_path.exists()
+    assert _load(context) is None
 
     reconnected = await exchange_and_store_oauth_credentials(
         context,
@@ -694,8 +689,8 @@ async def test_reset_deletes_unreadable_scoped_file_and_allows_reconnect(
 
 
 @pytest.mark.asyncio
-async def test_wrong_encryption_key_does_not_poison_legacy_oauth_adoption(tmp_path: Path) -> None:
-    """An unreadable legacy credential must remain adoptable after the correct key is restored."""
+async def test_wrong_encryption_key_does_not_poison_sqlite_oauth_credentials(tmp_path: Path) -> None:
+    """An unreadable SQLite credential remains readable after the correct key is restored."""
 
     async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
         return None
@@ -714,13 +709,8 @@ async def test_wrong_encryption_key_does_not_poison_legacy_oauth_adoption(tmp_pa
         credentials_manager=get_runtime_credentials_manager(correct_runtime_paths),
         worker_target=worker_target,
     )
-    legacy_credentials = _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT)
-    _save(correct_context, legacy_credentials)
-    credentials_path = scoped_credentials_path(
-        provider.credential_service,
-        credentials_manager=correct_context.credentials_manager,
-        worker_target=worker_target,
-    )
+    credentials = _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT)
+    _save(correct_context, credentials)
     wrong_runtime_paths = _runtime_paths(
         tmp_path,
         process_env={"MINDROOM_CREDENTIALS_ENCRYPTION_KEY": wrong_key},
@@ -734,10 +724,9 @@ async def test_wrong_encryption_key_does_not_poison_legacy_oauth_adoption(tmp_pa
     with pytest.raises(OAuthProviderError, match="credentials could not be loaded"):
         await load_oauth_credentials_snapshot(wrong_context)
 
-    assert not credentials_path.exists()
     assert ACCESS_0.encode() not in _oauth_credential_database_path(wrong_context).read_bytes()
     snapshot = await load_oauth_credentials_snapshot(correct_context)
-    assert snapshot.credentials == legacy_credentials
+    assert snapshot.credentials == credentials
     assert _oauth_credential_database_path(correct_context).exists()
 
 
