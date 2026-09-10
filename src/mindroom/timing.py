@@ -77,6 +77,7 @@ _PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
 )
 
 _PRIMARY_TOTALS: tuple[tuple[str, str, str], ...] = (
+    ("time_to_model_request_ms", "message_received", "first_model_request_sent"),
     ("time_to_first_visible_reply_ms", "message_received", "first_visible_reply"),
     ("time_to_first_substantive_reply_ms", "message_received", "first_substantive_reply"),
     ("total_pipeline_ms", "message_received", "response_complete"),
@@ -136,6 +137,12 @@ class DispatchPipelineTiming:
             if value is not None:
                 self.metadata[key] = value
 
+    def mark_model_request(self) -> None:
+        """Keep initial startup separate from the latest model attempt's timings."""
+        now = time.perf_counter()
+        self.marks.setdefault("first_model_request_sent", now)
+        self.marks["model_request_sent"] = now
+
     def mark_first_visible_reply(self, kind: str, *, substantive: bool = False) -> None:
         """Record the first visible reply and, when confirmed, the first substantive reply."""
         needs_visible = "first_visible_reply" not in self.marks
@@ -159,12 +166,10 @@ class DispatchPipelineTiming:
         return elapsed_ms_between(start, end)
 
     def emit_summary(self, logger: BoundLogger, *, outcome: str) -> None:
-        """Log one structured end-to-end timing summary."""
+        """Log one opt-in summary at INFO; high-frequency spans remain DEBUG."""
         if self.summary_emitted:
             return
         self.summary_emitted = True
-        if not _debug_enabled(logger):
-            return
         summary: dict[str, Any] = {
             "source_event_id": self.source_event_id,
             "room_id": self.room_id,
@@ -176,7 +181,7 @@ class DispatchPipelineTiming:
             elapsed = self._elapsed_ms(start_label, end_label)
             if elapsed is not None:
                 summary[key] = elapsed
-        logger.debug("Dispatch pipeline timing", **summary)
+        logger.info("Dispatch pipeline timing", **summary)
 
 
 def create_dispatch_pipeline_timing(*, event_id: str, room_id: str) -> DispatchPipelineTiming | None:

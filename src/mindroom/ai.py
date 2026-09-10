@@ -907,7 +907,7 @@ async def _run_non_streaming_agent_attempts(
     agent = run_context.prepared_run.agent
     try:
         if pipeline_timing is not None:
-            pipeline_timing.mark("model_request_sent", overwrite=True)
+            pipeline_timing.mark_model_request()
         with bind_llm_request_log_context(
             **_attempt_request_log_context(
                 run_context.turn,
@@ -1739,7 +1739,7 @@ async def _stream_agent_attempt_chunks(
     agent = run_context.prepared_run.agent
     try:
         if pipeline_timing is not None:
-            pipeline_timing.mark("model_request_sent", overwrite=True)
+            pipeline_timing.mark_model_request()
         ai_runtime.note_attempt_run_id(run_id_callback, attempt.attempt_run_id)
         request_context = _attempt_request_log_context(
             run_context.turn,

@@ -80,7 +80,10 @@ class AgentReplyMembershipSync:
         refresh: Callable[[], Awaitable[None]],
     ) -> None:
         """Refresh once when due and apply bounded retry backoff on failure."""
-        if not self._refresh_pending and not self._memberships.needs_refresh(config):
+        # A sync gap cannot invalidate explicit-user grants. Do not turn a
+        # no-op rebuild into downstream room and call reconciliation scans.
+        if not self._memberships.needs_refresh(config):
+            self._refresh_pending = False
             return
         if time.monotonic() < self._refresh_retry_at:
             return

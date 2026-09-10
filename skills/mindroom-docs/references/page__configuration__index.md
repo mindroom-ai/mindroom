@@ -744,6 +744,7 @@ The same flag also records successful tool-call rows in `mindroom_data/tracking/
 Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled.
 Tool-call rows include a `timing` object with result-ready, before-hook, and tool-body durations when those phases are measured.
 Set `MINDROOM_TIMING=1` to emit additional structured debug timing events for stream-visible tool-call start, stream-visible tool-call completion, and full bridge completion.
+The same flag emits one `Dispatch pipeline timing` summary per turn at INFO level, including `time_to_model_request_ms` from message handling to the model request and separate context, queue, payload, agent-build, and provider timing spans when available.
 Audit logging remains enabled.
 Credential-bearing fields such as tokens, cookies, passwords, API keys, and authorization headers are redacted before log records are emitted.
 These artifacts can still contain sensitive non-credential prompt, argument, and result data.
