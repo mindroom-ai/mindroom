@@ -458,6 +458,7 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
             "prompt_assembly_start": 16.8,
             "prompt_assembly_ready": 17.0,
             "history_ready": 17.0,
+            "first_model_request_sent": 18.0,
             "model_request_sent": 18.0,
             "model_first_token": 19.5,
             "first_visible_reply": 20.0,
@@ -469,9 +470,10 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
 
     timing.emit_summary(logger, outcome="edited")
 
-    logger.debug.assert_called_once()
-    assert logger.debug.call_args.args == ("Dispatch pipeline timing",)
-    summary = logger.debug.call_args.kwargs
+    logger.info.assert_called_once()
+    assert logger.info.call_args.args == ("Dispatch pipeline timing",)
+    summary = logger.info.call_args.kwargs
+    assert summary["time_to_model_request_ms"] == 18000.0
     assert summary["first_visible_kind"] == "stream_update"
     assert summary["first_substantive_kind"] == "stream_update"
     assert summary["seg_ingress_ms"] == 1000.0
@@ -528,6 +530,23 @@ def test_dispatch_pipeline_visible_reply_milestones_are_first_write_wins(
     assert perf_counter.call_count == 2
 
 
+def test_dispatch_pipeline_startup_excludes_prior_model_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry and continuation latency must not be misreported as initial startup."""
+    monkeypatch.setattr(timing_module.time, "perf_counter", Mock(side_effect=[2.0, 12.0]))
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
+    timing.marks["message_received"] = 1.0
+    timing.mark_model_request()
+    timing.mark_model_request()
+    timing.marks["response_complete"] = 15.0
+    logger = Mock()
+
+    timing.emit_summary(logger, outcome="completed")
+
+    summary = logger.info.call_args.kwargs
+    assert summary["time_to_model_request_ms"] == 1000.0
+    assert summary["diag_model_request_to_completion_ms"] == 3000.0
+
+
 def test_dispatch_pipeline_placeholder_only_omits_substantive_reply_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -540,7 +559,7 @@ def test_dispatch_pipeline_placeholder_only_omits_substantive_reply_metrics(
     timing.mark_first_visible_reply("placeholder")
     timing.emit_summary(logger, outcome="failed")
 
-    summary = logger.debug.call_args.kwargs
+    summary = logger.info.call_args.kwargs
     assert summary["time_to_first_visible_reply_ms"] == 1500.0
     assert "first_substantive_reply" not in timing.marks
     assert "first_substantive_kind" not in summary
@@ -576,8 +595,8 @@ def test_emit_timing_event_still_emits_when_debug_is_enabled(
     assert logger.debug.call_args.kwargs == {"phase": "queued", "queue_size": 7}
 
 
-def test_dispatch_pipeline_summary_builds_no_payload_when_debug_is_disabled() -> None:
-    """The end-to-end summary walks every span pair, so it must not run when dropped."""
+def test_dispatch_pipeline_summary_survives_debug_filtering() -> None:
+    """Opt-in per-turn timings must remain available without verbose per-chunk logs."""
     logger = Mock()
     logger.isEnabledFor.return_value = False
     timing = DispatchPipelineTiming(
@@ -587,8 +606,11 @@ def test_dispatch_pipeline_summary_builds_no_payload_when_debug_is_disabled() ->
     )
 
     timing.emit_summary(logger, outcome="edited")
+    timing.emit_summary(logger, outcome="edited")
 
     logger.debug.assert_not_called()
+    logger.info.assert_called_once()
+    assert logger.info.call_args.kwargs["total_pipeline_ms"] == 1000.0
     assert timing.summary_emitted
 
 
@@ -656,4 +678,4 @@ def test_dispatch_pipeline_summary_emits_when_the_level_check_is_unsupported() -
 
     timing.emit_summary(logger, outcome="edited")
 
-    logger.debug.assert_called_once()
+    logger.info.assert_called_once()

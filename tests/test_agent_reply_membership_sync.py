@@ -13,7 +13,10 @@ from mindroom.agent_reply_membership_sync import (
     AgentReplyMembershipSync,
     ReplyMembershipPreAdmission,
 )
+from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import RouterConfig
 from mindroom.event_journal import (
     DepartureSource,
     IngestionRecordAdmission,
@@ -65,6 +68,47 @@ def test_history_loss_invalidates_all_reply_membership_grants(tmp_path: Path) ->
     assert effects == ReplyMembershipPreAdmission(invalidate_reason="uncertain_sync_response")
     memberships.invalidate.assert_not_called()
     memberships.mark_room_unready.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current_room_members", "members_of_rooms", "expected_refreshes"),
+    [(False, [], 0), (True, [], 1), (False, ["lobby"], 1)],
+)
+async def test_history_loss_refreshes_only_room_backed_grants(
+    current_room_members: bool,
+    members_of_rooms: list[str],
+    expected_refreshes: int,
+) -> None:
+    """Explicit-user access must not trigger room/call scans after every sync gap."""
+    config = Config(
+        router=RouterConfig(access=ResponderAccessConfig(current_room_members=False)),
+        agents={
+            "assistant": AgentConfig(
+                display_name="Assistant",
+                role="Assistant",
+                rooms=["lobby"],
+                access=ResponderAccessConfig(
+                    current_room_members=current_room_members,
+                    members_of_rooms=members_of_rooms,
+                    users=["@alice:localhost"],
+                ),
+            ),
+        },
+    )
+    memberships = AgentReplyMembershipIndex()
+    membership_sync = AgentReplyMembershipSync(memberships)
+    refreshes = 0
+
+    async def refresh() -> None:
+        nonlocal refreshes
+        refreshes += 1
+
+    membership_sync.invalidate(config, reason="uncertain_sync_response")
+    await membership_sync.refresh_if_needed(config, refresh)
+
+    assert refreshes == expected_refreshes
+    assert memberships.needs_refresh(config) is bool(expected_refreshes)
 
 
 def test_reported_control_departure_fences_room_before_admission(tmp_path: Path) -> None:
