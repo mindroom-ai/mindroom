@@ -22,6 +22,7 @@ from mindroom.handled_turns import (
     with_user_stop,
 )
 from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
+from mindroom.legacy_revision_replay import summary_depends_on_source, summary_source_id
 from mindroom.session_ids import create_session_id
 from mindroom.turn_record import (
     EditPreparation,
@@ -721,9 +722,7 @@ class TurnStore:
                             target=owner.conversation_target,
                             requester_user_id=owner.requester_id,
                             redacted_event_id=revision_id,
-                            legacy_summary_source_id=(
-                                revision.source_event_id if revision.legacy_summary_provenance else None
-                            ),
+                            legacy_summary_source_id=summary_source_id(revision),
                         ),
                     )
                 await self._acknowledge_revision_cleanup(owner.source_event_ids[0], revision_id)
@@ -1123,12 +1122,12 @@ class TurnStore:
                 if session_type is SessionType.TEAM
                 else get_agent_session(storage, target.session_id)
             )
-            scope_contains_source = session is not None and redacted_event_id in read_scope_seen_event_ids(
-                session,
-                history_scope,
+            seen_event_ids = read_scope_seen_event_ids(session, history_scope) if session is not None else set()
+            scope_contains_source = redacted_event_id in seen_event_ids or summary_depends_on_source(
+                legacy_summary_source_id,
+                has_summary=session is not None and session.summary is not None,
+                seen_event_ids=seen_event_ids,
             )
-            if session is not None and session.summary is not None and legacy_summary_source_id is not None:
-                scope_contains_source |= legacy_summary_source_id in read_scope_seen_event_ids(session, history_scope)
             removed_summary_dependents = bool(
                 session is not None and session.summary is not None and scope_contains_source and session.runs,
             )

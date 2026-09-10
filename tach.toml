@@ -144,6 +144,7 @@ depends_on = [
     "mindroom.legacy_delivery_payloads",
     "mindroom.logging_config",
     "mindroom.matrix.sidecar_content",
+    "mindroom.turn_record",
 ]
 visibility = [
     "mindroom.agent_reply_membership_sync",
@@ -536,6 +537,14 @@ visibility = [
 path = "mindroom.legacy_openai_tool_replay"
 depends_on = []
 visibility = ["mindroom.openai_models"]
+
+[[modules]]
+path = "mindroom.legacy_revision_replay"
+depends_on = []
+visibility = [
+    "mindroom.turn_record",
+    "mindroom.turn_store",
+]
 
 [[modules]]
 path = "mindroom.legacy_handled_turns"
@@ -1512,6 +1521,7 @@ depends_on = [
     "mindroom.matrix_delivery",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
+    "mindroom.turn_record",
 ]
 
 [[modules]]
@@ -1527,6 +1537,7 @@ depends_on = [
     "mindroom.response_runner",
     "mindroom.runtime_protocols",
     "mindroom.timestamp_formatting",
+    "mindroom.turn_record",
     "mindroom.turn_store",
 ]
 
@@ -1940,6 +1951,7 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.turn_record",
     "mindroom.user_turn_time",
 ]
 
@@ -2129,6 +2141,7 @@ visibility = [
     "mindroom.execution_preparation",
     "mindroom.handled_turns",
     "mindroom.turn_controller",
+    "mindroom.turn_record",
     "mindroom.user_turn_time",
 ]
 
@@ -3743,10 +3756,16 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.legacy_streaming"
+depends_on = []
+visibility = ["mindroom.streaming"]
+
+[[modules]]
 path = "mindroom.streaming"
 depends_on = [
     "mindroom.constants",
     "mindroom.interactive",
+    "mindroom.legacy_streaming",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.mentions",
     "mindroom.message_target",
@@ -3790,7 +3809,18 @@ depends_on = [
     "mindroom.constants",
     "mindroom.handled_turns",
     "mindroom.history.storage",
+    "mindroom.legacy_revision_replay",
     "mindroom.thread_utils",
+    "mindroom.turn_record",
+]
+
+[[modules]]
+path = "mindroom.turn_record"
+depends_on = [
+    "mindroom.history.types",
+    "mindroom.legacy_revision_replay",
+    "mindroom.message_target",
+    "mindroom.timestamp_formatting",
 ]
 
 [[modules]]
@@ -3830,6 +3860,7 @@ depends_on = [
     "mindroom.response_lifecycle",
     "mindroom.response_payload_preparation",
     "mindroom.timing",
+    "mindroom.turn_record",
     "mindroom.visible_response_reconciliation",
 ]
 visibility = ["mindroom.turn_controller"]
@@ -3846,6 +3877,7 @@ depends_on = [
     "mindroom.matrix.identity",
     "mindroom.message_target",
     "mindroom.turn_policy",
+    "mindroom.turn_record",
     "mindroom.turn_store",
     "mindroom.visible_response_reconciliation",
 ]
@@ -3878,6 +3910,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.handled_turns",
     "mindroom.message_target",
+    "mindroom.turn_record",
     "mindroom.turn_store",
 ]
 visibility = [
@@ -3942,6 +3975,7 @@ depends_on = [
     "mindroom.teams",
     "mindroom.text_ingress_dispatch",
     "mindroom.timestamp_formatting",
+    "mindroom.turn_record",
     "mindroom.turn_store",
     "mindroom.turn_policy",
     "mindroom.visible_response_reconciliation",

@@ -255,6 +255,30 @@ class TestClassifyPartialReply:
             is None
         )
 
+    @pytest.mark.parametrize("body", ["Finished text [cancelled]", "Finished text [error]"])
+    @pytest.mark.parametrize(
+        ("stream_status", "expected"),
+        [
+            (STREAM_STATUS_COMPLETED, None),
+            (STREAM_STATUS_PENDING, _PartialReplyKind.IN_PROGRESS),
+            (STREAM_STATUS_STREAMING, _PartialReplyKind.IN_PROGRESS),
+        ],
+    )
+    def test_recognized_stream_status_wins_over_legacy_terminal_suffix(
+        self,
+        body: str,
+        stream_status: str,
+        expected: _PartialReplyKind | None,
+    ) -> None:
+        """Honor current metadata when an old terminal suffix contradicts it."""
+        assert (
+            _classify_partial_reply(
+                _make_visible_message(event_id="e_active", body=body, stream_status=stream_status),
+                active_event_ids={"e_active"},
+            )
+            is expected
+        )
+
     def test_trailing_marker_without_metadata_is_not_partial(self) -> None:
         """Messages without stream_status metadata are not classified as partial."""
         assert (
