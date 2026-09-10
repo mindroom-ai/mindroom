@@ -736,14 +736,14 @@ Run: `uv run pytest -q tests/test_access_migration.py tests/test_access_schema.p
 
 Expected: PASS.
 
-Run: `uv run pre-commit run --files src/mindroom/config/access_migration.py src/mindroom/config/main.py src/mindroom/authorization.py src/mindroom/matrix/rooms.py src/mindroom/cli/migrate.py tests/test_access_migration.py tests/test_cli_config.py docs/authorization.md docs/configuration/index.md docs/dev/agent_configuration.md`
+Run: `uv run pre-commit run --files src/mindroom/config/legacy_access.py src/mindroom/config/main.py src/mindroom/authorization.py src/mindroom/matrix/rooms.py src/mindroom/cli/migrate.py tests/test_access_migration.py tests/test_cli_config.py docs/authorization.md docs/configuration/index.md docs/dev/agent_configuration.md`
 
 Expected: PASS.
 
 - [x] **Step 7: Commit automatic migration and the single runtime model**
 
 ```bash
-git add src/mindroom/config/access_migration.py src/mindroom/config/main.py src/mindroom/config/auth.py src/mindroom/config/agent.py src/mindroom/config/models.py src/mindroom/config/matrix.py src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/matrix/rooms.py src/mindroom/orchestration/rooms.py src/mindroom/orchestration/config_updates.py src/mindroom/orchestrator.py src/mindroom/approval_inbound.py src/mindroom/bot_room_lifecycle.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/custom_tools/delegate.py src/mindroom/workers/backends/docker_projection.py src/mindroom/cli/migrate.py src/mindroom/cli/config.py tests/test_access_migration.py tests/test_cli_config.py tests/test_access_schema.py tests/test_authorization.py tests/test_matrix_room_access.py README.md config.yaml docs/authorization.md docs/chat-commands.md docs/configuration/index.md docs/dashboard.md docs/dev/agent_configuration.md docs/matrix-space.md docs/oauth-framework.md docs/tools/agent-orchestration.md
+git add src/mindroom/config/legacy_access.py src/mindroom/config/main.py src/mindroom/config/auth.py src/mindroom/config/agent.py src/mindroom/config/models.py src/mindroom/config/matrix.py src/mindroom/authorization.py src/mindroom/agent_reply_membership.py src/mindroom/matrix/rooms.py src/mindroom/orchestration/rooms.py src/mindroom/orchestration/config_updates.py src/mindroom/orchestrator.py src/mindroom/approval_inbound.py src/mindroom/bot_room_lifecycle.py src/mindroom/custom_tools/attachment_helpers.py src/mindroom/custom_tools/delegate.py src/mindroom/workers/backends/docker_projection.py src/mindroom/cli/migrate.py src/mindroom/cli/config.py tests/test_access_migration.py tests/test_cli_config.py tests/test_access_schema.py tests/test_authorization.py tests/test_matrix_room_access.py README.md config.yaml docs/authorization.md docs/chat-commands.md docs/configuration/index.md docs/dashboard.md docs/dev/agent_configuration.md docs/matrix-space.md docs/oauth-framework.md docs/tools/agent-orchestration.md
 git commit -m "feat: auto migrate membership access config"
 ```
 
