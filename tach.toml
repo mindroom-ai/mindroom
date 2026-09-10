@@ -1343,6 +1343,10 @@ path = "mindroom.script_runs.shim"
 depends_on = []
 
 [[modules]]
+path = "mindroom.script_runs.legacy_migrations"
+depends_on = []
+
+[[modules]]
 path = "mindroom.script_runs.worker_client"
 depends_on = ["mindroom.workers.models"]
 
@@ -1778,7 +1782,12 @@ depends_on = [
 path = "mindroom.matrix.state"
 depends_on = [
     "mindroom.constants",
+    "mindroom.matrix.legacy_state",
 ]
+
+[[modules]]
+path = "mindroom.matrix.legacy_state"
+depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.users"
@@ -4091,8 +4100,13 @@ depends_on = [
 path = "mindroom.knowledge.indexing_config"
 depends_on = [
     "mindroom.embeddings",
+    "mindroom.knowledge.legacy_metadata",
     "mindroom.knowledge.redaction",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.legacy_metadata"
+depends_on = []
 
 [[modules]]
 path = "mindroom.knowledge.refresh_outcome"
