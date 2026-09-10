@@ -38,6 +38,7 @@ MindRoom's architecture consists of several key components working together.
 - [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/) - How MindRoom connects to Matrix
 - [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/) - How agents are managed
 - [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) - The inbound turn pipeline and its module boundaries
+- [Migration and Compatibility Boundaries](https://docs.mindroom.chat/architecture/migrations/) - Current owners for historical formats, dependency migrations, and retained compatibility
 - [Matrix Event-Journal Security](https://docs.mindroom.chat/architecture/matrix-event-journal-security/) - Which decrypted plaintext is durable, who owns it, and what removes it
 - [Matrix Event-Journal Contracts](https://docs.mindroom.chat/dev/matrix-event-journal-contracts/) - What the journal guarantees, and the homeserver behaviour you would otherwise rediscover by debugging
 

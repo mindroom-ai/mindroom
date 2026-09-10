@@ -65,6 +65,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Overview | `architecture/index.md` | `architecture/index.md` | `page__architecture__index.md` |
 | Matrix Integration | `architecture/matrix.md` | `architecture/matrix/index.md` | `page__architecture__matrix__index.md` |
 | Agent Orchestration | `architecture/orchestration.md` | `architecture/orchestration/index.md` | `page__architecture__orchestration__index.md` |
+| Migration Boundaries | `architecture/migrations.md` | `architecture/migrations/index.md` | `page__architecture__migrations__index.md` |
 | Overview | `deployment/index.md` | `deployment/index.md` | `page__deployment__index.md` |
 | Nio 1.0 Upgrade | `deployment/nio-upgrade.md` | `deployment/nio-upgrade/index.md` | `page__deployment__nio-upgrade__index.md` |
 | Private Storage Migration | `deployment/private-storage-upgrade.md` | `deployment/private-storage-upgrade/index.md` | `page__deployment__private-storage-upgrade__index.md` |
