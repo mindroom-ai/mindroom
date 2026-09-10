@@ -390,6 +390,7 @@ def _resolve_continuation(
         recorded=True,
         continuation_ready=state is not None and state["state"] == "ready",
         continuation_entity_name=entity_name,
+        continuation_room_id=str(card["room_id"]),
         source_event_ids=tuple(str(row["event_id"]) for row in source_rows),
     )
 

@@ -54,6 +54,7 @@ class RecordedApprovalDecision:
     recorded: bool
     continuation_ready: bool = False
     continuation_entity_name: str | None = None
+    continuation_room_id: str | None = None
     source_event_ids: tuple[str, ...] = ()
 
 

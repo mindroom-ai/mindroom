@@ -1066,9 +1066,9 @@ class AgentBot:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
 
-    def retry_approval_sources(self, source_event_ids: tuple[str, ...]) -> None:
+    def retry_approval_sources(self, room_id: str, source_event_ids: tuple[str, ...]) -> None:
         """Release continuation-owned sources to the normal journal worker."""
-        self._journal_dispatcher.retry_turn_sources(source_event_ids)
+        self._journal_dispatcher.retry_turn_sources(room_id, source_event_ids)
 
     async def _emit_reaction_received_hooks(
         self,
@@ -2456,11 +2456,11 @@ class AgentBot:
     def _retry_failed_coalesced_dispatch(self, pending_events: tuple[PendingEvent, ...]) -> None:
         """Return failed gate sources to their exact durable callback owner."""
         for pending_event in pending_events:
-            self._retry_pending_dispatch_source(pending_event.event.event_id)
+            self._retry_pending_dispatch_source(pending_event.room.room_id, pending_event.event.event_id)
 
-    def _retry_pending_dispatch_source(self, source_event_id: str) -> None:
+    def _retry_pending_dispatch_source(self, room_id: str, source_event_id: str) -> None:
         """Return one undelivered source to its exact durable callback owner."""
-        self._journal_dispatcher.retry_turn_source(source_event_id)
+        self._journal_dispatcher.retry_turn_source(room_id, source_event_id)
 
     async def _settle_ignored_dispatch_source(self, source_event_id: str) -> None:
         """Settle one asynchronously normalized source that produced no dispatch payload."""

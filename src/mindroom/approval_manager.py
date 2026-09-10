@@ -42,7 +42,7 @@ _MatrixDeliveryResolver = Callable[[MatrixDelivery], Awaitable[str | None]]
 _ApprovalActionDeliveryResolver = Callable[[str, str], Awaitable[str | None]]
 _TransportSenderProvider = Callable[[], str | None]
 _SendingDeviceProvider = Callable[[], str | None]
-_ContinuationReadyHandler = Callable[[str, tuple[str, ...]], Awaitable[None] | None]
+_ContinuationReadyHandler = Callable[[str, str, tuple[str, ...]], Awaitable[None] | None]
 
 _STARTUP_RECOVERY_SCAN_PAGE = 256
 _DEADLINE_SWEEP_SECONDS = 60.0
@@ -745,9 +745,17 @@ class _ApprovalManager:
         )
 
     async def _wake_continuation(self, recorded: RecordedApprovalDecision) -> None:
-        if recorded.continuation_entity_name is None or self.continuation_ready is None:
+        if (
+            recorded.continuation_entity_name is None
+            or recorded.continuation_room_id is None
+            or self.continuation_ready is None
+        ):
             return
-        wake = self.continuation_ready(recorded.continuation_entity_name, recorded.source_event_ids)
+        wake = self.continuation_ready(
+            recorded.continuation_entity_name,
+            recorded.continuation_room_id,
+            recorded.source_event_ids,
+        )
         if wake is not None:
             await wake
 

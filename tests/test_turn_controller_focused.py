@@ -195,6 +195,7 @@ class _RecordingResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
+        room_id: str,  # noqa: ARG002
         recovery_proof_ready: Callable[[], Awaitable[bool]],
         on_failure: Callable[[], None] | None = None,
         on_terminal: Callable[[], None] | None = None,
@@ -528,7 +529,7 @@ def _build_harness(
     async def _dispatch_source_is_terminal(_source_event_id: str) -> bool:
         return False
 
-    def _retry_dispatch_sources(source_event_ids: tuple[str, ...]) -> None:
+    def _retry_dispatch_sources(_room_id: str, source_event_ids: tuple[str, ...]) -> None:
         retried_dispatch_sources.append(source_event_ids)
 
     def _retry_failed_coalesced_dispatch(

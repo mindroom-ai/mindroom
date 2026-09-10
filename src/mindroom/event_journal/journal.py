@@ -955,7 +955,6 @@ def pending(
     *,
     limit: int,
     room_id: str | None = None,
-    event_id: str | None = None,
     after_receipt_order: int | None = None,
     runtime_generation: str = "unmanaged",
 ) -> PendingPage:
@@ -978,7 +977,6 @@ def pending(
         principal_id,
         limit=limit,
         room_id=room_id,
-        event_id=event_id,
         after_receipt_order=after_receipt_order,
         runtime_generation=runtime_generation,
     )
@@ -991,7 +989,6 @@ def _pending_page(
     limit: int,
     after_receipt_order: int | None,
     room_id: str | None = None,
-    event_id: str | None = None,
     kind: EventKind | None = None,
     runtime_generation: str = "unmanaged",
 ) -> PendingPage:
@@ -1007,7 +1004,6 @@ def _pending_page(
         principal_id,
         limit=limit,
         room_id=room_id,
-        event_id=event_id,
         after_receipt_order=after_receipt_order,
         kind=kind,
         runtime_generation=runtime_generation,
@@ -1033,7 +1029,6 @@ def _pending_rows(
     limit: int,
     after_receipt_order: int | None,
     room_id: str | None = None,
-    event_id: str | None = None,
     kind: EventKind | None = None,
     runtime_generation: str = "unmanaged",
 ) -> tuple[Row, ...]:
@@ -1042,8 +1037,6 @@ def _pending_rows(
     cursor_params: tuple[object, ...] = () if after_receipt_order is None else (after_receipt_order,)
     room_clause = "" if room_id is None else " AND events.room_id = ?"
     room_params: tuple[object, ...] = () if room_id is None else (room_id,)
-    event_clause = "" if event_id is None else " AND events.event_id = ?"
-    event_params: tuple[object, ...] = () if event_id is None else (event_id,)
     kind_clause = "" if kind is None else " AND kind = ?"
     kind_params: tuple[object, ...] = () if kind is None else (kind.value,)
     continuation_joins = """
@@ -1089,11 +1082,11 @@ def _pending_rows(
         SELECT {_EVENT_JOURNAL_COLUMNS} FROM journal_events AS events
         {continuation_joins}
         WHERE events.principal_id = ? AND events.state = 'pending'
-          {continuation_clause}{kind_clause}{room_clause}{event_clause}{cursor_clause}
+          {continuation_clause}{kind_clause}{room_clause}{cursor_clause}
         ORDER BY events.receipt_order
         LIMIT ?
         """,  # noqa: S608 - a fixed column list and fixed clauses, not input
-        (principal_id, *continuation_params, *kind_params, *room_params, *event_params, *cursor_params, limit),
+        (principal_id, *continuation_params, *kind_params, *room_params, *cursor_params, limit),
     )
 
 

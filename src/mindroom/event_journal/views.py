@@ -84,7 +84,6 @@ class ReplayView(Protocol):
         *,
         limit: int = ...,
         room_id: str | None = None,
-        event_id: str | None = None,
         after_receipt_order: int | None = None,
         runtime_generation: str = "unmanaged",
     ) -> PendingPage:

@@ -101,7 +101,7 @@ def _gate(
     room_scope_is_single_conversation: bool | None = None,
     dispatch_allowed_now: Callable[[CoalescingKey], bool] | bool | None = None,
     wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
-    on_undelivered_source: Callable[[str], None] | None = None,
+    on_undelivered_source: Callable[[str, str], None] | None = None,
     on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[CoalescingGate, list[PreparedTurn]]:
     batches: list[PreparedTurn] = []
@@ -656,7 +656,7 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
 @pytest.mark.asyncio
 async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() -> None:
     """A failed terminal write must not suppress its own durable retry handoff."""
-    undelivered_sources: list[str] = []
+    undelivered_sources: list[tuple[str, str]] = []
 
     async def fail_settlement(_event_id: str) -> None:
         msg = "tracking store unavailable"
@@ -664,7 +664,7 @@ async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() 
 
     gate, _batches = _gate(
         debounce_seconds=0.0,
-        on_undelivered_source=undelivered_sources.append,
+        on_undelivered_source=lambda room_id, source_id: undelivered_sources.append((room_id, source_id)),
         on_intentionally_ignored_source=fail_settlement,
     )
 
@@ -681,7 +681,7 @@ async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() 
     )
 
     await slot.settled.wait()
-    assert undelivered_sources == ["$ignored-media"]
+    assert undelivered_sources == [("!room:localhost", "$ignored-media")]
 
 
 @pytest.mark.asyncio
@@ -1296,6 +1296,7 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
         blocked_response(),
         name="test_blocked_response",
         recovery_proof_ready=lambda: False,
+        room_id="!room:example.org",
     )
     await asyncio.wait_for(response_running.wait(), timeout=1.0)
     with patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)):
@@ -1504,6 +1505,7 @@ async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> Non
         stuck_response(),
         name="test_stuck_response",
         recovery_proof_ready=lambda: False,
+        room_id="!room:example.org",
     )
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
@@ -1539,6 +1541,7 @@ async def test_bounded_inbox_drain_rejects_indefinitely_resistant_response(tmp_p
         cancellation_resistant_response(),
         name="test_cancellation_resistant_response",
         recovery_proof_ready=lambda: False,
+        room_id="!room:example.org",
     )
     await asyncio.wait_for(started.wait(), timeout=1.0)
     drain_task = asyncio.create_task(
@@ -1578,6 +1581,7 @@ async def test_bounded_inbox_drain_preserves_cancel_message(tmp_path: Path) -> N
         stuck_response(),
         name="test_sync_restart_cancelled_response",
         recovery_proof_ready=lambda: False,
+        room_id="!room:example.org",
     )
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
@@ -1612,6 +1616,7 @@ async def test_failed_inbox_response_is_contained_and_unregistered(tmp_path: Pat
         failing_response(),
         name="test_failing_response",
         recovery_proof_ready=lambda: False,
+        room_id="!room:example.org",
     )
     await asyncio.gather(task, return_exceptions=True)
     await asyncio.sleep(0)

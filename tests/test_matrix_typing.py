@@ -111,6 +111,7 @@ async def test_process_shutdown_releases_typing_without_new_matrix_request() -> 
         hold_typing(),
         name="test_process_shutdown_typing",
         recovery_proof_ready=lambda: False,
+        room_id="!room:example.org",
     )
     await asyncio.wait_for(entered.wait(), timeout=1.0)
 

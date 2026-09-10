@@ -1183,7 +1183,7 @@ class TestAgentBot(AgentBotTestBase):
         assert response_completed.is_set()
         settle_dispatch_sources.assert_awaited_once_with(("$reaction",))
         # The failed settlement must hand the exact journal source back for retry.
-        retry_dispatch_sources.assert_called_once_with(("$reaction",))
+        retry_dispatch_sources.assert_called_once_with(target.room_id, ("$reaction",))
 
     @pytest.mark.asyncio
     async def test_interactive_approval_handoff_skips_fallback_source_settlement(
@@ -1335,11 +1335,13 @@ class TestAgentBot(AgentBotTestBase):
             name="test_interactive_claim_owner",
             recovery_proof_ready=lambda: False,
             source_event_ids=("$reaction",),
+            room_id="!room:example.org",
         )
         ordinary_response_task = bot._response_runner.track_inbox_response(
             ordinary_response(),
             name="test_ordinary_response",
             recovery_proof_ready=lambda: False,
+            room_id="!room:example.org",
         )
         await response_started.wait()
         await ordinary_response_started.wait()
@@ -1442,7 +1444,8 @@ class TestAgentBot(AgentBotTestBase):
                 assert deferred is not None
                 bot._journal_dispatcher._worker._deferred[deferred.event_id] = deferred
                 assert bot._journal_dispatcher._deferral_is_live(deferred)
-                assert bot._journal_dispatcher._worker._reclaim_lost_deferrals() == {}
+                assert await bot._journal_dispatcher._worker.drain_once() == 0
+                assert bot._journal_dispatcher._worker._deferred[deferred.event_id] == deferred
             finally:
                 release_resume.set()
                 await asyncio.gather(handoff, return_exceptions=True)
@@ -1645,7 +1648,10 @@ class TestAgentBot(AgentBotTestBase):
                     cards=restarted._journal_store.principal(router_principal_id),
                     transport_sender=lambda: "@mindroom_router:localhost",
                     sending_device=lambda: "DEVICE",
-                    continuation_ready=lambda _entity_name, source_ids: restarted.retry_approval_sources(source_ids),
+                    continuation_ready=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
+                        room_id,
+                        source_ids,
+                    ),
                 )
                 restarted._journal_dispatcher.release_turn_replay()
                 try:
@@ -1694,6 +1700,7 @@ class TestAgentBot(AgentBotTestBase):
                     name="test_late_interactive_claim_owner",
                     recovery_proof_ready=lambda: False,
                     source_event_ids=("$reaction",),
+                    room_id="!room:example.org",
                 ),
             )
             await response_started.wait()
@@ -1775,7 +1782,7 @@ class TestAgentBot(AgentBotTestBase):
                     await bot._response_runner.drain_inbox_responses()
 
             assert not response_entered.is_set()
-            retry_dispatch_sources.assert_called_with(("$reaction",))
+            retry_dispatch_sources.assert_called_with(target.room_id, ("$reaction",))
             if lock_owned_by_test:
                 lifecycle_lock.release()
                 lock_owned_by_test = False

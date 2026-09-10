@@ -364,14 +364,14 @@ class JournalDispatcher:
             raise RuntimeError(msg)
         await self.settle_intentionally_ignored_turn_sources((event.event_id,))
 
-    def retry_turn_source(self, event_id: str) -> None:
+    def retry_turn_source(self, room_id: str, event_id: str) -> None:
         """Return one undelivered turn source to the worker."""
-        self.retry_turn_sources((event_id,))
+        self.retry_turn_sources(room_id, (event_id,))
 
-    def retry_turn_sources(self, event_ids: tuple[str, ...]) -> None:
+    def retry_turn_sources(self, room_id: str, event_ids: tuple[str, ...]) -> None:
         """Return several undelivered turn sources to the worker."""
         self._release_sources(event_ids)
-        self._worker.wake(event_ids=event_ids)
+        self._worker.wake(room_id=room_id)
 
     def _release_sources(self, event_ids: tuple[str, ...]) -> None:
         """Release worker ownership and forget any deferred-reaction markers."""

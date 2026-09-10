@@ -697,7 +697,7 @@ class ResponseRunnerDeps:
     state_writer: ConversationStateWriter
     request_preparer: ResponsePayloadPreparer
     approval_store: PrincipalStore
-    retry_approval_sources: Callable[[tuple[str, ...]], None]
+    retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
 
 
@@ -723,6 +723,7 @@ class _InboxResponseOwnership:
     on_failure: Callable[[], None] | None
     shutdown_phase_trace: ResponseShutdownPhaseTrace
     source_event_ids: frozenset[str]
+    room_id: str
     drain_intent: RuntimeShutdownIntent | None = None
     proof_task: asyncio.Task[bool] | None = None
 
@@ -775,6 +776,7 @@ class ResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
+        room_id: str,
         recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
         on_failure: Callable[[], None] | None = None,
         on_terminal: Callable[[], None] | None = None,
@@ -795,6 +797,7 @@ class ResponseRunner:
             on_failure=on_failure,
             shutdown_phase_trace=shutdown_phase_trace,
             source_event_ids=frozenset(source_event_ids),
+            room_id=room_id,
         )
         if on_terminal is not None:
             task.add_done_callback(lambda _finished: on_terminal())
@@ -842,7 +845,7 @@ class ResponseRunner:
         if ownership is not None and ownership.drain_intent is None:
             self._inbox_response_tasks.pop(task)
         if ownership is not None and ownership.source_event_ids:
-            self.deps.retry_approval_sources(tuple(ownership.source_event_ids))
+            self.deps.retry_approval_sources(ownership.room_id, tuple(ownership.source_event_ids))
         if task.cancelled():
             return
         error = task.exception()
@@ -2565,6 +2568,7 @@ class ResponseRunner:
                 resume,
                 name=f"approval_resume:{continuation.approval_id}:{continuation.generation}",
                 recovery_proof_ready=lambda: True,
+                room_id=continuation.room_id,
                 source_event_ids=continuation.source_event_ids,
             )
         except BaseException:

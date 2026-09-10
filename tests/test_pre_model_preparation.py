@@ -375,6 +375,7 @@ async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase(
         blocked_response(),
         name="test_blocked_agent_build_shutdown_phase",
         recovery_proof_ready=lambda: True,
+        room_id="!room:example.org",
     )
     try:
         assert await asyncio.to_thread(agent_started.wait, 1.0)

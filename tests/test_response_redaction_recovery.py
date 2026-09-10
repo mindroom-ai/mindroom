@@ -126,6 +126,7 @@ async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR
         name="inbox_response:deleted",
         recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
         source_event_ids=turn.source_event_ids,
+        room_id=ROOM,
     )
     await started.wait()
     try:

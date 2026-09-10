@@ -1351,7 +1351,7 @@ class TestPendingEventWorker:
 
         The handler claims a semantic consumer the way a reaction's does, so
         the second handler is not merely wasteful: its claim raises against
-        the row the first one already settled, and `_run_lane` logs that and
+        the row the first one already settled, and the room owner logs that and
         stops the room mid-pass. The claim is right to raise. Nothing settles
         an event while its own handler is running, so a settled row there
         means the event was already being run somewhere else.
@@ -1449,14 +1449,9 @@ class TestPendingEventWorker:
                 tracked_lane.cancel()
             await asyncio.gather(stopping, draining, *worker._lanes.values(), return_exceptions=True)
 
-    @pytest.mark.parametrize("retry_source", [False, True])
-    @pytest.mark.parametrize("read_fails", [False, True])
     async def test_a_pre_stop_recovery_drain_cannot_dispatch_after_restart(
         self,
         alice: PrincipalStore,
-        *,
-        retry_source: bool,
-        read_fails: bool,
     ) -> None:
         """Restarting does not make an old drain current again."""
         first_read_started = asyncio.Event()
@@ -1472,8 +1467,6 @@ class TestPendingEventWorker:
                 self,
                 *,
                 limit: int = 256,
-                room_id: str | None = None,
-                event_id: str | None = None,
                 after_receipt_order: int | None = None,
                 runtime_generation: str = "unmanaged",
             ) -> PendingPage:
@@ -1481,16 +1474,11 @@ class TestPendingEventWorker:
                 if self.pending_calls == 1:
                     page = await self.inner.pending(
                         limit=limit,
-                        room_id=room_id,
-                        event_id=event_id,
                         after_receipt_order=after_receipt_order,
                         runtime_generation=runtime_generation,
                     )
                     first_read_started.set()
                     await release_first_read.wait()
-                    if read_fails:
-                        msg = "stale read failed"
-                        raise RuntimeError(msg)
                     return page
                 return PendingPage((), resume_after=None, reached_end=True, unreadable_rows=0)
 
@@ -1507,8 +1495,6 @@ class TestPendingEventWorker:
 
         await self._admit(alice, text_event("$message"))
         worker = PendingEventWorker(store=BlockingFirstRead(alice), handle=handle)
-        if retry_source:
-            worker.wake(event_ids=("$message",))
         stale_drain = asyncio.create_task(worker.drain_once())
         await first_read_started.wait()
 
@@ -1516,16 +1502,10 @@ class TestPendingEventWorker:
         worker.start()
         try:
             release_first_read.set()
-            if read_fails and not retry_source:
-                with pytest.raises(RuntimeError, match="stale read failed"):
-                    await asyncio.wait_for(stale_drain, timeout=1.0)
-            else:
-                await asyncio.wait_for(stale_drain, timeout=1.0)
+            await asyncio.wait_for(stale_drain, timeout=1.0)
             await asyncio.sleep(0)
 
             assert not handled.is_set()
-            assert worker._rooms == {}
-            assert worker._retry_sources == set()
         finally:
             release_first_read.set()
             await worker.stop()
@@ -2058,7 +2038,6 @@ class TestRoomRetryBackoff:
                 *,
                 limit: int = 256,
                 room_id: str | None = None,
-                event_id: str | None = None,
                 after_receipt_order: int | None = None,
                 runtime_generation: str = "unmanaged",
             ) -> PendingPage:
@@ -2066,7 +2045,6 @@ class TestRoomRetryBackoff:
                 page = await super().pending(
                     limit=limit,
                     room_id=room_id,
-                    event_id=event_id,
                     after_receipt_order=after_receipt_order,
                     runtime_generation=runtime_generation,
                 )
@@ -2094,18 +2072,15 @@ class TestRoomRetryBackoff:
         finally:
             await worker.stop()
 
-    @pytest.mark.parametrize("lookup_race", ["ready", "stale", "failed"])
-    async def test_exact_approval_wake_rewinds_before_unstarted_tail(
+    async def test_room_approval_wake_invalidates_a_pending_tail_read(
         self,
         alice: PrincipalStore,
-        retry_sleeps: list[tuple[float, asyncio.Event]],
         monkeypatch: pytest.MonkeyPatch,
-        lookup_race: str,
     ) -> None:
-        """Exact wakes survive stale or failed reads after approval ownership moves."""
+        """A retry handoff invalidates room admission before any further awaited lookup."""
         monkeypatch.setattr("mindroom.pending_event_worker._BATCH_SIZE", 1)
         generation = "runtime-a"
-        store = _ApprovalWakeReplayView(alice, lookup_race=lookup_race)
+        store = _ApprovalWakeReplayView(alice)
         attempts: list[str] = []
 
         async def handle(event: JournalEvent) -> bool:
@@ -2126,7 +2101,7 @@ class TestRoomRetryBackoff:
 
         for event_id in ("$source-1", "$source-2", "$middle", "$tail"):
             await TestPendingEventWorker._admit(alice, text_event(event_id))
-        middle = (await alice.pending(event_id="$middle"))[0]
+        middle = (await alice.pending())[2]
         worker = PendingEventWorker(store=store, handle=handle, runtime_generation=generation)
         try:
             worker.start()
@@ -2134,10 +2109,6 @@ class TestRoomRetryBackoff:
             assert attempts == ["$source-1", "$middle"]
             assert store.tail_read_after == middle.receipt_order
             worker.release(("$source-1",))
-            assert await alice.pending(event_id="$source-1", runtime_generation=generation) == ()
-            if lookup_race == "stale":
-                worker.wake(event_ids=("$source-1",))
-                await asyncio.wait_for(store.empty_lookup_entered.wait(), timeout=5)
             recorded = await alice.resolve_continuation_approval_card(
                 card_event_id="$approval",
                 requested_status="approved",
@@ -2145,14 +2116,10 @@ class TestRoomRetryBackoff:
                 resolution={"status": "approved"},
             )
             assert recorded.continuation_ready
-            worker.wake(event_ids=("$source-1",))
-            store.release_empty_lookup.set()
-            if lookup_race == "failed":
-                await _eventually(lambda: len(retry_sleeps) == 1)
-                retry_sleeps[0][1].set()
-            await asyncio.wait_for(store.fresh_lookup_returned.wait(), timeout=5)
-            assert store.exact_reads == (1 if lookup_race == "ready" else 2)
-            assert attempts == ["$source-1", "$middle"]
+            assert recorded.continuation_room_id == ROOM
+            worker.wake(room_id=ROOM)
+            # Release the stale tail immediately; retry admission must already
+            # be invalidated when the synchronous handoff returns.
             store.release_tail_read.set()
             await _eventually_async(lambda: alice.pending(runtime_generation=generation))
             assert attempts == ["$source-1", "$middle", "$source-1", "$tail"]
@@ -2160,7 +2127,6 @@ class TestRoomRetryBackoff:
             assert await alice.is_pending("$source-2")
             assert not await alice.is_pending("$tail")
         finally:
-            store.release_empty_lookup.set()
             store.release_tail_read.set()
             await worker.stop()
 
@@ -2440,7 +2406,6 @@ class TestRoomRetryBackoff:
                 *,
                 limit: int = 256,
                 room_id: str | None = None,
-                event_id: str | None = None,
                 after_receipt_order: int | None = None,
                 runtime_generation: str = "unmanaged",
             ) -> PendingPage:
@@ -2448,7 +2413,6 @@ class TestRoomRetryBackoff:
                 page = await super().pending(
                     limit=limit,
                     room_id=room_id,
-                    event_id=event_id,
                     after_receipt_order=after_receipt_order,
                     runtime_generation=runtime_generation,
                 )
@@ -2577,12 +2541,11 @@ class TestRoomRetryBackoff:
                 *,
                 limit: int = 256,
                 room_id: str | None = None,
-                event_id: str | None = None,
                 after_receipt_order: int | None = None,
                 runtime_generation: str = "unmanaged",
             ) -> PendingPage:
                 nonlocal global_reads
-                if room_id is None and event_id is None:
+                if room_id is None:
                     global_reads += 1
                     if global_reads > 1:
                         discovery_started.set()
@@ -2590,7 +2553,6 @@ class TestRoomRetryBackoff:
                 return await super().pending(
                     limit=limit,
                     room_id=room_id,
-                    event_id=event_id,
                     after_receipt_order=after_receipt_order,
                     runtime_generation=runtime_generation,
                 )
@@ -3192,7 +3154,6 @@ class _FlakyReplayView:
         *,
         limit: int = 256,
         room_id: str | None = None,
-        event_id: str | None = None,
         after_receipt_order: int | None = None,
         runtime_generation: str = "unmanaged",
     ) -> PendingPage:
@@ -3203,7 +3164,6 @@ class _FlakyReplayView:
         return await self.inner.pending(
             limit=limit,
             room_id=room_id,
-            event_id=event_id,
             after_receipt_order=after_receipt_order,
             runtime_generation=runtime_generation,
         )
@@ -3239,7 +3199,6 @@ class _ReservedRoomReplayView(_FlakyReplayView):
         *,
         limit: int = 256,
         room_id: str | None = None,
-        event_id: str | None = None,
         after_receipt_order: int | None = None,
         runtime_generation: str = "unmanaged",
     ) -> PendingPage:
@@ -3252,11 +3211,10 @@ class _ReservedRoomReplayView(_FlakyReplayView):
         page = await super().pending(
             limit=limit,
             room_id=room_id,
-            event_id=event_id,
             after_receipt_order=after_receipt_order,
             runtime_generation=runtime_generation,
         )
-        if room_id is None and event_id is None and asyncio.current_task() is self.competing_drain and page.reached_end:
+        if room_id is None and asyncio.current_task() is self.competing_drain and page.reached_end:
             self.competing_discovered.set()
         if hold_this_read:
             self.page_entered.set()
@@ -3266,44 +3224,26 @@ class _ReservedRoomReplayView(_FlakyReplayView):
 
 @dataclass
 class _ApprovalWakeReplayView(_FlakyReplayView):
-    """Hold one room snapshot while approval wake lookups race its eligibility."""
+    """Hold a room snapshot across an approval eligibility change."""
 
-    lookup_race: str = "ready"
     tail_read_entered: asyncio.Event = field(default_factory=asyncio.Event)
     release_tail_read: asyncio.Event = field(default_factory=asyncio.Event)
-    empty_lookup_entered: asyncio.Event = field(default_factory=asyncio.Event)
-    release_empty_lookup: asyncio.Event = field(default_factory=asyncio.Event)
-    fresh_lookup_returned: asyncio.Event = field(default_factory=asyncio.Event)
     tail_read_after: int | None = None
-    exact_reads: int = 0
 
     async def pending(
         self,
         *,
         limit: int = 256,
         room_id: str | None = None,
-        event_id: str | None = None,
         after_receipt_order: int | None = None,
         runtime_generation: str = "unmanaged",
     ) -> PendingPage:
         page = await super().pending(
             limit=limit,
             room_id=room_id,
-            event_id=event_id,
             after_receipt_order=after_receipt_order,
             runtime_generation=runtime_generation,
         )
-        if event_id == "$source-1":
-            self.exact_reads += 1
-            if self.lookup_race == "failed" and self.exact_reads == 1:
-                msg = "retry source lookup failed"
-                raise RuntimeError(msg)
-            if self.lookup_race == "stale" and self.exact_reads == 1:
-                assert page == ()
-                self.empty_lookup_entered.set()
-                await self.release_empty_lookup.wait()
-            elif page:
-                self.fresh_lookup_returned.set()
         if room_id == ROOM and not self.tail_read_entered.is_set() and any(event.event_id == "$tail" for event in page):
             self.tail_read_after = after_receipt_order
             self.tail_read_entered.set()

@@ -86,7 +86,8 @@ The journal query remains authoritative for replay eligibility, including approv
 Each room retains its page position across bounded passes, and its continuation runs independently of global discovery.
 Callback and room-read failures pause only that room with exponential retry delays from one to thirty seconds; other rooms continue, and admissions or recovery drains cannot bypass the cooldown.
 Successful progress past the failed receipt resets that room's retry delay.
-Downstream handoffs retain live ownership, while lost owners and exact retry wakeups rewind the room's query before later callbacks run.
+Downstream handoffs retain live ownership, while lost owners rewind the room's query before later callbacks run.
+Retry handoffs carry their room ID and invalidate that room's current page synchronously, without waiting for a source lookup or affecting another room's progress.
 Shutdown cancels lane and retry owners without settling unfinished work, which remains available for startup recovery.
 Visible response paths persist `TurnStore` truth, while pure policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity settle their journal events directly instead of recording a turn.
 This keeps ignored high-volume traffic out of the handled-turn ledger without weakening exact callback de-duplication.

@@ -76,7 +76,6 @@ class PendingEventWorker:
     _lanes: dict[str, asyncio.Task[_RoomPass]] = field(default_factory=dict, init=False, repr=False)
     _rooms: dict[str, _RoomProgress] = field(default_factory=dict, init=False, repr=False)
     _ready_rooms: set[str] = field(default_factory=set, init=False, repr=False)
-    _retry_sources: set[str] = field(default_factory=set, init=False, repr=False)
     _room_retries: dict[str, _RoomRetry] = field(default_factory=dict, init=False, repr=False)
     _deferred: dict[str, JournalEvent] = field(default_factory=dict, init=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
@@ -98,17 +97,22 @@ class PendingEventWorker:
         self._wake.set()
         self._pump = asyncio.create_task(self._run(), name="pending_event_worker")
 
-    def wake(self, *, event_ids: tuple[str, ...] = ()) -> None:
-        """Signal admissions or exact sources made replayable by an owner handoff."""
-        self._retry_sources.update(event_ids)
+    def wake(self, *, room_id: str | None = None) -> None:
+        """Signal admission, or synchronously rewind a room after a retry handoff."""
+        if self._stopped:
+            return
+        if room_id is not None:
+            self._queue_room(room_id, rewind_before=0)
+            if self._pump is not None and not self._pump.done():
+                self._start_lane(room_id)
         self._wake.set()
 
     def release(self, event_ids: Iterable[str]) -> None:
         """Forget downstream ownership after its durable handoff.
 
         This remains an in-memory operation callable from terminal handoffs.
-        A retry additionally calls wake with the exact source IDs, allowing
-        replay to rewind even after an approval source left this cache.
+        A retry additionally wakes its room, invalidating the current page
+        even after an approval source has left this cache.
         """
         for event_id in event_ids:
             self._deferred.pop(event_id, None)
@@ -164,7 +168,6 @@ class PendingEventWorker:
         self._lanes.clear()
         self._rooms.clear()
         self._ready_rooms.clear()
-        self._retry_sources.clear()
         self._room_retries.clear()
         self._scan_cursor = None
         return True
@@ -180,38 +183,6 @@ class PendingEventWorker:
             previous = progress.rewind_before
             progress.rewind_before = rewind_before if previous is None else min(previous, rewind_before)
         self._ready_rooms.add(room_id)
-
-    async def _resolve_retry_sources(self) -> None:
-        """Resolve exact handoffs through the same replay policy as room reads."""
-        generation = self._stop_generation
-        failed = False
-        for event_id in tuple(self._retry_sources)[:_BATCH_SIZE]:
-            # Remove before awaiting: another wake for this ID during the read
-            # is a new obligation, including when this snapshot still says waiting.
-            self._retry_sources.discard(event_id)
-            try:
-                page = await self.store.pending(
-                    event_id=event_id,
-                    limit=1,
-                    runtime_generation=self.runtime_generation,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                if self._stopped or generation != self._stop_generation:
-                    return
-                logger.exception("pending_event_retry_source_read_failed", event_id=event_id)
-                self._retry_sources.add(event_id)
-                failed = True
-                continue
-            if self._stopped or generation != self._stop_generation:
-                return
-            for event in page:
-                self._queue_room(event.room_id, rewind_before=event.receipt_order - 1)
-        if failed:
-            self._schedule_retry()
-        elif self._retry_sources:
-            self._wake.set()
 
     def _queue_lost_owners(self) -> None:
         """Probe globally, but leave reclamation to the room's reserved owner."""
@@ -255,9 +226,6 @@ class PendingEventWorker:
         """Drain eligible room work through the same owners, without waiting out cooldowns."""
         generation = self._stop_generation
         if self._stopped:
-            return 0
-        await self._resolve_retry_sources()
-        if self._stopped or generation != self._stop_generation:
             return 0
         rooms, _more = await self._discover_rooms(whole_backlog=True)
         if self._stopped or generation != self._stop_generation:
@@ -304,8 +272,6 @@ class PendingEventWorker:
 
     async def _dispatch_ready_rooms(self) -> None:
         started = self._start_ready_rooms()
-        await self._resolve_retry_sources()
-        started = self._start_ready_rooms() or started
         rooms, more_remains = await self._discover_rooms()
         if self._stopped:
             return

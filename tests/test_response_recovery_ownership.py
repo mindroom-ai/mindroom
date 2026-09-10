@@ -1505,8 +1505,9 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             ),
             name="inbox_response:preparation",
             recovery_proof_ready=lambda: True,
-            on_failure=lambda: dispatcher.retry_turn_sources((SOURCE,)),
+            on_failure=lambda: dispatcher.retry_turn_sources(callback_room.room_id, (SOURCE,)),
             source_event_ids=(SOURCE,),
+            room_id=callback_room.room_id,
         )
         tasks.append(task)
         return TurnDispatchOutcome.DEFERRED

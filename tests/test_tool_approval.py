@@ -714,9 +714,9 @@ async def test_continuation_decision_wakes_its_owning_bot_sources(tmp_path: Path
         cards_provider=lambda: None,
     )
 
-    await transport._wake_continuation_sources("code", ("$source-1", "$source-2"))
+    await transport._wake_continuation_sources("code", "!room:example.org", ("$source-1", "$source-2"))
 
-    owner.retry_approval_sources.assert_called_once_with(("$source-1", "$source-2"))
+    owner.retry_approval_sources.assert_called_once_with("!room:example.org", ("$source-1", "$source-2"))
 
 
 @pytest.mark.asyncio
@@ -919,6 +919,7 @@ async def test_deadline_sweep_expires_an_unacknowledged_card_and_wakes_its_conti
         recorded=True,
         continuation_ready=True,
         continuation_entity_name="code",
+        continuation_room_id="!room:example.org",
         source_event_ids=("$source",),
     )
     cards = MagicMock()
@@ -938,7 +939,7 @@ async def test_deadline_sweep_expires_an_unacknowledged_card_and_wakes_its_conti
     assert await manager._expire_stored("!room:localhost", stored) is False
 
     cards.expire_unacknowledged_approval_card.assert_awaited_once_with(delivery_id="approval-card-1")
-    wake.assert_awaited_once_with("code", ("$source",))
+    wake.assert_awaited_once_with("code", "!room:example.org", ("$source",))
 
 
 @pytest.mark.asyncio
