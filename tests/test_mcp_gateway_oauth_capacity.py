@@ -7,6 +7,7 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
@@ -21,8 +22,6 @@ from tests.test_mcp_gateway_oauth import client as client  # noqa: PLC0414
 from tests.test_mcp_gateway_oauth import runtime_paths as runtime_paths  # noqa: PLC0414
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mcp.shared.auth import OAuthClientInformationFull
 
     from mindroom.constants import RuntimePaths
@@ -398,78 +397,17 @@ def _seed_accounting_v1(paths: RuntimePaths) -> Path:
     ]
     with sqlite3.connect(path) as connection:
         connection.executescript(
-            """
-            CREATE TABLE clients (
-                client_id TEXT PRIMARY KEY, metadata TEXT NOT NULL,
-                expires_at REAL NOT NULL, accounted_bytes INTEGER NOT NULL
-            );
-            CREATE TABLE pending (
-                state_hash TEXT PRIMARY KEY, payload TEXT NOT NULL, expires_at REAL NOT NULL,
-                requester_id TEXT, authenticated_user_id TEXT, agent_name TEXT, csrf_hash TEXT,
-                accounted_bytes INTEGER NOT NULL, account_id TEXT
-            );
-            CREATE TABLE grants (
-                grant_id TEXT PRIMARY KEY, payload TEXT NOT NULL, expires_at REAL NOT NULL,
-                revoked INTEGER NOT NULL DEFAULT 0, accounted_bytes INTEGER NOT NULL,
-                requester_id TEXT NOT NULL, requester_charge INTEGER NOT NULL,
-                created_at REAL, last_used_at REAL, last_activity_at REAL,
-                idle_expires_at REAL, account_id TEXT
-            );
-            CREATE TABLE capabilities (
-                token_hash TEXT PRIMARY KEY, kind TEXT NOT NULL, grant_id TEXT NOT NULL,
-                payload TEXT NOT NULL, expires_at REAL NOT NULL, consumed INTEGER NOT NULL DEFAULT 0,
-                accounted_bytes INTEGER NOT NULL, issued_at REAL,
-                FOREIGN KEY (grant_id) REFERENCES grants(grant_id)
-            );
-            CREATE TABLE oauth_usage (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                bytes_used INTEGER NOT NULL, onboarding_bytes INTEGER NOT NULL
-            );
-            CREATE TABLE requester_usage (requester_id TEXT PRIMARY KEY, bytes_used INTEGER NOT NULL);
-            CREATE INDEX capabilities_grant ON capabilities(grant_id);
-            CREATE INDEX grants_client ON grants(json_extract(payload, '$.client_id'));
-            CREATE INDEX pending_client ON pending(json_extract(payload, '$.client_id'));
-            CREATE INDEX pending_expiry ON pending(expires_at);
-            CREATE INDEX clients_expiry ON clients(expires_at);
-            CREATE INDEX grants_expiry ON grants(expires_at);
-            CREATE INDEX grants_revoked ON grants(grant_id) WHERE revoked = 1;
-            CREATE INDEX capabilities_code_expiry ON capabilities(expires_at) WHERE kind = 'code';
-            CREATE INDEX capabilities_code_consumed ON capabilities(grant_id) WHERE kind = 'code' AND consumed = 1;
-            CREATE INDEX capabilities_live ON capabilities(grant_id) WHERE consumed = 0 AND kind IN ('access', 'refresh');
-            CREATE INDEX capabilities_issuance ON capabilities(grant_id, issued_at) WHERE kind = 'access';
-            CREATE INDEX grants_idle_expiry ON grants(idle_expires_at);
-            CREATE INDEX grants_account ON grants(account_id);
-            CREATE INDEX pending_account ON pending(account_id);
-            CREATE INDEX capabilities_access_expiry ON capabilities(expires_at) WHERE kind = 'access';
-            CREATE INDEX grants_owner ON grants(
-                requester_id, json_extract(payload, '$.authenticated_user_id'),
-                json_extract(payload, '$.agent_name'), json_extract(payload, '$.resource')
-            );
-            CREATE INDEX pending_owner ON pending(requester_id, authenticated_user_id, agent_name);
-            CREATE TRIGGER grants_owner_immutable BEFORE UPDATE OF requester_id ON grants
-                WHEN OLD.requester_id != NEW.requester_id
-                BEGIN SELECT RAISE(ABORT, 'Grant requester is immutable'); END;
-            CREATE TRIGGER grants_pin_client AFTER INSERT ON grants BEGIN SELECT 1; END;
-            CREATE TRIGGER grants_unpin_client AFTER DELETE ON grants BEGIN SELECT 1; END;
-            PRAGMA user_version = 1;
-            """,
-        )
-        for table in ("clients", "pending", "grants", "capabilities"):
-            for suffix, event in (
-                ("charge_insert", "AFTER INSERT"),
-                ("charge_change", "AFTER UPDATE"),
-                ("usage_update", "AFTER UPDATE OF accounted_bytes"),
-                ("usage_delete", "AFTER DELETE"),
-            ):
-                connection.execute(
-                    f"CREATE TRIGGER {table}_{suffix} {event} ON {table} BEGIN SELECT 1; END",
-                )
-        connection.execute(
-            "INSERT INTO clients VALUES (?, ?, ?, ?)",
-            ("desktop", client_metadata, 2_100_000_000.0, client_charge),
+            (Path(__file__).parent / "fixtures" / "mcp_gateway_accounting_v1.sql").read_text(encoding="utf-8"),
         )
         connection.execute(
-            "INSERT INTO pending VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO clients(client_id, metadata, expires_at) VALUES (?, ?, ?)",
+            ("desktop", client_metadata, 2_100_000_000.0),
+        )
+        connection.execute(
+            """INSERT INTO pending(
+                state_hash, payload, expires_at, requester_id,
+                authenticated_user_id, agent_name, csrf_hash, account_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 "pending-state-hash",
                 pending_payload,
@@ -478,20 +416,20 @@ def _seed_accounting_v1(paths: RuntimePaths) -> Path:
                 "@pending:example.org",
                 "personal",
                 "pending-csrf-hash",
-                pending_charge,
                 "pending-account",
             ),
         )
         connection.execute(
-            "INSERT INTO grants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            """INSERT INTO grants(
+                grant_id, payload, expires_at, revoked, requester_id,
+                created_at, last_used_at, last_activity_at, idle_expires_at, account_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 "grant-legacy",
                 grant_payload,
                 2_100_000_000.0,
                 0,
-                grant_charge,
                 "@alice:example.org",
-                grant_charge + client_charge,
                 1_999_999_000.0,
                 1_999_999_500.0,
                 1_999_999_800.0,
@@ -500,25 +438,95 @@ def _seed_accounting_v1(paths: RuntimePaths) -> Path:
             ),
         )
         connection.executemany(
-            "INSERT INTO capabilities VALUES (?, ?, 'grant-legacy', ?, 2100000000.0, ?, ?, ?)",
+            """INSERT INTO capabilities(
+                token_hash, kind, grant_id, payload, expires_at, consumed, issued_at
+            ) VALUES (?, ?, 'grant-legacy', ?, 2100000000.0, ?, ?)""",
             [
-                (token_hash, kind, payload, consumed, capability_charge, issued_at)
-                for (token_hash, kind, payload, consumed, issued_at), capability_charge in zip(
-                    capability_rows,
-                    capability_charges,
-                    strict=True,
-                )
+                (token_hash, kind, payload, consumed, issued_at)
+                for token_hash, kind, payload, consumed, issued_at in capability_rows
             ],
         )
-        connection.execute(
-            "INSERT INTO oauth_usage VALUES (1, ?, ?)",
-            (1024 + client_charge + pending_charge + grant_charge + sum(capability_charges), pending_charge),
+        assert connection.execute("SELECT accounted_bytes FROM clients").fetchone()[0] == client_charge
+        assert connection.execute("SELECT accounted_bytes FROM pending").fetchone()[0] == pending_charge
+        assert connection.execute("SELECT accounted_bytes, requester_charge FROM grants").fetchone() == (
+            grant_charge,
+            grant_charge + client_charge,
         )
-        connection.execute(
-            "INSERT INTO requester_usage VALUES (?, ?)",
-            ("@alice:example.org", grant_charge + client_charge + sum(capability_charges)),
+        assert connection.execute("SELECT accounted_bytes FROM capabilities ORDER BY rowid").fetchall() == [
+            (capability_charge,) for capability_charge in capability_charges
+        ]
+        assert connection.execute("SELECT bytes_used, onboarding_bytes FROM oauth_usage").fetchone() == (
+            1024 + client_charge + pending_charge + grant_charge + sum(capability_charges),
+            pending_charge,
+        )
+        assert connection.execute("SELECT requester_id, bytes_used FROM requester_usage").fetchone() == (
+            "@alice:example.org",
+            grant_charge + client_charge + sum(capability_charges),
         )
     return path
+
+
+def _assert_accounting_v1_trigger_behavior(path: Path) -> None:
+    """Exercise historical row accounting and client pin/unpin before upgrading."""
+    client_id = "probe-client"
+    client_metadata = "界"
+    requester = "@probe:example.org"
+    grant_id = "probe-grant"
+    grant_payload = '{"client_id":"probe-client","requester_id":"@probe:example.org"}'
+    client_charge = 1024 + len(client_id.encode()) + len(client_metadata.encode())
+    grant_charge = (
+        2048 + len(grant_id.encode()) + len(grant_payload.encode()) + len(requester.encode()) + len(requester.encode())
+    )
+    with sqlite3.connect(path) as connection:
+        baseline = connection.execute("SELECT bytes_used, onboarding_bytes FROM oauth_usage").fetchone()
+        assert baseline is not None
+        connection.execute("SAVEPOINT v1_trigger_probe")
+        connection.execute(
+            "INSERT INTO clients(client_id, metadata, expires_at) VALUES (?, ?, ?)",
+            (client_id, client_metadata, 2_100_000_000.0),
+        )
+        assert connection.execute(
+            "SELECT accounted_bytes FROM clients WHERE client_id = ?",
+            (client_id,),
+        ).fetchone() == (client_charge,)
+        assert connection.execute("SELECT bytes_used, onboarding_bytes FROM oauth_usage").fetchone() == (
+            baseline[0] + client_charge,
+            baseline[1] + client_charge,
+        )
+
+        connection.execute(
+            "INSERT INTO grants(grant_id, payload, expires_at, requester_id) VALUES (?, ?, ?, ?)",
+            (grant_id, grant_payload, 2_100_000_000.0, requester),
+        )
+        assert connection.execute(
+            "SELECT accounted_bytes, requester_charge FROM grants WHERE grant_id = ?",
+            (grant_id,),
+        ).fetchone() == (grant_charge, grant_charge + client_charge)
+        assert connection.execute("SELECT bytes_used, onboarding_bytes FROM oauth_usage").fetchone() == (
+            baseline[0] + client_charge + grant_charge,
+            baseline[1],
+        )
+        assert connection.execute(
+            "SELECT bytes_used FROM requester_usage WHERE requester_id = ?",
+            (requester,),
+        ).fetchone() == (grant_charge + client_charge,)
+
+        connection.execute("DELETE FROM grants WHERE grant_id = ?", (grant_id,))
+        assert connection.execute("SELECT bytes_used, onboarding_bytes FROM oauth_usage").fetchone() == (
+            baseline[0] + client_charge,
+            baseline[1] + client_charge,
+        )
+        assert (
+            connection.execute(
+                "SELECT bytes_used FROM requester_usage WHERE requester_id = ?",
+                (requester,),
+            ).fetchone()
+            is None
+        )
+        connection.execute("DELETE FROM clients WHERE client_id = ?", (client_id,))
+        assert connection.execute("SELECT bytes_used, onboarding_bytes FROM oauth_usage").fetchone() == baseline
+        connection.execute("ROLLBACK TO v1_trigger_probe")
+        connection.execute("RELEASE v1_trigger_probe")
 
 
 async def test_legacy_migration_backfills_once_and_over_budget_authority_remains_revocable(
@@ -573,6 +581,7 @@ async def test_v1_accounting_upgrade_compacts_historical_refresh_and_preserves_r
 ) -> None:
     """The v1-to-v2 step compacts only consumed refresh payloads and rebuilds exact counters."""
     path = _seed_accounting_v1(runtime_paths)
+    _assert_accounting_v1_trigger_behavior(path)
     provider = _provider(runtime_paths, _Clock())
 
     consumed = await provider.load_refresh_token(client, "consumed-refresh")
