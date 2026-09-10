@@ -14269,7 +14269,8 @@ The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can
 Published semantic searches and collection probes run in short-lived subprocesses.
 Embedding credentials and provider health stay in the application; only query vectors and document data cross the process boundary.
 Each child exits after one operation, releasing its native Chroma memory.
-At most two read children run at once, with a 30-second wait for a slot and a 30-second execution timeout.
+At most two read children run at once, with a 30-second execution timeout.
+Excess reads fail immediately as busy so waiting knowledge requests cannot fill the application's shared thread pool.
 A timed-out child is killed and reaped; cancelling an async caller leaves its already-started read bounded by that timeout.
 Native database stalls therefore do not hold the application process's Python lock.
 Fresh processes add startup and index-loading cost to each read.

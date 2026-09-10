@@ -37,7 +37,8 @@ def read_chroma(request: ReadRequest, *, timeout: float = 30.0) -> ReadResult:
     if len(payload) > MAX_FRAME_BYTES:
         message = "Knowledge read request exceeds transport size limit"
         raise ValueError(message)
-    if not _read_slots.acquire(timeout=timeout):
+    # Waiting here would occupy the shared executor and starve unrelated I/O.
+    if not _read_slots.acquire(blocking=False):
         message = "Knowledge reader is busy; try again shortly"
         raise RuntimeError(message)
     try:

@@ -6,7 +6,9 @@ import asyncio
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from threading import Event
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -196,3 +198,42 @@ async def test_native_error_logs_redacted_child_diagnostics(
     assert "ValueError" in error
     assert "$invalid" in error
     assert "synthetic-secret" not in error
+
+
+@pytest.mark.asyncio
+async def test_saturated_reads_leave_executor_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two blocked native reads must not let queued reads starve unrelated application work."""
+    release = Event()
+    active = [Event(), Event()]
+    started: list[int] = []
+
+    def blocked_child(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        slot = len(started)
+        started.append(slot)
+        active[slot].set()
+        assert release.wait(timeout=5)
+        return subprocess.CompletedProcess(command, 0, stdout=b'{"exists":true,"documents":[],"error_type":null}')
+
+    monkeypatch.setattr(subprocess, "run", blocked_child)
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        loop.set_default_executor(executor)
+        tasks = [
+            asyncio.create_task(asyncio.to_thread(read_chroma, ReadRequest("unused", "published"))) for _ in range(4)
+        ]
+        try:
+            for _ in range(200):
+                if all(event.is_set() for event in active):
+                    break
+                await asyncio.sleep(0.005)
+            assert all(event.is_set() for event in active)
+            assert (
+                await asyncio.wait_for(asyncio.to_thread(lambda: "unrelated work completed"), timeout=0.5)
+                == "unrelated work completed"
+            )
+        finally:
+            release.set()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+    errors = [result for result in results if isinstance(result, RuntimeError)]
+    assert len(errors) == 2
+    assert all("Knowledge reader is busy" in str(error) for error in errors)
