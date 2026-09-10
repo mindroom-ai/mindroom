@@ -69,7 +69,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import update_scope_seen_event_ids
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
-from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
+from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,

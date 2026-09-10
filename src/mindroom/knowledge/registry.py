@@ -97,7 +97,6 @@ class PublishedIndexResolution:
 
 
 class _PublishedIndexVectorDb(Protocol):
-    client: object | None
     collection_name: str
 
     def exists(self) -> bool:
@@ -375,16 +374,12 @@ def _build_published_index_vector_db(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _PublishedIndexVectorDb:
-    from mindroom.knowledge.chroma_client import ChromaDb  # noqa: PLC0415
+    from mindroom.knowledge.read_proxy import ChromaReadProxy  # noqa: PLC0415
 
-    return cast(
-        "_PublishedIndexVectorDb",
-        ChromaDb(
-            collection=_state_collection_name(state),
-            path=str(published_index_storage_path(key)),
-            persistent_client=True,
-            embedder=create_configured_embedder(config, runtime_paths),
-        ),
+    return ChromaReadProxy(
+        collection_name=_state_collection_name(state),
+        path=str(published_index_storage_path(key)),
+        embedder=create_configured_embedder(config, runtime_paths),
     )
 
 
@@ -551,36 +546,35 @@ def get_published_index(
     availability = _published_index_availability(key=key, state=state, metadata_exists=metadata_path.exists())
     current_embedder_client_signature = embedder_client_signature(config, runtime_paths)
 
-    index = _published_indexes.get(key)
-    if index is not None:
-        if (
-            index.embedder_client_signature == current_embedder_client_signature
-            and state is not None
-            and _cached_index_matches_persisted_state(index, state)
-            and _cached_index_still_queryable(index)
-        ):
-            if index.state != state:
-                index = replace(index, state=state)
-                _published_indexes[key] = index
+    try:
+        index = _published_indexes.get(key)
+        if index is not None:
+            if (
+                index.embedder_client_signature == current_embedder_client_signature
+                and state is not None
+                and _cached_index_matches_persisted_state(index, state)
+                and _cached_index_still_queryable(index)
+            ):
+                if index.state != state:
+                    index = replace(index, state=state)
+                    _published_indexes[key] = index
+                return PublishedIndexResolution(
+                    key=key,
+                    index=index,
+                    state=state,
+                    availability=availability,
+                    schedule_refresh_on_access=binding.incremental_sync_on_access,
+                )
+            _published_indexes.pop(key, None)
+
+        if state is None:
             return PublishedIndexResolution(
                 key=key,
-                index=index,
+                index=None,
                 state=state,
                 availability=availability,
                 schedule_refresh_on_access=binding.incremental_sync_on_access,
             )
-        _published_indexes.pop(key, None)
-
-    if state is None:
-        return PublishedIndexResolution(
-            key=key,
-            index=None,
-            state=state,
-            availability=availability,
-            schedule_refresh_on_access=binding.incremental_sync_on_access,
-        )
-
-    try:
         knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
     except Exception:
         logger.warning(

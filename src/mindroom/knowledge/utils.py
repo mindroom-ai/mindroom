@@ -34,6 +34,18 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+__all__ = [
+    "KnowledgeAccessSupport",
+    "KnowledgeAvailabilityDetail",
+    "KnowledgeBaseAccessResolution",
+    "format_knowledge_availability_notice",
+    "knowledge_runtime_identity",
+    "resolve_agent_knowledge_access",
+    "resolve_agent_knowledge_access_async",
+    "resolve_knowledge_base_access",
+    "resolve_knowledge_base_access_async",
+]
+
 logger = get_logger(__name__)
 _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
 _MAX_MERGED_SOURCE_COVERAGE_RESULTS = 20
@@ -594,7 +606,7 @@ class _MultiKnowledgeVectorDb:
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
-        """Async variant of ``search`` that searches DBs concurrently."""
+        """Search sources sequentially so one query cannot exhaust native reader slots."""
 
         async def _search_one(
             vdb: _KnowledgeVectorDb,
@@ -617,7 +629,7 @@ class _MultiKnowledgeVectorDb:
                 return None, exc
             return results, None
 
-        outcomes = await asyncio.gather(*[_search_one(vdb) for vdb in self._resolved_vector_dbs()])
+        outcomes = [await _search_one(vdb) for vdb in self._resolved_vector_dbs()]
         results_by_db = [results for results, _error in outcomes if results is not None]
         if not results_by_db:
             for _results, error in outcomes:

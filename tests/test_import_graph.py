@@ -345,6 +345,20 @@ def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:
     )
 
 
+def test_knowledge_read_worker_does_not_boot_application_services() -> None:
+    """A short-lived read must not pay for refresh scheduling or agent configuration."""
+    _assert_probe_clean(
+        "mindroom.knowledge.read_worker",
+        (
+            "mindroom.knowledge.registry",
+            "mindroom.knowledge.refresh_scheduler",
+            "mindroom.knowledge.utils",
+            "mindroom.config.main",
+            "mindroom.runtime_resolution",
+        ),
+    )
+
+
 def test_tool_auto_install_smoke_entrypoint_imports() -> None:
     """The repository smoke entry point must use the post-split tool-system surfaces."""
     subprocess.run(

@@ -54,8 +54,8 @@ from mindroom.credentials import CredentialsManager, get_runtime_credentials_man
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.history.runtime import close_team_runtime_state_dbs
-from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.matrix.state import MatrixState
 from mindroom.private_instance_identity import (
     PrivateInstanceIdentity,

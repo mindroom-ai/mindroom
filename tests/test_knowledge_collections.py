@@ -4,19 +4,19 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from threading import Event, current_thread
+from threading import Barrier
 from typing import TYPE_CHECKING, Never
 
 import pytest
 from agno.knowledge.embedder.base import Embedder
 from chromadb.api.client import Client
 from chromadb.api.models.Collection import Collection
-from chromadb.api.shared_system_client import SharedSystemClient
 from chromadb.config import Settings
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import CandidateCheckpoint
 from mindroom.knowledge.collections import (
     CollectionSpace,
@@ -27,16 +27,21 @@ from mindroom.knowledge.collections import (
 )
 from mindroom.knowledge.index_metadata import PublishedIndexState, save_published_index_state
 from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.read_process import _read_slot
 from mindroom.knowledge.registry import (
+    _PublishedIndexHandle,
     get_published_index,
     published_index_metadata_path,
     published_index_storage_path,
     resolve_published_index_key,
 )
+from mindroom.knowledge.utils import resolve_knowledge_base_access
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 
 @pytest.fixture
@@ -210,11 +215,12 @@ def test_candidate_inspection_error_releases_owned_client(tmp_path: Path, monkey
     _assert_storage_released(space, {space.default_collection, candidate_name})
 
 
-def test_concurrent_cold_lookups_keep_returned_readers_queryable(
+@pytest.fixture
+def published_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A probe's final release must not stop a concurrently acquired reader's system."""
+) -> tuple[Config, RuntimePaths]:
+    """A published real collection with no process-local read handle yet."""
     monkeypatch.setattr("mindroom.knowledge.registry._published_indexes", {})
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -243,53 +249,72 @@ def test_concurrent_cold_lookups_keep_returned_readers_queryable(
             source_signature="empty",
         ),
     )
-    zero_refs = Event()
-    allow_release = Event()
-    second_started = Event()
-    second_finished = Event()
-    original_decrement = SharedSystemClient._decrement_refcount
+    return config, runtime_paths
 
-    def pause_last_release(_cls: type[SharedSystemClient], identifier: str) -> int:
-        count = original_decrement(identifier)
-        if count == 0 and current_thread().name.startswith("first-lookup") and not zero_refs.is_set():
-            zero_refs.set()
-            assert allow_release.wait(10)
-        return count
 
-    monkeypatch.setattr(SharedSystemClient, "_decrement_refcount", classmethod(pause_last_release))
-    clients: list[Client] = []
+def test_concurrent_cold_lookups_keep_returned_readers_queryable(
+    published_lookup: tuple[Config, RuntimePaths],
+) -> None:
+    """Concurrent published handles remain usable without retaining parent native clients."""
+    config, runtime_paths = published_lookup
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    storage_path = published_index_storage_path(key)
+    barrier = Barrier(2)
 
-    def lookup(*, second: bool = False) -> Client:
-        if second:
-            second_started.set()
+    def lookup() -> _PublishedIndexHandle:
+        barrier.wait(timeout=10)
         result = get_published_index("docs", config=config, runtime_paths=runtime_paths)
         assert result.index is not None
-        client = require_chroma_vector_db(result.index.knowledge).client
-        assert isinstance(client, Client)
-        clients.append(client)
-        assert client.get_collection("present").count() == 0
-        if second:
-            second_finished.set()
-        return client
+        return result.index
 
-    try:
-        with (
-            ThreadPoolExecutor(max_workers=1, thread_name_prefix="first-lookup") as first_pool,
-            ThreadPoolExecutor(max_workers=1, thread_name_prefix="second-lookup") as second_pool,
-        ):
-            first = first_pool.submit(lookup)
-            try:
-                assert zero_refs.wait(10)
-                second = second_pool.submit(lookup, second=True)
-                assert second_started.wait(10)
-                # A guarded acquisition waits for release; the broken version
-                # completes here with a reader backed by the retiring system.
-                second_finished.wait(1)
-            finally:
-                allow_release.set()
-            readers = [first.result(timeout=10), second.result(timeout=10)]
-        for reader in readers:
-            assert reader.get_collection("present").count() == 0
-    finally:
-        for client in clients:
-            client.close()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(lookup)
+        second = pool.submit(lookup)
+        indexes = [first.result(timeout=10), second.result(timeout=10)]
+    for index in indexes:
+        assert index.knowledge.vector_db.exists() is True
+    # A native client with different settings can open immediately: none of
+    # the published handles retain a system in this process.
+    with Client(settings=Settings(is_persistent=True, persist_directory=str(storage_path), allow_reset=True)) as client:
+        assert client.count_collections() == 1
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_busy_published_lookup_reports_unavailable_then_recovers(
+    published_lookup: tuple[Config, RuntimePaths],
+    cached: bool,
+) -> None:
+    """Reader saturation stays a per-base availability result, including cached handles."""
+    config, runtime_paths = published_lookup
+    if cached:
+        assert resolve_knowledge_base_access("docs", config, runtime_paths).knowledge is not None
+
+    with _read_slot(), _read_slot():
+        busy = resolve_knowledge_base_access("docs", config, runtime_paths)
+        assert busy.knowledge is None
+        assert busy.availability is KnowledgeAvailability.REFRESH_FAILED
+
+    recovered = resolve_knowledge_base_access("docs", config, runtime_paths)
+    assert recovered.knowledge is not None
+    assert recovered.availability is KnowledgeAvailability.READY
+
+
+def test_cached_published_lookup_reports_probe_timeout(
+    published_lookup: tuple[Config, RuntimePaths],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cached probe timeout must not escape knowledge availability resolution."""
+    config, runtime_paths = published_lookup
+    assert resolve_knowledge_base_access("docs", config, runtime_paths).knowledge is not None
+
+    def timeout(*args: object, **kwargs: object) -> Never:  # noqa: ARG001
+        message = "Knowledge read timed out"
+        raise TimeoutError(message)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("mindroom.knowledge.read_proxy.collection_exists", timeout)
+        unavailable = resolve_knowledge_base_access("docs", config, runtime_paths)
+        assert unavailable.knowledge is None
+        assert unavailable.availability is KnowledgeAvailability.REFRESH_FAILED
+
+    assert resolve_knowledge_base_access("docs", config, runtime_paths).availability is KnowledgeAvailability.READY

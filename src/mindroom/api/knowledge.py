@@ -22,7 +22,7 @@ from mindroom.knowledge.refresh_locks import is_refresh_active_for_binding
 from mindroom.knowledge.refresh_runner import (
     knowledge_binding_mutation_lock,
     publish_file_mode_source_metadata_for_base,
-    refresh_knowledge_binding,
+    refresh_knowledge_binding_in_subprocess,
 )
 from mindroom.knowledge.status import (
     KnowledgeCandidateStatus,
@@ -809,7 +809,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
                 force_reindex=True,
             )
         else:
-            result = await refresh_knowledge_binding(
+            result = await refresh_knowledge_binding_in_subprocess(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,

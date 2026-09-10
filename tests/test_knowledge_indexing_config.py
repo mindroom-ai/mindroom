@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 from pathlib import Path
-from typing import Never
 from unittest.mock import Mock
 
 import pytest
@@ -55,21 +54,6 @@ def test_collection_probe_releases_storage(tmp_path: Path, collection_name: str,
     _assert_probe_storage_released(tmp_path)
 
 
-def test_collection_probe_releases_storage_after_lookup_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failed lookup must release the probe's client just like a successful lookup."""
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path))) as client:
-        client.create_collection("present")
-
-    def fail_lookup(self: Client, name: str, **kwargs: object) -> Never:  # noqa: ARG001
-        message = "collection lookup failed"
-        raise RuntimeError(message)
-
-    monkeypatch.setattr(Client, "get_collection", fail_lookup)
-    assert chroma_collection_exists(tmp_path, "present") is False
-
-    _assert_probe_storage_released(tmp_path)
-
-
 def test_collection_probe_keeps_retained_reader_queryable(tmp_path: Path) -> None:
     """Closing a probe must preserve another client's shared system and leave no extra owner."""
     with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path))) as reader:
@@ -83,12 +67,12 @@ def test_collection_probe_keeps_retained_reader_queryable(tmp_path: Path) -> Non
     _assert_probe_storage_released(tmp_path)
 
 
-def test_collection_probe_returns_false_when_client_cannot_open(tmp_path: Path) -> None:
-    """Client construction errors keep the probe's existing false-result contract."""
+def test_collection_probe_is_independent_of_parent_client_settings(tmp_path: Path) -> None:
+    """A child probe must not share the parent's native client settings."""
     with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path), allow_reset=True)) as reader:
         reader.create_collection("present")
-        # The probe's default settings conflict with this live client.
-        assert chroma_collection_exists(tmp_path, "present") is False
+        # The child has its own native system despite different settings.
+        assert chroma_collection_exists(tmp_path, "present") is True
         assert reader.count_collections() == 1
 
 

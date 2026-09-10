@@ -27,7 +27,8 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.custom_tools.invite_router import InviteRouterTools
 from mindroom.history.types import HistoryScope
-from mindroom.knowledge import KnowledgeAvailability, KnowledgeAvailabilityDetail
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.matrix_rtc.call_tools import (
     CallAgentResponse,
     _CallAgentCache,

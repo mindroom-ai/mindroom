@@ -364,3 +364,5 @@ _.revoke_token
 
 _.image_to_image  # FalTools registers this override as an image-editing tool (src/mindroom/custom_tools/fal.py)
 _.generate_media  # FalTools registers this override as a media-generation tool (src/mindroom/custom_tools/fal.py)
+
+_collections_to_query  # Agno calls this hook to resolve the exact published read collection.

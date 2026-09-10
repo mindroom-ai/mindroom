@@ -111,7 +111,7 @@ from .journal_dispatch import (
     JournalCallbacks,
     JournalDispatcher,
 )
-from .knowledge import KnowledgeAccessSupport
+from .knowledge.utils import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client_room_admin import get_joined_rooms
