@@ -220,6 +220,7 @@ async def search_tools(
     limit: int = 5,
     manager: MCPServerManager | None = None,
     require_current_access: Callable[[], None] | None = None,
+    allowed_toolkits: tuple[str, ...] | None = None,
 ) -> SearchResult:
     """Search assigned toolkit metadata or one selected function catalog without schemas."""
     if not isinstance(query, str) or len(query) > 256 or not isinstance(limit, int) or isinstance(limit, bool):
@@ -247,7 +248,7 @@ async def search_tools(
         entries = await run_gateway_sync(_entries, context)
         items: list[SearchItem] = []
         for name in entries:
-            if not _handle(name):
+            if not _handle(name) or (allowed_toolkits is not None and name not in allowed_toolkits):
                 continue
             metadata = TOOL_METADATA.get(name)
             server = context.config.mcp_servers.get(name.removeprefix("mcp_")) if name.startswith("mcp_") else None
@@ -271,11 +272,22 @@ async def search_tools(
     return await _guard(context, search())
 
 
-async def search_agents(contexts: list[AgentToolContext], *, query: str = "", limit: int = 5) -> SearchResult:
+async def search_agents(
+    contexts: list[AgentToolContext],
+    *,
+    query: str = "",
+    limit: int = 5,
+    toolkits_by_agent: dict[str, tuple[str, ...] | None] | None = None,
+) -> SearchResult:
     """Aggregate metadata with one global result and byte limit, without constructing tools."""
     items: list[SearchItem] = []
     for context in contexts:
-        response = await search_tools(context, query=query, limit=limit)
+        response = await search_tools(
+            context,
+            query=query,
+            limit=limit,
+            allowed_toolkits=toolkits_by_agent.get(context.agent_name, ()) if toolkits_by_agent is not None else None,
+        )
         if "error" in response:
             return response
         items.extend(response["results"])

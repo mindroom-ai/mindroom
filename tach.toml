@@ -5484,7 +5484,7 @@ depends_on = ["mindroom.api.config_lifecycle", "mindroom.mcp_gateway.accounts", 
 
 [[modules]]
 path = "mindroom.api.mcp_selection"
-depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.api.connection_agents", "mindroom.api.mcp_identity", "mindroom.mcp_gateway.selection", "mindroom.mcp_gateway.server", "mindroom.mcp_gateway.store"]
+depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.api.connection_agents", "mindroom.api.mcp_identity", "mindroom.mcp_gateway.selection", "mindroom.mcp_gateway.server", "mindroom.mcp_gateway.store", "mindroom.tool_system.catalog"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.selection"

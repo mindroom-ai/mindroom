@@ -9,8 +9,10 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Connections } from "./Connections";
+import type { ConnectionService } from "./types";
 
-const service = {
+const service: ConnectionService = {
+  icon: null,
   provider: "mail",
   is_shared: false,
   display_name: "Mail",
@@ -34,7 +36,16 @@ const catalog = (services: (typeof service)[]) => ({
       agent_display_name: "Personal assistant",
       is_shared: false,
       services,
-      tools: [],
+      tools: services.flatMap((item) =>
+        item.tools.map((name) => ({
+          name,
+          display_name: item.display_name,
+          description: item.description,
+          provider: item.provider,
+          requires_room_context: false,
+          icon: item.icon,
+        })),
+      ),
     },
   ],
 });
@@ -45,7 +56,7 @@ function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
     if (overrides[path]) return overrides[path]();
     if (path === "/api/connections") return json(catalog([service]));
     if (path === "/api/connections/mcp/selection")
-      return json({ enabled: false, selected_agents: [] });
+      return json({ enabled: false, agents: {} });
     if (path === "/api/connections/mcp/clients")
       return json({ enabled: false, clients: [] });
     if (path === "/api/connections/agents/personal/mail/status")
@@ -58,6 +69,12 @@ function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
   });
 }
 
+async function expandAgent(name = "Personal assistant") {
+  fireEvent.click(
+    await screen.findByRole("button", { name: `Expand ${name}` }),
+  );
+}
+
 beforeEach(() => installApi());
 afterEach(() => {
   cleanup();
@@ -65,16 +82,39 @@ afterEach(() => {
 });
 
 describe("connections", () => {
-  it("shows only the server's services without loading dashboard configuration", async () => {
+  it("keeps agents collapsed and loads connections only after expansion", async () => {
     render(<Connections />);
     expect(
-      await screen.findByRole("heading", { name: "Mail" }),
+      await screen.findByRole("table", { name: "Agents" }),
     ).toBeInTheDocument();
+    const expand = screen.getByRole("button", {
+      name: "Expand Personal assistant",
+    });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+    expect(fetch).not.toHaveBeenCalledWith(
+      "/api/connections/agents/personal/mail/status",
+      expect.anything(),
+    );
+    fireEvent.click(expand);
+    expect(
+      await screen.findByRole("button", { name: "Connect Mail" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("table", { name: "Personal assistant tools" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows only the server's services without loading dashboard configuration", async () => {
+    render(<Connections />);
+    await expandAgent();
+    expect(await screen.findByText("Mail")).toBeInTheDocument();
     expect(screen.getByText("Personal assistant")).toBeInTheDocument();
     expect(
       await screen.findByRole("button", { name: "Connect Mail" }),
     ).toBeEnabled();
-    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Filter agents" }),
+    ).toBeInTheDocument();
     expect(
       vi
         .mocked(fetch)
@@ -97,7 +137,12 @@ describe("connections", () => {
         json(
           catalog([
             service,
-            { ...service, provider: "calendar", display_name: "Calendar" },
+            {
+              ...service,
+              provider: "calendar",
+              display_name: "Calendar",
+              tools: ["calendar"],
+            },
           ]),
         ),
       "/api/connections/agents/personal/mail/status": () =>
@@ -113,6 +158,7 @@ describe("connections", () => {
         }),
     });
     render(<Connections />);
+    await expandAgent();
     expect(
       await screen.findByRole("button", { name: "Disconnect Calendar" }),
     ).toBeEnabled();
@@ -130,13 +176,14 @@ describe("connections", () => {
     ).toBeEnabled();
   });
 
-  it("keeps service cards usable while the client list fails", async () => {
+  it("keeps connection rows usable while the client list fails", async () => {
     installApi({
       "/api/connections/mcp/clients": async () =>
         json({ detail: "Sensitive server detail" }, 500),
     });
 
     render(<Connections />);
+    await expandAgent();
 
     expect(
       await screen.findByRole("button", { name: "Connect Mail" }),
@@ -164,6 +211,7 @@ describe("connections", () => {
       },
     });
     render(<Connections />);
+    await expandAgent();
     fireEvent.click(
       await screen.findByRole("button", { name: "Disconnect Mail" }),
     );
@@ -187,6 +235,7 @@ describe("connections", () => {
       },
     });
     render(<Connections />);
+    await expandAgent();
     fireEvent.click(
       await screen.findByRole("button", { name: "Reset Mail connection" }),
     );
@@ -223,6 +272,7 @@ describe("connections", () => {
       },
     });
     render(<Connections />);
+    await expandAgent();
     fireEvent.click(
       await screen.findByRole("button", { name: "Connect Mail" }),
     );
@@ -254,6 +304,7 @@ describe("connections", () => {
       "/api/connections": async () => json(catalog([])),
     });
     render(<Connections />);
+    await expandAgent();
     expect(await screen.findByText(/no tools.*available/i)).toBeInTheDocument();
   });
 
@@ -289,6 +340,7 @@ describe("connections", () => {
         json({ ...status, can_connect: false }),
     });
     render(<Connections />);
+    await expandAgent();
     expect(
       await screen.findByRole("button", { name: "Connect Mail" }),
     ).toBeDisabled();
@@ -307,6 +359,7 @@ describe("connections", () => {
         new Promise(() => {}),
     });
     const { unmount } = render(<Connections />);
+    await expandAgent();
     fireEvent.click(
       await screen.findByRole("button", { name: "Connect Mail" }),
     );
@@ -328,7 +381,7 @@ describe("shared agent connections", () => {
               agent_name: "research",
               agent_display_name: "Research Team",
               is_shared: true,
-              tools: [],
+              tools: catalog([service]).agents[0].tools,
               services: [service],
             },
           ],
@@ -341,6 +394,8 @@ describe("shared agent connections", () => {
       },
     });
     render(<Connections />);
+    await expandAgent();
+    await expandAgent("Research Team");
     const personal = await screen.findByRole("region", {
       name: "Personal assistant",
     });
@@ -373,7 +428,7 @@ describe("shared agent connections", () => {
               agent_name: "research",
               agent_display_name: "Research Team",
               is_shared: true,
-              tools: [],
+              tools: catalog([service]).agents[0].tools,
               services: [service],
             },
           ],
@@ -381,6 +436,7 @@ describe("shared agent connections", () => {
       "/api/connections/agents/research/mail/status": async () => json(status),
     });
     render(<Connections />);
+    await expandAgent("Research Team");
     expect(
       await screen.findByRole("button", { name: "Connect Mail" }),
     ).toBeEnabled();
@@ -400,7 +456,7 @@ describe("shared agent connections", () => {
               agent_name: "research",
               agent_display_name: "Research Team",
               is_shared: true,
-              tools: [],
+              tools: catalog([service]).agents[0].tools,
               services: [{ ...service, is_shared: true }],
             },
           ],
@@ -417,6 +473,8 @@ describe("shared agent connections", () => {
       },
     });
     render(<Connections />);
+    await expandAgent();
+    await expandAgent("Research Team");
     const personal = await screen.findByRole("region", {
       name: "Personal assistant",
     });
@@ -424,7 +482,11 @@ describe("shared agent connections", () => {
     expect(
       await within(personal).findByRole("button", { name: "Connect Mail" }),
     ).toBeEnabled();
-    expect(within(shared).getByText("Shared agent")).toBeInTheDocument();
+    expect(
+      screen
+        .getByRole("button", { name: "Collapse Research Team" })
+        .closest("tr"),
+    ).toHaveTextContent("Shared");
     fireEvent.click(
       await within(shared).findByRole("button", { name: "Disconnect Mail" }),
     );
@@ -451,7 +513,7 @@ it("describes a requester-only connection on a shared agent as personal", async 
             agent_name: "research",
             agent_display_name: "Research Team",
             is_shared: true,
-            tools: [],
+            tools: catalog([service]).agents[0].tools,
             services: [service],
           },
         ],
@@ -460,6 +522,7 @@ it("describes a requester-only connection on a shared agent as personal", async 
       json({ ...status, connected: true }),
   });
   render(<Connections />);
+  await expandAgent("Research Team");
   fireEvent.click(
     await screen.findByRole("button", { name: "Disconnect Mail" }),
   );
@@ -475,11 +538,13 @@ describe("MCP agent selection", () => {
       {
         ...catalog([service]).agents[0],
         tools: [
+          ...catalog([service]).agents[0].tools,
           {
             name: "calculator",
             display_name: "Calculator",
             description: "Calculate numbers.",
             provider: null,
+            icon: null,
             requires_room_context: false,
           },
           {
@@ -487,6 +552,7 @@ describe("MCP agent selection", () => {
             display_name: "Matrix Message",
             description: "Send room messages.",
             provider: null,
+            icon: null,
             requires_room_context: true,
           },
         ],
@@ -502,6 +568,7 @@ describe("MCP agent selection", () => {
             display_name: "Web Search",
             description: "Search the web.",
             provider: null,
+            icon: null,
             requires_room_context: false,
           },
         ],
@@ -512,12 +579,15 @@ describe("MCP agent selection", () => {
   it("lists tools without authentication and marks room-dependent tools", async () => {
     installApi({ "/api/connections": async () => json(withTools()) });
     render(<Connections />);
-    expect(
-      await screen.findByRole("heading", { name: "Calculator" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "Matrix Message" }),
-    ).toBeInTheDocument();
+    await expandAgent();
+    expect(screen.queryByText("Calculator")).not.toBeInTheDocument();
+    const other = screen.getByRole("button", {
+      name: "Other tools for Personal assistant",
+    });
+    expect(other).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(other);
+    expect(await screen.findByText("Calculator")).toBeInTheDocument();
+    expect(screen.getByText("Matrix Message")).toBeInTheDocument();
     expect(screen.getByText("MindRoom only")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Connect Calculator" }),
@@ -525,17 +595,173 @@ describe("MCP agent selection", () => {
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   });
 
+  it("keeps individual tool choices separate per agent and supports all or off", async () => {
+    let selected: Record<string, string[] | null> = { personal: null };
+    const data = withTools();
+    data.agents[1].tools = data.agents[0].tools.filter(
+      (tool) => tool.provider === null,
+    );
+    installApi({ "/api/connections": async () => json(data) });
+    const fallback = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      if (String(input) !== selectionPath) return fallback(input, options);
+      if (options?.method === "POST")
+        selected = JSON.parse(String(options.body)).agents;
+      return json({ enabled: true, agents: selected });
+    });
+    render(<Connections />);
+    await expandAgent();
+    await expandAgent("Research Team");
+    for (const name of ["Personal assistant", "Research Team"]) {
+      fireEvent.click(
+        screen.getByRole("button", { name: `Other tools for ${name}` }),
+      );
+    }
+    const personalTool = screen.getByRole("checkbox", {
+      name: "Expose Calculator for Personal assistant through MCP",
+    });
+    const sharedTool = screen.getByRole("checkbox", {
+      name: "Expose Calculator for Research Team through MCP",
+    });
+    const personal = screen.getByRole("checkbox", {
+      name: "Expose Personal assistant through MCP",
+    });
+    expect(personalTool).toBeChecked();
+    expect(sharedTool).not.toBeChecked();
+    fireEvent.click(personalTool);
+    await waitFor(() => expect(selected).toEqual({ personal: ["mail"] }));
+    expect(personal).toHaveAttribute("aria-checked", "mixed");
+    fireEvent.click(sharedTool);
+    await waitFor(() =>
+      expect(selected).toEqual({ personal: ["mail"], shared: ["calculator"] }),
+    );
+    expect(personalTool).not.toBeChecked();
+    expect(sharedTool).toBeChecked();
+    fireEvent.click(sharedTool);
+    await waitFor(() => expect(selected).toEqual({ personal: ["mail"] }));
+    fireEvent.click(personal);
+    await waitFor(() => expect(selected).toEqual({ personal: null }));
+    expect(personalTool).toBeChecked();
+    fireEvent.click(personal);
+    await waitFor(() => expect(selected).toEqual({}));
+    expect(personalTool).not.toBeChecked();
+    expect(
+      screen.queryByRole("checkbox", { name: /Expose Matrix Message/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("filters by tool name, agent type, and MCP access without fetching hidden statuses", async () => {
+    installApi({
+      "/api/connections": async () => json(withTools()),
+      [selectionPath]: async () =>
+        json({ enabled: true, agents: { personal: null } }),
+    });
+    render(<Connections />);
+    await screen.findByRole("button", { name: "Expand Research Team" });
+    const search = screen.getByRole("searchbox", {
+      name: "Search agents or tools",
+    });
+    const filter = screen.getByRole("combobox", { name: "Filter agents" });
+    fireEvent.change(search, { target: { value: "WEB SEARCH" } });
+    expect(
+      screen.queryByRole("button", { name: "Expand Personal assistant" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Expand Research Team" }),
+    ).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "" } });
+    fireEvent.change(filter, { target: { value: "personal" } });
+    expect(
+      screen.queryByRole("button", { name: "Expand Research Team" }),
+    ).not.toBeInTheDocument();
+    fireEvent.change(filter, { target: { value: "shared" } });
+    expect(
+      screen.queryByRole("button", { name: "Expand Personal assistant" }),
+    ).not.toBeInTheDocument();
+    fireEvent.change(filter, { target: { value: "exposed" } });
+    expect(
+      screen.getByRole("button", { name: "Expand Personal assistant" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Expand Research Team" }),
+    ).not.toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalledWith(
+      "/api/connections/agents/personal/mail/status",
+      expect.anything(),
+    );
+  });
+
+  it.each(["constructor", "__proto__"])(
+    "handles an agent named %s independently of object keys",
+    async (name) => {
+      const data = catalog([]);
+      data.agents[0].agent_name = name;
+      installApi({
+        "/api/connections": async () => json(data),
+        [selectionPath]: async () => json({ enabled: true, agents: {} }),
+      });
+      const fallback = vi.mocked(fetch).getMockImplementation()!;
+      vi.mocked(fetch).mockImplementation(async (input, options) => {
+        if (String(input) === selectionPath && options?.method === "POST") {
+          const { agents } = JSON.parse(String(options.body));
+          expect(Object.keys(agents)).toEqual([name]);
+          expect(agents[name]).toBeNull();
+          return json({ enabled: true, agents });
+        }
+        return fallback(input, options);
+      });
+      render(<Connections />);
+      expect(
+        await screen.findByRole("button", {
+          name: "Expand Personal assistant",
+        }),
+      ).toHaveAttribute("aria-expanded", "false");
+      const checkbox = screen.getByRole("checkbox", {
+        name: "Expose Personal assistant through MCP",
+      });
+      expect(checkbox).not.toBeChecked();
+      fireEvent.click(checkbox);
+      await waitFor(() => expect(checkbox).toBeChecked());
+    },
+  );
+
+  it("renders each toolkit separately while sharing one provider connection", async () => {
+    const data = catalog([{ ...service, tools: ["mail", "contacts"] }]);
+    data.agents[0].tools[1].display_name = "Contacts";
+    installApi({ "/api/connections": async () => json(data) });
+    render(<Connections />);
+    await expandAgent();
+    expect(
+      await screen.findByRole("button", { name: "Connect Mail" }),
+    ).toBeEnabled();
+    const rows = within(
+      screen.getByRole("table", { name: "Personal assistant tools" }),
+    ).getAllByRole("row");
+    expect(rows).toHaveLength(3);
+    expect(rows[1]).toHaveTextContent("Mail");
+    expect(rows[2]).toHaveTextContent("Contacts");
+    expect(
+      screen.getAllByRole("button", { name: "Connect Mail" }),
+    ).toHaveLength(1);
+    expect(
+      vi
+        .mocked(fetch)
+        .mock.calls.filter(([url]) => String(url).endsWith("/mail/status")),
+    ).toHaveLength(1);
+  });
+
   it("saves one complete selection for all clients, including empty", async () => {
-    let selected = ["personal"];
+    let selected: Record<string, string[] | null> = { personal: null };
     installApi({ "/api/connections": async () => json(withTools()) });
     const fallback = vi.mocked(fetch).getMockImplementation()!;
     vi.mocked(fetch).mockImplementation(async (input, options) => {
       if (String(input) !== selectionPath) return fallback(input, options);
       if (options?.method === "POST")
         selected = JSON.parse(String(options.body)).agents;
-      return json({ enabled: true, selected_agents: selected });
+      return json({ enabled: true, agents: selected });
     });
     render(<Connections />);
+    await expandAgent();
     const personal = await screen.findByRole("checkbox", {
       name: "Expose Personal assistant through MCP",
     });
@@ -547,12 +773,12 @@ describe("MCP agent selection", () => {
     expect(screen.getByText(/every connected MCP client/i)).toBeInTheDocument();
     fireEvent.click(shared);
     await waitFor(() => expect(shared).toBeChecked());
-    expect(selected).toEqual(["personal", "shared"]);
+    expect(selected).toEqual({ personal: null, shared: null });
     fireEvent.click(personal);
     await waitFor(() => expect(personal).not.toBeChecked());
     fireEvent.click(shared);
     await waitFor(() => expect(shared).not.toBeChecked());
-    expect(selected).toEqual([]);
+    expect(selected).toEqual({});
     expect(screen.getByRole("button", { name: "Connect Mail" })).toBeEnabled();
   });
 
@@ -566,9 +792,10 @@ describe("MCP agent selection", () => {
         return new Promise((resolve) => {
           finish = resolve;
         });
-      return json({ enabled: true, selected_agents: ["personal"] });
+      return json({ enabled: true, agents: { personal: null } });
     });
     render(<Connections />);
+    await expandAgent();
     const personal = await screen.findByRole("checkbox", {
       name: "Expose Personal assistant through MCP",
     });

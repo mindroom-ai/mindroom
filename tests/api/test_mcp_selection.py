@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import agents
-from mindroom.api import config_lifecycle
+from mindroom.api import config_lifecycle, mcp_selection
 from mindroom.config.agent import AgentConfig
 from tests.api.test_mcp_clients import _connect
 from tests.api.test_mcp_gateway_api import (
@@ -32,6 +32,90 @@ if TYPE_CHECKING:
 SELECTION = "/api/connections/mcp/selection"
 
 
+@pytest.mark.parametrize("all_tools", [False, True], ids=["custom", "all-tools"])
+def test_removed_tools_cannot_block_access_withdrawal(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+    all_tools: bool,
+) -> None:
+    """Old browser state and fresh reads can both withdraw access after a tool is removed."""
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    config.agents["personal"].tools = ["calculator", "duckduckgo", "shell"]
+    config.agents["shared"] = AgentConfig(
+        display_name="Shared",
+        role="Shared tools",
+        tools=["calculator"],
+        credential_managers=["@alice:example.org"],
+    )
+    headers = {**signed_headers("alice"), "Origin": ORIGIN}
+    browser_tools = ["calculator", "duckduckgo"]
+    original = {"personal": None if all_tools else browser_tools, "shared": None}
+    assert gateway_client.post(SELECTION, headers=headers, json={"agents": original}).status_code == 200
+    config.agents["personal"].tools = ["calculator", "shell"]
+    assert gateway_client.get(SELECTION, headers=headers).json()["agents"] == {
+        "personal": None if all_tools else ["calculator"],
+        "shared": None,
+    }
+    response = gateway_client.post(
+        SELECTION,
+        headers=headers,
+        json={"agents": {"personal": browser_tools}},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["agents"] == {"personal": ["calculator"]}
+    config.agents["personal"].tools = []
+    assert gateway_client.get(SELECTION, headers=headers).json()["agents"] == {}
+    response = gateway_client.post(SELECTION, headers=headers, json={"agents": {"personal": ["calculator"]}})
+    assert response.status_code == 200, response.text
+    assert response.json()["agents"] == {}
+
+
+def test_withdrawal_does_not_require_plugin_metadata(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken plugin cannot prevent withdrawing all tool access."""
+    alice = signed_headers("alice")
+    assert gateway_client.get(SELECTION, headers=alice).status_code == 200
+
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Withdrawing access must not load plugins")
+
+    monkeypatch.setattr(mcp_selection, "resolved_tool_metadata_for_runtime", unavailable)
+    response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {}})
+    assert response.status_code == 200, response.text
+    assert response.json()["agents"] == {}
+
+
+def test_tool_selection_filters_discovery_and_blocks_unselected_dispatch(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """Hidden tools cannot be discovered, inspected, or invoked by any connected client."""
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    config.agents["personal"].tools = ["calculator", "duckduckgo"]
+    alice = signed_headers("alice")
+    token = _connect(gateway_client, alice)["access_token"]
+    response = gateway_client.post(
+        SELECTION,
+        headers={**alice, "Origin": ORIGIN},
+        json={"agents": {"personal": ["duckduckgo"]}},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"enabled": True, "agents": {"personal": ["duckduckgo"]}}
+    for arguments in ({"limit": 1}, {"agent": "personal", "limit": 1}):
+        result = _call(gateway_client, token, "search_tools", arguments)["structuredContent"]
+        assert [(item["agent"], item["toolkit"]) for item in result["results"]] == [("personal", "duckduckgo")]
+    for operation, extra in (
+        ("search_tools", {}),
+        ("get_tool", {"function": "add"}),
+        ("invoke_tool", {"function": "add", "arguments": {"a": 1, "b": 2}}),
+    ):
+        result = _call(gateway_client, token, operation, {"agent": "personal", "toolkit": "calculator", **extra})
+        assert result["isError"]
+
+
 def test_selection_defaults_and_empty_are_user_scoped(
     gateway_client: TestClient,
     signed_headers: Callable[[str], dict[str, str]],
@@ -40,13 +124,13 @@ def test_selection_defaults_and_empty_are_user_scoped(
     alice = signed_headers("alice")
     response = gateway_client.get(SELECTION, headers=alice)
     assert response.status_code == 200, response.text
-    assert response.json() == {"enabled": True, "selected_agents": ["personal"]}
+    assert response.json() == {"enabled": True, "agents": {"personal": None}}
     assert "no-store" in response.headers["cache-control"]
-    response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": []})
+    response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {}})
     assert response.status_code == 200, response.text
-    assert response.json()["selected_agents"] == []
-    assert gateway_client.get(SELECTION, headers=alice).json()["selected_agents"] == []
-    assert gateway_client.get(SELECTION, headers=signed_headers("bob")).json()["selected_agents"] == ["personal"]
+    assert response.json()["agents"] == {}
+    assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {}
+    assert gateway_client.get(SELECTION, headers=signed_headers("bob")).json()["agents"] == {"personal": None}
 
 
 def test_shared_only_manager_can_select_assigned_shared_agent(
@@ -63,22 +147,26 @@ def test_shared_only_manager_can_select_assigned_shared_agent(
         credential_managers=["@alice:example.org"],
     )
     alice = signed_headers("alice")
-    assert gateway_client.get(SELECTION, headers=alice).json()["selected_agents"] == []
-    response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": ["shared"]})
+    assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {}
+    response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {"shared": None}})
     assert response.status_code == 200, response.text
-    assert response.json()["selected_agents"] == ["shared"]
+    assert response.json()["agents"] == {"shared": None}
     config.agents["shared"].credential_managers = []
-    assert gateway_client.get(SELECTION, headers=alice).json()["selected_agents"] == []
+    assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {}
 
 
 @pytest.mark.parametrize(
     "body",
     [
-        {"agents": ["missing"]},
-        {"agents": ["personal", "personal"]},
+        {"agents": {"missing": None}},
+        {"agents": {"personal": ["calculator", "calculator"]}},
         {"agents": "personal"},
-        {"agents": [1]},
-        {"agents": [], "user": "bob"},
+        {"agents": {"personal": ["unknown"]}},
+        {"agents": {"personal": ["matrix_message"]}},
+        {"agents": {"personal": "calculator"}},
+        {"agents": {"personal": [False]}},
+        {"agents": {1: None}},
+        {"agents": {}, "user": "bob"},
         [],
     ],
 )
@@ -88,6 +176,14 @@ def test_selection_rejects_invalid_or_unauthorized_names(
     body: object,
 ) -> None:
     """Browser input can narrow current authority but cannot invent agent access or owner IDs."""
+    assert (
+        gateway_client.post(
+            SELECTION,
+            headers={**signed_headers("alice"), "Origin": ORIGIN},
+            json={"agents": {}},
+        ).status_code
+        == 200
+    )
     response = gateway_client.post(SELECTION, headers={**signed_headers("alice"), "Origin": ORIGIN}, json=body)
     assert response.status_code in {400, 404}
 
@@ -98,7 +194,7 @@ def test_selection_requires_signed_identity_and_same_origin(
 ) -> None:
     """Gateway settings retain the existing signed dashboard and browser CSRF boundaries."""
     assert gateway_client.get(SELECTION).status_code == 401
-    response = gateway_client.post(SELECTION, headers=signed_headers("alice"), json={"agents": []})
+    response = gateway_client.post(SELECTION, headers=signed_headers("alice"), json={"agents": {}})
     assert response.status_code == 403
     response = gateway_client.get(SELECTION + "?agent=personal", headers=signed_headers("alice"))
     assert response.status_code == 400
@@ -136,7 +232,7 @@ def test_all_clients_follow_selection_and_agent_qualified_tools(
         gateway_client.post(
             SELECTION,
             headers={**alice, "Origin": ORIGIN},
-            json={"agents": ["personal", shared_agent]},
+            json={"agents": {"personal": None, shared_agent: None}},
         ).status_code
         == 200
     )
@@ -161,7 +257,7 @@ def test_all_clients_follow_selection_and_agent_qualified_tools(
             {"agent": shared_agent, "toolkit": "calculator", "function": function},
         )["structuredContent"]
         assert schema["agent"] == shared_agent
-    assert gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": []}).status_code == 200
+    assert gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {}}).status_code == 200
     for token in tokens:
         assert _call(gateway_client, token, "search_tools", {})["structuredContent"] == {"results": []}
         rejected = _call(
@@ -173,6 +269,7 @@ def test_all_clients_follow_selection_and_agent_qualified_tools(
         assert rejected["isError"]
 
 
+@pytest.mark.parametrize("keep_agent", [False, True], ids=["agent", "toolkit"])
 @pytest.mark.parametrize("phase", ["build", "connect", "hook"])
 @pytest.mark.parametrize("async_body", [False, True], ids=["sync", "async"])
 def test_deselection_during_preparation_stops_provider_body(
@@ -181,8 +278,11 @@ def test_deselection_during_preparation_stops_provider_body(
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
     async_body: bool,
+    keep_agent: bool,
 ) -> None:
     """A dashboard change wins over a call waiting in preparation, for synchronous and async tools."""
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    config.agents["personal"].tools = ["calculator", "duckduckgo"]
     alice = signed_headers("alice")
     token = _connect(gateway_client, alice)["access_token"]
     paused, release = threading.Event(), threading.Event()
@@ -207,7 +307,11 @@ def test_deselection_during_preparation_stops_provider_body(
         )
         try:
             assert paused.wait(10), "Provider preparation never paused"
-            response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": []})
+            response = gateway_client.post(
+                SELECTION,
+                headers={**alice, "Origin": ORIGIN},
+                json={"agents": {"personal": ["duckduckgo"]} if keep_agent else {}},
+            )
             assert response.status_code == 200, response.text
         finally:
             release.set()

@@ -46,24 +46,31 @@ Loopback HTTP origins are accepted for local development.
 Gateway environment changes require an API restart.
 The feature is disabled by default and requires both `MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true` and `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`.
 
-## Choose exposed agents
+## Choose exposed agents and tools
 
-On Connections, enable **Expose through MCP** for each agent you want your clients to use.
+Connections lists agents in a searchable table, with filters for personal, shared, and MCP-enabled agents.
+Expand an agent to see each tool with a connection, and expand **Other tools** for tools that need no additional setup.
+Under **MCP access**, select all compatible tools for an agent or choose tools individually.
+Each tool selection applies only to that agent, even when another agent has the same tool.
+An individual selection covers the configured toolkit or MCP server, rather than individual functions inside it.
+Selecting **All tools** includes future compatible tools assigned to that agent; a custom selection includes only the tools you checked.
+Custom selections hide tools that are no longer available and discard those stale choices when saved.
 One saved selection applies to every connected MCP client for your account, in either authentication mode.
 The eligible personal agent is selected once by default; shared agents start off.
 You can turn every agent off, and the empty selection survives restarts and new client connections.
-Turning agents off remains available when stored data exceeds a lowered gateway or per-user quota.
+Withdrawing agent or tool access remains available when stored data exceeds a lowered gateway or per-user quota.
 New agents are not automatically added to an existing selection.
 
 The page lists all assigned tools, including those without browser authentication.
-OAuth controls remain grouped by service, and room-dependent tools are labeled **MindRoom only**.
+Tools sharing a service connection share its OAuth controls, and room-dependent tools are labeled **MindRoom only**.
 The gateway exposes compatible native and upstream MCP tools; it does not start conversations with the agents themselves.
 A shared agent's authored worker and credential scopes still determine whose service connection executes a call.
 Your selection changes only your clients, without changing another user's selection or disconnecting services.
 
 Eligibility and selection are checked again when a prepared call is admitted for execution, after hooks and any upstream MCP call queue.
 Upstream service credentials are validated after admission and before using the remote session.
-Calls already admitted may finish after an agent is turned off.
+Calls already admitted may finish after an agent or tool is turned off.
+Previously saved agent selections become **All tools** selections on upgrade; empty selections stay empty.
 Removing eligibility hides a saved choice; restoring that permission can restore the previously saved choice.
 Selections are bound to the signed Matrix identity, canonical requester, and provisioned account when enabled.
 Deleting and recreating a provisioned account does not restore its previous selection.
