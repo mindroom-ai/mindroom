@@ -115,6 +115,28 @@ def test_a_scheme_carrying_no_credentials_is_left_alone() -> None:
     assert redact_sensitive_text("postgresql://db.example:5432/journal") == "postgresql://db.example:5432/journal"
 
 
+@pytest.mark.parametrize("prefix", ["", "123", "+.-", "123+.-", "prefix=", "λ"])
+@pytest.mark.parametrize("scheme", ["https", "postgresql", "git+ssh"])
+def test_url_redaction_preserves_text_before_a_credential_bearing_scheme(prefix: str, scheme: str) -> None:
+    """A URL can follow digits or punctuation without losing its credential protection."""
+    value = f"{prefix}{scheme}://user:hunter2@example.test/path"
+
+    assert redact_sensitive_text(value) == f"{prefix}{scheme}://user:***@example.test/path"
+
+
+@pytest.mark.parametrize("run", ["x" * 64_000, "9x" * 32_000], ids=["letters", "mixed"])
+def test_url_redaction_does_not_rescan_every_suffix_of_non_url_text(run: str) -> None:
+    """A long scheme-like run before a real URL must not occupy the GIL for seconds."""
+    value = f"{run} https://example.test/path?token=synthetic-secret"
+    # Exclude time when a loaded runner deschedules this thread.
+    start = time.thread_time()
+
+    assert redact_sensitive_data({"content": value}) == {
+        "content": f"{run} https://example.test/path?token={REDACTED}",
+    }
+    assert time.thread_time() - start < 1.0
+
+
 def test_redact_url_in_escaped_shell_command_keeps_json_arguments_valid() -> None:
     """URL redaction must not eat the backslash escaping the quote after the URL.
 

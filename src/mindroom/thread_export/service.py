@@ -139,23 +139,23 @@ def _validated_targets(
         accumulator.target = replace(accumulator.target, output_dir=output_dir)
         candidates.append((accumulator, resolved_output_dir))
 
-    overlaps: dict[int, list[Path]] = {}
-    for index, (_, resolved_output_dir) in enumerate(candidates):
-        for other_index in range(index + 1, len(candidates)):
-            other_accumulator, other_resolved_output_dir = candidates[other_index]
-            if not (
-                resolved_output_dir == other_resolved_output_dir
-                or resolved_output_dir.is_relative_to(other_resolved_output_dir)
-                or other_resolved_output_dir.is_relative_to(resolved_output_dir)
-            ):
-                continue
-            overlaps.setdefault(index, []).append(other_accumulator.target.output_dir)
-            overlaps.setdefault(other_index, []).append(candidates[index][0].target.output_dir)
+    overlaps: dict[int, list[int]] = {}
+    ancestors: list[tuple[int, Path]] = []
+    # Path ordering groups descendants after their ancestors. Each disjoint
+    # root leaves the stack once, avoiding all-pairs checks on every export.
+    for index, (_, resolved_output_dir) in sorted(enumerate(candidates), key=lambda item: item[1][1]):
+        while ancestors and not resolved_output_dir.is_relative_to(ancestors[-1][1]):
+            ancestors.pop()
+        for other_index, _ in ancestors:
+            overlaps.setdefault(index, []).append(other_index)
+            overlaps.setdefault(other_index, []).append(index)
+        ancestors.append((index, resolved_output_dir))
 
     prepared: list[ThreadExportAccumulator] = []
     for index, (accumulator, resolved_output_dir) in enumerate(candidates):
         if overlapping := overlaps.get(index):
-            conflicting = ", ".join(str(path) for path in overlapping)
+            overlapping_output_dirs = [candidates[other][0].target.output_dir for other in sorted(overlapping)]
+            conflicting = ", ".join(str(path) for path in overlapping_output_dirs)
             accumulator.failed_items.append(
                 failure_for_target(
                     f"output directory resolving to {resolved_output_dir} "
@@ -166,7 +166,7 @@ def _validated_targets(
                 "Skipping thread export target with overlapping output directory",
                 output_dir=str(accumulator.target.output_dir),
                 resolved_output_dir=str(resolved_output_dir),
-                overlapping_output_dirs=[str(path) for path in overlapping],
+                overlapping_output_dirs=[str(path) for path in overlapping_output_dirs],
             )
             continue
         try:

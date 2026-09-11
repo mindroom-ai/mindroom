@@ -31,7 +31,13 @@ _MAX_DEPTH = 32
 # URI grammar rather than of HTTP, and the schemes that carry the most damaging
 # ones here are database URLs: `postgresql://user:password@host/db` reaches logs
 # and audit records through exactly the same paths an API URL does.
-_URL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+# Start once per scheme-character run, avoiding quadratic suffix rescans.
+# Preserve leading non-letters while still redacting embedded URLs such as
+# ``123https://user:password@host`` that the unanchored scan recognized.
+_URL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9+.-])(?P<prefix>[0-9+.-]*+)"
+    r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*+://[^\s'\"<>]+)",
+)
 _BEARER_TOKEN_PATTERN = re.compile(
     r"(?P<prefix>(?:authorization(?:\s+header)?(?:\s*:)?\s+)?bearer(?:\s+token)?\s+)"
     r"(?P<token>[A-Za-z0-9._~+/=-]+)",
@@ -473,10 +479,10 @@ def _redact_url_match(match: re.Match[str]) -> str:
     content. Absorbing it into the query re-encodes it to ``%5C`` and strips
     the escape, which corrupts the surrounding encoding.
     """
-    matched_url = match.group(0)
+    matched_url = match.group("url")
     url = matched_url.rstrip("\\")
     trailing_backslashes = matched_url[len(url) :]
-    return _redact_url(url) + trailing_backslashes
+    return match.group("prefix") + _redact_url(url) + trailing_backslashes
 
 
 def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
