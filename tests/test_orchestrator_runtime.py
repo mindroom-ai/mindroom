@@ -24,6 +24,9 @@ from structlog.testing import capture_logs
 import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.workers.runtime as workers_runtime_module
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api import config_lifecycle as api_config_lifecycle
+from mindroom.api import main as api_main
 from mindroom.approval_manager import (
     _ApprovalStartupSweep,
     get_approval_store,
@@ -559,6 +562,44 @@ class TestAgentBot(AgentBotTestBase):
         assert get_api_server_address() is None
 
     @pytest.mark.asyncio
+    async def test_run_api_server_binds_live_memberships_and_clears_on_shutdown(self, tmp_path: Path) -> None:
+        """Roomless API authorization follows the orchestrator's live membership index."""
+        memberships = AgentReplyMembershipIndex()
+
+        class ReturningServer:
+            should_exit = True
+            force_exit = False
+
+            def __init__(
+                self,
+                _config: object,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
+            ) -> None:
+                del on_started
+
+            async def serve(self) -> None:
+                assert api_config_lifecycle.app_state(api_main.app).agent_reply_memberships is memberships
+
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+        with (
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
+        ):
+            await _run_api_server(
+                "127.0.0.1",
+                8765,
+                "INFO",
+                self._runtime_paths(tmp_path),
+                agent_reply_memberships=memberships,
+                shutdown_requested=shutdown_requested,
+            )
+
+        assert api_config_lifecycle.app_state(api_main.app).agent_reply_memberships is not memberships
+
+    @pytest.mark.asyncio
     async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:
         """The API gateway must receive the lifecycle-owned broker without replacing it."""
 
@@ -1001,10 +1042,12 @@ class TestAgentBot(AgentBotTestBase):
             thread_export_runner: object,
             leave_matrix_room: object,
             response_admission_gate: object,
+            agent_reply_memberships: AgentReplyMembershipIndex,
         ) -> None:
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
+            assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
             assert shutdown_requested is not None
             shutdown_requested.set()
             try:
@@ -1084,10 +1127,12 @@ class TestAgentBot(AgentBotTestBase):
             thread_export_runner: object,
             leave_matrix_room: object,
             response_admission_gate: object,
+            agent_reply_memberships: AgentReplyMembershipIndex,
         ) -> None:
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
+            assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
             assert shutdown_requested is not None
             shutdown_requested.set()
             api_shutdown_started.set()
@@ -1157,10 +1202,12 @@ class TestAgentBot(AgentBotTestBase):
             thread_export_runner: object,
             leave_matrix_room: object,
             response_admission_gate: object,
+            agent_reply_memberships: AgentReplyMembershipIndex,
         ) -> None:
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
+            assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
             assert shutdown_requested is not None
             shutdown_requested.set()
 

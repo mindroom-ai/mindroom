@@ -146,27 +146,30 @@ def resolve_request_credentials_target(
             allowed_shared_services=None,
         )
     execution_scope = scope_request.requested_execution_scope
-    allow_private_agent_requester = (
+    allow_requester_scope = (
         allow_private_scopes
         and scope_request.persisted_policy is not None
-        and scope_request.persisted_policy.is_private
         and execution_scope in {"user", "user_agent"}
         and not any(
             credential_service_policy(service, execution_scope).uses_primary_runtime_global_credentials
             for service in service_names
         )
     )
-    authorize = (
-        require_agent_oauth_connection_authorized
-        if allow_private_agent_requester
-        else require_agent_credential_management_authorized
-    )
-    execution_identity = authorize(
-        request,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_name=scope_request.agent_name,
-    )
+    if allow_requester_scope:
+        execution_identity = require_agent_oauth_connection_authorized(
+            request,
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name=scope_request.agent_name,
+            requester_owned=True,
+        )
+    else:
+        execution_identity = require_agent_credential_management_authorized(
+            request,
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name=scope_request.agent_name,
+        )
     if execution_scope is None:
         return RequestCredentialsTarget(
             runtime_paths=runtime_paths,
@@ -233,18 +236,28 @@ def resolve_requester_credentials_target(
     """Resolve credentials that must follow the authenticated requester, independent of worker reuse."""
     base_target = resolve_request_credentials_target(
         request,
-        agent_name=agent_name,
+        agent_name=None,
         service_names=service_names,
         execution_scope_override_provided=False,
         execution_scope_override=None,
         allow_private_scopes=True,
     )
-    execution_identity = build_dashboard_execution_identity(
-        request,
-        agent_name or "oauth",
-        config=config_lifecycle.bind_current_request_snapshot(request).runtime_config,
-        runtime_paths=base_target.runtime_paths,
-    )
+    if agent_name is not None:
+        config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+        execution_identity = require_agent_oauth_connection_authorized(
+            request,
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            requester_owned=True,
+        )
+    else:
+        execution_identity = build_dashboard_execution_identity(
+            request,
+            "oauth",
+            config=config_lifecycle.bind_current_request_snapshot(request).runtime_config,
+            runtime_paths=base_target.runtime_paths,
+        )
     reject_unbound_private_dashboard_requester("user", execution_identity)
     worker_key = require_worker_key_for_scope(
         "user",

@@ -1735,6 +1735,7 @@ class TestCredentialsAPI:
         assert token_response.status_code == 403
         assert copy_response.status_code == 403
 
+    @pytest.mark.usefixtures("enforce_turn_authorization")
     def test_unregistered_agent_oauth_token_service_authorizes_before_generic_rejection(
         self,
         client: TestClient,

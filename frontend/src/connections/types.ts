@@ -1,6 +1,7 @@
 export interface ConnectionService {
   provider: string;
   is_shared: boolean;
+  can_manage: boolean;
   display_name: string;
   description: string;
   icon: string | null;
@@ -11,6 +12,7 @@ export interface AgentConnections {
   agent_name: string;
   agent_display_name: string;
   is_shared: boolean;
+  can_use: boolean;
   services: ConnectionService[];
   tools: ConnectionTool[];
 }

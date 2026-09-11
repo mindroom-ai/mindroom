@@ -31,9 +31,11 @@ MINDROOM_MCP_GATEWAY_ENABLED=true
 ```
 
 The configured personal agent must use `private.per: user` or `private.per: user_agent`.
-Access requires an explicit matching `access.users` grant or administrator authority; room membership alone is insufficient.
+Access follows the agent's existing authorization rules: matching `access.users`, administrator authority, or verified membership in an `access.members_of_rooms` grant room (including default grants from configured agent rooms).
+`access.current_room_members` alone does not grant MCP access because MCP requests have no current Matrix conversation.
+Unknown or revoked grant-room membership cannot authorize a call.
 Both eager and deferred assigned tools are discoverable when their metadata permits execution without a Matrix room runtime.
-Shared agents are eligible when the user is a credential manager or administrator; ordinary reply access is insufficient.
+Shared agents use the same access rules; credential management alone does not grant tool execution.
 Private agents belonging to other users are never eligible.
 Clients can address only agents in the signed-in user's saved selection and cannot choose another user or credential owner.
 
@@ -45,6 +47,7 @@ The feature is disabled by default and requires both `MINDROOM_TRUSTED_UPSTREAM_
 ## Choose exposed agents and tools
 
 Connections lists agents in a searchable table, with filters for personal, shared, and MCP-enabled agents.
+The table includes agents you can use or manage credentials for; agents you can only manage have no MCP selection controls.
 Expand an agent to see each tool with a connection, and expand **Other tools** for tools that need no additional setup.
 Under **MCP access**, select all compatible tools for an agent or choose tools individually.
 Each tool selection applies only to that agent, even when another agent has the same tool.
@@ -61,9 +64,12 @@ The page lists all assigned tools, including those without browser authenticatio
 Tools sharing a service connection share its OAuth controls, and room-dependent tools are labeled **MindRoom only**.
 The gateway exposes compatible native and upstream MCP tools; it does not start conversations with the agents themselves.
 A shared agent's authored worker and credential scopes still determine whose service connection executes a call.
+Users can inspect shared connection availability without seeing the connected account identity or changing its credentials.
+Only credential managers and administrators can change shared connections; users manage their own requester-scoped connections.
 Your selection changes only your clients, without changing another user's selection or disconnecting services.
 
 Eligibility and selection are checked again when a prepared call is admitted for execution, after hooks and any upstream MCP call queue.
+Live membership revocation also takes effect at this boundary without a configuration change.
 Upstream service credentials are validated after admission and before using the remote session.
 Calls already admitted may finish after an agent or tool is turned off.
 Previously saved agent selections become **All tools** selections on upgrade; empty selections stay empty.

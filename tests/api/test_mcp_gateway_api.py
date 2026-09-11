@@ -76,7 +76,7 @@ def signed_headers(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], dict[str,
 
 
 @pytest.fixture
-def gateway_app(tmp_path: Path) -> FastAPI:
+def gateway_app(tmp_path: Path, enforce_turn_authorization: None) -> FastAPI:  # noqa: ARG001
     """Build the production gateway routes without starting Matrix or an LLM."""
     env = {
         "MINDROOM_PUBLIC_URL": ORIGIN,

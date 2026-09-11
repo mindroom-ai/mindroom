@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
-from mindroom.access_policy import resolve_responder_access
-from mindroom.authorization import is_sender_allowed_for_agent_credential_management
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.mcp_gateway.types import GatewayOwner
 from mindroom.requester_identity import resolve_human_requester_alias
@@ -45,6 +44,14 @@ class ConnectionUserContext:
     runtime_paths: RuntimePaths
     agent_names: tuple[str, ...]
     personal_agent_name: str | None
+    credential_agent_names: tuple[str, ...]
+
+    @property
+    def visible_agent_names(self) -> tuple[str, ...]:
+        """Show agents the user can execute or whose credentials they can manage."""
+        eligible = set(self.agent_names) | set(self.credential_agent_names)
+        personal = (self.personal_agent_name,) if self.personal_agent_name is not None else ()
+        return personal + tuple(name for name in self.config.agents if name in eligible and name not in personal)
 
 
 def resolve_connection_user(
@@ -52,6 +59,7 @@ def resolve_connection_user(
     authenticated_user_id: str,
     *,
     account_id: str | None = None,
+    membership_index: AgentReplyMembershipIndex | None = None,
 ) -> ConnectionUserContext:
     """Resolve current agent eligibility without constructing execution targets."""
     paths = snapshot.runtime_paths
@@ -71,25 +79,30 @@ def resolve_connection_user(
             headers=CONNECTIONS_HEADERS,
         )
     requester_id = resolve_human_requester_alias(authenticated_user_id, config, paths)
-    access = resolve_responder_access(config, agent_name)
-    # API callers have no conversation membership context. Require explicit grants.
-    personal_agent_name = (
-        agent_name
-        if requester_id in config.administrators or any(fnmatchcase(requester_id, pattern) for pattern in access.users)
-        else None
-    )
-    shared = tuple(
+    memberships = membership_index if membership_index is not None else AgentReplyMembershipIndex()
+    candidates = (agent_name, *(name for name, candidate in config.agents.items() if candidate.private is None))
+    usable = tuple(
         name
-        for name, shared_agent in config.agents.items()
-        if shared_agent.private is None
-        and is_sender_allowed_for_agent_credential_management(requester_id, name, config, paths)
+        for name in candidates
+        if is_sender_allowed_for_responder(requester_id, name, None, config, paths, memberships)
+    )
+    personal_agent_name = agent_name if agent_name in usable else None
+    managed = tuple(
+        name
+        for name in candidates
+        if name == personal_agent_name
+        or (
+            config.agents[name].private is None
+            and is_sender_allowed_for_agent_credential_management(requester_id, name, config, paths)
+        )
     )
     return ConnectionUserContext(
         GatewayOwner(authenticated_user_id, requester_id, account_id),
         config,
         paths,
-        ((personal_agent_name,) if personal_agent_name is not None else ()) + shared,
+        usable,
         personal_agent_name,
+        managed,
     )
 
 

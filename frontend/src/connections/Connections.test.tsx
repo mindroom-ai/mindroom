@@ -15,6 +15,7 @@ const service: ConnectionService = {
   icon: null,
   provider: "mail",
   is_shared: false,
+  can_manage: true,
   display_name: "Mail",
   description: "Read your email.",
   tools: ["mail"],
@@ -35,6 +36,7 @@ const catalog = (services: (typeof service)[]) => ({
       agent_name: "personal",
       agent_display_name: "Personal assistant",
       is_shared: false,
+      can_use: true,
       services,
       tools: services.flatMap((item) =>
         item.tools.map((name) => ({
@@ -48,6 +50,52 @@ const catalog = (services: (typeof service)[]) => ({
       ),
     },
   ],
+});
+
+it("shows shared connection availability without account controls for agent users", async () => {
+  installApi({
+    "/api/connections": async () =>
+      json(catalog([{ ...service, is_shared: true, can_manage: false }])),
+    "/api/connections/mcp/selection": async () =>
+      json({ enabled: true, agents: {} }),
+    "/api/connections/agents/personal/mail/status": async () =>
+      json({ ...status, connected: true, can_connect: false }),
+  });
+  render(<Connections />);
+  await expandAgent();
+  expect(
+    await screen.findByText("Shared connection configured"),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Disconnect Mail" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Connect Mail" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("checkbox", {
+      name: "Expose Mail for Personal assistant through MCP",
+    }),
+  ).toBeEnabled();
+});
+
+it("keeps account management available without offering MCP access to management-only agents", async () => {
+  const data = catalog([service]);
+  data.agents[0].can_use = false;
+  installApi({
+    "/api/connections": async () => json(data),
+    "/api/connections/mcp/selection": async () =>
+      json({ enabled: true, agents: {} }),
+  });
+  render(<Connections />);
+  await expandAgent();
+  expect(
+    await screen.findByRole("button", { name: "Connect Mail" }),
+  ).toBeEnabled();
+  expect(
+    screen.queryAllByRole("checkbox", { name: /Expose .* through MCP/ }),
+  ).toHaveLength(0);
+  expect(screen.getByText("Credential management only")).toBeInTheDocument();
 });
 
 function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
@@ -561,6 +609,7 @@ describe("MCP agent selection", () => {
         agent_name: "shared",
         agent_display_name: "Research Team",
         is_shared: true,
+        can_use: true,
         services: [],
         tools: [
           {

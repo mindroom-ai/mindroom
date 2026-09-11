@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def personal_snapshot(tmp_path: Path) -> ApiSnapshot:
+def personal_snapshot(tmp_path: Path, enforce_turn_authorization: None) -> ApiSnapshot:  # noqa: ARG001
     """Build two explicit personal users without a live chat or owner fallback."""
     paths = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -46,7 +46,7 @@ def personal_snapshot(tmp_path: Path) -> ApiSnapshot:
 
 @pytest.mark.parametrize("scope", [None, "shared", "user", "user_agent"])
 def test_shared_tool_target_uses_authored_scope(personal_snapshot: ApiSnapshot, scope: str | None) -> None:
-    """Credential managers may use a shared target without access to the personal agent."""
+    """Agent users receive the authored shared target without needing personal-agent access."""
     config = personal_snapshot.runtime_config
     assert config is not None
     config.agents["shared"] = AgentConfig.model_validate(
@@ -55,7 +55,7 @@ def test_shared_tool_target_uses_authored_scope(personal_snapshot: ApiSnapshot, 
             "role": "Shared tools",
             "tools": ["calculator"],
             "worker_scope": scope,
-            "credential_managers": ["@manager:example.org"],
+            "access": {"users": ["@manager:example.org"]},
         },
     )
     user = connection_agents.resolve_connection_user(personal_snapshot, "@manager:example.org")
@@ -79,6 +79,30 @@ def test_connection_user_has_no_implicit_agent_authority(personal_snapshot: ApiS
     assert user.personal_agent_name is None
     with pytest.raises(HTTPException) as denied:
         connection_agents.resolve_connection_agent(user, "personal")
+    assert denied.value.status_code == 404
+
+
+def test_shared_access_and_credential_management_are_independent(personal_snapshot: ApiSnapshot) -> None:
+    """Agent users can execute tools; credential managers without agent access cannot."""
+    config = personal_snapshot.runtime_config
+    assert config is not None
+    config.agents["shared"] = AgentConfig.model_validate(
+        {
+            "display_name": "Shared tools",
+            "role": "Shared tools",
+            "tools": ["calculator"],
+            "access": {"users": ["@alice:example.org"]},
+            "credential_managers": ["@manager:example.org"],
+        },
+    )
+    alice = connection_agents.resolve_connection_user(personal_snapshot, "@alice:example.org")
+    assert alice.agent_names == ("personal", "shared")
+    assert connection_agents.resolve_connection_agent(alice, "shared").requester_id == "@alice:example.org"
+    manager = connection_agents.resolve_connection_user(personal_snapshot, "@manager:example.org")
+    assert manager.agent_names == ()
+    assert manager.visible_agent_names == ("shared",)
+    with pytest.raises(HTTPException) as denied:
+        connection_agents.resolve_connection_agent(manager, "shared")
     assert denied.value.status_code == 404
 
 

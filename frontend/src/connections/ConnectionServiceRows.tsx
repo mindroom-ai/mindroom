@@ -160,11 +160,15 @@ export function ConnectionServiceRows({
                             aria-hidden="true"
                           />
                         )}
-                        {status.reset_required
-                          ? "Reset required"
-                          : status.connected
-                            ? "Connected"
-                            : "Not connected"}
+                        {!service.can_manage
+                          ? status.connected
+                            ? "Shared connection configured"
+                            : "Shared connection unavailable"
+                          : status.reset_required
+                            ? "Reset required"
+                            : status.connected
+                              ? "Connected"
+                              : "Not connected"}
                       </span>
                       {status.account_label && (
                         <p className="mt-1 max-w-56 break-all text-xs text-muted-foreground">
@@ -194,7 +198,12 @@ export function ConnectionServiceRows({
                     Retry status
                   </Button>
                 )}
-                {!loading && status && (
+                {!loading && status && !service.can_manage && (
+                  <span className="text-xs text-muted-foreground">
+                    Managed by credential managers
+                  </span>
+                )}
+                {!loading && status && service.can_manage && (
                   <div className="flex flex-wrap items-center justify-end gap-2">
                     {status.reset_required ? (
                       <Button

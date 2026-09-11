@@ -10,7 +10,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from mindroom.api.auth import require_connections_user
-from mindroom.api.config_lifecycle import rebind_current_request_snapshot
+from mindroom.api.config_lifecycle import app_state, rebind_current_request_snapshot
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS, resolve_connection_user
 from mindroom.api.mcp_identity import resolve_gateway_browser_owner
 from mindroom.mcp_gateway.selection import SelectionAccessDeniedError
@@ -113,6 +113,7 @@ async def _handle_selection(
         rebind_current_request_snapshot(request),
         owner.authenticated_user_id,
         account_id=owner.account_id,
+        membership_index=app_state(request.app).agent_reply_memberships,
     )
     runtime_for_request(request)
     defaults = (context.personal_agent_name,) if context.personal_agent_name is not None else ()

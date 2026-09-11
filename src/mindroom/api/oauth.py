@@ -906,6 +906,12 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         agent_name=agent_name,
     )
     context = _credential_context(provider, runtime_paths, target)
+    return await connection_status(request, context)
+
+
+async def connection_status(request: Request, context: OAuthCredentialContext) -> OAuthStatusResponse:
+    """Load connection state after the caller has authorized the credential target."""
+    provider, runtime_paths = context.provider, context.runtime_paths
     credential_status: OAuthCredentialsStatus = await load_oauth_credentials_status(context)
     credentials = credential_status.credentials or {}
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
