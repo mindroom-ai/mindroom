@@ -20,6 +20,7 @@ A real deployment should provide a useful config and Matrix settings.
 ## Rollout Progress Deadline
 
 Set `progressDeadlineSeconds` to a positive integer to customize the MindRoom Deployment's rollout progress budget, including scheduling, image initialization, and startup probes.
+The chart rejects invalid values and values above Kubernetes' int32 limit of `2147483647` seconds.
 Leaving it unset or `null` preserves the Kubernetes default.
 This controls when Kubernetes reports a stalled rollout; it does not change probe settings or Helm's wait timeout.
 
@@ -355,6 +356,7 @@ Use `workers.kubernetes.agentVault.server.extraEnv` for raw Kubernetes `EnvVar` 
 Use `server.envFrom` to import variables from existing Secrets or ConfigMaps.
 Both lists default to empty and apply only to the chart-managed Agent Vault server.
 Keep sensitive values in Secrets and avoid duplicate environment variable names; use the dedicated master-password and SMTP settings for chart-managed variables.
+The chart rejects `extraEnv` entries that repeat the master-password variable or any SMTP variable emitted when `server.smtp.enabled` is true.
 
 ```yaml
 workers:

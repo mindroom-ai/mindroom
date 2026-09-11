@@ -438,6 +438,7 @@ workers:
         # the vault's encryption key.
         masterPasswordSecretKey: AGENT_VAULT_MASTER_PASSWORD
         # Raw Kubernetes EnvVar entries appended to the Agent Vault server.
+        # Cannot override the chart-managed master password or enabled SMTP settings.
         extraEnv: []
         # Raw Kubernetes EnvFromSource entries for the Agent Vault server.
         envFrom: []
