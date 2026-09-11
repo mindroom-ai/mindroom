@@ -34,6 +34,7 @@ const catalog = (services: (typeof service)[]) => ({
       agent_display_name: "Personal assistant",
       is_shared: false,
       services,
+      tools: [],
     },
   ],
 });
@@ -43,6 +44,8 @@ function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
     const path = String(input);
     if (overrides[path]) return overrides[path]();
     if (path === "/api/connections") return json(catalog([service]));
+    if (path === "/api/connections/mcp/selection")
+      return json({ enabled: false, selected_agents: [] });
     if (path === "/api/connections/mcp/clients")
       return json({ enabled: false, clients: [] });
     if (path === "/api/connections/agents/personal/mail/status")
@@ -82,6 +85,7 @@ describe("personal connections", () => {
         "/api/connections",
         "/api/connections/agents/personal/mail/status",
         "/api/connections/mcp/clients",
+        "/api/connections/mcp/selection",
       ].sort(),
     );
   });
@@ -250,9 +254,7 @@ describe("personal connections", () => {
       "/api/connections": async () => json(catalog([])),
     });
     render(<Connections />);
-    expect(
-      await screen.findByText(/no services.*available/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/no tools.*available/i)).toBeInTheDocument();
   });
 
   it("shows safe access errors without displaying backend details", async () => {
@@ -326,6 +328,7 @@ describe("shared agent connections", () => {
               agent_name: "research",
               agent_display_name: "Research Team",
               is_shared: true,
+              tools: [],
               services: [service],
             },
           ],
@@ -361,7 +364,7 @@ describe("shared agent connections", () => {
     ).toBeEnabled();
   });
 
-  it("does not load personal MCP clients for a shared-only manager", async () => {
+  it("loads MCP client controls for a shared-only manager", async () => {
     installApi({
       "/api/connections": async () =>
         json({
@@ -370,6 +373,7 @@ describe("shared agent connections", () => {
               agent_name: "research",
               agent_display_name: "Research Team",
               is_shared: true,
+              tools: [],
               services: [service],
             },
           ],
@@ -380,9 +384,9 @@ describe("shared agent connections", () => {
     expect(
       await screen.findByRole("button", { name: "Connect Mail" }),
     ).toBeEnabled();
-    expect(
-      vi.mocked(fetch).mock.calls.map(([url]) => String(url)),
-    ).not.toContain("/api/connections/mcp/clients");
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toContain(
+      "/api/connections/mcp/clients",
+    );
   });
 
   it("keeps the same provider separate per agent and identifies shared disconnects", async () => {
@@ -396,6 +400,7 @@ describe("shared agent connections", () => {
               agent_name: "research",
               agent_display_name: "Research Team",
               is_shared: true,
+              tools: [],
               services: [{ ...service, is_shared: true }],
             },
           ],
@@ -446,6 +451,7 @@ it("describes a requester-only connection on a shared agent as personal", async 
             agent_name: "research",
             agent_display_name: "Research Team",
             is_shared: true,
+            tools: [],
             services: [service],
           },
         ],
@@ -460,4 +466,126 @@ it("describes a requester-only connection on a shared agent as personal", async 
   const dialog = screen.getByRole("dialog");
   expect(dialog).toHaveTextContent(/your saved connection/i);
   expect(dialog).not.toHaveTextContent(/anyone using this connection/i);
+});
+
+describe("MCP agent selection", () => {
+  const selectionPath = "/api/connections/mcp/selection";
+  const withTools = () => ({
+    agents: [
+      {
+        ...catalog([service]).agents[0],
+        tools: [
+          {
+            name: "calculator",
+            display_name: "Calculator",
+            description: "Calculate numbers.",
+            provider: null,
+            requires_room_context: false,
+          },
+          {
+            name: "matrix_message",
+            display_name: "Matrix Message",
+            description: "Send room messages.",
+            provider: null,
+            requires_room_context: true,
+          },
+        ],
+      },
+      {
+        agent_name: "shared",
+        agent_display_name: "Research Team",
+        is_shared: true,
+        services: [],
+        tools: [
+          {
+            name: "web",
+            display_name: "Web Search",
+            description: "Search the web.",
+            provider: null,
+            requires_room_context: false,
+          },
+        ],
+      },
+    ],
+  });
+
+  it("lists tools without authentication and marks room-dependent tools", async () => {
+    installApi({ "/api/connections": async () => json(withTools()) });
+    render(<Connections />);
+    expect(
+      await screen.findByRole("heading", { name: "Calculator" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Matrix Message" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("MindRoom only")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Connect Calculator" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
+
+  it("saves one complete selection for all clients, including empty", async () => {
+    let selected = ["personal"];
+    installApi({ "/api/connections": async () => json(withTools()) });
+    const fallback = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      if (String(input) !== selectionPath) return fallback(input, options);
+      if (options?.method === "POST")
+        selected = JSON.parse(String(options.body)).agents;
+      return json({ enabled: true, selected_agents: selected });
+    });
+    render(<Connections />);
+    const personal = await screen.findByRole("checkbox", {
+      name: "Expose Personal assistant through MCP",
+    });
+    const shared = screen.getByRole("checkbox", {
+      name: "Expose Research Team through MCP",
+    });
+    expect(personal).toBeChecked();
+    expect(shared).not.toBeChecked();
+    expect(screen.getByText(/every connected MCP client/i)).toBeInTheDocument();
+    fireEvent.click(shared);
+    await waitFor(() => expect(shared).toBeChecked());
+    expect(selected).toEqual(["personal", "shared"]);
+    fireEvent.click(personal);
+    await waitFor(() => expect(personal).not.toBeChecked());
+    fireEvent.click(shared);
+    await waitFor(() => expect(shared).not.toBeChecked());
+    expect(selected).toEqual([]);
+    expect(screen.getByRole("button", { name: "Connect Mail" })).toBeEnabled();
+  });
+
+  it("serializes saves and retains saved state on failure", async () => {
+    let finish!: (value: Response) => void;
+    installApi({ "/api/connections": async () => json(withTools()) });
+    const fallback = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      if (String(input) !== selectionPath) return fallback(input, options);
+      if (options?.method === "POST")
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      return json({ enabled: true, selected_agents: ["personal"] });
+    });
+    render(<Connections />);
+    const personal = await screen.findByRole("checkbox", {
+      name: "Expose Personal assistant through MCP",
+    });
+    const shared = screen.getByRole("checkbox", {
+      name: "Expose Research Team through MCP",
+    });
+    fireEvent.click(shared);
+    expect(personal).toBeDisabled();
+    expect(shared).toBeDisabled();
+    await act(async () => finish(json({}, 500)));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /could not save.*selection/i,
+    );
+    expect(personal).toBeChecked();
+    expect(shared).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Connect Mail" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Reload selection" }));
+    await waitFor(() => expect(personal).toBeEnabled());
+  });
 });

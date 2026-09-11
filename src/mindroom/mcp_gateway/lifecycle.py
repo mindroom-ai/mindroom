@@ -1,4 +1,4 @@
-"""Durable grant metadata and exact personal connection ownership."""
+"""Durable grant metadata and exact user connection ownership."""
 
 from __future__ import annotations
 
@@ -33,18 +33,18 @@ def owned_grants(
     *,
     requester_id: str,
     authenticated_user_id: str,
-    agent_name: str,
+    account_id: str | None,
     resource: str,
     active_at: float | None = None,
     accounts_required: bool = False,
     after: str | None = None,
     limit: int | None = None,
 ) -> list[sqlite3.Row]:
-    """Match canonical and original identities plus the exact agent and resource context."""
+    """Match canonical and original identities plus the exact account and resource context."""
     query = """SELECT * FROM grants WHERE requester_id = ?
         AND json_extract(payload, '$.authenticated_user_id') = ?
-        AND json_extract(payload, '$.agent_name') = ? AND json_extract(payload, '$.resource') = ?"""
-    values: list[Any] = [requester_id, authenticated_user_id, agent_name, resource]
+        AND account_id IS ? AND json_extract(payload, '$.resource') = ?"""
+    values: list[Any] = [requester_id, authenticated_user_id, account_id, resource]
     if active_at is not None:
         query += """ AND revoked = 0 AND expires_at > ? AND idle_expires_at > ?
             AND ((? = 0 AND account_id IS NULL) OR (? = 1 AND EXISTS (

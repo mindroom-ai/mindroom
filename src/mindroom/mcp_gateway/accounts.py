@@ -6,6 +6,7 @@ must bound physical storage with the runtime volume quota.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import sqlite3
@@ -163,6 +164,10 @@ class GatewayAccounts:
 
     async def resolve_external(self, user_name: str, issued_at: float) -> str | None:
         """Require exact active email and issue time beyond the cutoff plus bounded issuer skew."""
+        return await asyncio.to_thread(self.resolve_external_sync, user_name, issued_at)
+
+    def resolve_external_sync(self, user_name: str, issued_at: float) -> str | None:
+        """Recheck account status and token cutoff immediately before provider dispatch."""
         if isinstance(issued_at, bool) or not isinstance(issued_at, (int, float)) or not math.isfinite(issued_at):
             return None
 
@@ -173,7 +178,7 @@ class GatewayAccounts:
             ).fetchone()
             return row["account_id"] if row else None
 
-        return await self.store.read(read)
+        return self.store.read_sync(read)
 
     @staticmethod
     def _get(connection: sqlite3.Connection, account_id: str) -> dict[str, Any]:

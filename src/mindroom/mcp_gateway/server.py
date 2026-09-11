@@ -22,7 +22,12 @@ from starlette.responses import JSONResponse, Response
 
 from mindroom.logging_config import get_logger
 from mindroom.mcp_gateway.execution import ExecutionLease, execution_scope
-from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayErrorResponse, GatewayPrincipal
+from mindroom.mcp_gateway.types import (
+    GATEWAY_AGENT_NAME_LIMIT,
+    GatewayErrorCode,
+    GatewayErrorResponse,
+    GatewayPrincipal,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -41,17 +46,20 @@ logger = get_logger(__name__)
 
 def _meta_tools() -> list[types.Tool]:
     handle = {"type": "string", "minLength": 1, "maxLength": 128}
+    agent_handle = {"type": "string", "minLength": 1, "maxLength": GATEWAY_AGENT_NAME_LIMIT}
     return [
         types.Tool(
             name="search_tools",
-            description="Search your personal assistant's integrations. Select a toolkit to search its functions. Results omit schemas; use get_tool for one definition.",
+            description="Search integrations from your selected agents. Select an agent and toolkit to search its functions. Results omit schemas; use get_tool for one definition.",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "agent": agent_handle,
                     "query": {"type": "string", "maxLength": 256, "default": ""},
                     "toolkit": handle,
                     "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
                 },
+                "dependentRequired": {"toolkit": ["agent"]},
                 "additionalProperties": False,
             },
             annotations=types.ToolAnnotations(readOnlyHint=True, openWorldHint=True),
@@ -61,19 +69,24 @@ def _meta_tools() -> list[types.Tool]:
             description="Get the input schema for one discovered function. If a connection is required, open its connection_url and connect only that service.",
             inputSchema={
                 "type": "object",
-                "properties": {"toolkit": handle, "function": handle},
-                "required": ["toolkit", "function"],
+                "properties": {"agent": agent_handle, "toolkit": handle, "function": handle},
+                "required": ["agent", "toolkit", "function"],
                 "additionalProperties": False,
             },
             annotations=types.ToolAnnotations(readOnlyHint=True, openWorldHint=True),
         ),
         types.Tool(
             name="invoke_tool",
-            description="Invoke one discovered function using your personal connections. Fetch its schema first. A failed or timed-out action must not be retried automatically.",
+            description="Invoke one discovered function using the selected agent's connections. Fetch its schema first. A failed or timed-out action must not be retried automatically.",
             inputSchema={
                 "type": "object",
-                "properties": {"toolkit": handle, "function": handle, "arguments": {"type": "object"}},
-                "required": ["toolkit", "function", "arguments"],
+                "properties": {
+                    "agent": agent_handle,
+                    "toolkit": handle,
+                    "function": handle,
+                    "arguments": {"type": "object"},
+                },
+                "required": ["agent", "toolkit", "function", "arguments"],
                 "additionalProperties": False,
             },
             annotations=types.ToolAnnotations(

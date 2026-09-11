@@ -11,8 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.auth import require_personal_connections_user
-from mindroom.api.personal_agent import PersonalAgentAccessDeniedError, resolve_personal_agent
-from mindroom.authorization import is_sender_allowed_for_agent_credential_management
+from mindroom.api.connection_agents import resolve_connection_user
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
@@ -37,6 +36,16 @@ class ConnectionService(BaseModel):
     tools: list[str]
 
 
+class ConnectionTool(BaseModel):
+    """Assigned toolkit metadata, independent of browser authentication support."""
+
+    name: str
+    display_name: str
+    description: str
+    provider: str | None
+    requires_room_context: bool
+
+
 class AgentConnections(BaseModel):
     """Allowed services for one personal or managed shared agent."""
 
@@ -44,6 +53,7 @@ class AgentConnections(BaseModel):
     agent_display_name: str
     is_shared: bool
     services: list[ConnectionService]
+    tools: list[ConnectionTool]
 
 
 class ConnectionsCatalog(BaseModel):
@@ -90,24 +100,12 @@ async def _connections(request: Request, response: Response) -> _Connections:
     if config is None:
         raise HTTPException(503, "Connections are unavailable", headers=_PRIVATE_HEADERS)
     requester_id = cast("str", auth_user["matrix_user_id"])
-    agent_names: list[str] = []
-    try:
-        personal = resolve_personal_agent(snapshot, requester_id, channel="matrix")
-    except PersonalAgentAccessDeniedError:
-        pass
-    else:
-        agent_names.append(personal.agent_name)
-    agent_names.extend(
-        name
-        for name, agent in config.agents.items()
-        if agent.private is None
-        and is_sender_allowed_for_agent_credential_management(requester_id, name, config, snapshot.runtime_paths)
-    )
-    if not agent_names:
+    user = resolve_connection_user(snapshot, requester_id)
+    if not user.agent_names:
         raise HTTPException(403, "No connections are available for this account", headers=_PRIVATE_HEADERS)
     providers = load_oauth_providers_for_snapshot(snapshot)
     metadata = resolved_tool_metadata_for_runtime(snapshot.runtime_paths, config, tolerate_plugin_load_errors=True)
-    agents = [_agent_connections(name, config, providers, metadata) for name in agent_names]
+    agents = [_agent_connections(name, config, providers, metadata) for name in user.agent_names]
     return _Connections(
         runtime_paths=snapshot.runtime_paths,
         catalog=ConnectionsCatalog(agents=agents),
@@ -121,14 +119,26 @@ def _agent_connections(
     providers: dict[str, OAuthProvider],
     metadata: dict[str, ToolMetadata],
 ) -> AgentConnections:
-    """Group an authorized agent's available OAuth tools by provider."""
+    """List assigned toolkits and group their browser connections by provider."""
     services: dict[str, ConnectionService] = {}
+    tools: list[ConnectionTool] = []
     entity = config.resolve_entity(agent_name)
     for tool_name in entity.available_tools:
         tool = metadata.get(tool_name)
-        if tool is None or tool.auth_provider is None or tool.auth_provider not in providers:
+        if tool is None:
             continue
-        provider = providers[tool.auth_provider]
+        provider = providers.get(tool.auth_provider) if tool.auth_provider is not None else None
+        tools.append(
+            ConnectionTool(
+                name=tool_name,
+                display_name=tool.display_name,
+                description=tool.description,
+                provider=provider.id if provider is not None else None,
+                requires_room_context=tool.requires_room_context,
+            ),
+        )
+        if provider is None:
+            continue
         service = services.setdefault(
             provider.id,
             ConnectionService(
@@ -147,6 +157,7 @@ def _agent_connections(
         agent_display_name=agent.display_name,
         is_shared=agent.private is None,
         services=list(services.values()),
+        tools=tools,
     )
 
 

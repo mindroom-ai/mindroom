@@ -25,7 +25,7 @@ from tests.test_mcp_gateway_tools import context  # noqa: F401
 if TYPE_CHECKING:
     from starlette.requests import Request
 
-    from mindroom.api.personal_agent import PersonalAgentContext
+    from mindroom.api.connection_agents import AgentToolContext
 
 pytestmark = pytest.mark.asyncio
 
@@ -49,7 +49,7 @@ async def _wait(event: threading.Event) -> None:
     ],
 )
 async def test_native_capacity_survives_response_until_cleanup_finishes(
-    context: PersonalAgentContext,  # noqa: F811
+    context: AgentToolContext,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
     interruption: str,
@@ -134,7 +134,7 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
 
 @pytest.mark.parametrize("phase", ["metadata", "entry", "plugins"])
 async def test_cancelled_discovery_offload_keeps_capacity_until_thread_exits(
-    context: PersonalAgentContext,  # noqa: F811
+    context: AgentToolContext,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
 ) -> None:
@@ -192,7 +192,7 @@ async def test_cancelled_discovery_offload_keeps_capacity_until_thread_exits(
 
 
 async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity(
-    context: PersonalAgentContext,  # noqa: F811
+    context: AgentToolContext,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Async bodies still cancel promptly, while close and admission remain server-owned."""
@@ -254,7 +254,7 @@ async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity
 
 
 async def test_cancelled_native_cleanup_failure_is_safely_logged_and_releases_capacity(
-    context: PersonalAgentContext,  # noqa: F811
+    context: AgentToolContext,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Failed retained cleanup reports only its type and still releases its server slot."""
@@ -316,7 +316,7 @@ async def test_cancelled_native_cleanup_failure_is_safely_logged_and_releases_ca
 
 
 async def test_server_shutdown_drains_cancelled_metadata_work(
-    context: PersonalAgentContext,  # noqa: F811
+    context: AgentToolContext,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shutdown waits for cancelled discovery threads that own no toolkit cleanup."""

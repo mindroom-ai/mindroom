@@ -74,9 +74,10 @@ When no Matrix user ID claim or email-to-Matrix template is configured, strict m
 ## Personal Connections Portal
 
 Set `MINDROOM_CONNECTIONS_AGENT` to the name of a private agent to enable `/connections`.
-The portal groups OAuth services by agent: the selected private agent and shared agents for which the authenticated user is a credential manager or administrator.
+The portal lists assigned tools and groups OAuth services by agent: the selected private agent and shared agents for which the authenticated user is a credential manager or administrator.
 Services come from each authorized agent's available tools, including deferred tools and registered plugin or MCP OAuth providers.
-Each card loads independently, so a failed or unconnected service does not block the others.
+Tools without browser authentication also appear, and room-dependent tools are marked **MindRoom only**.
+Each service card loads independently, so a failed or unconnected service does not block the others.
 The portal does not expose model configuration, generic credential editing, or OAuth client administration.
 
 ```bash
@@ -125,7 +126,8 @@ Use a runtime build containing the portal before enabling the routes.
 
 Connect and disconnect requests require an HTTPS public origin and a same-origin `Origin` header matching `MINDROOM_PUBLIC_URL`, or the request base URL when unset.
 The portal API returns private, non-cacheable account status and never returns token or OAuth client configuration.
-The optional [Personal MCP Gateway](https://docs.mindroom.chat/deployment/personal-mcp-gateway/) reuses these accounts to expose assigned tools to external MCP clients.
+The optional [MCP Gateway](https://docs.mindroom.chat/deployment/personal-mcp-gateway/) reuses these accounts to expose selected agents' tools to external MCP clients.
+When enabled, the portal lets each user choose which eligible agents are exposed through every one of their MCP clients.
 Its machine endpoints use separate gateway OAuth bearer authentication; the browser consent page uses this same signed login.
 
 ## Instance Chart

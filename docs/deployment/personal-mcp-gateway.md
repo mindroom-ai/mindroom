@@ -2,10 +2,10 @@
 icon: lucide/network
 ---
 
-# Personal MCP Gateway
+# MCP Gateway
 
-The optional MindRoom MCP gateway exposes a personal agent's assigned tools to external MCP clients at `/mcp`.
-It reuses the [Connections portal](trusted-upstream-auth.md#personal-connections-portal), personal credentials, tool filters, and worker routing.
+The optional MindRoom MCP gateway exposes your selected agents' assigned tools to external MCP clients at `/mcp`.
+It reuses the [Connections portal](trusted-upstream-auth.md#personal-connections-portal), agent credential scopes, tool filters, and worker routing.
 Each user connects only the services they need.
 An unconnected or unavailable integration does not prevent discovery or use of another integration.
 
@@ -13,12 +13,12 @@ The initial MCP tool list contains exactly three operations:
 
 | Operation | Purpose |
 |-----------|---------|
-| `search_tools` | Search assigned integrations, or select a toolkit to search its functions without loading schemas into model context |
+| `search_tools` | Search assigned integrations, or select an agent and toolkit to search its functions without loading schemas into model context |
 | `get_tool` | Fetch the input schema for one selected function |
-| `invoke_tool` | Run that function with the authenticated user's personal connections |
+| `invoke_tool` | Run that function with the selected agent's connections |
 
-For example, search with `{"query": "calendar"}`, then pass the returned `toolkit` to another search.
-Use the returned `toolkit` and `function` with `get_tool` before calling `invoke_tool` with `arguments`.
+For example, search with `{"query": "calendar"}`, then pass the returned `agent` and `toolkit` to another search.
+Use the returned `agent`, `toolkit`, and `function` with `get_tool` before calling `invoke_tool` with those same selectors and `arguments`.
 If a service needs authorization, the response contains `error.code: connection_required` and a `connection_url` pointing to `/connections`.
 Connect that service in the browser, then retry the selected operation.
 The gateway does not require authorization to unrelated services during client login.
@@ -26,7 +26,7 @@ The gateway does not require authorization to unrelated services during client l
 ## Enable the gateway
 
 First configure the Connections portal, including strict signed upstream authentication, a verified Matrix identity, and an explicitly authorized private agent.
-The same `MINDROOM_CONNECTIONS_AGENT` selects the gateway's agent:
+The same `MINDROOM_CONNECTIONS_AGENT` supplies the initial personal selection:
 
 ```bash
 MINDROOM_CONNECTIONS_AGENT=personal
@@ -34,15 +34,37 @@ MINDROOM_PUBLIC_URL=https://assistant.example.org
 MINDROOM_MCP_GATEWAY_ENABLED=true
 ```
 
-The selected agent must use `private.per: user` or `private.per: user_agent`.
+The configured personal agent must use `private.per: user` or `private.per: user_agent`.
 Access requires an explicit matching `access.users` grant or administrator authority; room membership alone is insufficient.
 Both eager and deferred assigned tools are discoverable when their metadata permits execution without a Matrix room runtime.
-The client cannot choose another agent, user, or credential owner.
+Shared agents are eligible when the user is a credential manager or administrator; ordinary reply access is insufficient.
+Private agents belonging to other users are never eligible.
+Clients can address only agents in the signed-in user's saved selection and cannot choose another user or credential owner.
 
 `MINDROOM_PUBLIC_URL` must be an HTTPS origin without a path, query, or fragment.
 Loopback HTTP origins are accepted for local development.
 Gateway environment changes require an API restart.
 The feature is disabled by default and requires both `MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true` and `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`.
+
+## Choose exposed agents
+
+On Connections, enable **Expose through MCP** for each agent you want your clients to use.
+One saved selection applies to every connected MCP client for your account, in either authentication mode.
+The eligible personal agent is selected once by default; shared agents start off.
+You can turn every agent off, and the empty selection survives restarts and new client connections.
+New agents are not automatically added to an existing selection.
+
+The page lists all assigned tools, including those without browser authentication.
+OAuth controls remain grouped by service, and room-dependent tools are labeled **MindRoom only**.
+The gateway exposes compatible native and upstream MCP tools; it does not start conversations with the agents themselves.
+A shared agent's authored worker and credential scopes still determine whose service connection executes a call.
+Your selection changes only your clients, without changing another user's selection or disconnecting services.
+
+Eligibility and selection are checked again after tool preparation and hooks, before a provider action starts.
+Actions already running may finish after an agent is turned off.
+Removing eligibility hides a saved choice; restoring that permission can restore the previously saved choice.
+Selections are bound to the signed Matrix identity, canonical requester, and provisioned account when enabled.
+Deleting and recreating a provisioned account does not restore its previous selection.
 
 ## Route browser and machine traffic
 
@@ -94,7 +116,7 @@ The built-in client flow uses OAuth authorization code with PKCE S256 and dynami
 The exact resource is required for both code exchange and refresh.
 Client callbacks must be registered HTTPS URLs or loopback HTTP URLs.
 Dashboard API keys, browser cookies, and unsigned identity headers do not authenticate the MCP endpoint.
-In built-in mode, MindRoom issues its own client grant; upstream service tokens stay in the existing personal credential store.
+In built-in mode, MindRoom issues its own client grant; upstream service tokens stay in the existing scoped credential store.
 
 This implementation uses the Python MCP SDK 1.x Streamable HTTP protocol, tested with protocol version `2025-11-25`.
 It uses stateless requests and JSON responses; it does not offer resumable SSE sessions, resources, prompts, or newer protocol features outside that SDK version.
@@ -105,7 +127,7 @@ Client applications need support for the chosen authorization server's registrat
 
 ## External authorization
 
-External mode verifies signed credentials from one configured authority, then checks an active [provisioned account](#managed-account-provisioning) and current personal-agent access on every MCP request and again before tool dispatch.
+External mode verifies signed credentials from one configured authority, then checks an active [provisioned account](#managed-account-provisioning) and current agent eligibility and saved selection on every MCP request and again before tool dispatch.
 It requires `MINDROOM_MCP_SCIM_TOKEN`; the portal prerequisites above still apply.
 
 ```bash
@@ -120,6 +142,7 @@ MINDROOM_MCP_EXTERNAL_MATRIX_USER_ID_CLAIM=matrix_user_id
 Protected-resource metadata's `authorization_servers` field advertises `MINDROOM_MCP_EXTERNAL_AUTHORIZATION_SERVER`, whose discovery document supplies the client's OAuth endpoints.
 This issuer identifier may differ from `MINDROOM_MCP_EXTERNAL_ISSUER`; preserve significant trailing slashes.
 External mode disables MindRoom's OAuth registration, authorization, consent, token, revocation, authorization-server metadata, and client-management controls.
+Agent selection remains available on Connections and applies to all externally authenticated clients of that user.
 Manage external authorizations at their issuer; provider connections in the portal remain separate.
 Restart the API after changing authentication settings: changed or invalid settings fail closed until restart.
 
@@ -185,7 +208,7 @@ Before general access, verify real client login/resource handling, two users' to
 
 The OAuth token lifetimes, client-management controls, and issuer-storage limits in this section govern built-in credentials.
 External mode reuses the shared provider/account store, so its provider and storage configuration still validates at startup; leave unused `MINDROOM_MCP_OAUTH_*` settings at valid defaults.
-Personal-agent authorization, persistence, and active MCP call limits apply to both modes; external credential lifecycle is described above.
+Agent authorization, selection persistence, and active MCP call limits apply to both modes; external credential lifecycle is described above.
 
 Access tokens last up to 15 minutes.
 Refresh tokens rotate on use; replay revokes the grant family.
@@ -202,7 +225,7 @@ Users can disconnect one client connection or all of their client connections wi
 Disconnecting all also invalidates their already-open consent requests and unexchanged authorization codes.
 An authorized client may request fresh consent afterward.
 Client names are self-declared; users should check the displayed client address before approving access.
-Management remains available after a user loses personal-agent tool permission, using the same signed identity and exact credential-owner binding.
+Management remains available after a user loses agent tool permission, using the same signed identity and exact credential-owner binding.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -213,14 +236,16 @@ Management remains available after a user loses personal-agent tool permission, 
 Durations must be positive whole days, idle lifetime cannot exceed absolute lifetime, and absolute lifetime cannot exceed 365 days.
 Lifetimes above 30 days require configured account provisioning so that account-disable updates can revoke long-lived access.
 Restart the API after changing lifecycle settings.
-Existing grants keep their original absolute deadlines during migration; missing historical creation times or client addresses remain unknown.
+Upgrading from the earlier gateway that authorized a single private agent invalidates existing local grants and pending consent once.
+Users must reconnect their MCP clients to approve access following the dashboard selection.
+Provisioned accounts, client registrations, and upstream service connections are preserved.
 Enabling managed-account mode makes older grants without a provisioned account binding unusable; users must approve a fresh connection once.
 
-Each MCP request rechecks current personal-agent access.
+Each MCP request rechecks current agent eligibility and saved selection.
 Grants retain both the original signed identity and its canonical credential owner, so alias reassignment cannot transfer an old grant to another owner or preserve access to the previous one.
 Changes to the selected agent, access grants, assigned tools, and provider connections are checked before execution.
 
-Inbound OAuth state is persisted in `mcp_gateway/oauth.sqlite3` under the configured storage root.
+Inbound OAuth state and user selections are persisted in `mcp_gateway/oauth.sqlite3` under the configured storage root.
 Keep that directory private and persistent across restarts.
 Opaque authorization codes, browser nonces, access tokens, and refresh tokens are stored as hashes; upstream provider credentials remain separate.
 Run one API process for this gateway: active-call limits and cancellation ownership are process-local.
@@ -266,17 +291,16 @@ Consumed refresh metadata is compacted; expired access token bindings are reclai
 Revocation using an expired access token may succeed as a no-op; use the portal or a retained unexpired refresh token to disconnect the client.
 This onboarding budget is separate from the durable OAuth limits below.
 
-All retained OAuth state shares a 256-MiB logical budget, configured with the positive integer `MINDROOM_MCP_OAUTH_MAX_BYTES`.
+All retained OAuth state and agent selections share a 256-MiB logical budget, configured with the positive integer `MINDROOM_MCP_OAUTH_MAX_BYTES`.
 Each requester has a 16-MiB logical budget, configured with the positive integer `MINDROOM_MCP_OAUTH_USER_MAX_BYTES`.
 Accounting includes UTF-8 payloads and identifiers, a 1024-byte allowance per row for fixed fields and indexes, and conservative counter bookkeeping.
-Requester usage includes its grants and capabilities plus registered client metadata charged once per grant; global usage counts the actual client row once.
-Global admission applies atomically when registering clients, creating or binding consent, approving grants, and issuing tokens; requester admission applies to grant approval and token issuance.
+Requester usage includes its saved agent selection, grants, and capabilities plus registered client metadata charged once per grant; global usage counts the actual client row once.
+Global admission applies atomically when registering clients, creating or binding consent, approving grants, and issuing tokens; requester admission applies to selection changes, grant approval, and token issuance.
 Increasing limits admits more retained state; decreasing limits may prevent existing clients from refreshing until quota is released.
 An existing database above either limit remains readable and revocable.
 
 A grant may issue at most six token pairs in a rolling 60-second window, including its initial code exchange.
 At exactly 60 seconds an issuance leaves the window; restarting does not reset issuance history or storage usage.
-During the one-time schema migration, retained legacy access tokens receive the migration time as their issuance timestamp without changing expiry, so an existing family may wait up to 60 seconds before refreshing.
 Token exchange and browser consent capacity failures return private HTTP 503 with `Retry-After: 60` and `temporarily_unavailable`.
 Rejected issuance leaves the current refresh token or authorization code usable, and rejected consent preserves its prior nonce.
 Quota recovery can take longer than the retry interval: successful revocation or expiry releases family storage, while consumed refresh-token bindings remain until their family ends.

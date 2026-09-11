@@ -111,6 +111,20 @@ def test_catalog_includes_deferred_oauth_tools_without_status_calls(
     status.assert_not_called()
 
 
+def test_catalog_lists_tools_without_browser_authentication(portal: dict[str, Any]) -> None:
+    """Tool visibility does not depend on having an OAuth provider."""
+    portal["payload"]["agents"]["personal"]["tools"].append("matrix_message")
+    _publish_config(main.app, portal["paths"], portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+    assert response.status_code == 200, response.text
+    tools = {tool["name"]: tool for tool in response.json()["agents"][0]["tools"]}
+    assert tools["calculator"]["provider"] is None
+    assert tools["calculator"]["requires_room_context"] is False
+    assert tools["google_drive"]["provider"] == "google_drive"
+    assert tools["matrix_message"]["requires_room_context"] is True
+
+
 @pytest.mark.parametrize("query", ["agent_name=other", "worker_key=other", "user_id=bob", "execution_scope=user"])
 def test_target_overrides_rejected(portal: dict[str, Any], query: str) -> None:
     """The browser cannot choose a credential owner or scope."""

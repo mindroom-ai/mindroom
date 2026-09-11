@@ -114,13 +114,11 @@ async def issue_code(provider: GatewayOAuthProvider, client: OAuthClientInformat
         state,
         requester_id="@alice:example.org",
         authenticated_user_id="@alice:example.org",
-        agent_name="personal",
     )
     callback = await provider.finish_consent(
         state,
         requester_id="@alice:example.org",
         authenticated_user_id="@alice:example.org",
-        agent_name="personal",
         csrf_token=consent.csrf_token,
         allow=True,
     )
@@ -140,7 +138,7 @@ async def test_code_lookup_does_not_consume_and_exchange_is_one_use(
     tokens = await provider.exchange_authorization_code(client, code)
     access = await provider.load_access_token(tokens.access_token)
     assert access.requester_id == "@alice:example.org"
-    assert access.agent_name == "personal"
+    assert "agent_name" not in access.model_dump()
     assert access.resource == "https://example.org/mcp"
     assert access.scopes == ["mcp:tools"]
     assert tokens.expires_in == 900
@@ -148,31 +146,29 @@ async def test_code_lookup_does_not_consume_and_exchange_is_one_use(
         await provider.exchange_authorization_code(client, code)
 
 
-async def test_consent_binds_user_agent_csrf_and_is_one_use(
+async def test_consent_binds_user_account_csrf_and_is_one_use(
     provider: GatewayOAuthProvider,
     client: OAuthClientInformationFull,
 ) -> None:
-    """Consent binds user agent csrf and is one use."""
+    """Consent binds user account csrf and is one use."""
     state = await pending(provider, client)
     consent = await provider.begin_consent(
         state,
         requester_id="@alice:example.org",
         authenticated_user_id="@alice:example.org",
-        agent_name="personal",
     )
     assert consent.client_name == "Desktop app"
     assert consent.redirect_uri == "https://client.example.org/callback"
-    for requester, agent, csrf in [
-        ("@bob:example.org", "personal", consent.csrf_token),
-        ("@alice:example.org", "other", consent.csrf_token),
-        ("@alice:example.org", "personal", "wrong"),
+    for requester, authenticated, csrf in [
+        ("@bob:example.org", "@bob:example.org", consent.csrf_token),
+        ("@alice:example.org", "@other:example.org", consent.csrf_token),
+        ("@alice:example.org", "@alice:example.org", "wrong"),
     ]:
         with pytest.raises(AuthorizeError):
             await provider.finish_consent(
                 state,
                 requester_id=requester,
-                authenticated_user_id=requester,
-                agent_name=agent,
+                authenticated_user_id=authenticated,
                 csrf_token=csrf,
                 allow=True,
             )
@@ -181,13 +177,11 @@ async def test_consent_binds_user_agent_csrf_and_is_one_use(
             state,
             requester_id="@bob:example.org",
             authenticated_user_id="@bob:example.org",
-            agent_name="personal",
         )
     callback = await provider.finish_consent(
         state,
         requester_id="@alice:example.org",
         authenticated_user_id="@alice:example.org",
-        agent_name="personal",
         csrf_token=consent.csrf_token,
         allow=False,
     )
@@ -197,7 +191,6 @@ async def test_consent_binds_user_agent_csrf_and_is_one_use(
             state,
             requester_id="@alice:example.org",
             authenticated_user_id="@alice:example.org",
-            agent_name="personal",
             csrf_token=consent.csrf_token,
             allow=True,
         )
@@ -214,7 +207,7 @@ async def test_wrong_client_and_tampered_code_binding_rejected(
     with pytest.raises(TokenError):
         await provider.exchange_authorization_code(other, code)
     for field, value in [
-        ("agent_name", "other"),
+        ("account_id", "other"),
         ("requester_id", "@bob:example.org"),
         ("resource", "https://other.example.org/mcp"),
         ("scopes", ["admin"]),
@@ -386,7 +379,6 @@ async def test_pending_and_code_expire(
             state,
             requester_id="@alice:example.org",
             authenticated_user_id="@alice:example.org",
-            agent_name="personal",
         )
     code = await issue_code(provider, client)
     clock[0] += 300
@@ -430,7 +422,7 @@ async def test_refresh_binding_scope_and_revocation(
     with pytest.raises(TokenError):
         await provider.exchange_refresh_token(client, refresh, ["admin"])
     with pytest.raises(TokenError):
-        await provider.exchange_refresh_token(client, refresh.model_copy(update={"agent_name": "other"}), ["mcp:tools"])
+        await provider.exchange_refresh_token(client, refresh.model_copy(update={"account_id": "other"}), ["mcp:tools"])
     rotated = await provider.exchange_refresh_token(client, refresh, ["mcp:tools"])
     assert await provider.load_access_token(tokens.access_token) is None
     access = await provider.load_access_token(rotated.access_token)
@@ -450,14 +442,12 @@ async def test_reopen_persists_grants_without_raw_capabilities(
         state,
         requester_id="@alice:example.org",
         authenticated_user_id="@alice:example.org",
-        agent_name="personal",
     )
     reopened = GatewayOAuthProvider(runtime_paths, public_url="https://example.org")
     callback = await reopened.finish_consent(
         state,
         requester_id="@alice:example.org",
         authenticated_user_id="@alice:example.org",
-        agent_name="personal",
         csrf_token=consent.csrf_token,
         allow=True,
     )
@@ -591,13 +581,11 @@ async def test_consent_preserves_registered_callback_query_verbatim(
         state,
         requester_id="@alice:example.org",
         authenticated_user_id="@alice:example.org",
-        agent_name="personal",
     )
     result = await provider.finish_consent(
         state,
         requester_id="@alice:example.org",
         authenticated_user_id="@alice:example.org",
-        agent_name="personal",
         csrf_token=consent.csrf_token,
         allow=allow,
     )
@@ -822,13 +810,11 @@ async def test_unexpired_consent_can_finish_across_registration_expiry(
         state,
         requester_id="@alice:example.org",
         authenticated_user_id="@alice:example.org",
-        agent_name="personal",
     )
     callback = await provider.finish_consent(
         state,
         requester_id="@alice:example.org",
         authenticated_user_id="@alice:example.org",
-        agent_name="personal",
         csrf_token=consent.csrf_token,
         allow=True,
     )

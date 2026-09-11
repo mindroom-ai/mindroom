@@ -24,29 +24,33 @@ from starlette.routing import Route
 
 from mindroom.api.auth import require_personal_connections_user
 from mindroom.api.config_lifecycle import app_state, rebind_current_request_snapshot, require_api_state
+from mindroom.api.connection_agents import PERSONAL_RESPONSE_HEADERS, resolve_connection_agent, resolve_connection_user
 from mindroom.api.mcp_clients import client_routes
+from mindroom.api.mcp_identity import resolve_gateway_browser_owner
 from mindroom.api.mcp_scim import scim_routes
-from mindroom.api.personal_agent import PERSONAL_RESPONSE_HEADERS, resolve_personal_agent
+from mindroom.api.mcp_selection import selection_routes
 from mindroom.logging_config import get_logger
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp_gateway.accounts import GatewayAccounts
 from mindroom.mcp_gateway.admission import OnboardingRateLimiter
 from mindroom.mcp_gateway.consent import render_consent_page
+from mindroom.mcp_gateway.execution import run_gateway_sync
 from mindroom.mcp_gateway.external_auth import ExternalAuth, ExternalAuthSettings
 from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
+from mindroom.mcp_gateway.selection import GatewaySelections
 from mindroom.mcp_gateway.server import GatewayServer, read_gateway_body, replay_gateway_body
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
 from mindroom.mcp_gateway.toolkits import drain_gateway_tool_cleanup
-from mindroom.mcp_gateway.tools import get_tool, invoke_tool, search_tools
+from mindroom.mcp_gateway.tools import get_tool, invoke_tool, search_agents, search_tools
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode, GatewayPrincipal
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from fastapi import FastAPI
     from starlette.types import Receive, Scope, Send
 
-    from mindroom.api.personal_agent import PersonalAgentContext
+    from mindroom.api.connection_agents import ConnectionUserContext
     from mindroom.constants import RuntimePaths
     from mindroom.mcp_gateway.external_auth import ExternalIdentity
     from mindroom.mcp_gateway.oauth import GatewayAccessToken
@@ -138,6 +142,7 @@ class GatewayRuntime:
         self.provider = GatewayOAuthProvider(paths, public_url=paths.env_value("MINDROOM_PUBLIC_URL") or "")
         self.scim_token = self.provider.scim_token or ""
         self.accounts = GatewayAccounts(self.provider.store)
+        self.selections = GatewaySelections(self.provider.store)
         self.manager = MCPServerManager(paths, validate_agent_function_names=False)
         self._config_lock = asyncio.Lock()
         self.server = GatewayServer(
@@ -168,8 +173,43 @@ class GatewayRuntime:
         """Return the configured public origin, independent of forwarded headers."""
         return self.provider.resource_url.removesuffix("/mcp")
 
-    async def principal(self, request: Request) -> tuple[GatewayPrincipal, PersonalAgentContext]:
-        """Resolve verified MCP authority against current account and personal access policy."""
+    async def _external_principal(
+        self,
+        request: Request,
+        headers: dict[str, str],
+    ) -> tuple[GatewayPrincipal, ConnectionUserContext, Callable[[], None]]:
+        assert self.external_auth is not None
+        try:
+            identity: ExternalIdentity = await self.external_auth.verify(request)
+        except HTTPException as exc:
+            if exc.status_code == 403:
+                headers["WWW-Authenticate"] += ', error="insufficient_scope"'
+            raise HTTPException(exc.status_code, exc.detail, headers=headers) from exc
+        account_id = await self.accounts.resolve_external(identity.email, identity.issued_at)
+        if account_id is None:
+            raise HTTPException(401, "An active provisioned account is required", headers=headers)
+        snapshot = rebind_current_request_snapshot(request)
+        _runtime(request, paths=snapshot.runtime_paths)
+        try:
+            context = resolve_connection_user(snapshot, identity.matrix_user_id, account_id=account_id)
+        except HTTPException as exc:
+            raise HTTPException(401, "External principal is no longer authorized", headers=headers) from exc
+
+        if not context.agent_names:
+            raise HTTPException(401, "External principal is no longer authorized", headers=headers)
+
+        def require_external_access() -> None:
+            if self.accounts.resolve_external_sync(identity.email, identity.issued_at) != account_id:
+                raise GatewayError(GatewayErrorCode.UNAUTHORIZED)
+
+        return (
+            GatewayPrincipal(grant_id=identity.token_digest, requester_id=context.owner.requester_id),
+            context,
+            require_external_access,
+        )
+
+    async def principal(self, request: Request) -> tuple[GatewayPrincipal, ConnectionUserContext, Callable[[], None]]:
+        """Resolve verified MCP authority against current account and eligible agent policy."""
         _runtime(request)
         scopes = self.external_settings.required_scopes if self.external_settings is not None else ("mcp:tools",)
         challenge = f'Bearer resource_metadata="{self.origin}/.well-known/oauth-protected-resource/mcp"'
@@ -177,21 +217,7 @@ class GatewayRuntime:
             challenge += f', scope="{" ".join(scopes)}"'
         headers = {"WWW-Authenticate": challenge}
         if self.external_auth is not None:
-            try:
-                identity: ExternalIdentity = await self.external_auth.verify(request)
-            except HTTPException as exc:
-                if exc.status_code == 403:
-                    headers["WWW-Authenticate"] += ', error="insufficient_scope"'
-                raise HTTPException(exc.status_code, exc.detail, headers=headers) from exc
-            if await self.accounts.resolve_external(identity.email, identity.issued_at) is None:
-                raise HTTPException(401, "An active provisioned account is required", headers=headers)
-            snapshot = rebind_current_request_snapshot(request)
-            _runtime(request, paths=snapshot.runtime_paths)
-            try:
-                context = resolve_personal_agent(snapshot, identity.matrix_user_id)
-            except HTTPException as exc:
-                raise HTTPException(401, "External principal is no longer authorized", headers=headers) from exc
-            return GatewayPrincipal(grant_id=identity.token_digest, requester_id=context.requester_id), context
+            return await self._external_principal(request, headers)
         value = request.headers.get("authorization", "")
         scheme, _, raw = value.partition(" ")
         token: GatewayAccessToken | None = (
@@ -202,20 +228,25 @@ class GatewayRuntime:
         snapshot = rebind_current_request_snapshot(request)
         _runtime(request, paths=snapshot.runtime_paths)
         try:
-            context = resolve_personal_agent(
+            context = resolve_connection_user(
                 snapshot,
                 token.authenticated_user_id,
-                expected_agent_name=token.agent_name,
+                account_id=token.account_id,
             )
         except HTTPException as exc:
             raise HTTPException(401, "Gateway grant is no longer authorized", headers=headers) from exc
-        if context.requester_id != token.requester_id:
+        if context.owner.requester_id != token.requester_id or not context.agent_names:
             raise HTTPException(401, "Gateway principal changed", headers=headers)
-        return GatewayPrincipal(grant_id=token.grant_id, requester_id=token.requester_id), context
+
+        def require_local_access() -> None:
+            if self.provider.load_access_token_sync(raw) != token:
+                raise GatewayError(GatewayErrorCode.UNAUTHORIZED)
+
+        return GatewayPrincipal(grant_id=token.grant_id, requester_id=token.requester_id), context, require_local_access
 
     async def authenticate(self, request: Request) -> GatewayPrincipal:
         """Authenticate every HTTP message, including discovery and cancellation."""
-        principal, _ = await self.principal(request)
+        principal, _, _ = await self.principal(request)
         return principal
 
     async def _record_activity(self, request: Request) -> None:
@@ -230,30 +261,84 @@ class GatewayRuntime:
         except sqlite3.Error as exc:
             logger.warning("mcp_gateway_activity_failed", error_type=type(exc).__name__)
 
+    async def _search_selection(
+        self,
+        user: ConnectionUserContext,
+        selected: list[str],
+        arguments: dict[str, Any],
+        require_current_access: Callable[[str | None], None],
+    ) -> GatewayToolResponse:
+        contexts = [resolve_connection_agent(user, agent_name) for agent_name in selected]
+        result = await search_agents(contexts, **arguments)
+        await run_gateway_sync(require_current_access, None)
+        if "error" not in result:
+            for agent_name in {item["agent"] for item in result["results"]}:
+                await run_gateway_sync(require_current_access, agent_name)
+        return result
+
+    def _access_guard(
+        self,
+        request: Request,
+        user: ConnectionUserContext,
+        require_authority: Callable[[], None],
+    ) -> Callable[[str | None], None]:
+        state = require_api_state(request.app)
+
+        def require_current_access(agent_name: str | None = None) -> None:
+            with state.config_lock:
+                current = state.snapshot
+                if current.runtime_config != user.config or current.runtime_paths != user.runtime_paths:
+                    raise GatewayError(GatewayErrorCode.TOOL_UNAVAILABLE)
+                require_authority()
+                if agent_name is not None:
+                    self.selections.require_selected(user.owner, agent_name)
+
+        return require_current_access
+
     async def dispatch(self, request: Request, name: str, arguments: dict[str, Any]) -> GatewayToolResponse:
-        """Recheck access immediately before selecting one tool operation."""
-        _, context = await self.principal(request)
+        """Resolve an explicitly selected agent and recheck authority at the provider boundary."""
+        _, user, require_authority = await self.principal(request)
+        defaults = (user.personal_agent_name,) if user.personal_agent_name is not None else ()
+        saved = await self.selections.get(user.owner, defaults)
+        selected = [agent for agent in saved if agent in user.agent_names]
+        require_current_access = self._access_guard(request, user, require_authority)
+
+        agent = arguments.get("agent")
+        if name == "search_tools" and agent is None and "toolkit" not in arguments:
+            return await self._search_selection(user, selected, arguments, require_current_access)
+        if agent not in selected:
+            return {
+                "error": {"code": GatewayErrorCode.TOOL_NOT_FOUND, "message": "Agent is not selected or available."},
+            }
+        context = resolve_connection_agent(user, agent)
+        operation_arguments = {key: value for key, value in arguments.items() if key != "agent"}
+
+        def require_selected_access() -> None:
+            require_current_access(context.agent_name)
+
         async with self._config_lock:
-            if not self.manager.is_configured_for(context.config):
-                await self.manager.sync_servers(context.config, discover=False)
+            if not self.manager.is_configured_for(user.config):
+                await self.manager.sync_servers(user.config, discover=False)
         if name == "search_tools":
-            return await search_tools(context, manager=self.manager, **arguments)
+            return await search_tools(
+                context,
+                manager=self.manager,
+                require_current_access=require_selected_access,
+                **operation_arguments,
+            )
         if name == "get_tool":
-            return await get_tool(context, manager=self.manager, **arguments)
+            return await get_tool(
+                context,
+                manager=self.manager,
+                require_current_access=require_selected_access,
+                **operation_arguments,
+            )
         if name == "invoke_tool":
-            state = require_api_state(request.app)
-
-            def require_current_config() -> None:
-                with state.config_lock:
-                    current = state.snapshot
-                    if current.runtime_config != context.config or current.runtime_paths != context.runtime_paths:
-                        raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
-
             return await invoke_tool(
                 context,
                 manager=self.manager,
-                require_current_config=require_current_config,
-                **arguments,
+                require_current_config=require_selected_access,
+                **operation_arguments,
             )
         raise HTTPException(400, "Unknown gateway operation")
 
@@ -434,13 +519,14 @@ async def _metadata(request: Request) -> Response:
 async def _consent(request: Request) -> Response:
     runtime = _local_runtime(request)
     user = await require_personal_connections_user(request)
-    context = resolve_personal_agent(rebind_current_request_snapshot(request), user["matrix_user_id"], channel="matrix")
-    account_id = None
-    if runtime.provider.accounts_required:
-        email = user.get("email")
-        account_id = await runtime.accounts.resolve_active(email) if isinstance(email, str) else None
-        if account_id is None:
-            raise HTTPException(403, "An active provisioned account is required", headers=PERSONAL_RESPONSE_HEADERS)
+    owner = await resolve_gateway_browser_owner(request, user, runtime.provider)
+    context = resolve_connection_user(
+        rebind_current_request_snapshot(request),
+        owner.authenticated_user_id,
+        account_id=owner.account_id,
+    )
+    if not context.agent_names:
+        raise HTTPException(403, "Agent access is required", headers=PERSONAL_RESPONSE_HEADERS)
     try:
         if request.method == "POST":
             if request.headers.get("origin") != runtime.origin or request.headers.get("sec-fetch-site") == "cross-site":
@@ -451,10 +537,9 @@ async def _consent(request: Request) -> Response:
                 raise HTTPException(400, "Invalid consent form", headers=PERSONAL_RESPONSE_HEADERS)
             redirect = await runtime.provider.finish_consent(
                 fields["state"],
-                requester_id=context.requester_id,
+                requester_id=context.owner.requester_id,
                 authenticated_user_id=user["matrix_user_id"],
-                agent_name=context.agent_name,
-                account_id=account_id,
+                account_id=context.owner.account_id,
                 csrf_token=fields["csrf_token"],
                 allow=fields["decision"] == "allow",
             )
@@ -464,11 +549,12 @@ async def _consent(request: Request) -> Response:
             raise HTTPException(400, "Invalid consent state", headers=PERSONAL_RESPONSE_HEADERS)
         consent = await runtime.provider.begin_consent(
             state,
-            requester_id=context.requester_id,
-            agent_name=context.agent_name,
+            requester_id=context.owner.requester_id,
             authenticated_user_id=user["matrix_user_id"],
-            account_id=account_id,
+            account_id=context.owner.account_id,
         )
+        defaults = (context.personal_agent_name,) if context.personal_agent_name is not None else ()
+        saved = await runtime.selections.get(context.owner, defaults)
     except GatewayOAuthCapacityError:
         return JSONResponse(
             {"error": "temporarily_unavailable"},
@@ -481,11 +567,11 @@ async def _consent(request: Request) -> Response:
             "Consent is invalid, expired, or belongs to another user",
             headers=PERSONAL_RESPONSE_HEADERS,
         ) from exc
-    agent = context.config.get_agent(context.agent_name).display_name
+    agent_names = tuple(context.config.get_agent(agent).display_name for agent in saved if agent in context.agent_names)
     return HTMLResponse(
         render_consent_page(
             client_name=consent.client_name,
-            agent_name=agent,
+            agent_names=agent_names,
             redirect_uri=consent.redirect_uri,
             state=state,
             csrf_token=consent.csrf_token,
@@ -521,6 +607,7 @@ def install_gateway_routes(app: FastAPI) -> None:
     app.router.routes.extend(
         [
             *client_routes(_local_runtime),
+            *selection_routes(_runtime),
             *scim_routes(_runtime),
             Route("/mcp", _MCPEndpoint(), methods=["GET", "POST", "DELETE"]),
             Route("/.well-known/oauth-authorization-server/mcp/oauth", _metadata, methods=["GET"]),

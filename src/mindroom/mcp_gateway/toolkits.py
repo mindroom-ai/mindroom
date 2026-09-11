@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from agno.tools import Toolkit
     from agno.tools.function import ToolResult
 
-    from mindroom.api.personal_agent import PersonalAgentContext
+    from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp.manager import MCPServerManager
 
@@ -71,7 +71,7 @@ async def _close_after(pending: asyncio.Task[Any], toolkit: Toolkit | None = Non
         await _close(toolkit)
 
 
-def _build_native(context: PersonalAgentContext, entry: EffectiveToolConfig) -> Toolkit:
+def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Toolkit:
     from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
@@ -112,7 +112,7 @@ def _build_native(context: PersonalAgentContext, entry: EffectiveToolConfig) -> 
 class _GatewayMCPToolkit(MindRoomMCPToolkit):
     """Keep the exact request configuration attached to every upstream dispatch."""
 
-    context: PersonalAgentContext
+    context: AgentToolContext
 
     async def _call_tool_with_error_payload(self, tool_name: str, arguments: dict[str, object]) -> ToolResult:
         if self.manager is None:
@@ -131,7 +131,7 @@ class _GatewayMCPToolkit(MindRoomMCPToolkit):
 
 
 async def _build_selected(
-    context: PersonalAgentContext,
+    context: AgentToolContext,
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
 ) -> Toolkit:
@@ -176,7 +176,7 @@ async def _build_selected(
 
 
 async def run_toolkit_operation[T](
-    context: PersonalAgentContext,
+    context: AgentToolContext,
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
     operation: Callable[[Toolkit], Awaitable[T]],
