@@ -614,6 +614,7 @@ def register_local_attachment(
     source_event_id: str | None = None,
     sender: str | None = None,
     event_timestamp: int | None = None,
+    cleanup_loop: asyncio.AbstractEventLoop | None = None,
 ) -> AttachmentRecord | None:
     """Register a local file as an attachment and persist metadata."""
     if not local_path.is_file():
@@ -666,7 +667,11 @@ def register_local_attachment(
             tmp_path.unlink(missing_ok=True)
         return None
 
-    _maybe_cleanup_attachment_storage(storage_path)
+    if cleanup_loop is None:
+        _maybe_cleanup_attachment_storage(storage_path)
+    else:
+        # Hand off inside the worker, even when its awaiting caller was cancelled.
+        cleanup_loop.call_soon_threadsafe(_maybe_cleanup_attachment_storage, storage_path)
 
     return record
 
@@ -724,6 +729,7 @@ async def _register_media_attachment(
             source_event_id=event_id,
             sender=sender,
             event_timestamp=event_timestamp,
+            cleanup_loop=asyncio.get_running_loop(),
         ),
     )
 

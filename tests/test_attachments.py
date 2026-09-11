@@ -185,7 +185,9 @@ async def test_register_media_attachment_offloads_registration_work(tmp_path: Pa
         source_event_id: str | None = None,
         sender: str | None = None,
         event_timestamp: int | None = None,
+        cleanup_loop: asyncio.AbstractEventLoop | None = None,
     ) -> AttachmentRecord:
+        assert cleanup_loop is not None
         registration_thread_ids.append(threading.get_ident())
         return AttachmentRecord(
             attachment_id=attachment_id or "att_generated",
@@ -529,20 +531,28 @@ async def test_attachment_cleanup_failure_retries_without_throttle_or_stranded_c
 
 
 @pytest.mark.asyncio
-async def test_media_registration_cancellation_drains_attachment_cleanup_worker(tmp_path: Path) -> None:
-    """Cancelling media registration waits for its cleanup worker to finish."""
+async def test_media_registration_cancellation_hands_cleanup_to_shutdown_owner(tmp_path: Path) -> None:
+    """Cancelled registration drains persistence, while shutdown owns the cleanup scan."""
+    persistence_started = threading.Event()
+    release_persistence = threading.Event()
     cleanup_started = threading.Event()
     release_cleanup = threading.Event()
     cleanup_finished = threading.Event()
-    cleanup_claims: dict[Path, object] = {}
+    original_replace = Path.replace
+
+    def blocking_replace(path: Path, target: Path) -> Path:
+        if target.suffix == ".json":
+            persistence_started.set()
+            assert release_persistence.wait(timeout=5)
+        return original_replace(path, target)
 
     def blocking_cleanup(_storage_path: Path) -> None:
         cleanup_started.set()
-        assert release_cleanup.wait(timeout=2)
+        assert release_cleanup.wait(timeout=5)
         cleanup_finished.set()
 
     with (
-        patch("mindroom.attachments._attachment_cleanup_claim_tokens_by_storage_path", cleanup_claims),
+        patch.object(Path, "replace", new=blocking_replace),
         patch("mindroom.attachments._cleanup_attachment_storage", side_effect=blocking_cleanup),
     ):
         registration_task = asyncio.create_task(
@@ -559,17 +569,86 @@ async def test_media_registration_cancellation_drains_attachment_cleanup_worker(
                 kind="file",
             ),
         )
-        assert await asyncio.to_thread(cleanup_started.wait, 2)
-        registration_task.cancel()
-        await asyncio.sleep(0)
-        assert not registration_task.done()
-        release_cleanup.set()
-        with pytest.raises(asyncio.CancelledError):
-            await registration_task
+        try:
+            assert await asyncio.to_thread(persistence_started.wait, 2)
+            registration_task.cancel()
+            await asyncio.sleep(0)
+            assert not registration_task.done()
+            release_persistence.set()
+            assert await asyncio.to_thread(cleanup_started.wait, 2)
+            done, _ = await asyncio.wait({registration_task}, timeout=1)
+            assert done, "Registration cancellation still waits for cleanup"
+            with pytest.raises(asyncio.CancelledError):
+                await registration_task
+            record = load_attachment(tmp_path, _attachment_id_for_event("$cancel_cleanup"))
+            assert record is not None
+            assert record.local_path.read_bytes() == b"payload"
+            assert not cleanup_finished.is_set()
+        finally:
+            release_persistence.set()
+            release_cleanup.set()
+            await asyncio.gather(registration_task, return_exceptions=True)
+            assert await attachments_module.wait_for_attachment_cleanup_tasks()
 
     assert cleanup_finished.is_set()
-    assert await attachments_module.wait_for_attachment_cleanup_tasks()
-    assert cleanup_claims == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["audio", "image", "file", "video"])
+async def test_media_registration_returns_before_cleanup_and_deduplicates_scans(
+    tmp_path: Path,
+    kind: _AttachmentKind,
+) -> None:
+    """Persisted incoming media is usable while a single owned cleanup scan is blocked."""
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    cleanup_calls = 0
+
+    def blocking_cleanup(_storage_path: Path) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        cleanup_started.set()
+        assert release_cleanup.wait(timeout=5)
+
+    async def register(event_id: str) -> AttachmentRecord | None:
+        return await _register_media_attachment(
+            storage_path=tmp_path,
+            event_id=event_id,
+            media_bytes=b"payload",
+            mime_type="application/octet-stream",
+            room_id="!room:localhost",
+            thread_id=None,
+            sender="@sender:localhost",
+            event_timestamp=1,
+            filename="payload.bin",
+            kind=kind,
+        )
+
+    with patch("mindroom.attachments._cleanup_attachment_storage", side_effect=blocking_cleanup):
+        registration = asyncio.create_task(register("$first"))
+        drain = None
+        try:
+            assert await asyncio.to_thread(cleanup_started.wait, 2)
+            done, _ = await asyncio.wait({registration}, timeout=1)
+            assert done, "Incoming media registration still waits for cleanup"
+            first = registration.result()
+            assert first is not None
+            assert first.local_path.read_bytes() == b"payload"
+            assert load_attachment(tmp_path, first.attachment_id) == first
+            assert await asyncio.wait_for(register("$second"), timeout=1) is not None
+            drain = asyncio.create_task(attachments_module.wait_for_attachment_cleanup_tasks())
+            await asyncio.sleep(0)
+            assert not drain.done()
+            assert cleanup_calls == 1
+        finally:
+            release_cleanup.set()
+            await registration
+            assert await attachments_module.wait_for_attachment_cleanup_tasks()
+            if drain is not None:
+                assert await drain
+        assert await register("$third") is not None
+        assert await attachments_module.wait_for_attachment_cleanup_tasks()
+        assert cleanup_calls == 1
 
 
 def test_attachment_cleanup_logs_scan_and_deletion_counts(tmp_path: Path) -> None:

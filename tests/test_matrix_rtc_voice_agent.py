@@ -197,7 +197,7 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     monkeypatch.setattr("livekit.plugins.openai.realtime.RealtimeModel", lambda **_kwargs: fake_model)
     monkeypatch.setattr(
         "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
-        lambda *_args: fake_audio_input,
+        lambda *_args, **_kwargs: fake_audio_input,
     )
     bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
     bridge._room = MagicMock()
@@ -325,7 +325,7 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     fake_audio_input.aclose = AsyncMock()
     monkeypatch.setattr(
         "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
-        lambda *_args: fake_audio_input,
+        lambda *_args, **_kwargs: fake_audio_input,
     )
     bridge = CascadedVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
     bridge._room = MagicMock()
@@ -1025,7 +1025,7 @@ async def test_start_agent_logs_detailed_media_snapshot_once(monkeypatch: pytest
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
-        lambda *_args: MagicMock(),
+        lambda *_args, **_kwargs: MagicMock(),
     )
     alice_identity = "@alice:example.org:ALICEDEV"
     bob_identity = "@bob:example.org:BOBDEV"

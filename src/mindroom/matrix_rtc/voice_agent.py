@@ -17,6 +17,7 @@ import importlib.util
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -80,17 +81,30 @@ class _AudioFrameStream:
 class _AuthorizedParticipantAudioInput:
     """Mix microphone audio only from identities in the Matrix call roster."""
 
-    def __init__(self, room: rtc.Room, rtc_module: ModuleType, participant_identities: frozenset[str]) -> None:
+    def __init__(
+        self,
+        room: rtc.Room,
+        rtc_module: ModuleType,
+        participant_identities: frozenset[str],
+        *,
+        continuous_audio: bool = False,
+    ) -> None:
         self._room = room
         self._rtc = rtc_module
         self._participant_identities = participant_identities
+        self._continuous_audio = continuous_audio
+        self._pending_frame: asyncio.Task[rtc.AudioFrame] | None = None
+        self._next_frame_at = 0.0
+        self._closed_event = asyncio.Event()
         self._mixer = rtc_module.AudioMixer(
             _AUDIO_SAMPLE_RATE,
             _AUDIO_CHANNELS,
             blocksize=_AUDIO_SAMPLE_RATE * _AUDIO_FRAME_SIZE_MS // 1000,
+            capacity=1 if continuous_audio else 100,
         )
         self._streams: dict[str, tuple[str, _AudioFrameStream]] = {}
         self._close_tasks: set[asyncio.Task[None]] = set()
+        self._close_task: asyncio.Task[None] | None = None
         self._closed = False
         room.on("participant_connected", self._on_participant_connected)
         room.on("participant_disconnected", self._on_participant_disconnected)
@@ -110,7 +124,38 @@ class _AuthorizedParticipantAudioInput:
         return "authorized MatrixRTC participants"
 
     async def __anext__(self) -> rtc.AudioFrame:
-        return await self._mixer.__anext__()
+        if not self._continuous_audio:
+            return await self._mixer.__anext__()
+        if self._closed:
+            raise StopAsyncIteration
+        if self._pending_frame is None:
+            self._pending_frame = asyncio.create_task(self._mixer.__anext__())
+
+        # Keep one mixer read across silence deadlines and consumer cancellation.
+        # Cancelling and restarting reads can lose a frame arriving at the boundary.
+        loop = asyncio.get_running_loop()
+        try:
+            async with asyncio.timeout(max(0.0, self._next_frame_at - loop.time())):
+                await self._closed_event.wait()
+        except TimeoutError:
+            pass
+        if self._closed:
+            raise StopAsyncIteration
+        # Carry ordinary late wakeups forward without accumulating audio latency.
+        # After a full missed frame, rebase rather than emitting a catch-up burst.
+        now = loop.time()
+        frame_duration = _AUDIO_FRAME_SIZE_MS / 1000
+        if self._next_frame_at < now - frame_duration:
+            self._next_frame_at = now
+        self._next_frame_at += frame_duration
+        if self._pending_frame.done():
+            pending_frame, self._pending_frame = self._pending_frame, None
+            return pending_frame.result()
+        return self._rtc.AudioFrame.create(
+            _AUDIO_SAMPLE_RATE,
+            _AUDIO_CHANNELS,
+            _AUDIO_SAMPLE_RATE * _AUDIO_FRAME_SIZE_MS // 1000,
+        )
 
     @property
     def source(self) -> AudioInput | None:
@@ -161,6 +206,8 @@ class _AuthorizedParticipantAudioInput:
                 sample_rate=_AUDIO_SAMPLE_RATE,
                 num_channels=_AUDIO_CHANNELS,
                 frame_size_ms=_AUDIO_FRAME_SIZE_MS,
+                # Keep at most 500 ms of recent microphone audio if Live stalls.
+                capacity=10 if self._continuous_audio else 0,
             ),
             participant_identity,
         )
@@ -226,9 +273,14 @@ class _AuthorizedParticipantAudioInput:
 
     async def aclose(self) -> None:
         """Unregister room listeners and close every participant stream."""
-        if self._closed:
-            return
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await wait_for_future_until_complete(self._close_task)
+
+    async def _close(self) -> None:
+        """Own teardown until every audio resource has settled, even on cancellation."""
         self._closed = True
+        self._closed_event.set()
         self._room.off("participant_connected", self._on_participant_connected)
         self._room.off("participant_disconnected", self._on_participant_disconnected)
         self._room.off("track_published", self._on_track_published)
@@ -237,6 +289,10 @@ class _AuthorizedParticipantAudioInput:
         self._room.off("track_unsubscribed", self._on_track_unsubscribed)
         for publication_sid in list(self._streams):
             self._remove_stream(publication_sid)
+        if self._pending_frame is not None:
+            self._pending_frame.cancel()
+            await asyncio.gather(self._pending_frame, return_exceptions=True)
+            self._pending_frame = None
         await self._mixer.aclose()
         if self._close_tasks:
             await asyncio.gather(*self._close_tasks, return_exceptions=True)
@@ -437,7 +493,12 @@ class RealtimeVoiceBridge:
             msg = "connect() must succeed before start_agent()"
             raise RuntimeError(msg)
         self._session = session
-        audio_input = _AuthorizedParticipantAudioInput(self._room, rtc_module, self._participant_identities)
+        audio_input = _AuthorizedParticipantAudioInput(
+            self._room,
+            rtc_module,
+            self._participant_identities,
+            continuous_audio=isinstance(options, LiveVoiceAgentOptions),
+        )
         self._audio_input = audio_input
         session.input.audio = cast("AudioInput", audio_input)
         self._register_session_listeners(session, options)
