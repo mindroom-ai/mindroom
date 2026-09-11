@@ -104,7 +104,11 @@ class ToolValidationInfo:
 
 @dataclass
 class ToolMetadata:
-    """Complete metadata for a tool."""
+    """Complete metadata for a tool.
+
+    ``requires_room_context`` marks toolkits that need the live Matrix room
+    runtime, including its client, requester, and conversation context.
+    """
 
     name: str
     display_name: str

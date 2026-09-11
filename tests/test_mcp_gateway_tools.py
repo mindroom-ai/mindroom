@@ -18,6 +18,7 @@ from mindroom import agents, constants
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.personal_agent import resolve_personal_agent
 from mindroom.config.main import Config
+from mindroom.config.models import ToolConfigEntry
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, hook
@@ -96,6 +97,79 @@ async def test_metadata_search_never_constructs_toolkit(
     limited = await gateway.search_tools(context, limit=1)
     assert "error" not in limited
     assert len(limited["results"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize(
+    ("toolkit", "function"),
+    [
+        ("approved_egress", "request_network_access"),
+        ("attachments", "list_attachments"),
+        ("callback_manager", "mint_callback"),
+        ("dynamic_workflow", "list_workflows"),
+        ("external_trigger_manager", "list_triggers"),
+        ("matrix_api", "matrix_api"),
+        ("matrix_message", "matrix_message"),
+        ("matrix_room", "matrix_room"),
+        ("report_publishing", "publish_report"),
+        ("scheduler", "list_schedules"),
+        ("subagents", "agents_list"),
+        ("thread_model", "list_models"),
+        ("thread_summary", "set_thread_summary"),
+        ("usage_stats", "get_my_usage"),
+    ],
+)
+async def test_room_runtime_tools_are_hidden_and_cannot_be_selected(
+    context: PersonalAgentContext,
+    monkeypatch: pytest.MonkeyPatch,
+    toolkit: str,
+    function: str,
+    deferred: bool,
+) -> None:
+    """Room-dependent tools cannot be discovered or reached through direct gateway calls."""
+    config = context.config.model_copy(deep=True)
+    config.agents["personal"].tools = ["calculator", ToolConfigEntry(name=toolkit, defer=deferred)]
+    context = replace(context, config=config)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Gateway constructed a room-dependent toolkit")
+
+    monkeypatch.setattr(agents, "build_agent_toolkit", forbidden)
+    result = await gateway.search_tools(context)
+    assert "error" not in result
+    assert [item["toolkit"] for item in result["results"]] == ["calculator"]
+    for response in (
+        await gateway.search_tools(context, toolkit=toolkit),
+        await gateway.get_tool(context, toolkit=toolkit, function=function),
+        await gateway.invoke_tool(context, toolkit=toolkit, function=function, arguments={}),
+    ):
+        assert response == {
+            "error": {"code": "tool_not_found", "message": "This tool is not assigned to your personal agent."},
+        }
+
+
+@pytest.mark.asyncio
+async def test_gateway_rechecks_tool_metadata_after_discovery(
+    context: PersonalAgentContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A previously discovered function becomes inaccessible when its context requirement changes."""
+    result = await gateway.search_tools(context, toolkit="calculator")
+    assert "error" not in result
+    assert result["results"]
+    monkeypatch.setattr(TOOL_METADATA["calculator"], "requires_room_context", True)
+
+    result = await gateway.search_tools(context)
+    assert "error" not in result
+    assert [item["toolkit"] for item in result["results"]] == ["duckduckgo"]
+    for response in (
+        await gateway.get_tool(context, toolkit="calculator", function="add"),
+        await gateway.invoke_tool(context, toolkit="calculator", function="add", arguments={"a": 2, "b": 3}),
+    ):
+        assert response == {
+            "error": {"code": "tool_not_found", "message": "This tool is not assigned to your personal agent."},
+        }
 
 
 @pytest.mark.asyncio

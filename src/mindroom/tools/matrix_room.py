@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_room_context=True,
     icon="LayoutList",
     icon_color="text-blue-500",
     dependencies=["agno"],
