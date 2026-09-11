@@ -1040,6 +1040,8 @@ class MCPServerManager:
             self._require_active_state(state)
             if state.last_error is not None:
                 raise state.last_error
+            if before_dispatch is not None:
+                await before_dispatch()
             await self._validate_authoritative_oauth_lease(state, authorization_lease)
             self._require_session_oauth_lease(state, authorization_lease)
             if state.session is None or state.catalog is None or not state.connected:
@@ -1051,8 +1053,6 @@ class MCPServerManager:
                 include_tools=include_tools,
                 exclude_tools=exclude_tools,
             )
-            if before_dispatch is not None:
-                await before_dispatch()
             return await self._call_tool_once(
                 state,
                 remote_tool_name,

@@ -19050,9 +19050,9 @@ The gateway exposes compatible native and upstream MCP tools; it does not start 
 A shared agent's authored worker and credential scopes still determine whose service connection executes a call.
 Your selection changes only your clients, without changing another user's selection or disconnecting services.
 
-Eligibility and selection are checked again after tool preparation and hooks, before a provider action starts.
-Upstream MCP calls repeat that check after waiting for a remote call slot.
-Actions already running may finish after an agent is turned off.
+Eligibility and selection are checked again when a prepared call is admitted for execution, after hooks and any upstream MCP call queue.
+Upstream service credentials are validated after admission and before using the remote session.
+Calls already admitted may finish after an agent is turned off.
 Removing eligibility hides a saved choice; restoring that permission can restore the previously saved choice.
 Selections are bound to the signed Matrix identity, canonical requester, and provisioned account when enabled.
 Deleting and recreating a provisioned account does not restore its previous selection.
