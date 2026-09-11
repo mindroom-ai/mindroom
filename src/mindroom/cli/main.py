@@ -22,6 +22,7 @@ from .config import (
     load_config_quiet,
     print_config_search_locations,
 )
+from .config_reload import config_check_applied, config_fingerprint
 from .desktop import desktop_app
 from .local_stack import local_stack_setup
 from .migrate import config_migrate
@@ -63,6 +64,8 @@ avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
 threads_app = typer.Typer(help="Export Matrix threads to local files.")
 journal_app = typer.Typer(help="Inspect and rebind the durable event journal.")
 config_app.command("migrate")(config_migrate)
+config_app.command("fingerprint")(config_fingerprint)
+config_app.command("check-applied")(config_check_applied)
 app.add_typer(config_app, name="config")
 app.add_typer(plugins_app, name="plugins")
 app.add_typer(desktop_app, name="desktop")
