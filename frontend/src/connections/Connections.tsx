@@ -29,6 +29,7 @@ interface ConnectionService {
   is_shared: boolean;
   display_name: string;
   description: string;
+  icon: string | null;
   tools: string[];
 }
 
@@ -168,7 +169,10 @@ function ConnectionCard({
     <Card>
       <CardHeader>
         <div className="flex items-start gap-3">
-          <ConnectionIcon names={[service.provider, service.display_name]} />
+          <ConnectionIcon
+            names={[service.provider, service.display_name]}
+            iconName={service.icon}
+          />
           <div className="min-w-0 flex-1 space-y-2">
             <CardTitle className="break-words text-lg">
               {service.display_name}

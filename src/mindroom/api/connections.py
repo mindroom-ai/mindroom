@@ -32,6 +32,7 @@ class ConnectionService(BaseModel):
     is_shared: bool
     display_name: str
     description: str
+    icon: str | None
     tools: list[str]
 
 
@@ -142,6 +143,7 @@ def _agent_connections(
                 is_shared=not provider.requester_scoped_credentials and entity.execution_scope in {None, "shared"},
                 display_name=provider.display_name,
                 description=tool.description,
+                icon=tool.icon,
                 tools=[],
             ),
         )

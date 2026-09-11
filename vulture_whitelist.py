@@ -227,7 +227,7 @@ _._batch_get  # inherited Gmail tools call this override dynamically (src/mindro
 _._build_service  # Agno Google auth decorator calls this override dynamically (src/mindroom/custom_tools/google_drive.py)
 _.reject_legacy_defaults_fields  # unused method (src/mindroom/config/models.py)
 _.normalize_tool_filters  # unused method (src/mindroom/mcp/config.py)
-_.normalize_description  # unused method (src/mindroom/mcp/config.py)
+_.normalize_display_metadata  # unused method (src/mindroom/mcp/config.py)
 _.validate_provider_id  # unused method (src/mindroom/mcp/config.py)
 _.normalize_scopes  # unused method (src/mindroom/mcp/config.py)
 _.handle_exit  # unused method (src/mindroom/orchestrator.py)

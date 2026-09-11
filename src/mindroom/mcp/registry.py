@@ -145,6 +145,7 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
         name=tool_name,
         display_name=f"MCP {server_id.replace('_', ' ').title()}",
         description=f"MCP server '{server_id}' tools over {transport_label}.",
+        icon=server_config.icon,
         category=ToolCategory.DEVELOPMENT,
         status=ToolStatus.REQUIRES_CONFIG if is_oauth else ToolStatus.AVAILABLE,
         setup_type=SetupType.OAUTH if is_oauth else SetupType.NONE,
