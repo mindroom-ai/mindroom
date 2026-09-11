@@ -65,6 +65,7 @@ from mindroom.matrix.users import (
     preflight_managed_account_provisioning,
 )
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
+from mindroom.matrix_rtc.call_manager import preload_matrix_call_dependencies
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
@@ -1319,6 +1320,7 @@ class _MultiAgentOrchestrator:
         logger.info("Initializing multi-agent system...")
 
         config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
+        preload_matrix_call_dependencies(config)
         hook_registry = await asyncio.to_thread(self._build_hook_registry, config)
         entity_names = configured_entity_names(config)
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
