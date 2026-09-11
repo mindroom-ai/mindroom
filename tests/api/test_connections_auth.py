@@ -92,6 +92,7 @@ def connections_auth_client(
         "/api/config",
         "/api/credentials",
         "/api/workers",
+        "/api/usage",
         "/api/connections-admin",
         "/api/connections_extra/status",
         "/api/oauth/google_drive/connect",

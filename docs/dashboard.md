@@ -276,6 +276,27 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 | GET | `/api/workers` | List active sandbox workers |
 | POST | `/api/workers/cleanup` | Clean up idle sandbox workers |
 
+### Token Usage
+
+`GET /api/usage` returns retained token usage using the same collector as the
+`usage_stats` tool. It uses dashboard authentication; ordinary Connections users
+cannot access it. Standalone deployments should protect the dashboard with
+`MINDROOM_API_KEY` as described above.
+
+The JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`,
+and `user_breakdown`. Each user has a canonical `user_id`, token `totals`,
+`run_count`, and their own `model_breakdown`. Counters include input, output,
+total, cache read/write, reasoning, and audio tokens. Models include their
+provider. Requester aliases are combined; `user_id: null` holds unattributed
+usage.
+
+User and model breakdowns cover retained top-level runs. They can differ from
+session totals, which may include compacted history and nested team-member
+usage. Deleted sessions are unavailable. The `coverage`, `model_coverage`, and
+`user_coverage` fields describe missing sources and these limits. This is a
+retained-usage report, not a billing ledger. Responses contain no conversation
+content and use `Cache-Control: no-store`.
+
 ### Health & Readiness
 
 | Method | Endpoint | Description |

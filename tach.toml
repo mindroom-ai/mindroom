@@ -1186,6 +1186,7 @@ depends_on = [
     "mindroom.api.script_gateway",
     "mindroom.api.skills",
     "mindroom.api.tools",
+    "mindroom.api.usage",
     "mindroom.api.workers",
     "mindroom.constants",
     "mindroom.credentials_sync",
@@ -1385,6 +1386,13 @@ path = "mindroom.api.skills"
 depends_on = [
     "mindroom.constants",
     "mindroom.tool_system.skills",
+]
+
+[[modules]]
+path = "mindroom.api.usage"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.usage_stats",
 ]
 
 [[modules]]
