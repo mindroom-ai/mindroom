@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import os
 import signal
 import sys
@@ -2244,10 +2245,29 @@ class TestMultiAgentOrchestrator:
             assert "router" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
-    async def test_orchestrator_initialize_uses_custom_config_path(self, tmp_path: Path) -> None:
-        """Initialize should load the exact config file owned by the orchestrator."""
+    @pytest.mark.parametrize(("calls_enabled", "dependencies_available"), [(False, True), (True, False), (True, True)])
+    async def test_orchestrator_initialize_uses_custom_config_path(
+        self,
+        tmp_path: Path,
+        calls_enabled: bool,
+        dependencies_available: bool,
+    ) -> None:
+        """Load the owned config and prepare optional call SDKs before creating bots."""
         config_path = tmp_path / "custom-config.yaml"
         mock_config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
+        mock_config.calls.enabled = calls_enabled
+        call_import_threads: list[threading.Thread] = []
+        original_import = builtins.__import__
+
+        def record_import(name: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+            if name == "livekit.plugins":
+                call_import_threads.append(threading.current_thread())
+            return original_import(name, *args, **kwargs)
+
+        def create_bot(*_args: object) -> None:
+            assert call_import_threads == (
+                [threading.main_thread()] if calls_enabled and dependencies_available else []
+            )
 
         with (
             patch("mindroom.orchestrator.load_config", return_value=mock_config) as mock_load_config,
@@ -2267,7 +2287,12 @@ class TestMultiAgentOrchestrator:
                     },
                 ),
             ),
-            patch.object(_MultiAgentOrchestrator, "_create_managed_bot"),
+            patch.object(_MultiAgentOrchestrator, "_create_managed_bot", side_effect=create_bot),
+            patch(
+                "mindroom.matrix_rtc.call_manager.matrix_calls_dependencies_available",
+                return_value=dependencies_available,
+            ),
+            patch("builtins.__import__", new=record_import),
         ):
             orchestrator = _MultiAgentOrchestrator(
                 runtime_paths=resolve_runtime_paths(

@@ -152,6 +152,14 @@ def _build_call_instructions(chat_system_prompt: str) -> str:
     return f"{chat_system_prompt}\n\n{_VOICE_STYLE_ADDENDUM}"
 
 
+def preload_matrix_call_dependencies(config: Config) -> None:
+    """Load optional call SDKs before bots start syncing."""
+    if not config.calls.enabled or not matrix_calls_dependencies_available():
+        return
+    # LiveKit registers plugins on the main thread, so this import must not be offloaded.
+    from livekit.plugins import openai  # noqa: F401, PLC0415
+
+
 def maybe_build_call_manager(
     *,
     agent_name: str,
