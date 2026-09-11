@@ -10,8 +10,8 @@ import pytest
 
 from mindroom import constants, orchestrator
 from mindroom.api import config_lifecycle, main
+from mindroom.response_activity import ResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.response_tracking import ResponseActivityTracker
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from tests.api.conftest import trusted_upstream_headers
 
@@ -28,11 +28,11 @@ def reset_activity(test_client: TestClient) -> Iterator[None]:
     del test_client
     state = config_lifecycle.app_state(main.app)
     state.response_admission_gate = None
-    state.openai_response_tracker = ResponseActivityTracker()
+    state.openai_responses.clear()
     reset_runtime_state()
     yield
     state.response_admission_gate = None
-    state.openai_response_tracker = ResponseActivityTracker()
+    state.openai_responses.clear()
     reset_runtime_state()
 
 
@@ -91,8 +91,8 @@ def test_openai_request_blocks_idle(test_client: TestClient) -> None:
     state = config_lifecycle.app_state(main.app)
     state.response_admission_gate = ResponseAdmissionGate()
     set_runtime_ready()
-    with state.openai_response_tracker.track(responder="helper", requester_id="@alice:example.org"):
-        response = test_client.get("/api/responses/activity")
+    state.openai_responses.add(ResponseIdentity("helper", "@alice:example.org"))
+    response = test_client.get("/api/responses/activity")
     assert response.status_code == 200
     assert response.json()["status"] == "busy"
     assert response.json()["active_openai_requests"] == 1
@@ -145,11 +145,11 @@ def test_response_activity_details_requires_configured_matching_key(
     assert "wrong-key" not in response.text
 
 
-def test_response_activity_details_groups_identities_and_reconciles_unknown_slots(
+def test_response_activity_details_lists_responses_without_padding_admission_slots(
     test_client: TestClient,
     temp_config_file: Path,
 ) -> None:
-    """Each channel groups immutable identities and labels admitted slots without metadata as unknown."""
+    """Details list each response once, independently of nested admission counts."""
     _configure_details_runtime(test_client, temp_config_file, api_key="test-key")
     state = config_lifecycle.app_state(test_client.app)
     gate = ResponseAdmissionGate()
@@ -158,15 +158,14 @@ def test_response_activity_details_groups_identities_and_reconciles_unknown_slot
     assert gate.admit()
     set_runtime_ready()
 
-    with (
-        gate.track_response(responder="helper", requester_id="@alice:example.org"),
-        state.openai_response_tracker.track(responder="general", requester_id="@alice:example.org"),
-        state.openai_response_tracker.track(responder="general", requester_id="@alice:example.org"),
-    ):
-        response = test_client.get(
-            "/api/responses/activity/details",
-            headers={"Authorization": "Bearer test-key"},
-        )
+    gate.response_identities.add(ResponseIdentity("helper", "@alice:example.org"))
+    state.openai_responses.update(
+        [ResponseIdentity("general", "@alice:example.org"), ResponseIdentity("general", "@alice:example.org")],
+    )
+    response = test_client.get(
+        "/api/responses/activity/details",
+        headers={"Authorization": "Bearer test-key"},
+    )
 
     gate.release()
     gate.release()
@@ -181,46 +180,21 @@ def test_response_activity_details_groups_identities_and_reconciles_unknown_slot
                 "channel": "matrix",
                 "responder": "helper",
                 "requester_id": "@alice:example.org",
-                "operations": 1,
             },
-            {"channel": "matrix", "responder": None, "requester_id": None, "operations": 1},
             {
                 "channel": "openai",
                 "responder": "general",
                 "requester_id": "@alice:example.org",
-                "operations": 2,
+            },
+            {
+                "channel": "openai",
+                "responder": "general",
+                "requester_id": "@alice:example.org",
             },
         ],
         "status": "busy",
     }
     assert response.headers["cache-control"] == "no-store"
-
-
-def test_response_activity_details_coalesces_tracked_and_untracked_unknown_slots(
-    test_client: TestClient,
-    temp_config_file: Path,
-) -> None:
-    """One unknown identity row includes both tracked and metadata-free admitted slots."""
-    _configure_details_runtime(test_client, temp_config_file, api_key="test-key")
-    state = config_lifecycle.app_state(test_client.app)
-    gate = ResponseAdmissionGate()
-    state.response_admission_gate = gate
-    assert gate.admit()
-    assert gate.admit()
-    set_runtime_ready()
-
-    with gate.track_response():
-        response = test_client.get(
-            "/api/responses/activity/details",
-            headers={"Authorization": "Bearer test-key"},
-        )
-
-    gate.release()
-    gate.release()
-    assert response.status_code == 200
-    assert response.json()["responses"] == [
-        {"channel": "matrix", "responder": None, "requester_id": None, "operations": 2},
-    ]
 
 
 def test_response_activity_details_uses_api_key_even_with_trusted_upstream(
@@ -253,26 +227,11 @@ def test_aggregate_response_activity_never_serializes_identities(test_client: Te
     state = config_lifecycle.app_state(test_client.app)
     state.response_admission_gate = ResponseAdmissionGate()
     set_runtime_ready()
-    with state.openai_response_tracker.track(responder="helper", requester_id="@alice:example.org"):
-        payload = test_client.get("/api/responses/activity").json()
+    state.openai_responses.add(ResponseIdentity("helper", "@alice:example.org"))
+    payload = test_client.get("/api/responses/activity").json()
     assert "responses" not in payload
     assert "helper" not in str(payload)
     assert "@alice:example.org" not in str(payload)
-
-
-def test_recovery_work_blocks_idle(test_client: TestClient) -> None:
-    """Delivery recovery counts alongside admitted work without reserving admission."""
-    gate = ResponseAdmissionGate()
-    config_lifecycle.app_state(main.app).response_admission_gate = gate
-    set_runtime_ready()
-    with gate.track_background_response():
-        response = test_client.get("/api/responses/activity")
-        assert response.json()["status"] == "busy"
-        assert response.json()["active_matrix_operations"] == 1
-        assert gate.admit()
-        assert test_client.get("/api/responses/activity").json()["active_matrix_operations"] == 2
-        gate.release()
-    assert test_client.get("/api/responses/activity").json()["status"] == "idle"
 
 
 @pytest.mark.asyncio

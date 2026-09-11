@@ -481,7 +481,6 @@ class _MultiAgentOrchestrator:
             ),
             entity_permanently_unavailable=lambda name: name in self._permanently_failed_entities,
             recover_unavailable_final=self._recover_unavailable_final,
-            response_admission_gate=self._response_admission_gate,
         )
         self._startup_maintenance = StartupMaintenanceController(
             recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
@@ -628,13 +627,7 @@ class _MultiAgentOrchestrator:
                 )
                 return False
 
-        return await bot.recover_approval_final(
-            continuation.approval_id,
-            requester_id=continuation.requester_id,
-            responder=f"team/{continuation.entity_name}"
-            if continuation.entity_kind == "team"
-            else continuation.entity_name,
-        )
+        return await bot.recover_approval_final(continuation.approval_id)
 
     async def leave_matrix_room(self, agent_name: str, room_id: str) -> bool:
         """Route dashboard departures through the current bot's durable membership owner."""

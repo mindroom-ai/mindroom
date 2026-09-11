@@ -35,7 +35,6 @@ from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
 
 from mindroom import constants
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.api import config_lifecycle, openai_compat
@@ -62,11 +61,9 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_tracking import ResponseActivityTracker, ResponseIdentity
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
 from mindroom.tool_approval import shutdown_approval_runtime
-from mindroom.tool_system.runtime_context import DetachedRequesterContext, get_detached_requester_context
 from mindroom.tool_system.tool_calls import record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -2630,11 +2627,11 @@ class TestAutoRouting:
 
     def test_auto_routes_to_suggested_agent(self, app_client: TestClient) -> None:
         """Auto model routes to the agent suggested by suggest_responder()."""
-        observed: list[tuple[ResponseIdentity, ...]] = []
+        observed: list[tuple[str | None, str | None]] = []
 
         async def respond(*_args: object, **_kwargs: object) -> str:
-            tracker = config_lifecycle.app_state(app_client.app).openai_response_tracker
-            observed.append(tracker.snapshot())
+            (identity,) = config_lifecycle.app_state(app_client.app).openai_responses
+            observed.append((identity.responder, identity.requester_id))
             return "Here is your code"
 
         with (
@@ -2657,7 +2654,7 @@ class TestAutoRouting:
         # Response model field shows the resolved agent, not "auto"
         assert data["model"] == "code"
         assert data["choices"][0]["message"]["content"] == "Here is your code"
-        assert observed == [(ResponseIdentity(responder="code"),)]
+        assert observed == [("code", None)]
 
     def test_auto_fallback_when_routing_fails(self, app_client: TestClient) -> None:
         """When suggest_responder returns None, falls back to first agent."""
@@ -5367,14 +5364,14 @@ def test_response_activity_tracks_full_openai_request(
     observed: list[int] = []
 
     async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
-        observed.append(state.openai_response_tracker.count)
+        observed.append(len(state.openai_responses))
         if not stream:
             return JSONResponse({"ok": True})
 
         async def chunks() -> AsyncIterator[str]:
-            observed.append(state.openai_response_tracker.count)
+            observed.append(len(state.openai_responses))
             yield "data: hello\n\n"
-            observed.append(state.openai_response_tracker.count)
+            observed.append(len(state.openai_responses))
 
         return StreamingResponse(chunks())
 
@@ -5385,7 +5382,7 @@ def test_response_activity_tracks_full_openai_request(
     )
     assert response.status_code == 200, response.text
     assert observed == ([1, 1, 1] if stream else [1])
-    assert state.openai_response_tracker.count == 0
+    assert len(state.openai_responses) == 0
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -5399,13 +5396,13 @@ def test_response_activity_releases_failed_openai_request(
     observed: list[int] = []
 
     async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
-        observed.append(state.openai_response_tracker.count)
+        observed.append(len(state.openai_responses))
         if not stream:
             message = "generation failed"
             raise RuntimeError(message)
 
         async def chunks() -> AsyncIterator[str]:
-            observed.append(state.openai_response_tracker.count)
+            observed.append(len(state.openai_responses))
             yield "data: hello\n\n"
             message = "generation failed"
             raise RuntimeError(message)
@@ -5419,7 +5416,7 @@ def test_response_activity_releases_failed_openai_request(
             json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
         )
     assert observed == ([1, 1] if stream else [1])
-    assert state.openai_response_tracker.count == 0
+    assert len(state.openai_responses) == 0
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -5442,7 +5439,7 @@ def test_response_activity_releases_cancelled_openai_request(
             try:
                 await asyncio.Event().wait()
             finally:
-                unwound.append(state.openai_response_tracker.count)
+                unwound.append(len(state.openai_responses))
 
         async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
             if not stream:
@@ -5468,326 +5465,12 @@ def test_response_activity_releases_cancelled_openai_request(
             )
             try:
                 await asyncio.wait_for(started.wait(), timeout=2)
-                assert state.openai_response_tracker.count == 1
+                assert len(state.openai_responses) == 1
             finally:
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
         assert unwound == [1]
-        assert state.openai_response_tracker.count == 0
+        assert len(state.openai_responses) == 0
 
     asyncio.run(check())
-
-
-def _assert_openai_stream_cleanup_completed(
-    probe: SimpleNamespace,
-    model: str,
-    authority: DetachedRequesterContext,
-    tracker: ResponseActivityTracker,
-) -> None:
-    """Verify cleanup finished once with caller context before releasing request activity."""
-    assert probe.provider.close_count == 1
-    assert len(probe.observed) == 2
-    for count, requester, identity in probe.observed:
-        assert count == 1
-        assert requester is authority
-        assert identity is not None
-        assert identity.requester_id == "@caller:example.com"
-        assert identity.agent_name == model
-    assert probe.scope_storage.close_count == (1 if model.startswith("team/") else 0)
-    assert probe.team_storage.close_count == (1 if model.startswith("team/") else 0)
-    assert not probe.completion_locks[0].locked()
-    assert tracker.count == 0
-    assert get_detached_requester_context() is None
-    assert get_tool_execution_identity() is None
-
-
-def _prepare_openai_stream_cleanup_probe(
-    monkeypatch: pytest.MonkeyPatch,
-    model: str,
-    cleanup_fails: bool,
-    tracker: ResponseActivityTracker,
-    *,
-    native_generator: bool = False,
-) -> SimpleNamespace:
-    """Install agent/team resources with observable, blocked provider cleanup."""
-    cleanup_started = asyncio.Event()
-    finish_cleanup = asyncio.Event()
-    provider_waiting = asyncio.Event()
-    observed: list[tuple[int, DetachedRequesterContext | None, ToolExecutionIdentity | None]] = []
-    completion_locks: list[asyncio.Lock] = []
-
-    class ProviderStream:
-        close_count = 0
-        pulls = 0
-
-        def __aiter__(self) -> ProviderStream:
-            return self
-
-        async def __anext__(self) -> str | TeamContentEvent:
-            self.pulls += 1
-            if self.pulls > 1:
-                provider_waiting.set()
-                await asyncio.Event().wait()
-            return TeamContentEvent(content="Hello") if model.startswith("team/") else "Hello"
-
-        async def aclose(self) -> None:
-            self.close_count += 1
-            observed.append(
-                (
-                    tracker.count,
-                    get_detached_requester_context(),
-                    get_tool_execution_identity(),
-                ),
-            )
-            cleanup_started.set()
-            await finish_cleanup.wait()
-            observed.append(
-                (
-                    tracker.count,
-                    get_detached_requester_context(),
-                    get_tool_execution_identity(),
-                ),
-            )
-            if cleanup_fails:
-                message = "provider cleanup failed"
-                raise RuntimeError(message)
-
-    class Storage:
-        close_count = 0
-
-        def close(self) -> None:
-            self.close_count += 1
-
-    provider = ProviderStream()
-
-    async def provider_generator() -> AsyncIterator[str | TeamContentEvent]:
-        try:
-            yield await anext(provider)
-            yield await anext(provider)
-        finally:
-            await provider.aclose()
-
-    stream = provider_generator() if native_generator else provider
-    scope_storage = Storage()
-    team_storage = Storage()
-    team = _make_test_team()
-    team.db = team_storage
-    team.arun = MagicMock(return_value=stream)
-
-    @contextmanager
-    def scope_context(**_kwargs: object) -> Iterator[ScopeSessionContext]:
-        try:
-            yield ScopeSessionContext(
-                scope=HistoryScope(kind="team", scope_id="super_team"),
-                storage=scope_storage,
-                session=None,
-            )
-        finally:
-            scope_storage.close()
-
-    original_attach = openai_compat._attach_openai_completion_lock_release
-
-    def attach_lock(
-        response: JSONResponse | StreamingResponse,
-        completion_lock: asyncio.Lock,
-    ) -> JSONResponse | StreamingResponse:
-        completion_locks.append(completion_lock)
-        return original_attach(response, completion_lock)
-
-    monkeypatch.setattr(openai_compat, "_attach_openai_completion_lock_release", attach_lock)
-    monkeypatch.setattr(openai_compat, "stream_agent_response", lambda *_args, **_kwargs: stream)
-    monkeypatch.setattr(openai_compat, "open_bound_scope_session_context", scope_context)
-    monkeypatch.setattr(openai_compat, "_build_team", lambda *_args: ([], team, TeamMode.COORDINATE))
-    monkeypatch.setattr(
-        openai_compat,
-        "prepare_materialized_team_execution",
-        AsyncMock(return_value=_prepared_team_execution_context(final_prompt="Hello")),
-    )
-
-    return SimpleNamespace(
-        provider=provider,
-        scope_storage=scope_storage,
-        team_storage=team_storage,
-        cleanup_started=cleanup_started,
-        finish_cleanup=finish_cleanup,
-        provider_waiting=provider_waiting,
-        observed=observed,
-        completion_locks=completion_locks,
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model", ["general", "team/super_team"])
-@pytest.mark.parametrize("failure", ["headers-error", "body-error", "body-cancel"])
-@pytest.mark.parametrize("cleanup_fails", [False, True])
-@pytest.mark.parametrize("cancel_again", [False, True])
-async def test_response_activity_waits_for_provider_cleanup_after_send_failure(
-    team_app_client: TestClient,
-    team_config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-    model: str,
-    failure: str,
-    cleanup_fails: bool,
-    cancel_again: bool,
-) -> None:
-    """Transport failures must close prepared streams before releasing request activity."""
-    state = config_lifecycle.app_state(team_app_client.app)
-    runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-    authority = DetachedRequesterContext(
-        requester_id="@caller:example.com",
-        config=team_config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        config_provider=lambda: team_config,
-    )
-    monkeypatch.setattr(openai_compat, "_requester_authority", lambda *_args: authority)
-
-    sending = asyncio.Event()
-    probe = _prepare_openai_stream_cleanup_probe(monkeypatch, model, cleanup_fails, state.openai_response_tracker)
-
-    async def receive() -> dict[str, object]:
-        return {
-            "type": "http.request",
-            "body": json.dumps(
-                {"model": model, "messages": [{"role": "user", "content": "Hello"}], "stream": True},
-            ).encode(),
-            "more_body": False,
-        }
-
-    async def send(message: dict[str, object]) -> None:
-        failing_type = "http.response.start" if failure == "headers-error" else "http.response.body"
-        if message["type"] == failing_type:
-            sending.set()
-            if failure == "body-cancel":
-                await asyncio.Event().wait()
-            error_message = "connection closed during send"
-            raise OSError(error_message)
-
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.4"},
-        "method": "POST",
-        "path": "/v1/chat/completions",
-        "root_path": "",
-        "scheme": "http",
-        "query_string": b"",
-        "headers": [],
-        "server": ("test", 80),
-        "client": ("127.0.0.1", 1),
-        "http_version": "1.1",
-    }
-    task = asyncio.create_task(team_app_client.app(scope, receive, send))
-    cleanup_waiter = asyncio.create_task(probe.cleanup_started.wait())
-    try:
-        await asyncio.wait_for(sending.wait(), timeout=2)
-        if failure == "body-cancel":
-            task.cancel()
-        await asyncio.wait({task, cleanup_waiter}, timeout=2, return_when=asyncio.FIRST_COMPLETED)
-        assert probe.cleanup_started.is_set(), "Response returned before provider cleanup started"
-        if cancel_again:
-            task.cancel()
-            await asyncio.sleep(0)
-            task.cancel()
-            await asyncio.sleep(0)
-        assert not task.done()
-        assert state.openai_response_tracker.count == 1
-        assert probe.completion_locks[0].locked()
-    finally:
-        probe.finish_cleanup.set()
-        cleanup_waiter.cancel()
-        await asyncio.gather(cleanup_waiter, return_exceptions=True)
-        with pytest.raises(asyncio.CancelledError if failure == "body-cancel" else ClientDisconnect):
-            await task
-
-    _assert_openai_stream_cleanup_completed(probe, model, authority, state.openai_response_tracker)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model", ["general", "team/super_team"])
-@pytest.mark.parametrize("native_generator", [False, True], ids=["iterator", "generator"])
-@pytest.mark.parametrize("cleanup_fails", [False, True])
-@pytest.mark.parametrize("cancel_again", [False, True])
-async def test_response_activity_waits_for_provider_cleanup_after_receive_disconnect(
-    team_app_client: TestClient,
-    team_config: Config,
-    monkeypatch: pytest.MonkeyPatch,
-    model: str,
-    native_generator: bool,
-    cleanup_fails: bool,
-    cancel_again: bool,
-) -> None:
-    """Legacy ASGI disconnect cancellation cannot interrupt asynchronous provider cleanup."""
-    state = config_lifecycle.app_state(team_app_client.app)
-    runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-    authority = DetachedRequesterContext(
-        requester_id="@caller:example.com",
-        config=team_config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        config_provider=lambda: team_config,
-    )
-    monkeypatch.setattr(openai_compat, "_requester_authority", lambda *_args: authority)
-    probe = _prepare_openai_stream_cleanup_probe(
-        monkeypatch,
-        model,
-        cleanup_fails,
-        state.openai_response_tracker,
-        native_generator=native_generator,
-    )
-    received = False
-
-    async def receive() -> dict[str, object]:
-        nonlocal received
-        if not received:
-            received = True
-            return {
-                "type": "http.request",
-                "body": json.dumps(
-                    {"model": model, "messages": [{"role": "user", "content": "Hello"}], "stream": True},
-                ).encode(),
-                "more_body": False,
-            }
-        await probe.provider_waiting.wait()
-        return {"type": "http.disconnect"}
-
-    async def send(_message: dict[str, object]) -> None:
-        return None
-
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "method": "POST",
-        "path": "/v1/chat/completions",
-        "root_path": "",
-        "scheme": "http",
-        "query_string": b"",
-        "headers": [],
-        "server": ("test", 80),
-        "client": ("127.0.0.1", 1),
-        "http_version": "1.1",
-    }
-    task = asyncio.create_task(team_app_client.app(scope, receive, send))
-    cleanup_waiter = asyncio.create_task(probe.cleanup_started.wait())
-    try:
-        await asyncio.wait({task, cleanup_waiter}, timeout=2, return_when=asyncio.FIRST_COMPLETED)
-        assert probe.cleanup_started.is_set()
-        if cancel_again:
-            task.cancel()
-            await asyncio.sleep(0)
-            task.cancel()
-            await asyncio.sleep(0)
-        assert not task.done()
-        assert state.openai_response_tracker.count == 1
-        assert probe.completion_locks[0].locked()
-    finally:
-        probe.finish_cleanup.set()
-        cleanup_waiter.cancel()
-        await asyncio.gather(cleanup_waiter, return_exceptions=True)
-        if cancel_again:
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        else:
-            await task
-
-    _assert_openai_stream_cleanup_completed(probe, model, authority, state.openai_response_tracker)

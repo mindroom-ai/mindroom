@@ -32,7 +32,6 @@ from mindroom.config.yaml_includes import (
 )
 from mindroom.event_journal_open import pending_event_journal_restart
 from mindroom.logging_config import get_logger
-from mindroom.response_tracking import ResponseActivityTracker
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -43,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
+    from mindroom.response_activity import ResponseIdentity
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
     from mindroom.workers.backend import WorkerBackend
@@ -124,7 +124,7 @@ class _MindroomAppState:
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
     response_admission_gate: ResponseAdmissionGate | None = None
-    openai_response_tracker: ResponseActivityTracker = field(default_factory=ResponseActivityTracker)
+    openai_responses: set[ResponseIdentity] = field(default_factory=set)
     script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
     mcp_gateway_runtime: GatewayRuntime | None = None
 

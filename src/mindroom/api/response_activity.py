@@ -3,50 +3,30 @@
 from __future__ import annotations
 
 import secrets
-from collections import Counter
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
-from mindroom.response_activity import ActiveResponseInfo, DetailedResponseActivity, ResponseActivity
-from mindroom.response_tracking import ResponseIdentity, ResponseTrackingHandle
+from mindroom.response_activity import ActiveResponseInfo, DetailedResponseActivity, ResponseActivity, ResponseIdentity
 from mindroom.runtime_state import get_runtime_state
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 router = APIRouter(prefix="/api/responses", tags=["responses"])
-_OPENAI_TRACKING_HANDLE_SCOPE_KEY = "mindroom.response_activity.openai_tracking_handle"
 
 
-async def track_openai_request(request: Request) -> AsyncIterator[None]:
-    """Keep an OpenAI request counted until its response body has finished."""
-    state = config_lifecycle.app_state(request.app)
-    with state.openai_response_tracker.track() as handle:
-        request.scope[_OPENAI_TRACKING_HANDLE_SCOPE_KEY] = handle
-        try:
-            yield
-        finally:
-            request.scope.pop(_OPENAI_TRACKING_HANDLE_SCOPE_KEY, None)
-
-
-def update_openai_response_identity(
-    request: Request,
-    *,
-    responder: str | None = None,
-    requester_id: str | None = None,
-) -> None:
-    """Refine canonical metadata for the request-scoped OpenAI activity slot."""
-    handle = request.scope.get(_OPENAI_TRACKING_HANDLE_SCOPE_KEY)
-    if not isinstance(handle, ResponseTrackingHandle):
-        return
-    current = handle.identity
-    handle.identity = ResponseIdentity(
-        responder=responder if responder is not None else current.responder,
-        requester_id=requester_id if requester_id is not None else current.requester_id,
-    )
+async def track_openai_request(request: Request) -> AsyncIterator[ResponseIdentity]:
+    """Observe one HTTP request through its normal response-body lifecycle."""
+    responses = config_lifecycle.app_state(request.app).openai_responses
+    identity = ResponseIdentity()
+    responses.add(identity)
+    try:
+        yield identity
+    finally:
+        responses.remove(identity)
 
 
 def _response_activity_snapshot(request: Request) -> ResponseActivity:
@@ -56,8 +36,8 @@ def _response_activity_snapshot(request: Request) -> ResponseActivity:
     return ResponseActivity(
         runtime_phase=get_runtime_state().phase,
         admission_paused=gate.closed if gate is not None else None,
-        active_matrix_operations=gate.active_operation_count if gate is not None else None,
-        active_openai_requests=state.openai_response_tracker.count,
+        active_matrix_operations=gate.in_flight_response_count if gate is not None else None,
+        active_openai_requests=len(state.openai_responses),
     )
 
 
@@ -95,27 +75,14 @@ async def detailed_response_activity(
     aggregate = _response_activity_snapshot(request)
     state = config_lifecycle.app_state(request.app)
     gate = state.response_admission_gate
-    matrix_identities = gate.response_tracker.snapshot() if gate is not None else ()
-    openai_identities = state.openai_response_tracker.snapshot()
-
-    responses: list[ActiveResponseInfo] = []
-    for channel, total, identities in (
-        ("matrix", aggregate.active_matrix_operations or 0, matrix_identities),
-        ("openai", aggregate.active_openai_requests, openai_identities),
-    ):
-        grouped_identities = Counter(identities)
-        unknown_operations = total - len(identities)
-        if unknown_operations > 0:
-            grouped_identities[ResponseIdentity()] += unknown_operations
-        responses.extend(
-            ActiveResponseInfo(
-                channel=channel,
-                responder=identity.responder,
-                requester_id=identity.requester_id,
-                operations=operations,
-            )
-            for identity, operations in grouped_identities.items()
+    responses = [
+        ActiveResponseInfo(channel=channel, responder=identity.responder, requester_id=identity.requester_id)
+        for channel, identities in (
+            ("matrix", gate.response_identities if gate is not None else ()),
+            ("openai", state.openai_responses),
         )
+        for identity in identities
+    ]
 
     snapshot = DetailedResponseActivity.model_validate(
         {

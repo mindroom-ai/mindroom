@@ -21,10 +21,6 @@ Scope: the gate covers Matrix-driven response lifecycles plus requester-driven
 voice operations and external-trigger delivery. Direct agent-run entry points
 that bypass Matrix response policy, such as the OpenAI-compatible API in
 ``mindroom.api.openai_compat``, remain outside it.
-Delivery recovery and native child attempts are observed separately for
-activity reporting, without participating in admission decisions. Recovery
-can still run during replacement, and a cancelled child remains visible if
-its awaiting parent returns before the child finishes.
 
 Every state transition is deliberately synchronous. No critical section here
 contains an ``await``, so the single-threaded event loop cannot interleave one
@@ -37,16 +33,14 @@ interrupted and permanently leak a slot, wedging replacement admission.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.response_tracking import ResponseActivityTracker
-
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
-    from mindroom.response_tracking import ResponseTrackingHandle
+    from mindroom.response_activity import ResponseIdentity
 
 
 class ResponseAdmissionRefusedError(Exception):
@@ -65,9 +59,8 @@ class ResponseAdmissionRefusedError(Exception):
 class ResponseAdmissionGate:
     """Track in-flight responses and close admission while a replacement runs."""
 
+    response_identities: set[ResponseIdentity] = field(default_factory=set, init=False, repr=False)
     _in_flight_response_count: int = field(default=0, init=False)
-    _active_background_count: int = field(default=0, init=False)
-    response_tracker: ResponseActivityTracker = field(default_factory=ResponseActivityTracker, init=False)
     _closed: bool = field(default=False, init=False)
     _open_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
@@ -79,35 +72,6 @@ class ResponseAdmissionGate:
     def in_flight_response_count(self) -> int:
         """Return the number of admitted response-planning or lifecycle slots."""
         return self._in_flight_response_count
-
-    @property
-    def active_operation_count(self) -> int:
-        """Return admitted slots plus independently running response work."""
-        return self._in_flight_response_count + self._active_background_count
-
-    @contextmanager
-    def track_response(
-        self,
-        responder: str | None = None,
-        requester_id: str | None = None,
-    ) -> Iterator[ResponseTrackingHandle]:
-        """Attach metadata to work whose admission slot is already reserved."""
-        with self.response_tracker.track(responder=responder, requester_id=requester_id) as handle:
-            yield handle
-
-    @contextmanager
-    def track_background_response(
-        self,
-        responder: str | None = None,
-        requester_id: str | None = None,
-    ) -> Iterator[ResponseTrackingHandle]:
-        """Observe response work without reserving or waiting for admission."""
-        self._active_background_count += 1
-        try:
-            with self.track_response(responder=responder, requester_id=requester_id) as handle:
-                yield handle
-        finally:
-            self._active_background_count -= 1
 
     @property
     def closed(self) -> bool:
@@ -153,16 +117,12 @@ class ResponseAdmissionGate:
 async def admitted_response_decision(
     gate: ResponseAdmissionGate,
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
-    *,
-    responder: str | None = None,
-    requester_id: str | None = None,
-) -> AsyncIterator[ResponseTrackingHandle]:
+) -> AsyncIterator[None]:
     """Reserve replacement admission around one final authorization decision and its effects."""
     while not gate.admit():
         if not await wait_for_admission_or_shutdown():
             raise ResponseAdmissionRefusedError
     try:
-        with gate.track_response(responder=responder, requester_id=requester_id) as handle:
-            yield handle
+        yield
     finally:
         gate.release()

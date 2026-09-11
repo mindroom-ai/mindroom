@@ -67,76 +67,50 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 
 ## check-active-responses
 
-Check whether the running MindRoom process has active response work.
+Check the running process's admitted Matrix work and OpenAI-compatible requests.
 
-```bash
+```
 mindroom check-active-responses
 mindroom check-active-responses --json
-mindroom check-active-responses --url http://127.0.0.1:8765 --timeout 5
-```
-
-To include the active responder and requester identities, configure the operator key and request details:
-
-```bash
-export MINDROOM_API_KEY='<operator-key>'
 mindroom check-active-responses --details
 mindroom check-active-responses --details --json
 ```
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | The runtime is ready, admission is open, and no tracked response work is active. |
-| `1` | Matrix operations or OpenAI-compatible requests are active. |
-| `2` | Status is unavailable, including startup, runtime replacement, connection failure, or an incompatible server. |
+| `0` | Runtime ready, admission open, and no admitted Matrix work or active OpenAI requests. |
+| `1` | Admitted Matrix work or OpenAI-compatible requests are active. |
+| `2` | Status unavailable, including startup, replacement, connection failure, or an incompatible server. |
 
-The command reads a fresh snapshot from `GET /api/responses/activity`.
-Like health and readiness, this is an unauthenticated operational probe; it exposes only runtime phase, admission state, and aggregate counts.
-It does not expose room, user, agent, message, or tool details.
-The bundled API must be enabled and connected to the orchestrator; an API-only process cannot report the full runtime as idle.
+The command reads `GET /api/responses/activity`, an unauthenticated operational probe exposing only runtime phase, admission state, and counts.
+The bundled API must be enabled and connected to the orchestrator; an API-only process cannot report the runtime as idle.
 Responses carry `Cache-Control: no-store`.
 
-`--details` reads `GET /api/responses/activity/details` and adds a `responses` list while preserving the same idle, busy, and unavailable exit codes.
-Detailed access requires a nonempty `MINDROOM_API_KEY` in the selected runtime configuration and the exact matching bearer token on every request, including deployments that trust browser proxy authentication.
-The CLI reads that key from the selected environment; a missing key, rejected key, or incompatible detailed response exits `2` as unavailable.
-Calling the endpoint directly returns `503` when no operator key is configured and `401` when the bearer token is missing or does not match.
+`--details` uses `GET /api/responses/activity/details` and adds one row per response observed at the central Matrix response lifecycle or OpenAI request entry point.
+Rows contain `channel`, `responder`, and `requester_id`.
+The responder is the configured agent or `team/<team-name>`; the requester comes from the canonical response envelope or authenticated OpenAI requester context.
+Unknown identities are `null` in JSON and labeled unknown in text.
+Identities are held only in memory; no database, history, or Matrix lookups are added.
 
-Each detailed row identifies its `matrix` or `openai` channel, the configured response-owning agent or `team/<team-name>`, the canonical requester ID known to that operation, and an `operations` slot count.
-`requester_id` is a full Matrix user ID after configured human-alias resolution, not a display name; it can remain unknown for work that has no authenticated requester binding.
-Rows with the same channel, responder, and requester are grouped, so `operations` can be greater than one.
-The JSON fields `responder` and `requester_id` are `null` when metadata is unavailable; text output labels them as `unknown responder` and `unknown requester`.
-Internal delegated agents and individual team members are not enumerated separately unless they own another tracked response.
-Identity reporting does not query the database, response history, or Matrix to fill gaps.
-The aggregate endpoint remains identity-free.
+Detailed access requires a configured `MINDROOM_API_KEY` and the matching bearer token, including when browser proxy authentication is enabled.
+The CLI reads that key from the selected runtime environment.
+The endpoint returns `503` if no key is configured and `401` for a missing or invalid token; the CLI exits `2` for either failure.
+Aggregate output never includes identities.
 
-`active_matrix_operations` combines live admission slots with active delivery recovery.
-It includes response planning, waiting for response locks, generation, delivery, and other admitted Matrix operations such as voice and external-trigger delivery.
-It also includes frozen approval-final recovery, outbox resends, stale-response recovery, and unavailable-owner settlement while they run.
-Recovery is observed without changing its ability to run during runtime replacement.
-A native response attempt remains visible until it finishes, including cancellation cleanup that outlives its awaiting caller.
-Nested slots count separately, so this is a conservative work count, not a count of unique responses.
-`active_openai_requests` counts chat completion HTTP requests through the end of the response body, including streaming, and clears on errors or cancellation.
-If sending headers or a body chunk fails, the request stays active until its prepared stream resources have been closed.
-Persisted native tool-approval waits have released their live response slots and do not count as active work; publishing or resuming an approval does count while admitted.
-Interactive waits that still own a live slot remain busy.
+`active_matrix_operations` reads the existing admission count, including planning and response lock waits.
+Nested admission slots count separately, so this is not a count of unique responses.
+Detailed rows describe response lifecycles and do not need to match that count; planning and other admitted work can be busy before a response identity is available.
+`active_openai_requests` counts chat completion HTTP requests through their normal response-body lifetime.
+Persisted approval waits, delivery recovery outside admission, cleanup that outlives its response, unadmitted queues, and unrelated background jobs are outside this snapshot.
 
-This is a point-in-time observation, not a drain or a restart lock.
-New work can start immediately after the check.
-Unadmitted queued work and unrelated background jobs are outside these counters.
-For multiple MindRoom processes, check each process directly rather than a load-balanced service.
-Detailed reads walk the process's live in-memory entries on the runtime loop and reconcile their grouped slot totals with the aggregate counters.
-They do not provide durable history, and later snapshots can differ as operations start, finish, or acquire identity metadata.
+This is a point-in-time observation, not a drain or restart lock.
+New work can start immediately afterward.
+For multiple processes, check each process directly.
 
-The URL defaults to `MINDROOM_URL` from the selected runtime environment, then `http://127.0.0.1:8765`.
-Use `--config /path/to/config.yaml` to select an environment, `--url` to override the server, and `--timeout` to bound the HTTP request (10 seconds by default).
-The CLI sends `MINDROOM_API_KEY` as a bearer token when configured, for gateways that require it.
-Credentialed requests require HTTPS except on loopback URLs such as `http://127.0.0.1:8765`.
-
-For an in-container check:
-
-```bash
-docker exec <container> mindroom check-active-responses --url http://127.0.0.1:8765
-kubectl exec <pod> -c mindroom -- mindroom check-active-responses --url http://127.0.0.1:8765
-```
+The URL defaults to `MINDROOM_URL` from the selected environment, then `http://127.0.0.1:8765`.
+Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to bound the request (10 seconds by default).
+The CLI sends `MINDROOM_API_KEY` when configured; credentialed remote requests require HTTPS, while loopback HTTP is supported.
+Redirects are disabled.
 
 ## version
 

@@ -724,7 +724,6 @@ depends_on = [
     "mindroom.matrix.message_builder",
     "mindroom.matrix.room_history_reads",
     "mindroom.matrix_delivery",
-    "mindroom.response_admission",
     "mindroom.tool_approval",
 ]
 visibility = ["mindroom.orchestrator"]
@@ -968,12 +967,12 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.config_lifecycle"
 depends_on = [
+    "mindroom.response_activity",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
     "mindroom.event_journal_open",
     "mindroom.logging_config",
-    "mindroom.response_tracking",
 ]
 
 [[modules]]
@@ -1012,7 +1011,6 @@ depends_on = [
     "mindroom.external_triggers.models",
     "mindroom.external_triggers.replay_store",
     "mindroom.response_admission",
-    "mindroom.response_tracking",
 ]
 
 [[modules]]
@@ -1081,6 +1079,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.openai_compat"
 depends_on = [
+    "mindroom.response_activity",
     "mindroom.api.response_activity",
     "mindroom.knowledge.utils",
     "mindroom.agent_run_context",
@@ -1102,7 +1101,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.api.openai_streaming_protocol"
-depends_on = ["mindroom.background_tasks", "mindroom.tool_system.events"]
+depends_on = ["mindroom.tool_system.events"]
 
 [[modules]]
 path = "mindroom.api.openai_request_parsing"
@@ -1931,6 +1930,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.response_activity",
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
@@ -1974,10 +1974,9 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.response_admission"
-depends_on = ["mindroom.response_tracking"]
+depends_on = ["mindroom.response_activity"]
 visibility = [
     "mindroom.api.external_triggers",
-    "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.bot_runtime_view",
     "mindroom.matrix_rtc.call_manager",
@@ -3056,7 +3055,6 @@ depends_on = [
     "mindroom.matrix_rtc.transcript",
     "mindroom.matrix_rtc.voice_agent",
     "mindroom.model_defaults",
-    "mindroom.requester_identity",
     "mindroom.response_admission",
     "mindroom.session_ids",
 ]
@@ -5479,31 +5477,6 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.response_activity"
-depends_on = []
-
-[[modules]]
-path = "mindroom.api.response_activity"
-depends_on = [
-    "mindroom.api.config_lifecycle",
-    "mindroom.response_activity",
-    "mindroom.response_tracking",
-    "mindroom.runtime_state",
-]
-
-[[modules]]
-path = "mindroom.cli.response_activity"
-depends_on = [
-    "mindroom.cli.config",
-    "mindroom.constants",
-    "mindroom.response_activity",
-]
-
-[[modules]]
-path = "mindroom.response_tracking"
-depends_on = []
-
-[[modules]]
 path = "mindroom.api.mcp_identity"
 depends_on = ["mindroom.api.config_lifecycle", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.types", "mindroom.requester_identity"]
 
@@ -5518,3 +5491,15 @@ depends_on = ["mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.types"]
 [[modules]]
 path = "mindroom.mcp_gateway.selection_schema"
 depends_on = []
+
+[[modules]]
+path = "mindroom.response_activity"
+depends_on = []
+
+[[modules]]
+path = "mindroom.api.response_activity"
+depends_on = ["mindroom.api.config_lifecycle", "mindroom.response_activity", "mindroom.runtime_state"]
+
+[[modules]]
+path = "mindroom.cli.response_activity"
+depends_on = ["mindroom.cli.config", "mindroom.constants", "mindroom.response_activity"]

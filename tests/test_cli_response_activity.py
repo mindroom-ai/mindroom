@@ -221,7 +221,6 @@ def test_cli_details_json_uses_operator_key_and_detailed_route(
                 "channel": "openai",
                 "responder": "helper",
                 "requester_id": "@alice:example.org",
-                "operations": 2,
             },
         ],
     )
@@ -242,15 +241,15 @@ def test_cli_details_json_uses_operator_key_and_detailed_route(
 
 
 def test_cli_details_text_labels_unknown_identities(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Human output names channel, identity, and grouped operation count without hiding unknowns."""
+    """Human output names each channel and identity without hiding unknowns."""
     monkeypatch.setenv("MINDROOM_API_KEY", "test-secret")
     payload = _detailed_snapshot(
         status="busy",
         active_matrix_operations=1,
         active_openai_requests=1,
         responses=[
-            {"channel": "matrix", "responder": "helper", "requester_id": None, "operations": 1},
-            {"channel": "openai", "responder": None, "requester_id": None, "operations": 1},
+            {"channel": "matrix", "responder": "helper", "requester_id": None},
+            {"channel": "openai", "responder": None, "requester_id": None},
         ],
     )
     monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(200, json=payload))
@@ -259,8 +258,8 @@ def test_cli_details_text_labels_unknown_identities(monkeypatch: pytest.MonkeyPa
         ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--details"],
     )
     assert result.exit_code == 1, result.output
-    assert "Matrix: helper for unknown requester (1 operation)" in result.stdout
-    assert "OpenAI: unknown responder for unknown requester (1 operation)" in result.stdout
+    assert "Matrix: helper for unknown requester" in result.stdout
+    assert "OpenAI: unknown responder for unknown requester" in result.stdout
 
 
 def test_cli_details_requires_key_before_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -290,26 +289,21 @@ def test_cli_details_requires_key_before_request(monkeypatch: pytest.MonkeyPatch
         _detailed_snapshot(
             status="busy",
             active_openai_requests=1,
-            responses=[{"channel": "openai", "responder": 1, "requester_id": None, "operations": 1}],
+            responses=[{"channel": "openai", "responder": 1, "requester_id": None}],
         ),
         _detailed_snapshot(
             status="busy",
             active_openai_requests=1,
-            responses=[{"channel": "openai", "responder": None, "requester_id": None, "operations": "1"}],
-        ),
-        _detailed_snapshot(
-            status="busy",
-            active_openai_requests=2,
-            responses=[{"channel": "openai", "responder": None, "requester_id": None, "operations": 1}],
+            responses=[{"channel": "invalid", "responder": None, "requester_id": None}],
         ),
     ],
 )
-def test_cli_details_rejects_aggregate_invalid_rows_and_conflicting_totals(
+def test_cli_details_rejects_aggregate_and_invalid_rows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     payload: dict[str, object],
 ) -> None:
-    """Detailed mode accepts only the strict reconciled detailed schema."""
+    """Detailed mode requires response rows with valid channel and identity fields."""
     monkeypatch.setenv("MINDROOM_API_KEY", "test-secret")
     monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(200, json=payload))
     result = runner.invoke(

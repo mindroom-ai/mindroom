@@ -9,7 +9,6 @@ or config imports.
 
 from __future__ import annotations
 
-import asyncio
 import re
 import time
 from dataclasses import dataclass, field
@@ -20,15 +19,13 @@ from uuid import uuid4
 from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
-from anyio import CancelScope
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
 
     from agno.models.response import ToolExecution
     from agno.run.agent import RunOutputEvent
@@ -106,23 +103,6 @@ class OpenAIStreamingResponse(StreamingResponse):
 
     always_background: BackgroundTask | None = None
     completion_predicate: Callable[[], bool] | None = None
-    stream_cleanup: Callable[[], Awaitable[None]] | None = None
-
-    async def stream_response(self, send: Send) -> None:
-        """Cancel provider work once and drain its cleanup outside ASGI cancel scopes."""
-        stream_task = asyncio.create_task(super().stream_response(send))
-        try:
-            await asyncio.shield(stream_task)
-        except asyncio.CancelledError as cancellation:
-            stream_task.cancel()
-            # Legacy ASGI disconnects repeatedly cancel every await in their scope.
-            # The native stream task must finish its async-generator finally blocks.
-            with CancelScope(shield=True):
-                try:
-                    await wait_for_future_until_complete(stream_task)
-                except (Exception, asyncio.CancelledError) as error:
-                    raise cancellation from error
-            raise
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Stream the response, then run completion-scoped and always-run finalizers."""
@@ -137,39 +117,6 @@ class OpenAIStreamingResponse(StreamingResponse):
             completed = self.completion_predicate() if self.completion_predicate is not None else False
         else:
             completed = self.completion_predicate() if self.completion_predicate is not None else True
-        with CancelScope(shield=True):
-            try:
-                await run_coroutine_until_complete(
-                    self._finalize_response(
-                        completed=completed,
-                        response_error=response_error,
-                        completion_background=completion_background,
-                    ),
-                )
-            except asyncio.CancelledError:
-                if response_error is None:
-                    raise
-        # Cancellation during finalization must not replace the original failure.
-        if response_error is not None:
-            raise response_error
-
-    async def _finalize_response(
-        self,
-        *,
-        completed: bool,
-        response_error: BaseException | None,
-        completion_background: BackgroundTask | None,
-    ) -> None:
-        """Finish owned stream cleanup and backgrounds before request teardown."""
-        # The body may be suspended at a send, or never started if headers failed.
-        # Close it and the resources prepared before streaming before finalizers run.
-        for cleanup in (getattr(self.body_iterator, "aclose", None), self.stream_cleanup):
-            if cleanup is not None:
-                try:
-                    await cleanup()
-                except BaseException as error:
-                    if response_error is None:
-                        response_error = error
         await _run_openai_response_backgrounds(
             completed=completed,
             response_error=response_error,

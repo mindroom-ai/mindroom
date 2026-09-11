@@ -75,7 +75,7 @@ from mindroom.api.openai_streaming_protocol import (
 from mindroom.api.openai_streaming_protocol import (
     is_error_response as _is_error_response,
 )
-from mindroom.api.response_activity import track_openai_request, update_openai_response_identity
+from mindroom.api.response_activity import track_openai_request
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
@@ -89,6 +89,7 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
+from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.routing import suggest_responder
 from mindroom.teams import (
     TeamMode,
@@ -512,13 +513,10 @@ async def list_models(
     return JSONResponse(content=response.model_dump())
 
 
-@router.post(
-    "/chat/completions",
-    response_model=None,
-    dependencies=[Depends(track_openai_request, scope="request")],
-)
+@router.post("/chat/completions", response_model=None)
 async def chat_completions(
     request: Request,
+    activity: Annotated[ResponseIdentity, Depends(track_openai_request, scope="request")],
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
@@ -534,24 +532,23 @@ async def chat_completions(
     authority = _requester_authority(request, auth_error, config, runtime_paths)
     if isinstance(authority, JSONResponse):
         return authority
-    if authority is not None:
-        update_openai_response_identity(request, requester_id=authority.requester_id)
     with detached_requester_context(authority):
-        response = await _chat_completions(request, req, config, runtime_paths, prompt, thread_history, authority)
+        response = await _chat_completions(
+            request,
+            req,
+            config,
+            runtime_paths,
+            prompt,
+            thread_history,
+            authority,
+            activity,
+        )
     if isinstance(response, StreamingResponse):
         body_iterator = response.body_iterator
         response.body_iterator = context_bound_async_stream(
             context_factory=lambda: detached_requester_context(authority),
             stream_factory=lambda: aiter(body_iterator),
         )
-        if isinstance(response, _OpenAIStreamingResponse) and response.stream_cleanup is not None:
-            stream_cleanup = response.stream_cleanup
-
-            async def cleanup_with_requester() -> None:
-                with detached_requester_context(authority):
-                    await stream_cleanup()
-
-            response.stream_cleanup = cleanup_with_requester
     return response
 
 
@@ -563,6 +560,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     authority: DetachedRequesterContext | None,
+    activity: ResponseIdentity,
 ) -> JSONResponse | StreamingResponse:
     """Execute a completion inside its authenticated requester boundary."""
     # Resolve auto-routing if model is "auto"
@@ -581,7 +579,9 @@ async def _chat_completions(  # noqa: C901, PLR0912
 
     if not _requester_allows_model(agent_name, authority):
         return _error_response(403, "This requester is not authorized for the model", code="permission_denied")
-    update_openai_response_identity(request, responder=agent_name)
+
+    activity.responder = agent_name
+    activity.requester_id = authority.requester_id if authority is not None else None
 
     # Derive a namespaced session ID from request headers or fallback UUID.
     session_id = _derive_session_id(agent_name, request)
@@ -803,18 +803,10 @@ async def _stream_completion(  # noqa: C901, PLR0915
         ),
     )
 
-    stream_closed = False
-
-    async def cleanup() -> None:
-        nonlocal stream_closed
-        if not stream_closed:
-            stream_closed = True
-            await stream.aclose()
-
     # Peek at first event to detect errors before committing to SSE
     first_event = await anext(aiter(stream), None)
     if first_event is None:
-        await cleanup()
+        await stream.aclose()
         return _error_response(500, "Agent returned empty response", error_type="server_error")
 
     first_error = extract_agent_stream_failure(first_event)
@@ -825,7 +817,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
             session_id=session_id,
             error=first_error,
         )
-        await cleanup()
+        await stream.aclose()
         return _error_response(500, "Agent execution failed", error_type="server_error")
 
     state = CompletionStreamState.begin(agent_name)
@@ -885,14 +877,13 @@ async def _stream_completion(  # noqa: C901, PLR0915
             yield SSE_DONE
             stream_completed = not stream_failed
         finally:
-            await cleanup()
+            await stream.aclose()
 
     response = _OpenAIStreamingResponse(
         event_generator(),
         media_type="text/event-stream",
     )
     response.completion_predicate = lambda: stream_completed
-    response.stream_cleanup = cleanup
     return response
 
 
@@ -1150,26 +1141,16 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     scope_context: ScopeSessionContext | None = None
     stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None] | None = None
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
-    resources_closed = False
 
     async def _cleanup() -> None:
-        nonlocal resources_closed
-        if resources_closed:
-            return
-        resources_closed = True
-        with tool_execution_identity(execution_identity):
-            try:
-                if stream is not None:
-                    await stream.aclose()
-            finally:
-                try:
-                    stack.close()
-                finally:
-                    close_team_runtime_state_dbs(
-                        agents=agents,
-                        team_db=cast("BaseDb | None", team.db) if team is not None else None,
-                        shared_scope_storage=scope_context.storage if scope_context is not None else None,
-                    )
+        if stream is not None:
+            await stream.aclose()
+        stack.close()
+        close_team_runtime_state_dbs(
+            agents=agents,
+            team_db=cast("BaseDb | None", team.db) if team is not None else None,
+            shared_scope_storage=scope_context.storage if scope_context is not None else None,
+        )
 
     try:
         scope_context = stack.enter_context(
@@ -1300,9 +1281,13 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
             media_type="text/event-stream",
         )
         response.completion_predicate = lambda: stream_completed and not stream_failed
-        response.stream_cleanup = _cleanup
     except Exception:
-        await _cleanup()
+        stack.close()
+        close_team_runtime_state_dbs(
+            agents=agents,
+            team_db=cast("BaseDb | None", team.db) if team is not None else None,
+            shared_scope_storage=scope_context.storage if scope_context is not None else None,
+        )
         raise
     else:
         return response

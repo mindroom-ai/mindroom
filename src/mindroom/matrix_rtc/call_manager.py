@@ -59,7 +59,6 @@ from mindroom.matrix_rtc.voice_agent import (
     matrix_calls_dependencies_available,
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
-from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.response_admission import (
     ResponseAdmissionGate,
     ResponseAdmissionRefusedError,
@@ -488,7 +487,6 @@ class CallManager:
             async with admitted_response_decision(
                 self._response_admission_gate,
                 self._wait_for_admission_or_shutdown,
-                responder=self._agent_name,
             ):
                 lock = self._locks.setdefault(room_id, asyncio.Lock())
                 async with lock:
@@ -972,8 +970,6 @@ class CallManager:
             async with admitted_response_decision(
                 self._response_admission_gate,
                 self._wait_for_admission_or_shutdown,
-                responder=self._agent_name,
-                requester_id=resolve_human_requester_alias(requester_id, self._config, self._runtime_paths),
             ):
                 if not self._is_authorized_call_member(requester_id, room_id):
                     return
@@ -1077,8 +1073,6 @@ class CallManager:
         admission = admitted_response_decision(
             self._response_admission_gate,
             self._wait_for_admission_or_shutdown,
-            responder=self._agent_name,
-            requester_id=resolve_human_requester_alias(requester_id, self._config, self._runtime_paths),
         )
         try:
             await admission.__aenter__()

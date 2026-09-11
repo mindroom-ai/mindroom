@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING
 
-import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import (
     RunCompletedEvent,
@@ -19,12 +17,10 @@ from agno.run.agent import (
     ToolCallCompletedEvent,
     ToolCallStartedEvent,
 )
-from starlette.background import BackgroundTask
 
 from mindroom.api.openai_streaming_protocol import (
     SSE_DONE,
     CompletionStreamState,
-    OpenAIStreamingResponse,
     ToolStreamState,
     extract_agent_stream_failure,
     extract_stream_text,
@@ -33,87 +29,6 @@ from mindroom.api.openai_streaming_protocol import (
     new_completion_id,
     sse_chunk,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
-
-@pytest.mark.asyncio
-async def test_stream_cleanup_failures_preserve_send_error_and_run_finalizers() -> None:
-    """Every cleanup runs even when iterator close and prepared-resource close both fail."""
-    events: list[str] = []
-    send_error = RuntimeError("send failed")
-
-    async def body() -> AsyncIterator[str]:
-        try:
-            yield "data: partial\n\n"
-        finally:
-            events.append("body-close")
-            message = "body cleanup failed"
-            raise ValueError(message)
-
-    async def cleanup() -> None:
-        events.append("prepared-close")
-        message = "prepared cleanup failed"
-        raise ValueError(message)
-
-    async def always_background() -> None:
-        events.append("always-background")
-
-    async def completion_background() -> None:
-        events.append("completion-background")
-
-    async def receive() -> dict[str, str]:
-        return {"type": "http.request"}
-
-    async def send(message: dict[str, object]) -> None:
-        if message["type"] == "http.response.body":
-            raise send_error
-
-    iterator = body()
-    response = OpenAIStreamingResponse(iterator, background=BackgroundTask(completion_background))
-    response.stream_cleanup = cleanup
-    response.always_background = BackgroundTask(always_background)
-    with pytest.raises(RuntimeError, match="send failed") as raised:
-        await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
-
-    assert raised.value is send_error
-    assert events == ["body-close", "prepared-close", "always-background"]
-
-
-@pytest.mark.asyncio
-async def test_completed_stream_runs_backgrounds_when_prepared_cleanup_fails() -> None:
-    """Cleanup errors surface after always-run and completed-response backgrounds finish."""
-    events: list[str] = []
-    cleanup_error = RuntimeError("prepared cleanup failed")
-
-    async def body() -> AsyncIterator[str]:
-        yield SSE_DONE
-
-    async def cleanup() -> None:
-        events.append("prepared-close")
-        raise cleanup_error
-
-    async def always_background() -> None:
-        events.append("always-background")
-
-    async def completion_background() -> None:
-        events.append("completion-background")
-
-    async def receive() -> dict[str, str]:
-        return {"type": "http.request"}
-
-    async def send(_message: dict[str, object]) -> None:
-        return None
-
-    response = OpenAIStreamingResponse(body(), background=BackgroundTask(completion_background))
-    response.stream_cleanup = cleanup
-    response.always_background = BackgroundTask(always_background)
-    with pytest.raises(RuntimeError, match="prepared cleanup failed") as raised:
-        await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
-
-    assert raised.value is cleanup_error
-    assert events == ["prepared-close", "always-background", "completion-background"]
 
 
 def _parse_sse_line(line: str) -> dict:

@@ -355,8 +355,6 @@ _.runs_from_rows  # agno SqliteDb calls it on the run-object cache (src/mindroom
 _enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/agent_storage.py)
 
 export_threads  # FastAPI endpoint (src/mindroom/api/thread_exports.py)
-response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
-detailed_response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
 
 # MCP SDK OAuthAuthorizationServerProvider callbacks invoked by SDK HTTP handlers.
 _.register_client
@@ -371,4 +369,5 @@ _.generate_media  # FalTools registers this override as a media-generation tool 
 
 _collections_to_query  # Agno calls this hook to resolve the exact published read collection.
 
-_.validate_operation_totals  # Pydantic model validator (src/mindroom/response_activity.py)
+response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
+detailed_response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)

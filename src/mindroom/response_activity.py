@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Literal, Self
+from dataclasses import dataclass
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field
+
+
+@dataclass(eq=False)
+class ResponseIdentity:
+    """Mutable metadata for one response; equal names still identify distinct responses."""
+
+    responder: str | None = None
+    requester_id: str | None = None
 
 
 class ResponseActivity(BaseModel):
@@ -33,27 +42,16 @@ class ResponseActivity(BaseModel):
 
 
 class ActiveResponseInfo(BaseModel):
-    """One grouped identity and its active operation count."""
+    """One response observed at a central response entry point."""
 
     model_config = ConfigDict(strict=True, frozen=True)
 
     channel: Literal["matrix", "openai"]
     responder: str | None
     requester_id: str | None
-    operations: int = Field(gt=0)
 
 
 class DetailedResponseActivity(ResponseActivity):
-    """Operator-only identities reconciled against the authoritative counters."""
+    """Known response identities, independent of nested admission counts."""
 
     responses: list[ActiveResponseInfo]
-
-    @model_validator(mode="after")
-    def validate_operation_totals(self) -> Self:
-        """Reject detail rows that contradict either channel's aggregate count."""
-        matrix = sum(row.operations for row in self.responses if row.channel == "matrix")
-        openai = sum(row.operations for row in self.responses if row.channel == "openai")
-        if matrix != (self.active_matrix_operations or 0) or openai != self.active_openai_requests:
-            message = "Detailed response operation totals must match aggregate counts"
-            raise ValueError(message)
-        return self

@@ -39,7 +39,6 @@ from mindroom.response_admission import (
     ResponseAdmissionRefusedError,
     admitted_response_decision,
 )
-from mindroom.response_tracking import ResponseIdentity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -86,13 +85,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
         async with admitted_response_decision(
             runtime.response_admission_gate,
             runtime.wait_for_admission_or_shutdown,
-            responder=(
-                f"team/{trigger_snapshot.target.agent}"
-                if trigger_snapshot.target.agent in config.teams
-                else trigger_snapshot.target.agent
-            ),
-            requester_id=trigger_snapshot.owner_user_id,
-        ) as activity:
+        ):
             config_lifecycle.rebind_current_request_snapshot(request)
             config, runtime_paths, trigger_snapshot = await _request_config_and_trigger_snapshot(trigger_id, request)
             if len(body) > trigger_snapshot.max_body_bytes:
@@ -111,14 +104,6 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
                 config,
                 runtime_paths,
                 runtime.agent_reply_memberships,
-            )
-            activity.identity = ResponseIdentity(
-                responder=(
-                    f"team/{trigger_snapshot.target.agent}"
-                    if trigger_snapshot.target.agent in config.teams
-                    else trigger_snapshot.target.agent
-                ),
-                requester_id=trigger_snapshot.owner_user_id,
             )
             await _require_external_trigger_runtime_ready(runtime, trigger_snapshot)
             await _require_owner_joined_target_room(runtime, trigger_snapshot)

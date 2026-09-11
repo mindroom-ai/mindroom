@@ -30,7 +30,7 @@ class DecryptionDiagnostics:
     runtime: SupportsClientConfigMemberships
     runtime_paths: RuntimePaths
     read_position: Callable[[str], Awaitable[RoomMembershipPosition | None]]
-    admit_response: Callable[[], AbstractAsyncContextManager[object]]
+    admit_response: Callable[[], AbstractAsyncContextManager[None]]
     notice_is_fenced: Callable[[str], bool]
     _pending: set[tuple[str, str, int]] = field(default_factory=set, init=False)
 

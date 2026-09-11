@@ -144,6 +144,5 @@ def check_active_responses(
             channel = "Matrix" if row.channel == "matrix" else "OpenAI"
             responder = row.responder or "unknown responder"
             requester = row.requester_id or "unknown requester"
-            operation_label = "operation" if row.operations == 1 else "operations"
-            typer.echo(f"{channel}: {responder} for {requester} ({row.operations} {operation_label})")
+            typer.echo(f"{channel}: {responder} for {requester}")
     raise typer.Exit({"idle": 0, "busy": 1, "unavailable": 2}[snapshot.status])
