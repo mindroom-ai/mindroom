@@ -85,7 +85,8 @@ def _available_choices(
             for tool in context.config.resolve_entity(name).available_tools
             if tool in metadata and not metadata[tool].requires_room_context
         }
-        if previous is not None and set(tools) - available - set(previous.get(name) or ()):
+        previous_tools = previous.get(name, ()) if previous is not None else None
+        if previous_tools is not None and set(tools) - available - set(previous_tools):
             raise HTTPException(400, "Tool is not available for MCP")
         selected = tuple(tool for tool in tools if tool in available)
         if selected:

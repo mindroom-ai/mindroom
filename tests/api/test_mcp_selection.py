@@ -32,13 +32,15 @@ if TYPE_CHECKING:
 SELECTION = "/api/connections/mcp/selection"
 
 
-def test_removed_tools_cannot_block_other_agent_withdrawal(
+@pytest.mark.parametrize("all_tools", [False, True], ids=["custom", "all-tools"])
+def test_removed_tools_cannot_block_access_withdrawal(
     gateway_client: TestClient,
     signed_headers: Callable[[str], dict[str, str]],
+    all_tools: bool,
 ) -> None:
     """Old browser state and fresh reads can both withdraw access after a tool is removed."""
     config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
-    config.agents["personal"].tools = ["calculator", "duckduckgo"]
+    config.agents["personal"].tools = ["calculator", "duckduckgo", "shell"]
     config.agents["shared"] = AgentConfig(
         display_name="Shared",
         role="Shared tools",
@@ -46,17 +48,18 @@ def test_removed_tools_cannot_block_other_agent_withdrawal(
         credential_managers=["@alice:example.org"],
     )
     headers = {**signed_headers("alice"), "Origin": ORIGIN}
-    original = {"personal": ["calculator", "duckduckgo"], "shared": None}
+    browser_tools = ["calculator", "duckduckgo"]
+    original = {"personal": None if all_tools else browser_tools, "shared": None}
     assert gateway_client.post(SELECTION, headers=headers, json={"agents": original}).status_code == 200
-    config.agents["personal"].tools = ["calculator"]
+    config.agents["personal"].tools = ["calculator", "shell"]
     assert gateway_client.get(SELECTION, headers=headers).json()["agents"] == {
-        "personal": ["calculator"],
+        "personal": None if all_tools else ["calculator"],
         "shared": None,
     }
     response = gateway_client.post(
         SELECTION,
         headers=headers,
-        json={"agents": {"personal": original["personal"]}},
+        json={"agents": {"personal": browser_tools}},
     )
     assert response.status_code == 200, response.text
     assert response.json()["agents"] == {"personal": ["calculator"]}
@@ -173,6 +176,14 @@ def test_selection_rejects_invalid_or_unauthorized_names(
     body: object,
 ) -> None:
     """Browser input can narrow current authority but cannot invent agent access or owner IDs."""
+    assert (
+        gateway_client.post(
+            SELECTION,
+            headers={**signed_headers("alice"), "Origin": ORIGIN},
+            json={"agents": {}},
+        ).status_code
+        == 200
+    )
     response = gateway_client.post(SELECTION, headers={**signed_headers("alice"), "Origin": ORIGIN}, json=body)
     assert response.status_code in {400, 404}
 
