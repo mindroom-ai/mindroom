@@ -11,7 +11,8 @@ from mindroom.api import config_lifecycle, main
 
 
 def test_usage_endpoint_reads_retained_tokens_and_requires_dashboard_auth(
-    temp_config_file: Path, tmp_path: Path
+    temp_config_file: Path,
+    tmp_path: Path,
 ) -> None:
     """Missing auth must not expose usage; valid auth reads real retained sessions."""
     runtime_paths = constants.resolve_primary_runtime_paths(
@@ -27,7 +28,7 @@ def test_usage_endpoint_reads_retained_tokens_and_requires_dashboard_auth(
     with sqlite3.connect(database) as connection:
         connection.execute(
             "CREATE TABLE test_agent_sessions (session_id TEXT, session_type TEXT, agent_id TEXT, "
-            "team_id TEXT, user_id TEXT, session_data TEXT, runs TEXT)"
+            "team_id TEXT, user_id TEXT, session_data TEXT, runs TEXT)",
         )
         connection.execute(
             "INSERT INTO test_agent_sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -47,8 +48,8 @@ def test_usage_endpoint_reads_retained_tokens_and_requires_dashboard_auth(
                             "metrics": metrics,
                             "content": "private message",
                             "messages": [{"content": "private prompt"}],
-                        }
-                    ]
+                        },
+                    ],
                 ),
             ),
         )
