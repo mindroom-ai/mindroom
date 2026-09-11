@@ -40,6 +40,7 @@ from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
+from mindroom.api.usage import router as usage_router
 from mindroom.api.workers import router as workers_router
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials_sync import sync_env_to_credentials
@@ -731,6 +732,7 @@ app.include_router(schedules_router, dependencies=[Depends(verify_user)])
 app.include_router(knowledge_router, dependencies=[Depends(verify_user)])
 app.include_router(skills_router, dependencies=[Depends(verify_user)])
 app.include_router(tools_router, dependencies=[Depends(verify_user)])
+app.include_router(usage_router, dependencies=[Depends(verify_user)])
 app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)

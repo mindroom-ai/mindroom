@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage_stats import collect_admin_usage, collect_self_usage
 from mindroom.usage_stats_storage import (
@@ -141,6 +143,99 @@ def _wire(
         yield from rows.get(source.path_label, ())
 
     monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", iter_rows)
+
+
+def test_admin_groups_canonical_users_and_models_without_counting_duplicate_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    cached = replace(
+        _run(run_id="cached"),
+        metrics=MappingProxyType({**_metrics(10), "cache_read_tokens": 6, "cache_write_tokens": 1}),
+    )
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    cached,
+                    cached,
+                    _run(
+                        requester_id="@telegram-alice:example.test",
+                        run_id="alias",
+                        total_tokens=20,
+                        model="other-model",
+                    ),
+                    _run(requester_id="@bob:example.test", run_id="bob", total_tokens=15),
+                    _run(requester_id=None, run_id="unattributed", total_tokens=5),
+                    session_metrics=_metrics(100),
+                ),
+            ),
+        },
+    )
+
+    payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
+
+    users = payload["user_breakdown"]
+    assert [row["user_id"] for row in users] == ["@alice:example.test", "@bob:example.test", None]
+    assert [row["totals"]["total_tokens"] for row in users] == [30, 15, 5]
+    assert users[0]["run_count"] == 2
+    assert users[0]["totals"]["cache_read_tokens"] == 6
+    assert users[0]["totals"]["cache_write_tokens"] == 1
+    assert [(row["model"], row["totals"]["total_tokens"]) for row in users[0]["model_breakdown"]] == [
+        ("other-model", 20),
+        ("gpt-6-astra", 10),
+    ]
+    assert payload["totals"]["total_tokens"] == 100
+    assert "retained top-level runs" in payload["user_coverage"]["note"]
+    assert "null" in payload["user_coverage"]["note"]
+
+
+def test_admin_resolves_repeated_requesters_once_per_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _source()
+    run = _run(requester_id="@telegram-alice:example.test")
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(source, run, row_key="first"),
+                _row(source, run, row_key="second"),
+            ),
+        },
+    )
+    resolutions: list[str] = []
+
+    def resolve(user_id: str, config: Config, runtime_paths: RuntimePaths) -> str:
+        resolutions.append(user_id)
+        return resolve_human_requester_alias(user_id, config, runtime_paths)
+
+    monkeypatch.setattr("mindroom.usage_stats.resolve_human_requester_alias", resolve)
+    first = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+    changed_config = _config()
+    changed_config.authorization.aliases = {"@bob:example.test": ["@telegram-alice:example.test"]}
+    second = collect_admin_usage(config=changed_config, runtime_paths=_paths(tmp_path))
+
+    assert first.user_breakdown[0].user_id == "@alice:example.test"
+    assert second.user_breakdown[0].user_id == "@bob:example.test"
+    assert resolutions == ["@telegram-alice:example.test", "@telegram-alice:example.test"]
+
+
+def test_self_report_does_not_expose_user_breakdown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _source()
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _run()),)})
+    payload = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+    ).to_dict()
+    assert "user_breakdown" not in payload
+    assert "user_coverage" not in payload
 
 
 def test_self_usage_is_requester_scoped_and_small(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

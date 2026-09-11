@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
+from functools import cache
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.requester_identity import resolve_human_requester_alias
@@ -31,6 +32,7 @@ __all__ = [
     "UsageCoverage",
     "UsageModelBreakdownRow",
     "UsageReport",
+    "UsageUserBreakdownRow",
     "collect_admin_usage",
     "collect_self_usage",
 ]
@@ -46,6 +48,12 @@ _MODEL_COVERAGE_NOTE = (
     "Model breakdown uses retained top-level runs with usable token metrics. "
     "It does not necessarily sum to report totals, which may include compacted history "
     "and nested team-member usage."
+)
+_USER_COVERAGE_NOTE = (
+    "User breakdown uses requester-attributed retained top-level runs, grouped by canonical user identity. "
+    "A null user_id means requester identity is unavailable. "
+    "It does not necessarily sum to report totals, which may include compacted history "
+    "and nested team-member usage. Deleted sessions are unavailable."
 )
 
 
@@ -147,6 +155,25 @@ class UsageModelBreakdownRow:
 
 
 @dataclass(frozen=True, slots=True)
+class UsageUserBreakdownRow:
+    """Retained top-level usage for one canonical requester and their models."""
+
+    user_id: str | None
+    totals: TokenTotals
+    run_count: int
+    model_breakdown: tuple[UsageModelBreakdownRow, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the administrator-only user breakdown."""
+        return {
+            "user_id": self.user_id,
+            "totals": self.totals.to_dict(),
+            "run_count": self.run_count,
+            "model_breakdown": [row.to_dict() for row in self.model_breakdown],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class UsageReport:
     """Aggregate-only retained token usage."""
 
@@ -157,10 +184,11 @@ class UsageReport:
     coverage: UsageCoverage
     model_breakdown: tuple[UsageModelBreakdownRow, ...]
     model_coverage: UsageCoverage
+    user_breakdown: tuple[UsageUserBreakdownRow, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         """Return the stable custom-tool payload fields."""
-        return {
+        payload: dict[str, object] = {
             "scope": self.scope,
             "totals": self.totals.to_dict(),
             "session_count": self.session_count,
@@ -169,6 +197,10 @@ class UsageReport:
             "model_breakdown": [row.to_dict() for row in self.model_breakdown],
             "model_coverage": self.model_coverage.to_dict(),
         }
+        if self.scope == "admin":
+            payload["user_breakdown"] = [row.to_dict() for row in self.user_breakdown]
+            payload["user_coverage"] = replace(self.model_coverage, note=_USER_COVERAGE_NOTE).to_dict()
+        return payload
 
 
 @dataclass(slots=True)
@@ -227,6 +259,7 @@ class _UsageAccumulator:
 @dataclass(slots=True)
 class _ModelUsageAccumulator:
     buckets: dict[tuple[str, str], _Aggregate] = dataclass_field(default_factory=dict)
+    user_buckets: dict[str | None, dict[tuple[str, str], _Aggregate]] = dataclass_field(default_factory=dict)
     seen_runs: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
     unavailable_sources: set[str] = dataclass_field(default_factory=set)
 
@@ -257,6 +290,7 @@ class _ModelUsageAccumulator:
             row_key=row.row_key,
             buckets=self.buckets,
             seen_runs=self.seen_runs,
+            user_buckets=self.user_buckets if scope == "admin" else None,
         )
 
 
@@ -305,6 +339,10 @@ def _collect_usage(
     expected_agent: str | None,
     expected_requester: str | None,
 ) -> UsageReport:
+    @cache
+    def canonical_requester(requester_id: str) -> str:
+        return resolve_human_requester_alias(requester_id, config, runtime_paths)
+
     usage = _UsageAccumulator()
     model_usage = _ModelUsageAccumulator()
     scanned_sources: set[str] = set()
@@ -322,13 +360,13 @@ def _collect_usage(
                 model_usage.unavailable_sources.add(item.path_label)
                 continue
             row = item
-            if scope == "self" and not item.source.requester_isolated:
+            if scope == "admin" or not item.source.requester_isolated:
                 row = replace(
                     item,
                     runs=tuple(
                         replace(
                             run,
-                            requester_id=resolve_human_requester_alias(run.requester_id, config, runtime_paths),
+                            requester_id=canonical_requester(run.requester_id),
                         )
                         if run.requester_id is not None
                         else run
@@ -372,7 +410,22 @@ def _collect_usage(
         ),
         model_breakdown=model_breakdown,
         model_coverage=model_coverage,
+        user_breakdown=_user_breakdown(model_usage.user_buckets),
     )
+
+
+def _user_breakdown(
+    buckets: Mapping[str | None, dict[tuple[str, str], _Aggregate]],
+) -> tuple[UsageUserBreakdownRow, ...]:
+    rows: list[UsageUserBreakdownRow] = []
+    for user_id, models in buckets.items():
+        totals = TokenTotals()
+        run_count = 0
+        for aggregate in models.values():
+            totals = totals.plus(aggregate.totals)
+            run_count += aggregate.count
+        rows.append(UsageUserBreakdownRow(user_id, totals, run_count, _model_breakdown(models)))
+    return tuple(sorted(rows, key=lambda row: (-row.totals.total_tokens, row.user_id or "")))
 
 
 def _model_breakdown(
@@ -399,9 +452,10 @@ def _add_model_entries(
     row_key: str,
     buckets: dict[tuple[str, str], _Aggregate],
     seen_runs: set[tuple[str, str, str]],
+    user_buckets: dict[str | None, dict[tuple[str, str], _Aggregate]] | None = None,
 ) -> None:
     row_seen_runs: set[tuple[str, str, str]] = set()
-    accepted_entries: list[tuple[tuple[str, str], TokenTotals]] = []
+    accepted_entries: list[tuple[str | None, tuple[str, str], TokenTotals]] = []
     for run, totals in entries:
         if run.run_id is not None:
             identity = (source_path, row_key, run.run_id)
@@ -409,10 +463,12 @@ def _add_model_entries(
                 continue
             row_seen_runs.add(identity)
         key = (run.model_provider or "unknown", run.model or "unknown")
-        accepted_entries.append((key, totals))
+        accepted_entries.append((run.requester_id, key, totals))
     seen_runs.update(row_seen_runs)
-    for key, totals in accepted_entries:
+    for requester_id, key, totals in accepted_entries:
         buckets.setdefault(key, _Aggregate()).add(totals)
+        if user_buckets is not None:
+            user_buckets.setdefault(requester_id, {}).setdefault(key, _Aggregate()).add(totals)
 
 
 def _model_entries_for_row(
