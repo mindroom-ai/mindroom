@@ -15,7 +15,7 @@ from mindroom.constants import DEFAULT_MINDROOM_URL
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.response_activity import ResponseActivity
+    from mindroom.response_activity import DetailedResponseActivity, ResponseActivity
 
 
 def _is_loopback(host: str) -> bool:
@@ -25,10 +25,16 @@ def _is_loopback(host: str) -> bool:
         return host == "localhost"
 
 
-def _request_activity(runtime_paths: RuntimePaths, url: str | None, timeout: float) -> ResponseActivity:
+def _request_activity(  # noqa: C901
+    runtime_paths: RuntimePaths,
+    url: str | None,
+    timeout: float,
+    *,
+    details: bool = False,
+) -> ResponseActivity | DetailedResponseActivity:
     import httpx  # noqa: PLC0415
 
-    from mindroom.response_activity import ResponseActivity  # noqa: PLC0415
+    from mindroom.response_activity import DetailedResponseActivity, ResponseActivity  # noqa: PLC0415
 
     if not math.isfinite(timeout):
         msg = "--timeout must be finite."
@@ -49,13 +55,16 @@ def _request_activity(runtime_paths: RuntimePaths, url: str | None, timeout: flo
         msg = "Use an absolute HTTP(S) URL without credentials, query, or fragment."
         raise ValueError(msg)
     token = runtime_paths.env_value("MINDROOM_API_KEY")
+    if details and not token:
+        msg = "MINDROOM_API_KEY is required for --details."
+        raise ValueError(msg)
     if token and parsed_url.scheme == "http" and not _is_loopback(parsed_url.host):
         msg = "Use HTTPS when sending MINDROOM_API_KEY to a remote endpoint."
         raise ValueError(msg)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         response = httpx.get(
-            f"{base_url.rstrip('/')}/api/responses/activity",
+            f"{base_url.rstrip('/')}/api/responses/activity{'/details' if details else ''}",
             headers=headers,
             timeout=timeout,
             follow_redirects=False,
@@ -68,7 +77,8 @@ def _request_activity(runtime_paths: RuntimePaths, url: str | None, timeout: flo
         raise ValueError(msg)
     try:
         payload = response.json()
-        snapshot = ResponseActivity.model_validate(payload)
+        model = DetailedResponseActivity if details else ResponseActivity
+        snapshot = model.model_validate(payload)
     except ValueError as exc:
         msg = "MindRoom returned an invalid activity snapshot; check the URL and running version."
         raise ValueError(msg) from exc
@@ -90,11 +100,12 @@ def check_active_responses(
     ),
     timeout: float = typer.Option(10.0, "--timeout", min=0.001, help="HTTP timeout in seconds."),
     json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
+    details: bool = typer.Option(False, "--details", help="Show authenticated responder and requester details."),
 ) -> None:
     """Check live responses; exit 0 idle, 1 busy, or 2 unavailable."""
     try:
         runtime_paths = activate_cli_runtime(path=config_path)
-        snapshot = _request_activity(runtime_paths, url, timeout)
+        snapshot = _request_activity(runtime_paths, url, timeout, details=details)
     except (ValueError, OSError) as exc:
         if json_output:
             typer.echo(json.dumps({"status": "unavailable", "detail": str(exc)}))
@@ -115,4 +126,16 @@ def check_active_responses(
         typer.echo(
             f"Response activity unavailable (runtime: {snapshot.runtime_phase}, admission paused: {snapshot.admission_paused}).",
         )
+    if details and not json_output:
+        from mindroom.response_activity import DetailedResponseActivity  # noqa: PLC0415
+
+        if not isinstance(snapshot, DetailedResponseActivity):
+            msg = "Detailed response activity snapshot expected"
+            raise TypeError(msg)
+        for row in snapshot.responses:
+            channel = "Matrix" if row.channel == "matrix" else "OpenAI"
+            responder = row.responder or "unknown responder"
+            requester = row.requester_id or "unknown requester"
+            operation_label = "operation" if row.operations == 1 else "operations"
+            typer.echo(f"{channel}: {responder} for {requester} ({row.operations} {operation_label})")
     raise typer.Exit({"idle": 0, "busy": 1, "unavailable": 2}[snapshot.status])

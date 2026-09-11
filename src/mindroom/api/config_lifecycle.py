@@ -7,7 +7,7 @@ import threading
 import weakref
 from contextlib import ExitStack
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import yaml
@@ -32,6 +32,7 @@ from mindroom.config.yaml_includes import (
 )
 from mindroom.event_journal_open import pending_event_journal_restart
 from mindroom.logging_config import get_logger
+from mindroom.response_tracking import ResponseActivityTracker
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -123,7 +124,7 @@ class _MindroomAppState:
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
     response_admission_gate: ResponseAdmissionGate | None = None
-    active_openai_requests: int = 0
+    openai_response_tracker: ResponseActivityTracker = field(default_factory=ResponseActivityTracker)
     script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
     mcp_gateway_runtime: GatewayRuntime | None = None
 

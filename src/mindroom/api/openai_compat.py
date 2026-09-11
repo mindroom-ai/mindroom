@@ -75,7 +75,7 @@ from mindroom.api.openai_streaming_protocol import (
 from mindroom.api.openai_streaming_protocol import (
     is_error_response as _is_error_response,
 )
-from mindroom.api.response_activity import track_openai_request
+from mindroom.api.response_activity import track_openai_request, update_openai_response_identity
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
@@ -534,6 +534,8 @@ async def chat_completions(
     authority = _requester_authority(request, auth_error, config, runtime_paths)
     if isinstance(authority, JSONResponse):
         return authority
+    if authority is not None:
+        update_openai_response_identity(request, requester_id=authority.requester_id)
     with detached_requester_context(authority):
         response = await _chat_completions(request, req, config, runtime_paths, prompt, thread_history, authority)
     if isinstance(response, StreamingResponse):
@@ -571,6 +573,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
 
     if not _requester_allows_model(agent_name, authority):
         return _error_response(403, "This requester is not authorized for the model", code="permission_denied")
+    update_openai_response_identity(request, responder=agent_name)
 
     # Derive a namespaced session ID from request headers or fallback UUID.
     session_id = _derive_session_id(agent_name, request)

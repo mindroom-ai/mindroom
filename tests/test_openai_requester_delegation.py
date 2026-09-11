@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.response_tracking import ResponseIdentity
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from tests.identity_helpers import persist_entity_accounts
 
@@ -109,6 +110,9 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     ) -> str:
         assert ctx.requester_id == "@alice:example.org"
         assert execution_identity.requester_id == ctx.requester_id
+        assert config_lifecycle.app_state(api.client.app).openai_response_tracker.snapshot() == (
+            ResponseIdentity(responder="leader", requester_id="@alice:example.org"),
+        )
         tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
         return await tool.delegate_task("specialist", "help")
 
@@ -140,6 +144,7 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     assert "specialist result" in response.text
     assert len(child_calls) == 1
     assert get_detached_requester_context() is None
+    assert config_lifecycle.app_state(api.client.app).openai_response_tracker.count == 0
 
 
 @pytest.mark.parametrize(("key", "target"), [("legacy-key", "specialist"), ("alice-key", "forbidden")])

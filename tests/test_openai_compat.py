@@ -61,6 +61,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.response_tracking import ResponseIdentity
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
 from mindroom.tool_approval import shutdown_approval_runtime
@@ -2627,18 +2628,25 @@ class TestAutoRouting:
 
     def test_auto_routes_to_suggested_agent(self, app_client: TestClient) -> None:
         """Auto model routes to the agent suggested by suggest_responder()."""
+        observed: list[tuple[ResponseIdentity, ...]] = []
+
+        async def respond(*_args: object, **_kwargs: object) -> str:
+            tracker = config_lifecycle.app_state(app_client.app).openai_response_tracker
+            observed.append(tracker.snapshot())
+            return "Here is your code"
+
         with (
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", side_effect=respond),
         ):
             mock_route.return_value = "code"
-            mock_ai.return_value = "Here is your code"
 
             response = app_client.post(
                 "/v1/chat/completions",
                 json={
                     "model": "auto",
                     "messages": [{"role": "user", "content": "Write Python code"}],
+                    "user": "@bob:example.org",
                 },
             )
 
@@ -2647,6 +2655,7 @@ class TestAutoRouting:
         # Response model field shows the resolved agent, not "auto"
         assert data["model"] == "code"
         assert data["choices"][0]["message"]["content"] == "Here is your code"
+        assert observed == [(ResponseIdentity(responder="code"),)]
 
     def test_auto_fallback_when_routing_fails(self, app_client: TestClient) -> None:
         """When suggest_responder returns None, falls back to first agent."""
@@ -5356,14 +5365,14 @@ def test_response_activity_tracks_full_openai_request(
     observed: list[int] = []
 
     async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
-        observed.append(state.active_openai_requests)
+        observed.append(state.openai_response_tracker.count)
         if not stream:
             return JSONResponse({"ok": True})
 
         async def chunks() -> AsyncIterator[str]:
-            observed.append(state.active_openai_requests)
+            observed.append(state.openai_response_tracker.count)
             yield "data: hello\n\n"
-            observed.append(state.active_openai_requests)
+            observed.append(state.openai_response_tracker.count)
 
         return StreamingResponse(chunks())
 
@@ -5374,7 +5383,7 @@ def test_response_activity_tracks_full_openai_request(
     )
     assert response.status_code == 200, response.text
     assert observed == ([1, 1, 1] if stream else [1])
-    assert state.active_openai_requests == 0
+    assert state.openai_response_tracker.count == 0
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -5388,13 +5397,13 @@ def test_response_activity_releases_failed_openai_request(
     observed: list[int] = []
 
     async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
-        observed.append(state.active_openai_requests)
+        observed.append(state.openai_response_tracker.count)
         if not stream:
             message = "generation failed"
             raise RuntimeError(message)
 
         async def chunks() -> AsyncIterator[str]:
-            observed.append(state.active_openai_requests)
+            observed.append(state.openai_response_tracker.count)
             yield "data: hello\n\n"
             message = "generation failed"
             raise RuntimeError(message)
@@ -5408,7 +5417,7 @@ def test_response_activity_releases_failed_openai_request(
             json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
         )
     assert observed == ([1, 1] if stream else [1])
-    assert state.active_openai_requests == 0
+    assert state.openai_response_tracker.count == 0
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -5431,7 +5440,7 @@ def test_response_activity_releases_cancelled_openai_request(
             try:
                 await asyncio.Event().wait()
             finally:
-                unwound.append(state.active_openai_requests)
+                unwound.append(state.openai_response_tracker.count)
 
         async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
             if not stream:
@@ -5457,12 +5466,12 @@ def test_response_activity_releases_cancelled_openai_request(
             )
             try:
                 await asyncio.wait_for(started.wait(), timeout=2)
-                assert state.active_openai_requests == 1
+                assert state.openai_response_tracker.count == 1
             finally:
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
         assert unwound == [1]
-        assert state.active_openai_requests == 0
+        assert state.openai_response_tracker.count == 0
 
     asyncio.run(check())

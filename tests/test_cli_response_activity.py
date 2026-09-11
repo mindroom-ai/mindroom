@@ -28,6 +28,10 @@ def _snapshot(**overrides: object) -> dict[str, object]:
     }
 
 
+def _detailed_snapshot(**overrides: object) -> dict[str, object]:
+    return _snapshot(**{"responses": [], **overrides})
+
+
 @pytest.mark.parametrize(
     ("payload", "exit_code", "status"),
     [
@@ -201,3 +205,129 @@ def test_cli_rejects_conflicting_or_missing_wire_status(
     result = runner.invoke(app, ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--json"])
     assert result.exit_code == 2, result.output
     assert json.loads(result.stdout)["status"] == "unavailable"
+
+
+def test_cli_details_json_uses_operator_key_and_detailed_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Detailed JSON preserves validated identity rows and uses the protected route."""
+    monkeypatch.setenv("MINDROOM_API_KEY", "test-secret")
+    payload = _detailed_snapshot(
+        status="busy",
+        active_openai_requests=2,
+        responses=[
+            {
+                "channel": "openai",
+                "responder": "helper",
+                "requester_id": "@alice:example.org",
+                "operations": 2,
+            },
+        ],
+    )
+
+    def get(url: str, **kwargs: object) -> httpx.Response:
+        assert url.endswith("/api/responses/activity/details")
+        assert kwargs["headers"] == {"Authorization": "Bearer test-secret"}
+        assert kwargs["follow_redirects"] is False
+        return httpx.Response(200, json=payload)
+
+    monkeypatch.setattr(httpx, "get", get)
+    result = runner.invoke(
+        app,
+        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--details", "--json"],
+    )
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout) == payload
+
+
+def test_cli_details_text_labels_unknown_identities(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Human output names channel, identity, and grouped operation count without hiding unknowns."""
+    monkeypatch.setenv("MINDROOM_API_KEY", "test-secret")
+    payload = _detailed_snapshot(
+        status="busy",
+        active_matrix_operations=1,
+        active_openai_requests=1,
+        responses=[
+            {"channel": "matrix", "responder": "helper", "requester_id": None, "operations": 1},
+            {"channel": "openai", "responder": None, "requester_id": None, "operations": 1},
+        ],
+    )
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(200, json=payload))
+    result = runner.invoke(
+        app,
+        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--details"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "Matrix: helper for unknown requester (1 operation)" in result.stdout
+    assert "OpenAI: unknown responder for unknown requester (1 operation)" in result.stdout
+
+
+def test_cli_details_requires_key_before_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Detailed mode gives an actionable local error and sends no unauthenticated request."""
+    monkeypatch.delenv("MINDROOM_API_KEY", raising=False)
+    requested = False
+
+    def get(*_args: object, **_kwargs: object) -> httpx.Response:
+        nonlocal requested
+        requested = True
+        return httpx.Response(200, json=_detailed_snapshot())
+
+    monkeypatch.setattr(httpx, "get", get)
+    result = runner.invoke(
+        app,
+        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--details", "--json"],
+    )
+    assert result.exit_code == 2
+    assert requested is False
+    assert "MINDROOM_API_KEY" in json.loads(result.stdout)["detail"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _snapshot(),
+        _detailed_snapshot(
+            status="busy",
+            active_openai_requests=1,
+            responses=[{"channel": "openai", "responder": 1, "requester_id": None, "operations": 1}],
+        ),
+        _detailed_snapshot(
+            status="busy",
+            active_openai_requests=1,
+            responses=[{"channel": "openai", "responder": None, "requester_id": None, "operations": "1"}],
+        ),
+        _detailed_snapshot(
+            status="busy",
+            active_openai_requests=2,
+            responses=[{"channel": "openai", "responder": None, "requester_id": None, "operations": 1}],
+        ),
+    ],
+)
+def test_cli_details_rejects_aggregate_invalid_rows_and_conflicting_totals(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    """Detailed mode accepts only the strict reconciled detailed schema."""
+    monkeypatch.setenv("MINDROOM_API_KEY", "test-secret")
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(200, json=payload))
+    result = runner.invoke(
+        app,
+        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--details", "--json"],
+    )
+    assert result.exit_code == 2
+    assert json.loads(result.stdout)["status"] == "unavailable"
+
+
+def test_cli_details_wrong_key_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A rejected detailed operator key remains an unavailable CLI result."""
+    monkeypatch.setenv("MINDROOM_API_KEY", "wrong-key")
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(401, text="unauthorized"))
+    result = runner.invoke(
+        app,
+        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--details", "--json"],
+    )
+    assert result.exit_code == 2
+    assert json.loads(result.stdout)["status"] == "unavailable"
+    assert "wrong-key" not in result.output

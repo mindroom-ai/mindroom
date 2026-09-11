@@ -11,7 +11,9 @@ import pytest
 from mindroom import constants, orchestrator
 from mindroom.api import config_lifecycle, main
 from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.response_tracking import ResponseActivityTracker
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
+from tests.api.conftest import trusted_upstream_headers
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -26,11 +28,11 @@ def reset_activity(test_client: TestClient) -> Iterator[None]:
     del test_client
     state = config_lifecycle.app_state(main.app)
     state.response_admission_gate = None
-    state.active_openai_requests = 0
+    state.openai_response_tracker = ResponseActivityTracker()
     reset_runtime_state()
     yield
     state.response_admission_gate = None
-    state.active_openai_requests = 0
+    state.openai_response_tracker = ResponseActivityTracker()
     reset_runtime_state()
 
 
@@ -88,12 +90,146 @@ def test_openai_request_blocks_idle(test_client: TestClient) -> None:
     """OpenAI requests count even when the Matrix gate has no admitted work."""
     state = config_lifecycle.app_state(main.app)
     state.response_admission_gate = ResponseAdmissionGate()
-    state.active_openai_requests = 1
     set_runtime_ready()
-    response = test_client.get("/api/responses/activity")
+    with state.openai_response_tracker.track(responder="helper", requester_id="@alice:example.org"):
+        response = test_client.get("/api/responses/activity")
     assert response.status_code == 200
     assert response.json()["status"] == "busy"
     assert response.json()["active_openai_requests"] == 1
+
+
+def _configure_details_runtime(
+    test_client: TestClient,
+    temp_config_file: Path,
+    *,
+    api_key: str | None,
+    trusted_upstream: bool = False,
+) -> None:
+    process_env = {"MINDROOM_OWNER_USER_ID": "@owner:example.org"}
+    if api_key is not None:
+        process_env["MINDROOM_API_KEY"] = api_key
+    if trusted_upstream:
+        process_env.update(
+            {
+                "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+                "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+                "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+                "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
+            },
+        )
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env=process_env)
+    main.initialize_api_app(test_client.app, runtime_paths)
+
+
+@pytest.mark.parametrize(
+    ("api_key", "headers", "status_code"),
+    [
+        (None, {}, 503),
+        ("test-key", {}, 401),
+        ("test-key", {"Authorization": "Bearer wrong-key"}, 401),
+    ],
+)
+def test_response_activity_details_requires_configured_matching_key(
+    test_client: TestClient,
+    temp_config_file: Path,
+    api_key: str | None,
+    headers: dict[str, str],
+    status_code: int,
+) -> None:
+    """Detailed identities fail closed without the selected runtime's exact operator key."""
+    _configure_details_runtime(test_client, temp_config_file, api_key=api_key)
+    response = test_client.get("/api/responses/activity/details", headers=headers)
+    assert response.status_code == status_code
+    assert "test-key" not in response.text
+    assert "wrong-key" not in response.text
+
+
+def test_response_activity_details_groups_identities_and_reconciles_unknown_slots(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Each channel groups immutable identities and labels admitted slots without metadata as unknown."""
+    _configure_details_runtime(test_client, temp_config_file, api_key="test-key")
+    state = config_lifecycle.app_state(test_client.app)
+    gate = ResponseAdmissionGate()
+    state.response_admission_gate = gate
+    assert gate.admit()
+    assert gate.admit()
+    set_runtime_ready()
+
+    with (
+        gate.track_response(responder="helper", requester_id="@alice:example.org"),
+        state.openai_response_tracker.track(responder="general", requester_id="@alice:example.org"),
+        state.openai_response_tracker.track(responder="general", requester_id="@alice:example.org"),
+    ):
+        response = test_client.get(
+            "/api/responses/activity/details",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    gate.release()
+    gate.release()
+    assert response.status_code == 200
+    assert response.json() == {
+        "runtime_phase": "ready",
+        "admission_paused": False,
+        "active_matrix_operations": 2,
+        "active_openai_requests": 2,
+        "responses": [
+            {
+                "channel": "matrix",
+                "responder": "helper",
+                "requester_id": "@alice:example.org",
+                "operations": 1,
+            },
+            {"channel": "matrix", "responder": None, "requester_id": None, "operations": 1},
+            {
+                "channel": "openai",
+                "responder": "general",
+                "requester_id": "@alice:example.org",
+                "operations": 2,
+            },
+        ],
+        "status": "busy",
+    }
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_response_activity_details_uses_api_key_even_with_trusted_upstream(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Proxy identity neither grants nor blocks direct operator-key access."""
+    _configure_details_runtime(test_client, temp_config_file, api_key="test-key", trusted_upstream=True)
+    state = config_lifecycle.app_state(test_client.app)
+    state.response_admission_gate = ResponseAdmissionGate()
+    set_runtime_ready()
+    assert (
+        test_client.get(
+            "/api/responses/activity/details",
+            headers=trusted_upstream_headers(),
+        ).status_code
+        == 401
+    )
+    assert (
+        test_client.get(
+            "/api/responses/activity/details",
+            headers={"Authorization": "Bearer test-key"},
+        ).status_code
+        == 200
+    )
+
+
+def test_aggregate_response_activity_never_serializes_identities(test_client: TestClient) -> None:
+    """Public aggregate activity remains free of responder and requester metadata."""
+    state = config_lifecycle.app_state(test_client.app)
+    state.response_admission_gate = ResponseAdmissionGate()
+    set_runtime_ready()
+    with state.openai_response_tracker.track(responder="helper", requester_id="@alice:example.org"):
+        payload = test_client.get("/api/responses/activity").json()
+    assert "responses" not in payload
+    assert "helper" not in str(payload)
+    assert "@alice:example.org" not in str(payload)
 
 
 def test_recovery_work_blocks_idle(test_client: TestClient) -> None:

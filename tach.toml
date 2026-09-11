@@ -973,6 +973,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.event_journal_open",
     "mindroom.logging_config",
+    "mindroom.response_tracking",
 ]
 
 [[modules]]
@@ -5477,6 +5478,7 @@ path = "mindroom.api.response_activity"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.response_activity",
+    "mindroom.response_tracking",
     "mindroom.runtime_state",
 ]
 
