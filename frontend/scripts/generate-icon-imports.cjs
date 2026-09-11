@@ -18,6 +18,7 @@ for (const tool of toolsMetadata.tools) {
 // Group icons by library
 const iconsByLibrary = {
   fa: [],
+  fi: [],
   si: [],
   gi: [],
   tb: [],
@@ -30,6 +31,8 @@ const iconsByLibrary = {
 for (const icon of iconNames) {
   if (icon.startsWith('Fa')) {
     iconsByLibrary.fa.push(icon);
+  } else if (/^Fi[A-Z]/.test(icon)) {
+    iconsByLibrary.fi.push(icon);
   } else if (icon.startsWith('Si')) {
     iconsByLibrary.si.push(icon);
   } else if (icon.startsWith('Gi')) {
@@ -68,6 +71,9 @@ function iconImport(library, icons) {
 if (iconsByLibrary.fa.length > 0) {
   imports += iconImport("react-icons/fa", iconsByLibrary.fa);
 }
+if (iconsByLibrary.fi.length > 0) {
+  imports += iconImport("react-icons/fi", iconsByLibrary.fi);
+}
 if (iconsByLibrary.si.length > 0) {
   imports += iconImport("react-icons/si", iconsByLibrary.si);
 }
@@ -86,15 +92,21 @@ if (iconsByLibrary.wi.length > 0) {
 if (iconsByLibrary.aws.length > 0) {
   imports += iconImport("./awsIcons", iconsByLibrary.aws);
 }
+if (iconsByLibrary.lucide.length > 0) {
+  imports += iconImport("lucide-react", iconsByLibrary.lucide);
+}
 
 // Create the icon mapping
 imports += `
 // Map of all icons we use
-const iconMap: Record<string, any> = {
+export const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
 `;
 
 // Add all the imported icons to the map
 for (const icon of iconsByLibrary.fa) {
+  imports += `  ${icon},\n`;
+}
+for (const icon of iconsByLibrary.fi) {
   imports += `  ${icon},\n`;
 }
 for (const icon of iconsByLibrary.si) {
@@ -113,6 +125,9 @@ for (const icon of iconsByLibrary.wi) {
   imports += `  ${icon},\n`;
 }
 for (const icon of iconsByLibrary.aws) {
+  imports += `  ${icon},\n`;
+}
+for (const icon of iconsByLibrary.lucide) {
   imports += `  ${icon},\n`;
 }
 
@@ -152,7 +167,7 @@ export function getIconForTool(
 }
 
 // Export specific lucide icons that might be needed elsewhere
-export const {
+export {
   Calculator,
   Folder,
   Terminal,
@@ -168,7 +183,7 @@ export const {
   Film,
   VolumeX,
   Volume2,
-} = LucideIcons;
+} from "lucide-react";
 `;
 
 // Write the generated file
@@ -177,6 +192,7 @@ fs.writeFileSync(outputPath, imports, "utf8");
 
 console.log(`✅ Generated icon imports for ${iconNames.size} unique icons`);
 console.log(`   - ${iconsByLibrary.fa.length} from react-icons/fa`);
+console.log(`   - ${iconsByLibrary.fi.length} from react-icons/fi`);
 console.log(`   - ${iconsByLibrary.si.length} from react-icons/si`);
 console.log(`   - ${iconsByLibrary.gi.length} from react-icons/gi`);
 console.log(`   - ${iconsByLibrary.tb.length} from react-icons/tb`);

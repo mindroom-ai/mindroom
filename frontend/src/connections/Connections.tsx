@@ -19,6 +19,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ConnectedClients } from "./ConnectedClients";
+import { ConnectionIcon } from "./ConnectionIcon";
 import { connectWithPopup, type OAuthAuthorization } from "./oauthPopup";
 import { requestConnection } from "./request";
 import { useMcpSelection } from "./useMcpSelection";
@@ -165,13 +166,18 @@ function ConnectionCard({
   return (
     <Card>
       <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <CardTitle className="text-lg">{service.display_name}</CardTitle>
-          {!loading && status && (
-            <Badge variant={status.connected ? "default" : "secondary"}>
-              {status.connected ? "Connected" : "Not connected"}
-            </Badge>
-          )}
+        <div className="flex items-start gap-3">
+          <ConnectionIcon names={[service.provider, service.display_name]} />
+          <div className="min-w-0 flex-1 space-y-2">
+            <CardTitle className="break-words text-lg">
+              {service.display_name}
+            </CardTitle>
+            {!loading && status && (
+              <Badge variant={status.connected ? "default" : "secondary"}>
+                {status.connected ? "Connected" : "Not connected"}
+              </Badge>
+            )}
+          </div>
         </div>
         <CardDescription>{service.description}</CardDescription>
         <div className="flex flex-wrap gap-2">
@@ -426,13 +432,18 @@ export function Connections() {
                 .map((tool) => (
                   <Card key={tool.name}>
                     <CardHeader>
-                      <div className="flex items-start justify-between gap-3">
-                        <CardTitle className="text-lg">
-                          {tool.display_name}
-                        </CardTitle>
-                        {tool.requires_room_context && (
-                          <Badge variant="secondary">MindRoom only</Badge>
-                        )}
+                      <div className="flex items-start gap-3">
+                        <ConnectionIcon
+                          names={[tool.name, tool.display_name]}
+                        />
+                        <div className="min-w-0 flex-1 space-y-2">
+                          <CardTitle className="break-words text-lg">
+                            {tool.display_name}
+                          </CardTitle>
+                          {tool.requires_room_context && (
+                            <Badge variant="secondary">MindRoom only</Badge>
+                          )}
+                        </div>
                       </div>
                       <CardDescription>{tool.description}</CardDescription>
                     </CardHeader>

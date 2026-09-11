@@ -8,9 +8,7 @@ import {
   FaCode,
   FaAws,
   FaCalendarAlt,
-  FaImage,
   FaTerminal,
-  FaMicrophone,
   FaRobot,
   FaFolder,
   FaFileExport,
@@ -31,6 +29,7 @@ import {
   FaNewspaper,
   FaFileAlt,
 } from "react-icons/fa";
+import { FiShield } from "react-icons/fi";
 import {
   SiDiscord,
   SiSlack,
@@ -79,16 +78,55 @@ import {
 import { TbBrain } from "react-icons/tb";
 import { WiDaySunny } from "react-icons/wi";
 import { AwsRedshift } from "./awsIcons";
+import {
+  MessageSquare,
+  LayoutList,
+  Mic,
+  CircleCheckBig,
+  MessageCircleMore,
+  Tags,
+  Calculator,
+  VolumeX,
+  Bot,
+  Code,
+  Settings,
+  Globe,
+  PackagePlus,
+  Terminal,
+  TrendingUp,
+  Video,
+  Workflow,
+  FileCode2,
+  Clock,
+  Mail,
+  RefreshCw,
+  Lock,
+  Unplug,
+  Paperclip,
+  Webhook,
+  Minimize2,
+  Users,
+  MonitorUp,
+  Database,
+  Brain,
+  Share2,
+  Calendar,
+  Cpu,
+  ListTodo,
+  Search,
+  Home,
+} from "lucide-react";
 
 // Map of all icons we use
-const iconMap: Record<string, any> = {
+export const iconMap: Record<
+  string,
+  React.ComponentType<{ className?: string }>
+> = {
   FaCog,
   FaCode,
   FaAws,
   FaCalendarAlt,
-  FaImage,
   FaTerminal,
-  FaMicrophone,
   FaRobot,
   FaFolder,
   FaFileExport,
@@ -108,6 +146,7 @@ const iconMap: Record<string, any> = {
   FaHackerNews,
   FaNewspaper,
   FaFileAlt,
+  FiShield,
   SiDiscord,
   SiSlack,
   SiTelegram,
@@ -154,6 +193,42 @@ const iconMap: Record<string, any> = {
   TbBrain,
   WiDaySunny,
   AwsRedshift,
+  MessageSquare,
+  LayoutList,
+  Mic,
+  CircleCheckBig,
+  MessageCircleMore,
+  Tags,
+  Calculator,
+  VolumeX,
+  Bot,
+  Code,
+  Settings,
+  Globe,
+  PackagePlus,
+  Terminal,
+  TrendingUp,
+  Video,
+  Workflow,
+  FileCode2,
+  Clock,
+  Mail,
+  RefreshCw,
+  Lock,
+  Unplug,
+  Paperclip,
+  Webhook,
+  Minimize2,
+  Users,
+  MonitorUp,
+  Database,
+  Brain,
+  Share2,
+  Calendar,
+  Cpu,
+  ListTodo,
+  Search,
+  Home,
 };
 
 /**
@@ -190,7 +265,7 @@ export function getIconForTool(
 }
 
 // Export specific lucide icons that might be needed elsewhere
-export const {
+export {
   Calculator,
   Folder,
   Terminal,
@@ -206,4 +281,4 @@ export const {
   Film,
   VolumeX,
   Volume2,
-} = LucideIcons;
+} from "lucide-react";
