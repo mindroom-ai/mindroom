@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from threading import Barrier
+from threading import Barrier, BoundedSemaphore
 from typing import TYPE_CHECKING, Never
 
 import pytest
@@ -282,14 +282,17 @@ def test_concurrent_cold_lookups_keep_returned_readers_queryable(
 @pytest.mark.parametrize("cached", [False, True])
 def test_busy_published_lookup_reports_unavailable_then_recovers(
     published_lookup: tuple[Config, RuntimePaths],
+    monkeypatch: pytest.MonkeyPatch,
     cached: bool,
 ) -> None:
     """Reader saturation stays a per-base availability result, including cached handles."""
+    # Exercise saturation independently of the production reader capacity.
+    monkeypatch.setattr("mindroom.knowledge.read_process._read_slots", BoundedSemaphore(1))
     config, runtime_paths = published_lookup
     if cached:
         assert resolve_knowledge_base_access("docs", config, runtime_paths).knowledge is not None
 
-    with _read_slot(), _read_slot():
+    with _read_slot():
         busy = resolve_knowledge_base_access("docs", config, runtime_paths)
         assert busy.knowledge is None
         assert busy.availability is KnowledgeAvailability.REFRESH_FAILED
