@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
+from functools import cache
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.requester_identity import resolve_human_requester_alias
@@ -338,6 +339,10 @@ def _collect_usage(
     expected_agent: str | None,
     expected_requester: str | None,
 ) -> UsageReport:
+    @cache
+    def canonical_requester(requester_id: str) -> str:
+        return resolve_human_requester_alias(requester_id, config, runtime_paths)
+
     usage = _UsageAccumulator()
     model_usage = _ModelUsageAccumulator()
     scanned_sources: set[str] = set()
@@ -361,7 +366,7 @@ def _collect_usage(
                     runs=tuple(
                         replace(
                             run,
-                            requester_id=resolve_human_requester_alias(run.requester_id, config, runtime_paths),
+                            requester_id=canonical_requester(run.requester_id),
                         )
                         if run.requester_id is not None
                         else run
