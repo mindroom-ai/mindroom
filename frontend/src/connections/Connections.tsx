@@ -21,6 +21,7 @@ import {
 import { ConnectedClients } from "./ConnectedClients";
 import { connectWithPopup, type OAuthAuthorization } from "./oauthPopup";
 import { requestConnection } from "./request";
+import { useMcpSelection } from "./useMcpSelection";
 
 interface ConnectionService {
   provider: string;
@@ -35,6 +36,15 @@ interface AgentConnections {
   agent_display_name: string;
   is_shared: boolean;
   services: ConnectionService[];
+  tools: ConnectionTool[];
+}
+
+interface ConnectionTool {
+  name: string;
+  display_name: string;
+  description: string;
+  provider: string | null;
+  requires_room_context: boolean;
 }
 
 interface ConnectionList {
@@ -164,6 +174,17 @@ function ConnectionCard({
           )}
         </div>
         <CardDescription>{service.description}</CardDescription>
+        <div className="flex flex-wrap gap-2">
+          {service.tools.map((name) => {
+            const tool = agent.tools.find((item) => item.name === name);
+            return (
+              <Badge key={name} variant="outline">
+                {tool?.display_name ?? name}
+                {tool?.requires_room_context ? " · MindRoom only" : ""}
+              </Badge>
+            );
+          })}
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
         {loading && (
@@ -277,6 +298,7 @@ function ConnectionCard({
 }
 
 export function Connections() {
+  const mcp = useMcpSelection();
   const [connections, setConnections] = useState<ConnectionList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -311,11 +333,34 @@ export function Connections() {
           </h1>
           <p className="text-muted-foreground">
             Connect services for your personal assistant and shared agents you
-            manage.
+            manage, and choose which tools your MCP clients can use.
           </p>
         </header>
-        {connections?.agents.some((agent) => !agent.is_shared) && (
-          <ConnectedClients />
+        <ConnectedClients />
+        {mcp.selection?.enabled && (
+          <p className="text-sm text-muted-foreground">
+            Expose an agent below to make its compatible tools available to
+            every connected MCP client. Your selection only affects your
+            clients.
+          </p>
+        )}
+        {mcp.loading && (
+          <p role="status" className="text-sm text-muted-foreground">
+            Loading MCP selection…
+          </p>
+        )}
+        {mcp.error && (
+          <Alert variant="destructive">
+            <AlertDescription>{mcp.error}</AlertDescription>
+            <Button
+              variant="outline"
+              className="mt-3"
+              disabled={mcp.loading || mcp.saving}
+              onClick={() => void mcp.reload()}
+            >
+              Reload selection
+            </Button>
+          </Alert>
         )}
         {error && (
           <Alert variant="destructive">
@@ -342,10 +387,27 @@ export function Connections() {
                 {agent.is_shared ? "Shared agent" : "Personal agent"}
               </Badge>
             </div>
-            {agent.services.length === 0 && (
+            {mcp.selection?.enabled && (
+              <label className="flex items-center gap-3 text-sm">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-primary"
+                  aria-label={`Expose ${agent.agent_display_name} through MCP`}
+                  checked={mcp.selection.selected_agents.includes(
+                    agent.agent_name,
+                  )}
+                  disabled={mcp.loading || mcp.saving || mcp.error !== null}
+                  onChange={(event) =>
+                    void mcp.toggle(agent.agent_name, event.target.checked)
+                  }
+                />
+                Expose through MCP
+              </label>
+            )}
+            {agent.services.length === 0 && agent.tools.length === 0 && (
               <Card>
                 <CardContent className="pt-6 text-muted-foreground">
-                  No services are available for this agent yet.
+                  No tools are available for this agent yet.
                 </CardContent>
               </Card>
             )}
@@ -359,6 +421,23 @@ export function Connections() {
                   onConnectionChange={refreshConnections}
                 />
               ))}
+              {agent.tools
+                .filter((tool) => tool.provider === null)
+                .map((tool) => (
+                  <Card key={tool.name}>
+                    <CardHeader>
+                      <div className="flex items-start justify-between gap-3">
+                        <CardTitle className="text-lg">
+                          {tool.display_name}
+                        </CardTitle>
+                        {tool.requires_room_context && (
+                          <Badge variant="secondary">MindRoom only</Badge>
+                        )}
+                      </div>
+                      <CardDescription>{tool.description}</CardDescription>
+                    </CardHeader>
+                  </Card>
+                ))}
             </div>
           </section>
         ))}

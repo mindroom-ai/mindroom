@@ -3,13 +3,15 @@
  *
  * @param path - API path to request.
  * @param signal - Abort signal for canceling the request.
- * @param method - HTTP method, with POST requests using an empty JSON object.
+ * @param method - HTTP method.
+ * @param body - JSON object for POST requests, empty by default.
  * @returns A `Promise<T>` that resolves to the parsed response payload.
  */
 export async function requestConnection<T>(
   path: string,
   signal: AbortSignal,
   method = "GET",
+  body: object = {},
 ): Promise<T> {
   let response: Response;
   try {
@@ -18,7 +20,10 @@ export async function requestConnection<T>(
       signal,
       credentials: "same-origin",
       ...(method === "POST"
-        ? { headers: { "Content-Type": "application/json" }, body: "{}" }
+        ? {
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }
         : {}),
     });
   } catch {

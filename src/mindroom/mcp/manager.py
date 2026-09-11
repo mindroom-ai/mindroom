@@ -455,8 +455,9 @@ class MCPServerManager:
         include_tools: Collection[str] | None = None,
         exclude_tools: Collection[str] | None = None,
         expected_config: Config | None = None,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> ToolResult:
-        """Call one remote MCP tool through the cached session."""
+        """Call one remote MCP tool, checking caller authority after preparation and queueing."""
         self._require_expected_config(server_id, expected_config)
         state = self._require_state(server_id)
         if state.config.auth is not None:
@@ -492,6 +493,7 @@ class MCPServerManager:
                         authorization_lease=authorization_lease,
                         include_tools=include_tools,
                         exclude_tools=exclude_tools,
+                        before_dispatch=before_dispatch,
                     )
                 except _MCPAuthorizationChangedError:
                     continue
@@ -508,6 +510,7 @@ class MCPServerManager:
             timeout_seconds=timeout_seconds or state.config.call_timeout_seconds,
             include_tools=include_tools,
             exclude_tools=exclude_tools,
+            before_dispatch=before_dispatch,
         )
 
     async def get_request_catalog(
@@ -958,6 +961,7 @@ class MCPServerManager:
         authorization_lease: _MCPAuthorizationLease | None = None,
         include_tools: Collection[str] | None = None,
         exclude_tools: Collection[str] | None = None,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> ToolResult:
         self._require_desired_oauth_lease(state, authorization_lease)
         self._require_active_state(state)
@@ -979,6 +983,7 @@ class MCPServerManager:
                 authorization_lease=authorization_lease,
                 include_tools=include_tools,
                 exclude_tools=exclude_tools,
+                before_dispatch=before_dispatch,
             )
         except (MCPToolCallError, MCPProtocolError):
             raise
@@ -1028,12 +1033,15 @@ class MCPServerManager:
         authorization_lease: _MCPAuthorizationLease | None = None,
         include_tools: Collection[str] | None = None,
         exclude_tools: Collection[str] | None = None,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> ToolResult:
         async with state.semaphore, state.call_lock.read():
             self._require_desired_oauth_lease(state, authorization_lease)
             self._require_active_state(state)
             if state.last_error is not None:
                 raise state.last_error
+            if before_dispatch is not None:
+                await before_dispatch()
             await self._validate_authoritative_oauth_lease(state, authorization_lease)
             self._require_session_oauth_lease(state, authorization_lease)
             if state.session is None or state.catalog is None or not state.connected:

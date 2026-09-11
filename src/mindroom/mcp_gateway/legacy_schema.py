@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 # Grants also reserve one requester-counter row and its key, conservatively once per grant.
 _FIELDS = {
     "clients": ("client_id", "metadata"),
-    "pending": ("state_hash", "payload", "requester_id", "authenticated_user_id", "agent_name", "csrf_hash"),
+    "pending": ("state_hash", "payload", "requester_id", "authenticated_user_id", "csrf_hash"),
     "grants": ("grant_id", "payload", "requester_id"),
     "capabilities": ("token_hash", "kind", "grant_id", "payload"),
 }
@@ -105,7 +105,7 @@ def _migrate_accounting(connection: sqlite3.Connection, now: float) -> None:
     # Legacy format: staged gateway tables had no byte charges, counters, requester ownership, or issuance time.
     # Last legacy release: pre-release schema; v2026.9.33 already completed this upgrade.
     # Handling: backfill fields and counters once inside the store's writer transaction.
-    # Coverage: tests/test_mcp_gateway_oauth_capacity.py::test_legacy_migration_backfills_once_and_over_budget_authority_remains_revocable.
+    # Coverage: tests/test_mcp_gateway_oauth_capacity.py::test_legacy_migration_retires_authority_even_over_budget.
     if connection.execute("PRAGMA user_version").fetchone()[0] >= 1:
         return
     for table in _FIELDS:
@@ -173,7 +173,7 @@ def _migrate_lifecycle(connection: sqlite3.Connection) -> None:
     # Legacy format: staged grants and pending consent lacked lifecycle dates and account bindings.
     # Last legacy release: pre-release schema; v2026.9.33 already completed this upgrade.
     # Handling: preserve absolute expiry, leave unknown history null, and add nullable account ownership.
-    # Coverage: tests/test_mcp_gateway_lifecycle.py::test_legacy_metadata_stays_unknown_and_absolute_expiry_never_extends.
+    # Coverage: tests/test_mcp_gateway_lifecycle.py::test_legacy_grants_without_account_metadata_require_new_consent.
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(grants)")}
     if "idle_expires_at" in columns:
         return
@@ -226,7 +226,7 @@ def _migrate_lifecycle_accounting(connection: sqlite3.Connection) -> None:
     # Legacy format: staged accounting v1 retained full payloads on consumed refresh rows.
     # Last legacy release: pre-release schema; v2026.9.33 already completed accounting v2.
     # Handling: compact only consumed refresh payloads, replace triggers, and reconcile byte counters atomically.
-    # Coverage: tests/test_mcp_gateway_oauth_capacity.py::test_v1_accounting_upgrade_compacts_historical_refresh_and_preserves_replay.
+    # Coverage: tests/test_mcp_gateway_oauth_capacity.py::test_v1_upgrade_retires_authority_and_reconciles_counters.
     if connection.execute("PRAGMA user_version").fetchone()[0] >= 2:
         return
     connection.execute("UPDATE capabilities SET payload = '{}' WHERE kind = 'refresh' AND consumed = 1")
@@ -237,6 +237,28 @@ def _migrate_lifecycle_accounting(connection: sqlite3.Connection) -> None:
         field = "metadata" if table == "clients" else "payload"
         connection.execute(f"UPDATE {table} SET {field} = {field}")
     connection.execute("PRAGMA user_version = 2")
+
+
+def _migrate_user_authority(connection: sqlite3.Connection) -> None:
+    """Require fresh consent when moving from one agent to the dashboard's shared selection."""
+    # Legacy format: schema v2 grants and pending consent authorized one personal agent.
+    # Handling: retire old authority atomically; preserve registrations and provisioned accounts.
+    # Coverage: tests/test_mcp_gateway_selection.py::test_agent_bound_authority_is_retired_once.
+    if connection.execute("PRAGMA user_version").fetchone()[0] >= 3:
+        return
+    connection.execute("DELETE FROM capabilities")
+    connection.execute("DELETE FROM grants")
+    connection.execute("DELETE FROM pending")
+    connection.execute("DROP INDEX grants_owner")
+    connection.execute("DROP INDEX pending_owner")
+    for suffix in ("charge_insert", "charge_change", "usage_update", "usage_delete"):
+        connection.execute(f"DROP TRIGGER pending_{suffix}")
+    connection.execute("ALTER TABLE pending DROP COLUMN agent_name")
+    _install_triggers(connection, "pending", lifecycle=True)
+    connection.execute("""CREATE INDEX grants_owner ON grants(requester_id,
+        json_extract(payload, '$.authenticated_user_id'), account_id, json_extract(payload, '$.resource'))""")
+    connection.execute("CREATE INDEX pending_owner ON pending(requester_id, authenticated_user_id, account_id)")
+    connection.execute("PRAGMA user_version = 3")
 
 
 def migrate_schema(
@@ -251,3 +273,4 @@ def migrate_schema(
     _migrate_lifecycle(connection)
     _migrate_accounts(connection)
     _migrate_lifecycle_accounting(connection)
+    _migrate_user_authority(connection)

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from agno.tools import Toolkit
     from agno.tools.function import ToolResult
 
-    from mindroom.api.personal_agent import PersonalAgentContext
+    from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp.manager import MCPServerManager
 
@@ -71,13 +71,14 @@ async def _close_after(pending: asyncio.Task[Any], toolkit: Toolkit | None = Non
         await _close(toolkit)
 
 
-def _build_native(context: PersonalAgentContext, entry: EffectiveToolConfig) -> Toolkit:
+def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Toolkit:
     from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
+    # Plugin metadata can change after selection while this build is scheduled.
     metadata = TOOL_METADATA.get(entry.name)
     if metadata is not None and metadata.requires_room_context:
-        raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
+        raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
     runtime = resolve_agent_runtime(
         context.agent_name,
         context.config,
@@ -111,7 +112,12 @@ def _build_native(context: PersonalAgentContext, entry: EffectiveToolConfig) -> 
 class _GatewayMCPToolkit(MindRoomMCPToolkit):
     """Keep the exact request configuration attached to every upstream dispatch."""
 
-    context: PersonalAgentContext
+    context: AgentToolContext
+    require_current_access: Callable[[], None] | None
+
+    async def _before_dispatch(self) -> None:
+        if self.require_current_access is not None:
+            await run_gateway_sync(self.require_current_access)
 
     async def _call_tool_with_error_payload(self, tool_name: str, arguments: dict[str, object]) -> ToolResult:
         if self.manager is None:
@@ -126,13 +132,15 @@ class _GatewayMCPToolkit(MindRoomMCPToolkit):
             include_tools=self.include_tools,
             exclude_tools=self.exclude_tools,
             expected_config=self.context.config,
+            before_dispatch=self._before_dispatch,
         )
 
 
 async def _build_selected(
-    context: PersonalAgentContext,
+    context: AgentToolContext,
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
+    require_current_access: Callable[[], None] | None,
 ) -> Toolkit:
     server_id = entry.name.removeprefix("mcp_")
     server = context.config.mcp_servers.get(server_id) if entry.name.startswith("mcp_") else None
@@ -159,6 +167,7 @@ async def _build_selected(
             call_timeout_seconds=cast("float | None", entry.tool_config_overrides.get("call_timeout_seconds")),
         )
         toolkit.context = context
+        toolkit.require_current_access = require_current_access
         # Generic OAuth bridge dispatch cannot carry per-function approval policy.
         typed_names = {tool.function_name for tool in catalog.tools}
         toolkit.async_functions = {
@@ -175,13 +184,14 @@ async def _build_selected(
 
 
 async def run_toolkit_operation[T](
-    context: PersonalAgentContext,
+    context: AgentToolContext,
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
     operation: Callable[[Toolkit], Awaitable[T]],
+    require_current_access: Callable[[], None] | None = None,
 ) -> T:
     """Build, connect, operate on, and close one selected gateway toolkit."""
-    toolkit = await _build_selected(context, entry, manager)
+    toolkit = await _build_selected(context, entry, manager, require_current_access)
     tracker = SyncToolCompletionTracker()
     pending: asyncio.Task[Any] | None = None
     cancelled = False

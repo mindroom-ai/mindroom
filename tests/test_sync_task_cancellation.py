@@ -2634,6 +2634,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         config.mcp_servers = {}
         config.plugins = []
         config.event_journal = MagicMock()
+        config.calls = Config().calls
         config.mindroom_user = None
         config.get_all_configured_rooms.return_value = []
         mock_load_config.return_value = config

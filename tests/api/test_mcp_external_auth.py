@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from mindroom import agents
 from mindroom.api import config_lifecycle
+from mindroom.config.agent import AgentConfig
 from mindroom.mcp_gateway import accounts, external_auth
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt_key
@@ -55,6 +56,47 @@ PROFILES = [
     {"issuer": "https://identity.example.org/", "server": "https://identity.example.org/", "header": "authorization"},
     {"issuer": "https://edge.example.org", "server": "https://login.example.org/oauth", "header": "x-access-assertion"},
 ]
+
+
+def test_external_clients_share_dashboard_agent_selection(
+    external_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+    request: pytest.FixtureRequest,
+) -> None:
+    """Selection controls stay available with external auth and preserve the provisioned owner."""
+    headers = signed_headers("alice")
+    clock = request.getfixturevalue("clock")
+    _provision(external_client, "alice")
+    clock[0] += 61
+    config = config_lifecycle.require_api_state(external_client.app).snapshot.runtime_config
+    assert config is not None
+    config.agents["shared"] = AgentConfig(
+        display_name="Research",
+        role="Shared tools",
+        tools=["calculator"],
+        credential_managers=["@alice:example.org"],
+    )
+    selection = "/api/connections/mcp/selection"
+    assert external_client.get(selection, headers=headers).json()["selected_agents"] == ["personal"]
+    response = external_client.post(selection, headers={**headers, "Origin": ORIGIN}, json={"agents": ["shared"]})
+    assert response.status_code == 200, response.text
+    assert external_client.get("/api/connections/mcp/clients", headers=headers).json()["enabled"] is False
+    # Install the external issuer's distinct test key after the signed browser requests.
+    credential = request.getfixturevalue("credential")
+    for _ in range(2):
+        response = external_client.post(
+            "/mcp",
+            headers={**MCP_HEADERS, **credential()},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "search_tools", "arguments": {}},
+            },
+        )
+        assert response.status_code == 200, response.text
+        results = response.json()["result"]["structuredContent"]["results"]
+        assert {(item["agent"], item["toolkit"]) for item in results} == {("shared", "calculator")}
 
 
 @pytest.fixture(params=PROFILES, ids=["bearer", "signed-assertion"])
@@ -295,7 +337,7 @@ def test_external_cancellation_and_user_limit_span_tokens(
         "method": "tools/call",
         "params": {
             "name": "invoke_tool",
-            "arguments": {"toolkit": "calculator", "function": "account", "arguments": {}},
+            "arguments": {"agent": "personal", "toolkit": "calculator", "function": "account", "arguments": {}},
         },
     }
     cancel = {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 7}}
@@ -358,7 +400,12 @@ def test_external_native_tools_keep_requester_identity(
                 "method": "tools/call",
                 "params": {
                     "name": "invoke_tool",
-                    "arguments": {"toolkit": "calculator", "function": "identity", "arguments": {}},
+                    "arguments": {
+                        "agent": "personal",
+                        "toolkit": "calculator",
+                        "function": "identity",
+                        "arguments": {},
+                    },
                 },
             },
         )
@@ -412,7 +459,12 @@ def test_external_security_change_between_admission_and_dispatch(
             "method": "tools/call",
             "params": {
                 "name": "invoke_tool",
-                "arguments": {"toolkit": "calculator", "function": "forbidden_tool", "arguments": {}},
+                "arguments": {
+                    "agent": "personal",
+                    "toolkit": "calculator",
+                    "function": "forbidden_tool",
+                    "arguments": {},
+                },
             },
         },
     )
@@ -442,7 +494,7 @@ def _assert_native_call_denied(client: TestClient, headers: dict[str, str], monk
             "method": "tools/call",
             "params": {
                 "name": "invoke_tool",
-                "arguments": {"toolkit": "calculator", "function": "account", "arguments": {}},
+                "arguments": {"agent": "personal", "toolkit": "calculator", "function": "account", "arguments": {}},
             },
         },
     )

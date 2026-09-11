@@ -1118,7 +1118,7 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.oauth",
-    "mindroom.api.personal_agent",
+    "mindroom.api.connection_agents",
     "mindroom.constants",
     "mindroom.oauth",
     "mindroom.oauth.service",
@@ -1126,10 +1126,12 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.api.personal_agent"
+path = "mindroom.api.connection_agents"
 depends_on = [
     "mindroom.access_policy",
+    "mindroom.authorization",
     "mindroom.matrix.identity",
+    "mindroom.mcp_gateway.types",
     "mindroom.requester_identity",
     "mindroom.tool_system.worker_routing",
 ]
@@ -1883,6 +1885,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
+    "mindroom.matrix_rtc.call_manager",
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.legacy_private_storage",
@@ -5172,7 +5175,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.mcp_clients",
     "mindroom.api.mcp_scim",
-    "mindroom.api.personal_agent",
+    "mindroom.api.connection_agents",
     "mindroom.logging_config",
     "mindroom.mcp.manager",
     "mindroom.mcp_gateway.admission",
@@ -5185,6 +5188,10 @@ depends_on = [
     "mindroom.mcp_gateway.toolkits",
     "mindroom.mcp_gateway.tools",
     "mindroom.mcp_gateway.types",
+    "mindroom.api.mcp_identity",
+    "mindroom.api.mcp_selection",
+    "mindroom.mcp_gateway.selection",
+    "mindroom.mcp_gateway.execution",
 ]
 
 [[modules]]
@@ -5201,16 +5208,17 @@ depends_on = ["mindroom.mcp_gateway.store", "mindroom.mcp_gateway.accounts", "mi
 
 [[modules]]
 path = "mindroom.mcp_gateway.store"
-depends_on = ["mindroom.mcp_gateway.legacy_schema"]
+depends_on = ["mindroom.mcp_gateway.legacy_schema",
+    "mindroom.mcp_gateway.selection_schema",
+]
 
 [[modules]]
 path = "mindroom.api.mcp_clients"
 depends_on = [
     "mindroom.api.auth",
-    "mindroom.api.config_lifecycle",
-    "mindroom.api.personal_agent",
+    "mindroom.api.connection_agents",
     "mindroom.mcp_gateway.server",
-    "mindroom.requester_identity",
+    "mindroom.api.mcp_identity",
 ]
 
 [[modules]]
@@ -5492,4 +5500,20 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.response_tracking"
+depends_on = []
+
+[[modules]]
+path = "mindroom.api.mcp_identity"
+depends_on = ["mindroom.api.config_lifecycle", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.types", "mindroom.requester_identity"]
+
+[[modules]]
+path = "mindroom.api.mcp_selection"
+depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.api.connection_agents", "mindroom.api.mcp_identity", "mindroom.mcp_gateway.selection", "mindroom.mcp_gateway.server", "mindroom.mcp_gateway.store"]
+
+[[modules]]
+path = "mindroom.mcp_gateway.selection"
+depends_on = ["mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.types"]
+
+[[modules]]
+path = "mindroom.mcp_gateway.selection_schema"
 depends_on = []

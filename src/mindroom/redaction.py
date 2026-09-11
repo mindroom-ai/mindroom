@@ -186,7 +186,7 @@ def _safe_repr(value: object) -> str:
         return f"<unrepresentable: {type(value).__name__}>"
 
 
-_ACRONYM_BOUNDARY_PATTERN = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_ACRONYM_BOUNDARY_PATTERN = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
 _CAMEL_BOUNDARY_PATTERN = re.compile(r"([a-z0-9])([A-Z])")
 _NON_ALPHANUMERIC_RUN_PATTERN = re.compile(r"[^a-z0-9]+")
 
@@ -215,7 +215,7 @@ class _KeyClassification:
 
 def _normalize_key_text(key: str) -> str:
     """Return the canonical snake_case spelling of one key."""
-    collapsed = _ACRONYM_BOUNDARY_PATTERN.sub(r"\1_\2", key.strip())
+    collapsed = _ACRONYM_BOUNDARY_PATTERN.sub("_", key.strip())
     collapsed = _CAMEL_BOUNDARY_PATTERN.sub(r"\1_\2", collapsed)
     return _NON_ALPHANUMERIC_RUN_PATTERN.sub("_", collapsed.lower()).strip("_")
 

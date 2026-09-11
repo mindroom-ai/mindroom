@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 import json
@@ -86,21 +87,19 @@ def _valid_url(value: str) -> bool:
 
 
 class _GatewayAuthorizationCode(AuthorizationCode):
-    """Code bound to the user, agent and grant approved in the browser."""
+    """Code bound to the user and grant approved in the browser."""
 
     requester_id: str
     authenticated_user_id: str
-    agent_name: str
     grant_id: str
     account_id: str | None = None
 
 
 class GatewayAccessToken(AccessToken):
-    """Bearer principal scoped to one personal agent and OAuth grant."""
+    """Bearer principal bound to one user and OAuth grant."""
 
     requester_id: str
     authenticated_user_id: str
-    agent_name: str
     grant_id: str
     account_id: str | None = None
 
@@ -110,7 +109,6 @@ class _GatewayRefreshToken(RefreshToken):
 
     requester_id: str
     authenticated_user_id: str
-    agent_name: str
     grant_id: str
     account_id: str | None = None
     resource: str
@@ -268,7 +266,6 @@ class GatewayOAuthProvider(
         *,
         requester_id: str,
         authenticated_user_id: str,
-        agent_name: str,
         account_id: str | None = None,
     ) -> _GatewayConsent:
         """Bind the first authenticated visitor and issue a fresh browser nonce."""
@@ -279,13 +276,11 @@ class GatewayOAuthProvider(
                 not self._account_allowed(connection, account_id)
                 or not requester_id
                 or not authenticated_user_id
-                or not agent_name
                 or (
                     row["requester_id"] is not None
                     and (
                         row["account_id"] != account_id
                         or row["requester_id"] != requester_id
-                        or row["agent_name"] != agent_name
                         or row["authenticated_user_id"] != authenticated_user_id
                     )
                 )
@@ -293,9 +288,9 @@ class GatewayOAuthProvider(
                 raise AuthorizeError("access_denied", "Consent belongs to another principal")  # noqa: EM101
             csrf = _secret()
             connection.execute(
-                """UPDATE pending SET requester_id = ?, authenticated_user_id = ?, agent_name = ?, csrf_hash = ?, account_id = ?
+                """UPDATE pending SET requester_id = ?, authenticated_user_id = ?, csrf_hash = ?, account_id = ?
                    WHERE state_hash = ?""",
-                (requester_id, authenticated_user_id, agent_name, _digest(csrf), account_id, _digest(state)),
+                (requester_id, authenticated_user_id, _digest(csrf), account_id, _digest(state)),
             )
             self.store.require_capacity(connection, onboarding=True)
             payload = json.loads(row["payload"])
@@ -309,7 +304,6 @@ class GatewayOAuthProvider(
         *,
         requester_id: str,
         authenticated_user_id: str,
-        agent_name: str,
         csrf_token: str,
         allow: bool,
         account_id: str | None = None,
@@ -323,7 +317,6 @@ class GatewayOAuthProvider(
                 or row["account_id"] != account_id
                 or row["requester_id"] != requester_id
                 or row["authenticated_user_id"] != authenticated_user_id
-                or row["agent_name"] != agent_name
                 or not row["csrf_hash"]
                 or not secrets.compare_digest(row["csrf_hash"], _digest(csrf_token))
             ):
@@ -339,7 +332,6 @@ class GatewayOAuthProvider(
                 "client_id": payload["client_id"],
                 "requester_id": requester_id,
                 "authenticated_user_id": authenticated_user_id,
-                "agent_name": agent_name,
                 "grant_id": grant_id,
                 "account_id": account_id,
                 "resource": self.resource_url,
@@ -450,12 +442,16 @@ class GatewayOAuthProvider(
     @override
     async def load_access_token(self, token: str) -> GatewayAccessToken | None:
         """Resolve only an unexpired, unrevoked principal for this fixed resource."""
+        return await asyncio.to_thread(self.load_access_token_sync, token)
+
+    def load_access_token_sync(self, token: str) -> GatewayAccessToken | None:
+        """Recheck a bearer in the dispatch worker after preparation and hooks."""
 
         def read(connection: sqlite3.Connection) -> GatewayAccessToken | None:
             row = self._load(connection, "access", token)
             return GatewayAccessToken(token=token, **json.loads(row["payload"])) if row else None
 
-        return await self.store.read(read)
+        return self.store.read_sync(read)
 
     @override
     async def load_refresh_token(
@@ -578,7 +574,7 @@ class GatewayOAuthProvider(
         *,
         requester_id: str,
         authenticated_user_id: str,
-        agent_name: str,
+        account_id: str | None = None,
         after: str | None = None,
         limit: int = 101,
     ) -> list[dict[str, Any]]:
@@ -592,7 +588,7 @@ class GatewayOAuthProvider(
                 connection,
                 requester_id=requester_id,
                 authenticated_user_id=authenticated_user_id,
-                agent_name=agent_name,
+                account_id=account_id,
                 resource=self.resource_url,
                 active_at=self._clock(),
                 accounts_required=self.accounts_required,
@@ -620,7 +616,7 @@ class GatewayOAuthProvider(
         *,
         requester_id: str,
         authenticated_user_id: str,
-        agent_name: str,
+        account_id: str | None = None,
         grant_id: str | None = None,
     ) -> bool:
         """Atomically remove owned grants and, for revoke-all, bound pending approvals."""
@@ -630,7 +626,7 @@ class GatewayOAuthProvider(
                 connection,
                 requester_id=requester_id,
                 authenticated_user_id=authenticated_user_id,
-                agent_name=agent_name,
+                account_id=account_id,
                 resource=self.resource_url,
             )
             selected = [row for row in rows if grant_id is None or row["grant_id"] == grant_id]
@@ -638,9 +634,9 @@ class GatewayOAuthProvider(
                 self.store.delete_family(connection, row["grant_id"])
             if grant_id is None:
                 connection.execute(
-                    """DELETE FROM pending WHERE requester_id = ? AND authenticated_user_id = ? AND agent_name = ?
+                    """DELETE FROM pending WHERE requester_id = ? AND authenticated_user_id = ? AND account_id IS ?
                        AND json_extract(payload, '$.params.resource') = ?""",
-                    (requester_id, authenticated_user_id, agent_name, self.resource_url),
+                    (requester_id, authenticated_user_id, account_id, self.resource_url),
                 )
             return grant_id is None or bool(selected)
 

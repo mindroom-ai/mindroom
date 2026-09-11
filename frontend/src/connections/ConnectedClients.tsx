@@ -172,7 +172,7 @@ export function ConnectedClients() {
             Connected clients
           </h2>
           <p className="text-sm text-muted-foreground">
-            Manage apps that can use your personal tools.
+            Manage apps that can use tools from your selected agents.
           </p>
         </div>
         {clients.length > 0 && (

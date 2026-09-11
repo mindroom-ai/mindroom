@@ -592,9 +592,14 @@ async def test_sdk_client_handshake_search_and_call() -> None:
     async def dispatch(request: Request, name: str, arguments: dict[str, object]) -> dict[str, object]:
         assert request.headers["authorization"] == "Bearer alice"
         if name == "search_tools":
-            return {"results": [{"toolkit": "calculator", "function": "add"}]}
+            return {"results": [{"agent": "personal", "toolkit": "calculator", "function": "add"}]}
         assert name == "invoke_tool"
-        assert arguments == {"toolkit": "calculator", "function": "add", "arguments": {"a": 1, "b": 2}}
+        assert arguments == {
+            "agent": "personal",
+            "toolkit": "calculator",
+            "function": "add",
+            "arguments": {"a": 1, "b": 2},
+        }
         return {"result": 3}
 
     async with (
@@ -607,10 +612,12 @@ async def test_sdk_client_handshake_search_and_call() -> None:
         listed = await session.list_tools()
         assert {tool.name for tool in listed.tools} == {"search_tools", "get_tool", "invoke_tool"}
         searched = await session.call_tool("search_tools", {})
-        assert searched.structuredContent == {"results": [{"toolkit": "calculator", "function": "add"}]}
+        assert searched.structuredContent == {
+            "results": [{"agent": "personal", "toolkit": "calculator", "function": "add"}],
+        }
         result = await session.call_tool(
             "invoke_tool",
-            {"toolkit": "calculator", "function": "add", "arguments": {"a": 1, "b": 2}},
+            {"agent": "personal", "toolkit": "calculator", "function": "add", "arguments": {"a": 1, "b": 2}},
         )
         assert result.structuredContent == {"result": 3}
         assert result.isError is False

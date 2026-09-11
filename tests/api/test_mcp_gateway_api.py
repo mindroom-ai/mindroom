@@ -311,6 +311,7 @@ def test_native_dispatch_rejects_changed_publication(
                 "params": {
                     "name": "invoke_tool",
                     "arguments": {
+                        "agent": "personal",
                         "toolkit": "calculator",
                         "function": "async_account" if async_body else "account",
                         "arguments": {},

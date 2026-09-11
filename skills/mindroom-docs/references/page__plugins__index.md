@@ -154,6 +154,11 @@ A tools module is a Python file that registers one or more tool factories using 
 Each factory function returns a **Toolkit class** (not an instance).
 MindRoom instantiates the class when building agents.
 
+Set `requires_room_context=True` in tool metadata when the toolkit requires the live Matrix room runtime, including its client, requester, or conversation context.
+The MCP gateway omits these toolkits from discovery and rejects direct schema and invocation requests before constructing them.
+Agent runs without a room also hide these tools using the same metadata.
+This requirement describes runtime compatibility; it does not grant or replace tool authorization.
+
 ## OAuth providers
 
 An OAuth module registers provider definitions without registering FastAPI routes.

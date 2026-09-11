@@ -555,6 +555,7 @@ _REDACTED_KEYS = (
     "Bearer_Token",
     "Cookie",
     "HTTPAPIKey",
+    "HTTPServerAPIKey",
     "Password",
     "TOKEN",
     "Token",
@@ -596,6 +597,7 @@ _REDACTED_KEYS = (
     "x_token",
 )
 _KEPT_KEYS = (
+    "ABC",
     "XMLHttpToken",
     "input_tokens",
     "max_tokens",
