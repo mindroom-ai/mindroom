@@ -6,6 +6,9 @@ nameOverride: ""
 fullnameOverride: ""
 
 replicaCount: 1
+# Optional rollout progress deadline for the MindRoom Deployment, in seconds.
+# Leave null to use the Kubernetes default.
+progressDeadlineSeconds: null
 
 image:
   repository: ghcr.io/mindroom-ai/mindroom
@@ -434,6 +437,10 @@ workers:
         # Key in bootstrapSecretName holding the master password that protects
         # the vault's encryption key.
         masterPasswordSecretKey: AGENT_VAULT_MASTER_PASSWORD
+        # Raw Kubernetes EnvVar entries appended to the Agent Vault server.
+        extraEnv: []
+        # Raw Kubernetes EnvFromSource entries for the Agent Vault server.
+        envFrom: []
         persistence:
           enabled: true
           size: 1Gi
