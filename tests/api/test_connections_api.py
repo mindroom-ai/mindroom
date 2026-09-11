@@ -385,27 +385,43 @@ def test_catalog_lists_only_authorized_agents(shared_portal: dict[str, Any], use
     assert all(agent["is_shared"] == (agent["agent_name"] != "personal") for agent in agents)
 
 
-@pytest.mark.parametrize("agent", ["research", "other_private", "missing"])
+@pytest.mark.parametrize(
+    ("user", "agent"),
+    [
+        ("bob", "research"),
+        ("bob", "other_private"),
+        ("bob", "missing"),
+        ("alice", "other_private"),
+        ("admin", "other_private"),
+    ],
+)
 @pytest.mark.parametrize("action", ["status", "connect", "disconnect"])
-def test_unlisted_agent_actions_are_denied(shared_portal: dict[str, Any], agent: str, action: str) -> None:
+def test_unlisted_agent_actions_are_denied(
+    shared_portal: dict[str, Any],
+    user: str,
+    agent: str,
+    action: str,
+) -> None:
     """Direct URLs cannot bypass catalog authorization or choose another private agent."""
     response = shared_portal["client"].request(
         "GET" if action == "status" else "POST",
         f"/api/connections/agents/{agent}/google_drive/{action}",
-        headers=shared_portal["headers"]["bob"],
+        headers=shared_portal["headers"][user],
         **({} if action == "status" else {"json": {}}),
     )
     assert response.status_code == 404
 
 
-@pytest.mark.parametrize("worker_scope", [None, "shared"])
+@pytest.mark.parametrize(("worker_scope", "shared_across_agents"), [(None, True), ("shared", False)])
 def test_shared_connection_lifecycle_and_revoked_manager(
     shared_portal: dict[str, Any],
     worker_scope: str | None,
+    shared_across_agents: bool,
 ) -> None:
-    """Shared credentials reach other managers, stay out of private stores, and enforce revocation."""
+    """Connections follow configured ownership, isolate private stores, and enforce revocation."""
     if worker_scope is not None:
-        shared_portal["payload"]["agents"]["research"]["worker_scope"] = worker_scope
+        for agent_name in ("research", "support"):
+            shared_portal["payload"]["agents"][agent_name]["worker_scope"] = worker_scope
         _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
         _use_runtime_auth_settings(main.app)
     client, headers = shared_portal["client"], shared_portal["headers"]
@@ -421,6 +437,10 @@ def test_shared_connection_lifecycle_and_revoked_manager(
     )
     assert callback.status_code == 307, callback.text
     assert client.get(f"{base}/status", headers=headers["mallory"]).json()["connected"] is True
+    assert (
+        client.get("/api/connections/agents/support/google_drive/status", headers=headers["bob"]).json()["connected"]
+        is shared_across_agents
+    )
     assert (
         client.get(
             "/api/connections/agents/personal/google_drive/status",
@@ -441,6 +461,10 @@ def test_shared_connection_lifecycle_and_revoked_manager(
         assert response.status_code == 404
     assert client.post(f"{base}/disconnect", headers=headers["mallory"], json={}).status_code == 200
     assert client.get(f"{base}/status", headers=headers["mallory"]).json()["connected"] is False
+    assert (
+        client.get("/api/connections/agents/support/google_drive/status", headers=headers["bob"]).json()["connected"]
+        is False
+    )
 
 
 def test_shared_manager_alias_is_canonicalized(shared_portal: dict[str, Any]) -> None:

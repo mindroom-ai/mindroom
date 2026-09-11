@@ -18903,7 +18903,8 @@ Shared agents appear when the user is listed in `agents.<name>.credential_manage
 Reply access alone does not grant shared connection management.
 The server resolves canonical Matrix aliases and rechecks agent and provider authorization for every status, connect, and disconnect request.
 The browser selects an authorized agent; it cannot override the credential owner or execution scope.
-Shared connections use the agent's configured credential scope, so disconnecting a shared account affects everyone using it.
+Shared connections keep their configured credential scope: `worker_scope: shared` is per agent, while an unset scope uses the installation-wide store.
+Disconnecting an account affects every agent using that credential scope.
 Existing requester-only provider rules still apply.
 Disconnect confirmations follow the connection's credential scope, including personal connections on shared agents.
 Account linking and disconnect reuse the same OAuth state, callback, token store, and reset lifecycle used by tools.
