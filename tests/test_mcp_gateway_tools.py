@@ -819,7 +819,7 @@ async def test_mcp_deselection_before_construction_prevents_provider_contact(
     provider = GatewayOAuthProvider(context.runtime_paths, public_url="https://assistant.example.org")
     selections = GatewaySelections(provider.store)
     owner = GatewayOwner(context.requester_id, context.requester_id)
-    await selections.set(owner, (context.agent_name,))
+    await selections.set(owner, {context.agent_name: None})
     waiting, release = threading.Event(), threading.Event()
     require_entry = gateway._require_entry
 
@@ -847,7 +847,7 @@ async def test_mcp_deselection_before_construction_prevents_provider_contact(
         )
         try:
             assert await asyncio.to_thread(waiting.wait, 10)
-            await selections.set(owner, ())
+            await selections.set(owner, {})
         finally:
             release.set()
         result = await asyncio.wait_for(pending, timeout=10)
@@ -871,7 +871,7 @@ async def test_mcp_deselection_while_queued_prevents_remote_dispatch(
     provider = GatewayOAuthProvider(context.runtime_paths, public_url="https://assistant.example.org")
     selections = GatewaySelections(provider.store)
     owner = GatewayOwner(context.requester_id, context.requester_id)
-    await selections.set(owner, (context.agent_name,))
+    await selections.set(owner, {context.agent_name: None})
     waiting = asyncio.Event()
 
     class DispatchGate(asyncio.Semaphore):
@@ -883,7 +883,7 @@ async def test_mcp_deselection_while_queued_prevents_remote_dispatch(
             return await super().acquire()
 
     def require_access() -> None:
-        selections.require_selected(owner, context.agent_name)
+        selections.require_selected(owner, context.agent_name, "mcp_example")
 
     manager = MCPServerManager(context.runtime_paths, validate_agent_function_names=False)
     pending: asyncio.Task[InvocationResult] | None = None
@@ -905,7 +905,7 @@ async def test_mcp_deselection_while_queued_prevents_remote_dispatch(
             ),
         )
         await asyncio.wait_for(waiting.wait(), timeout=10)
-        await selections.set(owner, ())
+        await selections.set(owner, {context.agent_name: ("calculator",)})
         gate.release()
         result = await asyncio.wait_for(pending, timeout=10)
         assert "error" in result

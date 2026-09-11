@@ -58,10 +58,21 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.mcp_gateway.external_auth import ExternalIdentity
     from mindroom.mcp_gateway.oauth import GatewayAccessToken
-    from mindroom.mcp_gateway.types import GatewayToolResponse
+    from mindroom.mcp_gateway.types import GatewayToolResponse, SearchResult
 
 logger = get_logger(__name__)
 _MACHINE_HEADERS = {**CONNECTIONS_HEADERS, "Access-Control-Allow-Origin": "*"}
+
+
+async def _check_search_access(
+    result: SearchResult,
+    require_current_access: Callable[[str | None, str | None], None],
+) -> None:
+    """Recheck each published toolkit once, even when multiple functions share it."""
+    await run_gateway_sync(require_current_access, None, None)
+    if "error" not in result:
+        for agent, toolkit in {(item["agent"], item["toolkit"]) for item in result["results"]}:
+            await run_gateway_sync(require_current_access, agent, toolkit)
 
 
 def _enabled(paths: RuntimePaths) -> bool:
@@ -268,16 +279,13 @@ class GatewayRuntime:
     async def _search_selection(
         self,
         user: ConnectionUserContext,
-        selected: list[str],
+        selected: dict[str, tuple[str, ...] | None],
         arguments: dict[str, Any],
-        require_current_access: Callable[[str | None], None],
+        require_current_access: Callable[[str | None, str | None], None],
     ) -> GatewayToolResponse:
         contexts = [resolve_connection_agent(user, agent_name) for agent_name in selected]
-        result = await search_agents(contexts, **arguments)
-        await run_gateway_sync(require_current_access, None)
-        if "error" not in result:
-            for agent_name in {item["agent"] for item in result["results"]}:
-                await run_gateway_sync(require_current_access, agent_name)
+        result = await search_agents(contexts, toolkits_by_agent=selected, **arguments)
+        await _check_search_access(result, require_current_access)
         return result
 
     def _access_guard(
@@ -285,17 +293,17 @@ class GatewayRuntime:
         request: Request,
         user: ConnectionUserContext,
         require_authority: Callable[[], None],
-    ) -> Callable[[str | None], None]:
+    ) -> Callable[[str | None, str | None], None]:
         state = require_api_state(request.app)
 
-        def require_current_access(agent_name: str | None = None) -> None:
+        def require_current_access(agent_name: str | None, toolkit: str | None) -> None:
             with state.config_lock:
                 current = state.snapshot
                 if current.runtime_config != user.config or current.runtime_paths != user.runtime_paths:
                     raise GatewayError(GatewayErrorCode.TOOL_UNAVAILABLE)
                 require_authority()
                 if agent_name is not None:
-                    self.selections.require_selected(user.owner, agent_name)
+                    self.selections.require_selected(user.owner, agent_name, toolkit)
 
         return require_current_access
 
@@ -304,32 +312,43 @@ class GatewayRuntime:
         _, user, require_authority = await self.principal(request)
         defaults = (user.personal_agent_name,) if user.personal_agent_name is not None else ()
         saved = await self.selections.get(user.owner, defaults)
-        selected = [agent for agent in saved if agent in user.agent_names]
+        selected = {agent: tools for agent, tools in saved.items() if agent in user.agent_names}
         require_current_access = self._access_guard(request, user, require_authority)
 
         agent = arguments.get("agent")
         if name == "search_tools" and agent is None and "toolkit" not in arguments:
             return await self._search_selection(user, selected, arguments, require_current_access)
-        if agent not in selected:
+        if not isinstance(agent, str) or agent not in selected:
             return {
                 "error": {"code": GatewayErrorCode.TOOL_NOT_FOUND, "message": "Agent is not selected or available."},
             }
         context = resolve_connection_agent(user, agent)
         operation_arguments = {key: value for key, value in arguments.items() if key != "agent"}
+        if name == "search_tools" and "toolkit" not in arguments:
+            return await self._search_selection(
+                user,
+                {agent: selected[agent]},
+                operation_arguments,
+                require_current_access,
+            )
 
         def require_selected_access() -> None:
-            require_current_access(context.agent_name)
+            toolkit = arguments.get("toolkit")
+            require_current_access(context.agent_name, toolkit if isinstance(toolkit, str) else None)
 
         async with self._config_lock:
             if not self.manager.is_configured_for(user.config):
                 await self.manager.sync_servers(user.config, discover=False)
         if name == "search_tools":
-            return await search_tools(
+            result = await search_tools(
                 context,
                 manager=self.manager,
                 require_current_access=require_selected_access,
+                allowed_toolkits=selected[agent],
                 **operation_arguments,
             )
+            await _check_search_access(result, require_current_access)
+            return result
         if name == "get_tool":
             return await get_tool(
                 context,

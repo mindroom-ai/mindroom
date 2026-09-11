@@ -33,3 +33,7 @@ def initialize_selections(connection: sqlite3.Connection) -> None:
                 ON CONFLICT(requester_id) DO UPDATE SET bytes_used = bytes_used + excluded.bytes_used;
                 DELETE FROM requester_usage WHERE requester_id = {owner}.requester_id AND bytes_used = 0;
             END""")  # noqa: S608
+    # Preserve existing all-tools choices. The update trigger adjusts byte accounting.
+    connection.execute("""UPDATE gateway_selections SET agents = (
+        SELECT json_group_object(value, NULL) FROM json_each(gateway_selections.agents)
+    ) WHERE json_type(agents) = 'array'""")

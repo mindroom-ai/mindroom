@@ -1,3 +1,4 @@
+import { cn } from "@/lib/utils";
 import { Plug } from "lucide-react";
 import { getIconForTool, iconMap } from "@/components/Integrations/iconMapping";
 
@@ -31,9 +32,11 @@ function nameVariants(name: string): string[] {
 export function ConnectionIcon({
   names,
   iconName,
+  className,
 }: {
   names: string[];
   iconName?: string | null;
+  className?: string;
 }) {
   const variants = new Set(names.flatMap(nameVariants));
   // Prefer specific names (Google Calendar) over generic ones (Calendar).
@@ -43,7 +46,10 @@ export function ConnectionIcon({
   return (
     <span
       aria-hidden="true"
-      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted/60 text-primary ring-1 ring-inset ring-border/60"
+      className={cn(
+        "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted/60 text-primary ring-1 ring-inset ring-border/60",
+        className,
+      )}
     >
       {getIconForTool(iconName ?? null, null, fallbackIcon)}
     </span>

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { AgentConnections } from "./types";
 import { requestConnection } from "./request";
 
 interface McpSelection {
   enabled: boolean;
-  selected_agents: string[];
+  agents: Record<string, string[] | null>;
 }
 
 const selectionPath = "/api/connections/mcp/selection";
@@ -45,14 +46,11 @@ export function useMcpSelection() {
     };
   }, [reload]);
 
-  const toggle = async (agent: string, checked: boolean) => {
+  const save = async (agents: McpSelection["agents"]) => {
     if (!selection?.enabled || mutation.current || loading || error) return;
     const controller = new AbortController();
     mutation.current = controller;
     setSaving(true);
-    const agents = checked
-      ? [...selection.selected_agents, agent]
-      : selection.selected_agents.filter((name) => name !== agent);
     try {
       const result = await requestConnection<McpSelection>(
         selectionPath,
@@ -72,5 +70,51 @@ export function useMcpSelection() {
     }
   };
 
-  return { selection, error, loading, saving, reload, toggle };
+  const selectedTools = (agent: string) =>
+    selection && Object.prototype.hasOwnProperty.call(selection.agents, agent)
+      ? selection.agents[agent]
+      : undefined;
+
+  const toggle = (agent: string, checked: boolean) => {
+    if (!selection) return;
+    const agents = { ...selection.agents };
+    if (checked) return save({ ...agents, [agent]: null });
+    delete agents[agent];
+    return save(agents);
+  };
+
+  const toggleTool = (
+    agent: AgentConnections,
+    tool: string,
+    checked: boolean,
+  ) => {
+    if (!selection) return;
+    const agents = { ...selection.agents };
+    const current = selectedTools(agent.agent_name);
+    const tools = new Set(
+      current === null
+        ? agent.tools
+            .filter((item) => !item.requires_room_context)
+            .map((item) => item.name)
+        : (current ?? []),
+    );
+    if (checked) tools.add(tool);
+    else tools.delete(tool);
+    if (tools.size) return save({ ...agents, [agent.agent_name]: [...tools] });
+    delete agents[agent.agent_name];
+    return save(agents);
+  };
+
+  return {
+    selection,
+    selectedTools,
+    error,
+    loading,
+    saving,
+    reload,
+    toggle,
+    toggleTool,
+  };
 }
+
+export type McpSelectionState = ReturnType<typeof useMcpSelection>;

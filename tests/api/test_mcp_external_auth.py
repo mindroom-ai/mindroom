@@ -77,8 +77,8 @@ def test_external_clients_share_dashboard_agent_selection(
         credential_managers=["@alice:example.org"],
     )
     selection = "/api/connections/mcp/selection"
-    assert external_client.get(selection, headers=headers).json()["selected_agents"] == ["personal"]
-    response = external_client.post(selection, headers={**headers, "Origin": ORIGIN}, json={"agents": ["shared"]})
+    assert external_client.get(selection, headers=headers).json()["agents"] == {"personal": None}
+    response = external_client.post(selection, headers={**headers, "Origin": ORIGIN}, json={"agents": {"shared": None}})
     assert response.status_code == 200, response.text
     assert external_client.get("/api/connections/mcp/clients", headers=headers).json()["enabled"] is False
     # Install the external issuer's distinct test key after the signed browser requests.
