@@ -122,6 +122,8 @@ class _MindroomAppState:
     thread_export_runner: WorkspaceThreadExportRunner | None = None
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
+    response_admission_gate: ResponseAdmissionGate | None = None
+    active_openai_requests: int = 0
     script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
     mcp_gateway_runtime: GatewayRuntime | None = None
 

@@ -5343,3 +5343,126 @@ class TestKnowledgeIntegration:
         assert mock_ai.call_args.kwargs["knowledge"] is None
         data = response.json()
         assert data["choices"][0]["message"]["content"] == "Response without knowledge"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_response_activity_tracks_full_openai_request(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """OpenAI work remains visible through generation and streaming finalization."""
+    state = config_lifecycle.app_state(app_client.app)
+    observed: list[int] = []
+
+    async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
+        observed.append(state.active_openai_requests)
+        if not stream:
+            return JSONResponse({"ok": True})
+
+        async def chunks() -> AsyncIterator[str]:
+            observed.append(state.active_openai_requests)
+            yield "data: hello\n\n"
+            observed.append(state.active_openai_requests)
+
+        return StreamingResponse(chunks())
+
+    monkeypatch.setattr(openai_compat, "_chat_completions", complete)
+    response = app_client.post(
+        "/v1/chat/completions",
+        json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
+    )
+    assert response.status_code == 200, response.text
+    assert observed == ([1, 1, 1] if stream else [1])
+    assert state.active_openai_requests == 0
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_response_activity_releases_failed_openai_request(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """Generation and stream failures cannot leak an activity slot."""
+    state = config_lifecycle.app_state(app_client.app)
+    observed: list[int] = []
+
+    async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
+        observed.append(state.active_openai_requests)
+        if not stream:
+            message = "generation failed"
+            raise RuntimeError(message)
+
+        async def chunks() -> AsyncIterator[str]:
+            observed.append(state.active_openai_requests)
+            yield "data: hello\n\n"
+            message = "generation failed"
+            raise RuntimeError(message)
+
+        return StreamingResponse(chunks())
+
+    monkeypatch.setattr(openai_compat, "_chat_completions", complete)
+    with pytest.raises(RuntimeError, match="generation failed"):
+        app_client.post(
+            "/v1/chat/completions",
+            json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
+        )
+    assert observed == ([1, 1] if stream else [1])
+    assert state.active_openai_requests == 0
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_response_activity_releases_cancelled_openai_request(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A cancelled HTTP request releases activity only after its stream unwinds."""
+    import httpx  # noqa: PLC0415
+
+    state = config_lifecycle.app_state(app_client.app)
+
+    async def check() -> None:
+        started = asyncio.Event()
+        unwound: list[int] = []
+
+        async def wait_for_cancel() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                unwound.append(state.active_openai_requests)
+
+        async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
+            if not stream:
+                await wait_for_cancel()
+                return JSONResponse({})
+
+            async def chunks() -> AsyncIterator[str]:
+                yield "data: hello\n\n"
+                await wait_for_cancel()
+
+            return StreamingResponse(chunks())
+
+        monkeypatch.setattr(openai_compat, "_chat_completions", complete)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_client.app),
+            base_url="http://test",
+        ) as client:
+            task = asyncio.create_task(
+                client.post(
+                    "/v1/chat/completions",
+                    json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
+                ),
+            )
+            try:
+                await asyncio.wait_for(started.wait(), timeout=2)
+                assert state.active_openai_requests == 1
+            finally:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        assert unwound == [1]
+        assert state.active_openai_requests == 0
+
+    asyncio.run(check())

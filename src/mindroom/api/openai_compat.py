@@ -24,7 +24,7 @@ from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictStr, TypeAdapter
 from starlette.background import BackgroundTask
@@ -75,6 +75,7 @@ from mindroom.api.openai_streaming_protocol import (
 from mindroom.api.openai_streaming_protocol import (
     is_error_response as _is_error_response,
 )
+from mindroom.api.response_activity import track_openai_request
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
@@ -511,7 +512,11 @@ async def list_models(
     return JSONResponse(content=response.model_dump())
 
 
-@router.post("/chat/completions", response_model=None)
+@router.post(
+    "/chat/completions",
+    response_model=None,
+    dependencies=[Depends(track_openai_request, scope="request")],
+)
 async def chat_completions(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
