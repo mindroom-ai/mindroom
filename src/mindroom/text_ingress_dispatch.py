@@ -106,6 +106,10 @@ async def dispatch_text_message(
         async with admitted_response_decision(
             controller.deps.runtime.response_admission_gate,
             controller.deps.response_runner.wait_for_admission_or_shutdown,
+            responder=f"team/{controller.deps.agent_name}"
+            if controller.deps.agent_name in controller.deps.runtime.config.teams
+            else controller.deps.agent_name,
+            requester_id=turn.requester_user_id,
         ):
             if not controller.deps.turn_policy.can_reply_to_sender_in_room(
                 turn.requester_user_id,
@@ -499,6 +503,9 @@ async def _run_admitted_router_relay(
     async with admitted_response_decision(
         controller.deps.runtime.response_admission_gate,
         controller.deps.response_runner.wait_for_admission_or_shutdown,
+        responder=f"team/{controller.deps.agent_name}"
+        if controller.deps.agent_name in controller.deps.runtime.config.teams
+        else controller.deps.agent_name,
     ):
         await relay()
 

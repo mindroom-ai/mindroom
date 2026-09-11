@@ -297,7 +297,12 @@ class ApprovalMatrixTransport:
         reason: str,
     ) -> bool:
         """Expire visible cards, then atomically release the removed owner's sources."""
-        with self.response_admission_gate.track_recovery():
+        with self.response_admission_gate.track_recovery(
+            responder=f"team/{continuation.entity_name}"
+            if continuation.entity_kind == "team"
+            else continuation.entity_name,
+            requester_id=continuation.requester_id,
+        ):
             assert self.journal_provider is not None
             store = self.journal_provider().principal(principal_id)
             current = await store.approval_continuation(continuation.approval_id)

@@ -498,6 +498,7 @@ class AgentBot:
                 admit_response=lambda: admitted_response_decision(
                     self.admission_gate,
                     self.wait_for_admission_or_shutdown,
+                    responder=f"team/{self.agent_name}" if self.agent_name in self.config.teams else self.agent_name,
                 ),
                 on_configured_room_joined=self._post_join_room_setup,
             ),
@@ -696,7 +697,11 @@ class AgentBot:
             runtime=self._runtime_view,
             runtime_paths=self.runtime_paths,
             read_position=lambda room_id: self.journal_principal().ingestion_membership_position(room_id),
-            admit_response=lambda: admitted_response_decision(self.admission_gate, self.wait_for_admission_or_shutdown),
+            admit_response=lambda: admitted_response_decision(
+                self.admission_gate,
+                self.wait_for_admission_or_shutdown,
+                responder=f"team/{self.agent_name}" if self.agent_name in self.config.teams else self.agent_name,
+            ),
             notice_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
@@ -1479,7 +1484,9 @@ class AgentBot:
         onto the same event.
         """
         try:
-            with self.admission_gate.track_recovery():
+            with self.admission_gate.track_recovery(
+                responder=f"team/{self.agent_name}" if self.agent_name in self.config.teams else self.agent_name,
+            ):
                 outcome = await self._delivery_gateway.recover_deliveries()
         except Exception:
             self.logger.exception("Delivery recovery failed")
@@ -1841,9 +1848,19 @@ class AgentBot:
             await self._close_owned_matrix_after_start_failure()
             raise
 
-    async def recover_approval_final(self, approval_id: str) -> bool:
+    async def recover_approval_final(
+        self,
+        approval_id: str,
+        *,
+        requester_id: str | None = None,
+        responder: str | None = None,
+    ) -> bool:
         """Recover one frozen approval answer, owning any recovery-only client lifetime."""
-        with self.admission_gate.track_recovery():
+        with self.admission_gate.track_recovery(
+            responder=responder
+            or (f"team/{self.agent_name}" if self.agent_name in self.config.teams else self.agent_name),
+            requester_id=requester_id,
+        ):
             opened_recovery_client = self.client is None
             try:
                 if opened_recovery_client:
@@ -1879,7 +1896,9 @@ class AgentBot:
     @asynccontextmanager
     async def response_recovery_scope(self, room_id: str, event_id: str) -> AsyncIterator[bool]:
         """Expose the delivery owner's startup operation to fleet discovery."""
-        with self.admission_gate.track_recovery():
+        with self.admission_gate.track_recovery(
+            responder=f"team/{self.agent_name}" if self.agent_name in self.config.teams else self.agent_name,
+        ):
             async with self._delivery_gateway.response_recovery_scope(room_id, event_id) as allowed:
                 yield allowed
 

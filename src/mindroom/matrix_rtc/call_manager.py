@@ -476,6 +476,7 @@ class CallManager:
             async with admitted_response_decision(
                 self._response_admission_gate,
                 self._wait_for_admission_or_shutdown,
+                responder=self._agent_name,
             ):
                 lock = self._locks.setdefault(room_id, asyncio.Lock())
                 async with lock:
@@ -959,6 +960,8 @@ class CallManager:
             async with admitted_response_decision(
                 self._response_admission_gate,
                 self._wait_for_admission_or_shutdown,
+                responder=self._agent_name,
+                requester_id=requester_id,
             ):
                 if not self._is_authorized_call_member(requester_id, room_id):
                     return
@@ -1062,6 +1065,8 @@ class CallManager:
         admission = admitted_response_decision(
             self._response_admission_gate,
             self._wait_for_admission_or_shutdown,
+            responder=self._agent_name,
+            requester_id=requester_id,
         )
         try:
             await admission.__aenter__()

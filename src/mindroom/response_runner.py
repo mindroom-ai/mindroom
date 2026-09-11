@@ -2378,54 +2378,62 @@ class ResponseRunner:
                 raise ResponseAdmissionRefusedError
         self._in_flight_response_count += 1
         try:
-            resolved_target = request.response_envelope.target
-            early_placeholder = _EarlyPlaceholderState()
-            try:
-                return await self._lifecycle_coordinator.run_locked_response(
-                    target=resolved_target,
-                    response_envelope=request.response_envelope,
-                    pipeline_timing=request.pipeline_timing,
-                    locked_operation=lambda target: self._run_owned_or_locked_response(
-                        request,
-                        target=target,
-                        early_placeholder=early_placeholder,
-                        locked_operation=locked_operation,
-                    ),
-                    signal_queued_message=(
-                        signal_queued_message
-                        and request.sync_restart_retry_source_event_id is None
-                        and not _is_silent_schedule_response(request)
-                    ),
-                )
-            except asyncio.CancelledError as error:
-                if current_task_is_process_shutdown():
-                    raise
-                if early_placeholder.placeholder_event_id is not None and not early_placeholder.settlement_started:
-                    await self._finalize_early_placeholder_cancellation(
-                        early_placeholder,
-                        error,
-                        response_kind=response_kind,
+            with self._admission_gate.track_response(
+                responder=(
+                    f"team/{self.deps.agent_name}"
+                    if self.deps.agent_name in self.deps.runtime.config.teams
+                    else self.deps.agent_name
+                ),
+                requester_id=request.response_envelope.requester_id,
+            ):
+                resolved_target = request.response_envelope.target
+                early_placeholder = _EarlyPlaceholderState()
+                try:
+                    return await self._lifecycle_coordinator.run_locked_response(
+                        target=resolved_target,
+                        response_envelope=request.response_envelope,
+                        pipeline_timing=request.pipeline_timing,
+                        locked_operation=lambda target: self._run_owned_or_locked_response(
+                            request,
+                            target=target,
+                            early_placeholder=early_placeholder,
+                            locked_operation=locked_operation,
+                        ),
+                        signal_queued_message=(
+                            signal_queued_message
+                            and request.sync_restart_retry_source_event_id is None
+                            and not _is_silent_schedule_response(request)
+                        ),
                     )
-                raise
-            except Exception as error:
-                already_linked = (
-                    isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
-                )
-                if (
-                    isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError))
-                    or early_placeholder.placeholder_event_id is None
-                    or early_placeholder.settlement_started
-                    or already_linked
-                ):
+                except asyncio.CancelledError as error:
+                    if current_task_is_process_shutdown():
+                        raise
+                    if early_placeholder.placeholder_event_id is not None and not early_placeholder.settlement_started:
+                        await self._finalize_early_placeholder_cancellation(
+                            early_placeholder,
+                            error,
+                            response_kind=response_kind,
+                        )
                     raise
-                cause = (
-                    error.__cause__
-                    if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
-                    else error
-                )
-                raise PostLockRequestPreparationError(
-                    placeholder_event_id=early_placeholder.placeholder_event_id,
-                ) from cause
+                except Exception as error:
+                    already_linked = (
+                        isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
+                    )
+                    if (
+                        isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError))
+                        or early_placeholder.placeholder_event_id is None
+                        or early_placeholder.settlement_started
+                        or already_linked
+                    ):
+                        raise
+                    cause = (
+                        error.__cause__
+                        if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
+                        else error
+                    )
+                    raise PostLockRequestPreparationError(
+                        placeholder_event_id=early_placeholder.placeholder_event_id,
+                    ) from cause
         finally:
             self._in_flight_response_count -= 1
             self._admission_gate.release()

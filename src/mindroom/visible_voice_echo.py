@@ -408,6 +408,10 @@ class VisibleVoiceEchoLifecycle:
             admitted_response_decision(
                 self.deps.runtime.response_admission_gate,
                 self.deps.wait_for_admission_or_shutdown,
+                responder=f"team/{self.deps.agent_name}"
+                if self.deps.agent_name in self.deps.runtime.config.teams
+                else self.deps.agent_name,
+                requester_id=request.requester_user_id,
             ),
         ):
             if not self._sender_is_authorized(request):
@@ -452,6 +456,10 @@ class VisibleVoiceEchoLifecycle:
             admitted_response_decision(
                 self.deps.runtime.response_admission_gate,
                 self.deps.wait_for_admission_or_shutdown,
+                responder=f"team/{self.deps.agent_name}"
+                if self.deps.agent_name in self.deps.runtime.config.teams
+                else self.deps.agent_name,
+                requester_id=request.requester_user_id,
             ),
         ):
             if not self._sender_is_authorized(request):

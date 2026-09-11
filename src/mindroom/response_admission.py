@@ -39,8 +39,12 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.response_tracking import ResponseActivityTracker
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+
+    from mindroom.response_tracking import ResponseTrackingHandle
 
 
 class ResponseAdmissionRefusedError(Exception):
@@ -61,6 +65,7 @@ class ResponseAdmissionGate:
 
     _in_flight_response_count: int = field(default=0, init=False)
     _active_recovery_count: int = field(default=0, init=False)
+    response_tracker: ResponseActivityTracker = field(default_factory=ResponseActivityTracker, init=False)
     _closed: bool = field(default=False, init=False)
     _open_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
@@ -79,11 +84,26 @@ class ResponseAdmissionGate:
         return self._in_flight_response_count + self._active_recovery_count
 
     @contextmanager
-    def track_recovery(self) -> Iterator[None]:
+    def track_response(
+        self,
+        responder: str | None = None,
+        requester_id: str | None = None,
+    ) -> Iterator[ResponseTrackingHandle]:
+        """Attach metadata to work whose admission slot is already reserved."""
+        with self.response_tracker.track(responder=responder, requester_id=requester_id) as handle:
+            yield handle
+
+    @contextmanager
+    def track_recovery(
+        self,
+        responder: str | None = None,
+        requester_id: str | None = None,
+    ) -> Iterator[ResponseTrackingHandle]:
         """Observe recovery without changing its ability to run during replacement."""
         self._active_recovery_count += 1
         try:
-            yield
+            with self.track_response(responder=responder, requester_id=requester_id) as handle:
+                yield handle
         finally:
             self._active_recovery_count -= 1
 
@@ -131,12 +151,16 @@ class ResponseAdmissionGate:
 async def admitted_response_decision(
     gate: ResponseAdmissionGate,
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
-) -> AsyncIterator[None]:
+    *,
+    responder: str | None = None,
+    requester_id: str | None = None,
+) -> AsyncIterator[ResponseTrackingHandle]:
     """Reserve replacement admission around one final authorization decision and its effects."""
     while not gate.admit():
         if not await wait_for_admission_or_shutdown():
             raise ResponseAdmissionRefusedError
     try:
-        yield
+        with gate.track_response(responder=responder, requester_id=requester_id) as handle:
+            yield handle
     finally:
         gate.release()

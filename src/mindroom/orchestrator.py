@@ -627,7 +627,13 @@ class _MultiAgentOrchestrator:
                 )
                 return False
 
-        return await bot.recover_approval_final(continuation.approval_id)
+        return await bot.recover_approval_final(
+            continuation.approval_id,
+            requester_id=continuation.requester_id,
+            responder=f"team/{continuation.entity_name}"
+            if continuation.entity_kind == "team"
+            else continuation.entity_name,
+        )
 
     async def leave_matrix_room(self, agent_name: str, room_id: str) -> bool:
         """Route dashboard departures through the current bot's durable membership owner."""

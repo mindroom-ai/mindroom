@@ -395,6 +395,9 @@ class TurnController:
         async with admitted_response_decision(
             self.deps.runtime.response_admission_gate,
             self.deps.response_runner.wait_for_admission_or_shutdown,
+            responder=f"team/{self.deps.agent_name}"
+            if self.deps.agent_name in self.deps.runtime.config.teams
+            else self.deps.agent_name,
         ):
             requester_user_id = await self.deps.ingress.precheck_event(room, event, is_edit=is_edit)
         if requester_user_id is None:
@@ -819,6 +822,10 @@ class TurnController:
         async with admitted_response_decision(
             self.deps.runtime.response_admission_gate,
             self.deps.response_runner.wait_for_admission_or_shutdown,
+            responder=f"team/{self.deps.agent_name}"
+            if self.deps.agent_name in self.deps.runtime.config.teams
+            else self.deps.agent_name,
+            requester_id=prechecked_event.requester_user_id,
         ):
             if not self.deps.turn_policy.can_reply_to_sender_in_room(
                 prechecked_event.requester_user_id,
@@ -852,6 +859,10 @@ class TurnController:
             async with admitted_response_decision(
                 self.deps.runtime.response_admission_gate,
                 self.deps.response_runner.wait_for_admission_or_shutdown,
+                responder=f"team/{self.deps.agent_name}"
+                if self.deps.agent_name in self.deps.runtime.config.teams
+                else self.deps.agent_name,
+                requester_id=requester_user_id,
             ):
                 if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
                     return True
@@ -1103,6 +1114,10 @@ class TurnController:
         async with admitted_response_decision(
             self.deps.runtime.response_admission_gate,
             self.deps.response_runner.wait_for_admission_or_shutdown,
+            responder=f"team/{self.deps.agent_name}"
+            if self.deps.agent_name in self.deps.runtime.config.teams
+            else self.deps.agent_name,
+            requester_id=envelope.requester_id,
         ):
             if not self.deps.turn_policy.can_reply_to_sender_in_room(envelope.requester_id, room.room_id):
                 await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
@@ -1552,6 +1567,10 @@ class TurnController:
         async with admitted_response_decision(
             self.deps.runtime.response_admission_gate,
             self.deps.response_runner.wait_for_admission_or_shutdown,
+            responder=f"team/{self.deps.agent_name}"
+            if self.deps.agent_name in self.deps.runtime.config.teams
+            else self.deps.agent_name,
+            requester_id=requester_user_id,
         ):
             if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
                 await self.deps.settle_dispatch_sources((source_event_id,))

@@ -70,7 +70,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         method = "recover_approval_final" if recovery_kind == "approval" else "recover_deliveries"
         with patch.object(owner, method, AsyncMock(side_effect=recover)):
             operation = (
-                bot.recover_approval_final("approval")
+                bot.recover_approval_final("approval", requester_id="@alice:example.org")
                 if recovery_kind == "approval"
                 else bot._recover_unacknowledged_matrix_deliveries()
             )
@@ -79,6 +79,9 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 await asyncio.wait_for(entered.wait(), timeout=1)
                 assert gate.active_operation_count == 1
                 assert gate.in_flight_response_count == 0
+                (identity,) = gate.response_tracker.snapshot()
+                assert identity.responder == bot.agent_name
+                assert identity.requester_id == ("@alice:example.org" if recovery_kind == "approval" else None)
                 assert gate.closed is admission_closed
                 if outcome == "cancel":
                     task.cancel()
@@ -92,6 +95,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                     else:
                         assert await task is (outcome == "complete")
                 assert gate.active_operation_count == 0
+                assert gate.response_tracker.snapshot() == ()
                 assert gate.closed is admission_closed
             finally:
                 task.cancel()

@@ -284,7 +284,12 @@ async def test_unavailable_final_recovery_uses_retained_owner_bot(tmp_path: Path
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    continuation = MagicMock(approval_id="approval-1", entity_name="removed")
+    continuation = MagicMock(
+        approval_id="approval-1",
+        entity_name="removed",
+        requester_id="@alice:example.org",
+        entity_kind="agent",
+    )
     bot = MagicMock()
     bot.approval_store.principal_id = "removed@@removed:localhost"
     bot.recover_approval_final = AsyncMock(return_value=True)
@@ -292,7 +297,11 @@ async def test_unavailable_final_recovery_uses_retained_owner_bot(tmp_path: Path
 
     assert await orchestrator._recover_unavailable_final("removed@@removed:localhost", continuation)
 
-    bot.recover_approval_final.assert_awaited_once_with("approval-1")
+    bot.recover_approval_final.assert_awaited_once_with(
+        "approval-1",
+        requester_id="@alice:example.org",
+        responder="removed",
+    )
 
 
 @pytest.mark.asyncio
@@ -309,7 +318,12 @@ async def test_unavailable_final_recovery_restores_offline_owner_account(tmp_pat
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
     orchestrator.config = config
-    continuation = MagicMock(approval_id="approval-1", entity_name="removed")
+    continuation = MagicMock(
+        approval_id="approval-1",
+        entity_name="removed",
+        requester_id="@alice:example.org",
+        entity_kind="agent",
+    )
     account = AgentMatrixUser(
         agent_name="removed",
         user_id="@removed:localhost",
@@ -331,7 +345,11 @@ async def test_unavailable_final_recovery_restores_offline_owner_account(tmp_pat
 
     load_account.assert_called_once_with("removed", orchestrator.runtime_paths)
     create_recovery_bot.assert_called_once()
-    recovery_bot.recover_approval_final.assert_awaited_once_with("approval-1")
+    recovery_bot.recover_approval_final.assert_awaited_once_with(
+        "approval-1",
+        requester_id="@alice:example.org",
+        responder="removed",
+    )
 
 
 @pytest.mark.asyncio

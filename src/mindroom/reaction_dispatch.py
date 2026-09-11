@@ -190,6 +190,10 @@ class ReactionDispatcher:
             async with admitted_response_decision(
                 self.deps.runtime.response_admission_gate,
                 self.deps.wait_for_admission_or_shutdown,
+                responder=f"team/{self.deps.agent_name}"
+                if self.deps.agent_name in self.deps.runtime.config.teams
+                else self.deps.agent_name,
+                requester_id=requester_user_id,
             ):
                 if not self.deps.turn_policy.can_reply_to_sender_in_room(
                     requester_user_id,
@@ -274,6 +278,10 @@ class ReactionDispatcher:
                 async with admitted_response_decision(
                     self.deps.runtime.response_admission_gate,
                     self.deps.wait_for_admission_or_shutdown,
+                    responder=f"team/{self.deps.agent_name}"
+                    if self.deps.agent_name in self.deps.runtime.config.teams
+                    else self.deps.agent_name,
+                    requester_id=requester_user_id,
                 ):
                     if not self.deps.turn_policy.can_reply_to_sender_in_room(
                         requester_user_id,
@@ -322,6 +330,10 @@ class ReactionDispatcher:
         async with admitted_response_decision(
             self.deps.runtime.response_admission_gate,
             self.deps.wait_for_admission_or_shutdown,
+            responder=f"team/{self.deps.agent_name}"
+            if self.deps.agent_name in self.deps.runtime.config.teams
+            else self.deps.agent_name,
+            requester_id=requester_user_id,
         ):
             if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
                 self.deps.logger.debug(

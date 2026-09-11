@@ -82,7 +82,7 @@ class BotRoomLifecycleDeps:
     get_configured_rooms: Callable[[], Sequence[str]]
     send_response: _SendRoomResponse
     change_membership: _ChangeRoomMembership
-    admit_response: Callable[[], AbstractAsyncContextManager[None]]
+    admit_response: Callable[[], AbstractAsyncContextManager[object]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
 
 

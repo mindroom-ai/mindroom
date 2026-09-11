@@ -1011,6 +1011,7 @@ depends_on = [
     "mindroom.external_triggers.models",
     "mindroom.external_triggers.replay_store",
     "mindroom.response_admission",
+    "mindroom.response_tracking",
 ]
 
 [[modules]]
@@ -1969,7 +1970,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.response_admission"
-depends_on = []
+depends_on = ["mindroom.response_tracking"]
 visibility = [
     "mindroom.api.external_triggers",
     "mindroom.approval_transport",
@@ -5486,3 +5487,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.response_activity",
 ]
+
+[[modules]]
+path = "mindroom.response_tracking"
+depends_on = []
