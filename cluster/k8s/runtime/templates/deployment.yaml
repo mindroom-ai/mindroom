@@ -25,6 +25,9 @@ metadata:
   {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if ne .Values.progressDeadlineSeconds nil }}
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds | int64 }}
+  {{- end }}
   strategy:
     type: Recreate
   selector:

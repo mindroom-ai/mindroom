@@ -1503,6 +1503,160 @@ def test_runtime_chart_approved_egress_can_chain_agent_vault_parent(tmp_path: Pa
     assert "name=agentvault" not in conf
 
 
+@pytest.mark.parametrize("deadline", [None, 1, 1800, 2147483647])
+@pytest.mark.parametrize("from_values_file", [False, True])
+def test_runtime_chart_progress_deadline_is_optional(
+    tmp_path: Path,
+    deadline: int | None,
+    from_values_file: bool,
+) -> None:
+    """A custom rollout budget reaches the Deployment; omission keeps the Kubernetes default."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(yaml.safe_dump({"progressDeadlineSeconds": deadline}))
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        *((f"progressDeadlineSeconds={deadline}",) if deadline is not None and not from_values_file else ()),
+        values_files=(values_path,) if from_values_file else (),
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+
+    if deadline is None:
+        assert "progressDeadlineSeconds" not in deployment["spec"]
+    else:
+        assert isinstance(deployment["spec"]["progressDeadlineSeconds"], int)
+        assert deployment["spec"]["progressDeadlineSeconds"] == deadline
+
+
+@pytest.mark.parametrize("deadline", [0, -1, 1.5, "abc", True, "", 2147483648, 999999999999999999999999])
+@pytest.mark.parametrize("from_values_file", [False, True])
+def test_runtime_chart_rejects_invalid_progress_deadline(
+    tmp_path: Path,
+    deadline: str | float,
+    from_values_file: bool,
+) -> None:
+    """Reject invalid Kubernetes int32 deadlines during rendering rather than installation."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(yaml.safe_dump({"progressDeadlineSeconds": deadline}))
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        set_string_args=() if from_values_file else (f"progressDeadlineSeconds={deadline}",),
+        values_files=(values_path,) if from_values_file else (),
+    )
+
+    assert completed.returncode != 0
+    assert "progressDeadlineSeconds must be a positive integer no greater than 2147483647" in completed.stderr
+
+
+@pytest.mark.parametrize("smtp_enabled", [False, True])
+@pytest.mark.parametrize(
+    "env_name",
+    [
+        "AGENT_VAULT_MASTER_PASSWORD",
+        "AGENT_VAULT_SMTP_HOST",
+        "AGENT_VAULT_SMTP_PORT",
+        "AGENT_VAULT_SMTP_TLS_MODE",
+        "AGENT_VAULT_SMTP_FROM_NAME",
+        "AGENT_VAULT_SMTP_USERNAME",
+        "AGENT_VAULT_SMTP_PASSWORD",
+        "AGENT_VAULT_SMTP_FROM",
+    ],
+)
+def test_runtime_chart_agent_vault_server_rejects_managed_environment(env_name: str, smtp_enabled: bool) -> None:
+    """Extensions cannot replace chart-managed credentials; disabled SMTP stays configurable."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.kubernetes.agentVault.server.enabled=true",
+        "workers.kubernetes.agentVault.server.image=example.test/agent-vault:test",
+        f"workers.kubernetes.agentVault.server.smtp.enabled={str(smtp_enabled).lower()}",
+        "workers.kubernetes.agentVault.server.smtp.host=smtp.example.test",
+        "workers.kubernetes.agentVault.server.smtp.existingSecret=vault-smtp",
+        f"workers.kubernetes.agentVault.server.extraEnv[0].name={env_name}",
+        "workers.kubernetes.agentVault.server.extraEnv[0].value=custom-value",
+    )
+
+    if env_name == "AGENT_VAULT_MASTER_PASSWORD" or smtp_enabled:
+        assert completed.returncode != 0
+        assert f"server.extraEnv[0] cannot override chart-managed {env_name}" in completed.stderr
+    else:
+        completed.check_returncode()
+        docs = [doc for doc in yaml.safe_load_all(completed.stdout) if isinstance(doc, dict)]
+        vault = _container(_resource(docs, "Deployment", "agent-vault"), "agent-vault")
+        assert _env_by_name(vault)[env_name]["value"] == "custom-value"
+
+
+@pytest.mark.parametrize("smtp_enabled", [False, True])
+@pytest.mark.parametrize("custom_env", [False, True])
+def test_runtime_chart_agent_vault_server_environment(
+    tmp_path: Path,
+    smtp_enabled: bool,
+    custom_env: bool,
+) -> None:
+    """Vault-only environment extensions preserve built-in password and SMTP wiring."""
+    extra_env = [
+        {"name": "AGENT_VAULT_ADDR", "value": "https://vault.example.test"},
+        {
+            "name": "AGENT_VAULT_OAUTH_GITHUB_CLIENT_SECRET",
+            "valueFrom": {"secretKeyRef": {"name": "vault-oauth", "key": "client-secret"}},
+        },
+    ]
+    env_from = [
+        {"secretRef": {"name": "vault-extra-env"}},
+        {"configMapRef": {"name": "vault-settings"}, "prefix": "VAULT_"},
+    ]
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "workers": {
+                    "kubernetes": {
+                        "agentVault": {
+                            "server": {
+                                "enabled": True,
+                                "image": "example.test/agent-vault:test",
+                                "extraEnv": extra_env if custom_env else [],
+                                "envFrom": env_from if custom_env else [],
+                                "smtp": {
+                                    "enabled": smtp_enabled,
+                                    "host": "smtp.example.test",
+                                    "existingSecret": "vault-smtp",
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        ),
+    )
+    docs = _render_chart(Path("cluster/k8s/runtime"), values_files=(values_path,), release_name="mindroom-runtime")
+    vault = _container(_resource(docs, "Deployment", "agent-vault"), "agent-vault")
+    env = _env_by_name(vault)
+
+    assert env["AGENT_VAULT_MASTER_PASSWORD"] == {
+        "name": "AGENT_VAULT_MASTER_PASSWORD",
+        "valueFrom": {"secretKeyRef": {"name": "agent-vault-bootstrap", "key": "AGENT_VAULT_MASTER_PASSWORD"}},
+    }
+    if smtp_enabled:
+        assert env["AGENT_VAULT_SMTP_HOST"]["value"] == "smtp.example.test"
+        assert env["AGENT_VAULT_SMTP_PASSWORD"] == {
+            "name": "AGENT_VAULT_SMTP_PASSWORD",
+            "valueFrom": {"secretKeyRef": {"name": "vault-smtp", "key": "AGENT_VAULT_SMTP_PASSWORD"}},
+        }
+    else:
+        assert "AGENT_VAULT_SMTP_HOST" not in env
+    if custom_env:
+        assert vault["env"][-2:] == extra_env
+        assert vault["envFrom"] == env_from
+    else:
+        assert "AGENT_VAULT_ADDR" not in env
+        assert "envFrom" not in vault
+
+    runtime = _container(_resource(docs, "Deployment", "mindroom-runtime"), "mindroom")
+    assert "AGENT_VAULT_ADDR" not in _env_by_name(runtime)
+    assert "AGENT_VAULT_OAUTH_GITHUB_CLIENT_SECRET" not in _env_by_name(runtime)
+    assert "envFrom" not in runtime
+
+
 def test_runtime_chart_agent_vault_access_tool_sets_owner_email() -> None:
     """The self-service access tool must know the owner used by worker token minting."""
     docs = _render_chart(

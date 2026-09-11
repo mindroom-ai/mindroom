@@ -17,6 +17,17 @@ helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
 The default values render a self-contained Deployment, Service, ConfigMap, runtime PVC, and PostgreSQL event-journal StatefulSet.
 A real deployment should provide a useful config and Matrix settings.
 
+## Rollout Progress Deadline
+
+Set `progressDeadlineSeconds` to a positive integer to customize the MindRoom Deployment's rollout progress budget, including scheduling, image initialization, and startup probes.
+The chart rejects invalid values and values above Kubernetes' int32 limit of `2147483647` seconds.
+Leaving it unset or `null` preserves the Kubernetes default.
+This controls when Kubernetes reports a stalled rollout; it does not change probe settings or Helm's wait timeout.
+
+```yaml
+progressDeadlineSeconds: 1800
+```
+
 ## Event Journal
 
 The runtime chart defaults to PostgreSQL for MindRoom's Matrix event journal, because Kubernetes deployments need a durable database for it.
@@ -338,6 +349,36 @@ With this setup, workers mint Agent Vault tokens through the API port (`14321`),
 Tokenless traffic egresses directly from Squid after the normal policy check.
 When `agentVault.accessTool.enabled` is set, self-service vault grants also keep `agentVault.ownerEmail` as an admin on each worker vault; the Kubernetes worker init container uses that owner account to mint and attach the proxy-role agent token.
 The chart rejects the unsafe default combination of chart-managed approved egress plus Agent Vault without `approvedEgress.parentProxy`, because that would be vault-first and break dynamic grants.
+
+### Agent Vault Server Environment
+
+Use `workers.kubernetes.agentVault.server.extraEnv` for raw Kubernetes `EnvVar` entries, including `valueFrom` Secret references.
+Use `server.envFrom` to import variables from existing Secrets or ConfigMaps.
+Both lists default to empty and apply only to the chart-managed Agent Vault server.
+Keep sensitive values in Secrets and avoid duplicate environment variable names; use the dedicated master-password and SMTP settings for chart-managed variables.
+The chart rejects `extraEnv` entries that repeat the master-password variable or any SMTP variable emitted when `server.smtp.enabled` is true.
+
+```yaml
+workers:
+  kubernetes:
+    agentVault:
+      server:
+        enabled: true
+        image: registry.example.com/agent-vault@sha256:1111111111111111111111111111111111111111111111111111111111111111
+        extraEnv:
+          - name: AGENT_VAULT_ADDR
+            value: https://vault.example.com
+          - name: AGENT_VAULT_OAUTH_GITHUB_CLIENT_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: vault-oauth
+                key: client-secret
+        envFrom:
+          - secretRef:
+              name: vault-extra-env
+          - configMapRef:
+              name: vault-settings
+```
 
 ### Agent Vault Access Grants
 

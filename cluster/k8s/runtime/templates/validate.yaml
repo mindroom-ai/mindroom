@@ -1,3 +1,9 @@
+{{- if ne .Values.progressDeadlineSeconds nil -}}
+{{- $deadline := toJson .Values.progressDeadlineSeconds -}}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" $deadline)) (lt (int64 $deadline) 1) (gt (int64 $deadline) 2147483647) -}}
+{{- fail "progressDeadlineSeconds must be a positive integer no greater than 2147483647" -}}
+{{- end -}}
+{{- end -}}
 {{- if not (or (eq .Values.eventCache.backend "postgres") (eq .Values.eventCache.backend "sqlite")) -}}
 {{- fail "eventCache.backend must be either postgres or sqlite" -}}
 {{- end -}}
@@ -213,6 +219,17 @@
 {{- end -}}
 {{- end -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}
+{{- if $agentVault.server.enabled -}}
+{{- $managedVaultEnv := list "AGENT_VAULT_MASTER_PASSWORD" -}}
+{{- if $agentVault.server.smtp.enabled -}}
+{{- $managedVaultEnv = concat $managedVaultEnv (list "AGENT_VAULT_SMTP_HOST" "AGENT_VAULT_SMTP_PORT" "AGENT_VAULT_SMTP_TLS_MODE" "AGENT_VAULT_SMTP_FROM_NAME" "AGENT_VAULT_SMTP_USERNAME" "AGENT_VAULT_SMTP_PASSWORD" "AGENT_VAULT_SMTP_FROM") -}}
+{{- end -}}
+{{- range $index, $entry := $agentVault.server.extraEnv -}}
+{{- if has (default "" $entry.name) $managedVaultEnv -}}
+{{- fail (printf "workers.kubernetes.agentVault.server.extraEnv[%d] cannot override chart-managed %s" $index $entry.name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $agentVaultProxyUrl := lower (regexReplaceAll "/+$" (trim (default "" $agentVault.proxyUrl)) "") -}}
 {{- $agentVaultServiceName := include "mindroom-runtime.agentVaultServerName" . -}}
 {{- $agentVaultMitmPort := printf "%v" $agentVault.server.mitmPort -}}
