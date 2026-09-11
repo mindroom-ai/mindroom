@@ -302,6 +302,80 @@ async def test_full_pass_retains_scoped_exports_when_account_group_cannot_run(tm
 
 
 @pytest.mark.asyncio
+async def test_disjoint_target_validation_uses_linear_ancestry_checks(tmp_path: Path) -> None:
+    """A growing set of workspaces must not trigger all-pairs ancestry checks."""
+    config = thread_export_config(tmp_path)
+    targets = tuple(
+        ThreadExportTarget(tmp_path / f"agent-{index}" / "workspace" / "thread_exports") for index in range(64)
+    )
+    ancestry_checks = 0
+    original_is_relative_to = Path.is_relative_to
+
+    def counted_is_relative_to(path: Path, other: Path) -> bool:
+        nonlocal ancestry_checks
+        ancestry_checks += 1
+        return original_is_relative_to(path, other)
+
+    with patch.object(Path, "is_relative_to", counted_is_relative_to):
+        stats = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            sources=(),
+            targets=targets,
+            full_pass=False,
+        )
+
+    assert len(stats) == len(targets)
+    assert all(item.failures == 0 for item in stats)
+    assert ancestry_checks <= 2 * len(targets)
+    assert all((target.output_dir / _ROOT_MARKER_FILENAME).is_file() for target in targets)
+
+
+@pytest.mark.asyncio
+async def test_mixed_target_overlaps_preserve_every_conflict_in_input_order(tmp_path: Path) -> None:
+    """Nested, duplicate and sibling roots retain complete ordered diagnostics."""
+    config = thread_export_config(tmp_path)
+    root = tmp_path / "exports"
+    output_dirs = (
+        root / "branch" / "leaf",
+        tmp_path / "exports-neighbor",
+        root / "sibling",
+        root,
+        root / "branch",
+        root,
+        tmp_path / "unique",
+    )
+    expected_conflicts = {
+        0: (3, 4, 5),
+        2: (3, 5),
+        3: (0, 2, 4, 5),
+        4: (0, 3, 5),
+        5: (0, 2, 3, 4),
+    }
+
+    stats = await export_threads_to_sources(
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        sources=(),
+        targets=tuple(ThreadExportTarget(output_dir) for output_dir in output_dirs),
+        full_pass=False,
+    )
+
+    assert tuple(item.output_dir for item in stats) == output_dirs
+    for index, item in enumerate(stats):
+        if index not in expected_conflicts:
+            assert item.failures == 0
+            assert (item.output_dir / _ROOT_MARKER_FILENAME).is_file()
+            continue
+        assert item.failures == 1
+        conflicting = ", ".join(str(output_dirs[other]) for other in expected_conflicts[index])
+        assert item.failed_items[0].error == (
+            f"output directory resolving to {output_dirs[index]} overlaps another enabled target: {conflicting}"
+        )
+    assert not root.exists()
+
+
+@pytest.mark.asyncio
 async def test_aliased_target_output_directories_are_all_skipped(tmp_path: Path) -> None:
     """A symlinked agent workspace must preserve the corpus both aliases resolve to."""
     config = thread_export_config(tmp_path)
