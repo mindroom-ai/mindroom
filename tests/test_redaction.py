@@ -128,12 +128,13 @@ def test_url_redaction_preserves_text_before_a_credential_bearing_scheme(prefix:
 def test_url_redaction_does_not_rescan_every_suffix_of_non_url_text(run: str) -> None:
     """A long scheme-like run before a real URL must not occupy the GIL for seconds."""
     value = f"{run} https://example.test/path?token=synthetic-secret"
-    start = time.perf_counter()
+    # Exclude time when a loaded runner deschedules this thread.
+    start = time.thread_time()
 
     assert redact_sensitive_data({"content": value}) == {
         "content": f"{run} https://example.test/path?token={REDACTED}",
     }
-    assert time.perf_counter() - start < 1.0
+    assert time.thread_time() - start < 1.0
 
 
 def test_redact_url_in_escaped_shell_command_keeps_json_arguments_valid() -> None:
