@@ -565,6 +565,7 @@ class TestAgentBot(AgentBotTestBase):
     async def test_run_api_server_binds_live_memberships_and_clears_on_shutdown(self, tmp_path: Path) -> None:
         """Roomless API authorization follows the orchestrator's live membership index."""
         memberships = AgentReplyMembershipIndex()
+        reload_status = MagicMock()
 
         class ReturningServer:
             should_exit = True
@@ -581,6 +582,7 @@ class TestAgentBot(AgentBotTestBase):
 
             async def serve(self) -> None:
                 assert api_config_lifecycle.app_state(api_main.app).agent_reply_memberships is memberships
+                assert api_config_lifecycle.app_state(api_main.app).config_reload_status is reload_status
 
         shutdown_requested = asyncio.Event()
         shutdown_requested.set()
@@ -594,10 +596,12 @@ class TestAgentBot(AgentBotTestBase):
                 "INFO",
                 self._runtime_paths(tmp_path),
                 agent_reply_memberships=memberships,
+                config_reload_status=reload_status,
                 shutdown_requested=shutdown_requested,
             )
 
         assert api_config_lifecycle.app_state(api_main.app).agent_reply_memberships is not memberships
+        assert api_config_lifecycle.app_state(api_main.app).config_reload_status is None
 
     @pytest.mark.asyncio
     async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:
@@ -1043,11 +1047,13 @@ class TestAgentBot(AgentBotTestBase):
             leave_matrix_room: object,
             response_admission_gate: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
+            config_reload_status: Callable[[], object],
         ) -> None:
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
             assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
+            assert config_reload_status() is mock_orchestrator.config_reload.status
             assert shutdown_requested is not None
             shutdown_requested.set()
             try:
@@ -1128,11 +1134,13 @@ class TestAgentBot(AgentBotTestBase):
             leave_matrix_room: object,
             response_admission_gate: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
+            config_reload_status: Callable[[], object],
         ) -> None:
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
             assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
+            assert config_reload_status() is mock_orchestrator.config_reload.status
             assert shutdown_requested is not None
             shutdown_requested.set()
             api_shutdown_started.set()
@@ -1203,11 +1211,13 @@ class TestAgentBot(AgentBotTestBase):
             leave_matrix_room: object,
             response_admission_gate: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
+            config_reload_status: Callable[[], object],
         ) -> None:
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
             assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
+            assert config_reload_status() is mock_orchestrator.config_reload.status
             assert shutdown_requested is not None
             shutdown_requested.set()
 
@@ -2458,7 +2468,7 @@ class TestMultiAgentOrchestrator:
     async def test_orchestrator_start_sets_up_rooms_before_auxiliary_workers(self, tmp_path: Path) -> None:
         """Room creation/invites should happen before auxiliary runtime workers."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        orchestrator.config = MagicMock()
+        orchestrator.config = MagicMock(source_fingerprint=None)
 
         bot = MagicMock()
         bot.agent_name = "router"
@@ -2497,7 +2507,7 @@ class TestMultiAgentOrchestrator:
     async def test_orchestrator_start_syncs_knowledge_watchers_after_runtime_starts(self, tmp_path: Path) -> None:
         """Normal startup should start watch-owned knowledge refresh after reply paths are live."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        config = MagicMock()
+        config = MagicMock(source_fingerprint=None)
         orchestrator.config = config
 
         bot = MagicMock()
@@ -2537,7 +2547,7 @@ class TestMultiAgentOrchestrator:
     ) -> None:
         """Router readiness should trigger Matrix-backed startup discard after room setup."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        orchestrator.config = MagicMock()
+        orchestrator.config = MagicMock(source_fingerprint=None)
         orchestrator.config.tool_approval.timeout_days = 7.0
         orchestrator.config.tool_approval.rules = [SimpleNamespace(timeout_days=10.0)]
 
@@ -3023,7 +3033,7 @@ class TestMultiAgentOrchestrator:
 
         async def _initialize() -> None:
             call_order.append("initialize")
-            orchestrator.config = MagicMock()
+            orchestrator.config = MagicMock(source_fingerprint=None)
             bot = MagicMock()
             bot.agent_name = "router"
             bot.try_start = AsyncMock(return_value=True)
@@ -3221,7 +3231,7 @@ class TestMultiAgentOrchestrator:
     async def test_orchestrator_start_schedules_retry_for_failed_agents(self, tmp_path: Path) -> None:
         """Startup should keep degraded agents around and retry them in the background."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        orchestrator.config = MagicMock()
+        orchestrator.config = MagicMock(source_fingerprint=None)
 
         router_bot = MagicMock()
         router_bot.agent_name = "router"
@@ -3255,7 +3265,7 @@ class TestMultiAgentOrchestrator:
     ) -> None:
         """Initial startup must wait for router and responder generation first syncs."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        orchestrator.config = MagicMock()
+        orchestrator.config = MagicMock(source_fingerprint=None)
         responder_started = False
         runtime_support_bound = False
 
@@ -3704,7 +3714,7 @@ class TestMultiAgentOrchestrator:
     async def test_orchestrator_start_skips_retry_for_permanent_failures(self, tmp_path: Path) -> None:
         """Permanent startup failures should leave bots disabled without retry loops."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-        orchestrator.config = MagicMock()
+        orchestrator.config = MagicMock(source_fingerprint=None)
 
         router_bot = MagicMock()
         router_bot.agent_name = "router"
@@ -4428,10 +4438,10 @@ class TestMultiAgentOrchestrator:
     async def test_update_config_uses_custom_config_path(self, tmp_path: Path) -> None:
         """Hot reload should keep reading the orchestrator's custom config path."""
         config_path = tmp_path / "custom-config.yaml"
-        current_config = MagicMock()
+        current_config = MagicMock(source_fingerprint=None)
         current_config.administrators = []
         current_config.event_journal = EventJournalConfig()
-        new_config = MagicMock()
+        new_config = MagicMock(source_fingerprint=None)
         new_config.administrators = []
         # The same journal, because a *changed* one is refused before the
         # reload reaches the support-only apply path under test here.
@@ -4506,10 +4516,10 @@ class TestMultiAgentOrchestrator:
         """
         runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-        current_config = MagicMock()
+        current_config = MagicMock(source_fingerprint=None)
         current_config.administrators = []
         current_config.event_journal = EventJournalConfig()
-        new_config = MagicMock()
+        new_config = MagicMock(source_fingerprint=None)
         new_config.administrators = []
         new_config.event_journal = EventJournalConfig(
             backend="postgres",
@@ -4545,16 +4555,17 @@ class TestMultiAgentOrchestrator:
         mock_plan.assert_called_once(), "the reload was refused instead of applied around the inert field"
         warned = [call for call in mock_warning.call_args_list if "pending_restart" in str(call)]
         assert warned, "a journal edit that cannot take effect until restart was applied silently"
+        assert orchestrator.config_reload.status.status == "restart_required"
 
     @pytest.mark.asyncio
     async def test_update_config_does_not_swap_hook_runtime_on_failed_reload(self, tmp_path: Path) -> None:
         """Failed reloads must leave the active hook snapshot and scheduling registry untouched."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
 
-        current_config = MagicMock()
+        current_config = MagicMock(source_fingerprint=None)
         current_config.administrators = []
         current_config.event_journal = MagicMock()
-        new_config = MagicMock()
+        new_config = MagicMock(source_fingerprint=None)
         new_config.administrators = []
         # The same journal config object, because a *changed* one is refused
         # outright before the reload reaches the behaviour under test here.

@@ -21979,6 +21979,40 @@ mindroom config resolve
 mindroom config resolve --path ./config.yaml
 ```
 
+### config fingerprint and config check-applied
+
+Confirm that the running runtime finished applying a particular config source:
+
+```bash
+mindroom config fingerprint --path ./config.yaml
+mindroom config check-applied --path ./config.yaml --wait 300
+mindroom config check-applied --fingerprint <sha256> --url https://example.org --json
+```
+
+`fingerprint` hashes the source bytes captured by the YAML loader, including all
+transitively included YAML and text files. A single file uses its plain SHA-256;
+multiple files combine their relative paths and content hashes. Moving the same
+tree to another directory preserves its fingerprint. Comments and formatting
+changes affect the fingerprint; unrelated files and environment variables do not.
+
+`check-applied` captures the expected fingerprint once before polling the
+authenticated `GET /api/config/reload-status` endpoint. It requires
+`MINDROOM_API_KEY` and HTTPS for remote endpoints. Without `--wait`, it checks
+once. `--timeout` bounds each HTTP request; `--wait` bounds the polling period.
+Neither command changes config or triggers a reload.
+
+Exit codes are `0` for matching completed application, `1` for pending or a
+different fingerprint (including wait expiration), and `2` for matching failure,
+restart required, or unavailable status. JSON output identifies the expected
+and observed fingerprints. Only the latest reload result is retained in memory.
+
+The runtime acknowledges a fingerprint after its reload plan finishes, including
+changes that need no agent restart. A loaded API config cache does not count as
+completion. Known event-journal changes requiring a process restart return
+`restart_required`. Completion does not guarantee that every bot or external
+service is healthy. If parsing fails before the include tree is known, the
+failure has no fingerprint and cannot settle a wait for a particular fingerprint.
+
 ## connect
 
 Pair this local MindRoom install with a provisioning service.
