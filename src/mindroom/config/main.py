@@ -73,6 +73,7 @@ from mindroom.config.yaml_includes import (
     ConfigIncludeError,
     attach_partial_source_files,
     load_yaml_config_source_with_digests,
+    source_files_fingerprint,
 )
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
@@ -394,6 +395,7 @@ class Config(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     _source_files: frozenset[Path] = PrivateAttr(default=frozenset())
+    _source_fingerprint: str | None = PrivateAttr(default=None)
     _unavailable_plugin_tool_names: set[str] = PrivateAttr(default_factory=set)
     _unresolved_plugin_tool_sources: frozenset[str] = PrivateAttr(default=frozenset())
     _runtime_approved_egress_injected_default_tool: bool = PrivateAttr(default=False)
@@ -1049,6 +1051,11 @@ class Config(BaseModel):
         Empty when the config was not loaded from disk via :func:`load_config`.
         """
         return self._source_files
+
+    @property
+    def source_fingerprint(self) -> str | None:
+        """Fingerprint of source bytes captured at load time, including includes."""
+        return self._source_fingerprint
 
     @classmethod
     def validate_with_runtime(
@@ -1929,6 +1936,12 @@ class Config(BaseModel):
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
 
 
+def failed_config_source_fingerprint(exc: BaseException) -> str | None:
+    """Read optional source metadata this loader attaches after parsing succeeds."""
+    fingerprint = getattr(exc, "config_source_fingerprint", None)
+    return fingerprint if isinstance(fingerprint, str) else None
+
+
 def validate_loaded_config_source(
     data: dict[str, Any],
     source_digests: dict[Path, str],
@@ -1956,8 +1969,10 @@ def validate_loaded_config_source(
         # Parsing succeeded, so the full file set is known; expose it the same
         # way as parse-time failures so reload watchers keep covering it.
         attach_partial_source_files(exc, source_files)
+        exc.config_source_fingerprint = source_files_fingerprint(path, source_digests)  # ty: ignore[invalid-assignment]
         raise
     config._source_files = frozenset(source_digests)
+    config._source_fingerprint = source_files_fingerprint(path, source_digests)
     return config, source_digests
 
 

@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.api.mcp_gateway import GatewayRuntime
+    from mindroom.config_reload import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
@@ -126,6 +127,7 @@ class _MindroomAppState:
     agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
     response_admission_gate: ResponseAdmissionGate | None = None
     openai_responses: set[ResponseIdentity] = field(default_factory=set)
+    config_reload_status: Callable[[], ConfigReloadStatus] | None = None
     script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
     mcp_gateway_runtime: GatewayRuntime | None = None
 

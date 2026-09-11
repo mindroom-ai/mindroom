@@ -20,6 +20,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
+from mindroom.api.config_reload import router as config_reload_router
 from mindroom.api.connections import router as connections_router
 
 # Import routers
@@ -731,6 +732,7 @@ app.include_router(integrations_router, dependencies=[Depends(verify_user)])
 app.include_router(matrix_router, dependencies=[Depends(verify_user)])
 app.include_router(thread_exports_router, dependencies=[Depends(verify_user)])
 app.include_router(response_activity_router)  # Aggregate operational probe, like health/readiness.
+app.include_router(config_reload_router)  # Requires its own operator bearer key.
 app.include_router(oauth_router)
 app.include_router(schedules_router, dependencies=[Depends(verify_user)])
 app.include_router(knowledge_router, dependencies=[Depends(verify_user)])

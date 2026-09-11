@@ -968,6 +968,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.config_lifecycle"
 depends_on = [
+    "mindroom.config_reload",
     "mindroom.response_activity",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
@@ -1167,6 +1168,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
+    "mindroom.api.config_reload",
     "mindroom.api.response_activity",
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
@@ -1842,6 +1844,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.orchestration.config_lifecycle"
 depends_on = [
+    "mindroom.config_reload",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
     "mindroom.event_journal_open",
@@ -1895,6 +1898,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
+    "mindroom.config_reload",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
@@ -3375,6 +3379,7 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.main"
 depends_on = [
+    "mindroom.cli.config_reload",
     "mindroom.cli.response_activity",
     "mindroom.cli.thread_export",
     "mindroom",
@@ -5509,8 +5514,24 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.api.response_activity"
-depends_on = ["mindroom.api.config_lifecycle", "mindroom.response_activity", "mindroom.runtime_state"]
+depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.response_activity", "mindroom.runtime_state"]
 
 [[modules]]
 path = "mindroom.cli.response_activity"
-depends_on = ["mindroom.cli.config", "mindroom.constants", "mindroom.response_activity"]
+depends_on = ["mindroom.cli.api", "mindroom.cli.config", "mindroom.constants", "mindroom.response_activity"]
+
+[[modules]]
+path = "mindroom.config_reload"
+depends_on = []
+
+[[modules]]
+path = "mindroom.api.config_reload"
+depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.config_reload", "mindroom.runtime_state"]
+
+[[modules]]
+path = "mindroom.cli.api"
+depends_on = ["mindroom.constants"]
+
+[[modules]]
+path = "mindroom.cli.config_reload"
+depends_on = ["mindroom.cli.api", "mindroom.cli.config", "mindroom.config.legacy_access", "mindroom.config.main", "mindroom.config.yaml_includes", "mindroom.config_reload", "mindroom.constants"]

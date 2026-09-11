@@ -145,6 +145,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.config_reload import ConfigReloadStatus
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
@@ -1673,6 +1674,7 @@ class _MultiAgentOrchestrator:
                 check_embedder_health(config, self.runtime_paths, reason="startup"),
                 name="embedder_startup_health_check",
             )
+            self.config_reload.record_applied(config)
             set_runtime_ready()
             self._runtime_ready_event.set()
             self._schedule_ready_turn_dispatch_recovery()
@@ -2634,6 +2636,7 @@ async def _run_api_server(
     thread_export_runner: WorkspaceThreadExportRunner | None = None,
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
+    config_reload_status: Callable[[], ConfigReloadStatus] | None = None,
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
@@ -2645,6 +2648,7 @@ async def _run_api_server(
     api_state.thread_export_runner = thread_export_runner
     api_state.leave_matrix_room = leave_matrix_room
     api_state.response_admission_gate = response_admission_gate
+    api_state.config_reload_status = config_reload_status
     if agent_reply_memberships is not None:
         api_state.agent_reply_memberships = agent_reply_memberships
     if script_runtime is not None:
@@ -2679,6 +2683,7 @@ async def _run_api_server(
         api_state.thread_export_runner = None
         api_state.leave_matrix_room = None
         api_state.response_admission_gate = None
+        api_state.config_reload_status = None
         api_state.agent_reply_memberships = AgentReplyMembershipIndex()
         if script_runtime is not None:
             await script_runtime.unbind_api()
@@ -3040,6 +3045,7 @@ async def main(
                     thread_export_runner=orchestrator._thread_export_runner,
                     leave_matrix_room=orchestrator.leave_matrix_room,
                     response_admission_gate=orchestrator._response_admission_gate,
+                    config_reload_status=lambda: orchestrator.config_reload.status,
                     agent_reply_memberships=orchestrator.agent_reply_memberships,
                 ),
                 name="api_server",

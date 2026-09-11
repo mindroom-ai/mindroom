@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import secrets
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
+from mindroom.api.auth import require_operator_key
 from mindroom.response_activity import ActiveResponseInfo, DetailedResponseActivity, ResponseActivity, ResponseIdentity
 from mindroom.runtime_state import get_runtime_state
 
@@ -62,15 +62,7 @@ async def detailed_response_activity(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     """Return operator-authenticated active response identities."""
-    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-    configured_key = runtime_paths.env_value("MINDROOM_API_KEY")
-    if not configured_key:
-        raise HTTPException(status_code=503, detail="Response activity details require MINDROOM_API_KEY")
-    token = (
-        authorization.removeprefix("Bearer ").strip() if authorization and authorization.startswith("Bearer ") else None
-    )
-    if token is None or not secrets.compare_digest(token.encode(), configured_key.encode()):
-        raise HTTPException(status_code=401, detail="Missing or invalid credentials")
+    require_operator_key(request, authorization)
 
     aggregate = _response_activity_snapshot(request)
     state = config_lifecycle.app_state(request.app)

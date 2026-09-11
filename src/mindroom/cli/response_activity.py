@@ -3,48 +3,17 @@
 from __future__ import annotations
 
 import json
-import math
-from ipaddress import ip_address
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
 import typer
 
+from mindroom.cli.api import get_api_response
 from mindroom.cli.config import activate_cli_runtime
-from mindroom.constants import DEFAULT_MINDROOM_URL
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.response_activity import DetailedResponseActivity, ResponseActivity
-
-
-def _is_loopback(host: str) -> bool:
-    try:
-        return ip_address(host).is_loopback
-    except ValueError:
-        return host == "localhost"
-
-
-def _validated_activity_url(runtime_paths: RuntimePaths, url: str | None) -> tuple[str, str, str]:
-    """Resolve and validate one API base URL, returning its scheme and host."""
-    import httpx  # noqa: PLC0415
-
-    base_url = url or runtime_paths.env_value("MINDROOM_URL") or DEFAULT_MINDROOM_URL
-    try:
-        parsed_url = httpx.URL(base_url)
-    except httpx.InvalidURL as exc:
-        msg = "Invalid MindRoom URL."
-        raise ValueError(msg) from exc
-    if (
-        parsed_url.scheme not in {"http", "https"}
-        or not parsed_url.host
-        or parsed_url.userinfo
-        or parsed_url.query
-        or parsed_url.fragment
-    ):
-        msg = "Use an absolute HTTP(S) URL without credentials, query, or fragment."
-        raise ValueError(msg)
-    return base_url, parsed_url.scheme, parsed_url.host
 
 
 def _request_activity(
@@ -54,32 +23,15 @@ def _request_activity(
     *,
     details: bool = False,
 ) -> ResponseActivity | DetailedResponseActivity:
-    import httpx  # noqa: PLC0415
-
     from mindroom.response_activity import DetailedResponseActivity, ResponseActivity  # noqa: PLC0415
 
-    if not math.isfinite(timeout):
-        msg = "--timeout must be finite."
-        raise ValueError(msg)
-    base_url, scheme, host = _validated_activity_url(runtime_paths, url)
-    token = runtime_paths.env_value("MINDROOM_API_KEY")
-    if details and not token:
-        msg = "MINDROOM_API_KEY is required for --details."
-        raise ValueError(msg)
-    if token and scheme == "http" and not _is_loopback(host):
-        msg = "Use HTTPS when sending MINDROOM_API_KEY to a remote endpoint."
-        raise ValueError(msg)
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    try:
-        response = httpx.get(
-            f"{base_url.rstrip('/')}/api/responses/activity{'/details' if details else ''}",
-            headers=headers,
-            timeout=timeout,
-            follow_redirects=False,
-        )
-    except httpx.HTTPError as exc:
-        msg = "Cannot reach MindRoom; check --url / MINDROOM_URL and that its API is running."
-        raise ValueError(msg) from exc
+    response = get_api_response(
+        runtime_paths,
+        url,
+        f"/api/responses/activity{'/details' if details else ''}",
+        timeout,
+        require_key=details,
+    )
     if response.status_code not in {200, 503}:
         msg = f"Activity request failed (HTTP {response.status_code}); check authentication and the running version."
         raise ValueError(msg)

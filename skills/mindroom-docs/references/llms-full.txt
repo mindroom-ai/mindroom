@@ -21852,13 +21852,17 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init       Create a starter config.yaml with a personal agent and model.               │
-│ show       Display the current config file with syntax highlighting.                   │
-│ edit       Open config.yaml in your default editor.                                    │
-│ validate   Validate config.yaml and check for common issues.                           │
-│ resolve    Print the fully merged config YAML with all !include tags resolved.         │
-│ path       Show the resolved config file path and search locations.                    │
-│ migrate    Migrate config.yaml to membership access settings.                          │
+│ init            Create a starter config.yaml with a personal agent and model.          │
+│ show            Display the current config file with syntax highlighting.              │
+│ edit            Open config.yaml in your default editor.                               │
+│ validate        Validate config.yaml and check for common issues.                      │
+│ resolve         Print the fully merged config YAML with all !include tags resolved.    │
+│ path            Show the resolved config file path and search locations.               │
+│ migrate         Migrate config.yaml to membership access settings.                     │
+│ fingerprint     Print the config source SHA-256, including all transitively included   │
+│                 files.                                                                 │
+│ check-applied   Confirm config application; exit 0 applied, 1 pending/mismatch, 2      │
+│                 failed/restart-required/unavailable.                                   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -21978,6 +21982,41 @@ Keys are sorted so the output can be diffed before and after splitting a configu
 mindroom config resolve
 mindroom config resolve --path ./config.yaml
 ```
+
+### config fingerprint and config check-applied
+
+Confirm that the running runtime finished applying a particular config source:
+
+```bash
+mindroom config fingerprint --path ./config.yaml
+mindroom config check-applied --path ./config.yaml --wait 300
+mindroom config check-applied --fingerprint <sha256> --url https://example.org --json
+```
+
+`fingerprint` hashes the source bytes captured by the YAML loader, including all transitively included YAML and text files.
+A single file uses its plain SHA-256; multiple files combine their relative paths and content hashes.
+Moving the same tree to another directory preserves its fingerprint.
+Comments and formatting changes affect the fingerprint; unrelated files and environment variables do not.
+
+Legacy access settings must be migrated with `mindroom config migrate --path <config-path>` before capturing a fingerprint.
+When reading a config file, both commands reject legacy access settings with exit `2`: automatic migration would rewrite their source bytes during reload.
+Explicit `--fingerprint` skips reading local config sources; the caller must supply a fingerprint of the migrated source.
+
+`check-applied` captures the expected fingerprint once before polling the authenticated `GET /api/config/reload-status` endpoint.
+It requires `MINDROOM_API_KEY` and HTTPS for remote endpoints.
+Without `--wait`, it checks once.
+`--timeout` bounds each HTTP request; `--wait` bounds the polling period.
+Neither command changes config or triggers a reload.
+
+Exit codes are `0` for matching completed application, `1` for pending or a different fingerprint (including wait expiration), and `2` for matching failure, restart required, or unavailable status.
+JSON output identifies the expected and observed fingerprints.
+Only the latest reload result is retained in memory.
+
+The runtime acknowledges a fingerprint after its reload plan finishes, including changes that need no agent restart.
+A loaded API config cache does not count as completion.
+Known event-journal changes requiring a process restart return `restart_required`.
+Completion does not guarantee that every bot or external service is healthy.
+If parsing fails before the include tree is known, the failure has no fingerprint and cannot settle a wait for a particular fingerprint.
 
 ## connect
 
