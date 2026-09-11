@@ -297,7 +297,7 @@ class ApprovalMatrixTransport:
         reason: str,
     ) -> bool:
         """Expire visible cards, then atomically release the removed owner's sources."""
-        with self.response_admission_gate.track_recovery(
+        with self.response_admission_gate.track_background_response(
             responder=f"team/{continuation.entity_name}"
             if continuation.entity_kind == "team"
             else continuation.entity_name,

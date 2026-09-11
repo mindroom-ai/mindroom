@@ -2866,6 +2866,96 @@ async def test_lifecycle_identity_uses_canonical_requester_before_lock_wait(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("is_team", [False, True])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_activity_retains_cancelled_attempt_until_child_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    is_team: bool,
+    cleanup_fails: bool,
+) -> None:
+    """A child unwinding after its parent returns must still report live response work."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    if is_team:
+        bot.config.teams["helpers"] = TeamConfig(display_name="Helpers", role="Help users", agents=["general"])
+        runner = ResponseRunner(replace(runner.deps, agent_name="helpers"))
+    gate = bot.admission_gate
+    request = _plain_request(_target())
+    request = replace(
+        request,
+        response_envelope=replace(
+            request.response_envelope,
+            origin=replace(request.response_envelope.origin, requester_id="@alice:example.org"),
+        ),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    children: list[asyncio.Task[None]] = []
+    progress = response_runner._DeliveryProgress()
+    outcome = FinalDeliveryOutcome(terminal_status="cancelled", event_id="$cancelled", failure_reason="interrupted")
+    lifecycle = runner._build_lifecycle(
+        identity=runner._response_identity(request, response_kind="team" if is_team else "agent"),
+        request=request,
+    )
+
+    async def respond(_message_id: str | None) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        children.append(task)
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+        if cleanup_fails:
+            message = "attempt cleanup failed"
+            raise RuntimeError(message)
+
+    async def settle_cancelled(**_kwargs: object) -> None:
+        progress.settle(outcome)
+
+    async def operation(target: MessageTarget, _placeholder: response_runner._EarlyPlaceholderState) -> str | None:
+        return await runner._run_and_settle_locked_response(
+            request,
+            target=target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=respond,
+            user_id=request.user_id,
+            run_id="activity-test",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=MagicMock(spec=PostResponseEffectsDeps),
+        )
+
+    monkeypatch.setattr("mindroom.response_attempt._FORWARDED_CANCEL_WAIT_SECONDS", 0.001)
+    with (
+        patch.object(runner, "_settle_missing_delivery_outcome", new=settle_cancelled),
+        patch.object(runner, "_finalize_locked_outcome", new=AsyncMock(return_value=outcome)),
+    ):
+        parent = asyncio.create_task(
+            runner._run_locked_response_lifecycle(request, response_kind="agent", locked_operation=operation),
+        )
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1)
+            parent.cancel()
+            await asyncio.wait_for(parent, timeout=1)
+            assert not children[0].done()
+            assert gate.in_flight_response_count == 0
+            assert gate.active_operation_count == 1
+            (identity,) = gate.response_tracker.snapshot()
+            assert identity.responder == ("team/helpers" if is_team else "general")
+            assert identity.requester_id == "@alice:example.org"
+            assert gate.close_if_idle()
+        finally:
+            release.set()
+            await asyncio.gather(parent, *children, return_exceptions=True)
+
+    assert gate.active_operation_count == 0
+    assert gate.response_tracker.snapshot() == ()
+
+
+@pytest.mark.asyncio
 async def test_early_placeholder_failure_preserves_non_preparation_error_cause(tmp_path: Path) -> None:
     """Only the preparation wrapper is unwrapped when linking an early placeholder failure."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)

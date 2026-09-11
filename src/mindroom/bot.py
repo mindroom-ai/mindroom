@@ -1484,7 +1484,7 @@ class AgentBot:
         onto the same event.
         """
         try:
-            with self.admission_gate.track_recovery(
+            with self.admission_gate.track_background_response(
                 responder=f"team/{self.agent_name}" if self.agent_name in self.config.teams else self.agent_name,
             ):
                 outcome = await self._delivery_gateway.recover_deliveries()
@@ -1856,7 +1856,7 @@ class AgentBot:
         responder: str | None = None,
     ) -> bool:
         """Recover one frozen approval answer, owning any recovery-only client lifetime."""
-        with self.admission_gate.track_recovery(
+        with self.admission_gate.track_background_response(
             responder=responder
             or (f"team/{self.agent_name}" if self.agent_name in self.config.teams else self.agent_name),
             requester_id=requester_id,
@@ -1896,7 +1896,7 @@ class AgentBot:
     @asynccontextmanager
     async def response_recovery_scope(self, room_id: str, event_id: str) -> AsyncIterator[bool]:
         """Expose the delivery owner's startup operation to fleet discovery."""
-        with self.admission_gate.track_recovery(
+        with self.admission_gate.track_background_response(
             responder=f"team/{self.agent_name}" if self.agent_name in self.config.teams else self.agent_name,
         ):
             async with self._delivery_gateway.response_recovery_scope(room_id, event_id) as allowed:

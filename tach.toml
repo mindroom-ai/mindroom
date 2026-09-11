@@ -1102,7 +1102,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.api.openai_streaming_protocol"
-depends_on = ["mindroom.tool_system.events"]
+depends_on = ["mindroom.background_tasks", "mindroom.tool_system.events"]
 
 [[modules]]
 path = "mindroom.api.openai_request_parsing"
@@ -3056,6 +3056,7 @@ depends_on = [
     "mindroom.matrix_rtc.transcript",
     "mindroom.matrix_rtc.voice_agent",
     "mindroom.model_defaults",
+    "mindroom.requester_identity",
     "mindroom.response_admission",
     "mindroom.session_ids",
 ]

@@ -3387,13 +3387,26 @@ class ResponseRunner:
         show_tool_calls: bool | None = None,
     ) -> str | None:
         """Run generation and settle its terminal lifecycle exactly once."""
+
+        async def tracked_response(message_id: str | None) -> None:
+            """Observe the attempt until it exits, even if its awaiting parent returns."""
+            with self._admission_gate.track_background_response(
+                responder=(
+                    f"team/{self.deps.agent_name}"
+                    if self.deps.agent_name in self.deps.runtime.config.teams
+                    else self.deps.agent_name
+                ),
+                requester_id=request.response_envelope.requester_id,
+            ):
+                await response_function(message_id)
+
         deferred_error: BaseException | None = None
         try:
             # The attempt runs against the event the turn already adopted, which
             # `progress` was seeded with, so it has no new event to report back.
             await self._run_cancellable_response(
                 target=target,
-                response_function=response_function,
+                response_function=tracked_response,
                 existing_event_id=request.existing_event_id,
                 user_id=user_id,
                 run_id=run_id,

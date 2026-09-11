@@ -544,6 +544,14 @@ async def chat_completions(
             context_factory=lambda: detached_requester_context(authority),
             stream_factory=lambda: aiter(body_iterator),
         )
+        if isinstance(response, _OpenAIStreamingResponse) and response.stream_cleanup is not None:
+            stream_cleanup = response.stream_cleanup
+
+            async def cleanup_with_requester() -> None:
+                with detached_requester_context(authority):
+                    await stream_cleanup()
+
+            response.stream_cleanup = cleanup_with_requester
     return response
 
 
@@ -795,10 +803,18 @@ async def _stream_completion(  # noqa: C901, PLR0915
         ),
     )
 
+    stream_closed = False
+
+    async def cleanup() -> None:
+        nonlocal stream_closed
+        if not stream_closed:
+            stream_closed = True
+            await stream.aclose()
+
     # Peek at first event to detect errors before committing to SSE
     first_event = await anext(aiter(stream), None)
     if first_event is None:
-        await stream.aclose()
+        await cleanup()
         return _error_response(500, "Agent returned empty response", error_type="server_error")
 
     first_error = extract_agent_stream_failure(first_event)
@@ -809,7 +825,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
             session_id=session_id,
             error=first_error,
         )
-        await stream.aclose()
+        await cleanup()
         return _error_response(500, "Agent execution failed", error_type="server_error")
 
     state = CompletionStreamState.begin(agent_name)
@@ -869,13 +885,14 @@ async def _stream_completion(  # noqa: C901, PLR0915
             yield SSE_DONE
             stream_completed = not stream_failed
         finally:
-            await stream.aclose()
+            await cleanup()
 
     response = _OpenAIStreamingResponse(
         event_generator(),
         media_type="text/event-stream",
     )
     response.completion_predicate = lambda: stream_completed
+    response.stream_cleanup = cleanup
     return response
 
 
@@ -1133,16 +1150,26 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
     scope_context: ScopeSessionContext | None = None
     stream: AsyncGenerator[RunOutputEvent | TeamRunOutputEvent | RunOutput | TeamRunOutput, None] | None = None
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
+    resources_closed = False
 
     async def _cleanup() -> None:
-        if stream is not None:
-            await stream.aclose()
-        stack.close()
-        close_team_runtime_state_dbs(
-            agents=agents,
-            team_db=cast("BaseDb | None", team.db) if team is not None else None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
+        nonlocal resources_closed
+        if resources_closed:
+            return
+        resources_closed = True
+        with tool_execution_identity(execution_identity):
+            try:
+                if stream is not None:
+                    await stream.aclose()
+            finally:
+                try:
+                    stack.close()
+                finally:
+                    close_team_runtime_state_dbs(
+                        agents=agents,
+                        team_db=cast("BaseDb | None", team.db) if team is not None else None,
+                        shared_scope_storage=scope_context.storage if scope_context is not None else None,
+                    )
 
     try:
         scope_context = stack.enter_context(
@@ -1273,13 +1300,9 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
             media_type="text/event-stream",
         )
         response.completion_predicate = lambda: stream_completed and not stream_failed
+        response.stream_cleanup = _cleanup
     except Exception:
-        stack.close()
-        close_team_runtime_state_dbs(
-            agents=agents,
-            team_db=cast("BaseDb | None", team.db) if team is not None else None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
+        await _cleanup()
         raise
     else:
         return response

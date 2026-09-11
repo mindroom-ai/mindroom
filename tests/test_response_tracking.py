@@ -29,7 +29,7 @@ def test_recovery_identity_cleanup_while_admission_closed(failure: bool) -> None
     gate.close()
     with (
         pytest.raises(RuntimeError) if failure else nullcontext(),
-        gate.track_recovery(responder="helper", requester_id="@alice:example.org"),
+        gate.track_background_response(responder="helper", requester_id="@alice:example.org"),
     ):
         assert gate.active_operation_count == 1
         assert gate.in_flight_response_count == 0

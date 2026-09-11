@@ -3410,6 +3410,39 @@ async def test_voice_runtime_error_waits_for_reload_and_rechecks_authorization(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_notice", [False, True], ids=["call-operation", "failure-notice"])
+async def test_call_activity_resolves_requester_alias(tmp_path: Path, failure_notice: bool) -> None:
+    """Both voice activity paths report the canonical human behind a caller alias."""
+    config = _config()
+    alias = "@alternate_alice:example.org"
+    config.authorization.aliases = {"@alice:example.org": [alias]}
+    client = _client()
+    gate = ResponseAdmissionGate()
+    manager = _manager(client, FakeBridge(), tmp_path, config, response_admission_gate=gate)
+    observed: list[tuple[str | None, str | None]] = []
+
+    def observe() -> None:
+        (identity,) = gate.response_tracker.snapshot()
+        observed.append((identity.responder, identity.requester_id))
+
+    async def send_notice(**_kwargs: object) -> nio.RoomSendResponse:
+        observe()
+        return nio.RoomSendResponse("$notice", ROOM_ID)
+
+    if failure_notice:
+        client.room_send = AsyncMock(side_effect=send_notice)
+        await manager._send_call_failure_notice(ROOM_ID, alias, "Voice call failed.")
+    else:
+        async with manager._admitted_call_requester_operation(ROOM_ID, alias) as allowed:
+            assert allowed
+            observe()
+
+    assert observed == [("helper", "@alice:example.org")]
+    assert gate.active_operation_count == 0
+    assert gate.response_tracker.snapshot() == ()
+
+
+@pytest.mark.asyncio
 async def test_voice_runtime_error_does_not_report_success_without_delivery(tmp_path: Path) -> None:
     """A normalized delivery failure remains visible in call diagnostics."""
     manager = _manager(_client(), FakeBridge(), tmp_path)

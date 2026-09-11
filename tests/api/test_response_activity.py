@@ -265,7 +265,7 @@ def test_recovery_work_blocks_idle(test_client: TestClient) -> None:
     gate = ResponseAdmissionGate()
     config_lifecycle.app_state(main.app).response_admission_gate = gate
     set_runtime_ready()
-    with gate.track_recovery():
+    with gate.track_background_response():
         response = test_client.get("/api/responses/activity")
         assert response.json()["status"] == "busy"
         assert response.json()["active_matrix_operations"] == 1

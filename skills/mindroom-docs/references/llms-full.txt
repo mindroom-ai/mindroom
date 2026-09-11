@@ -20847,8 +20847,10 @@ The aggregate endpoint remains identity-free.
 It includes response planning, waiting for response locks, generation, delivery, and other admitted Matrix operations such as voice and external-trigger delivery.
 It also includes frozen approval-final recovery, outbox resends, stale-response recovery, and unavailable-owner settlement while they run.
 Recovery is observed without changing its ability to run during runtime replacement.
+A native response attempt remains visible until it finishes, including cancellation cleanup that outlives its awaiting caller.
 Nested slots count separately, so this is a conservative work count, not a count of unique responses.
 `active_openai_requests` counts chat completion HTTP requests through the end of the response body, including streaming, and clears on errors or cancellation.
+If sending headers or a body chunk fails, the request stays active until its prepared stream resources have been closed.
 Persisted native tool-approval waits have released their live response slots and do not count as active work; publishing or resuming an approval does count while admitted.
 Interactive waits that still own a live slot remain busy.
 
