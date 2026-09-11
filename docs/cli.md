@@ -1198,8 +1198,8 @@ Moving the same tree to another directory preserves its fingerprint.
 Comments and formatting changes affect the fingerprint; unrelated files and environment variables do not.
 
 Legacy access settings must be migrated with `mindroom config migrate --path <config-path>` before capturing a fingerprint.
-Both commands reject these files with exit `2`: automatic migration would rewrite their source bytes during reload.
-Explicit `--fingerprint` values must likewise identify the migrated source.
+When reading a config file, both commands reject legacy access settings with exit `2`: automatic migration would rewrite their source bytes during reload.
+Explicit `--fingerprint` skips reading local config sources; the caller must supply a fingerprint of the migrated source.
 
 `check-applied` captures the expected fingerprint once before polling the authenticated `GET /api/config/reload-status` endpoint.
 It requires `MINDROOM_API_KEY` and HTTPS for remote endpoints.

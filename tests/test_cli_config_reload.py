@@ -20,6 +20,38 @@ if TYPE_CHECKING:
 runner = CliRunner()
 
 
+@pytest.mark.parametrize(
+    ("url", "expected_proxy"),
+    [("http://127.0.0.1:8765", False), ("https://example.org", True)],
+)
+def test_operator_key_uses_proxies_only_over_https(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    expected_proxy: bool,
+) -> None:
+    """Local plaintext credentials stay direct; HTTPS retains configured proxy support."""
+    monkeypatch.setenv("MINDROOM_API_KEY", "operator-key")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("NO_PROXY", "")
+    routed_through_proxy: list[bool] = []
+
+    class Transport(httpx.MockTransport):
+        """Replace network I/O while preserving HTTPX's proxy selection."""
+
+        def __init__(self, *, proxy: httpx.Proxy | None = None, **_kwargs: object) -> None:
+            def respond(_request: httpx.Request) -> httpx.Response:
+                routed_through_proxy.append(proxy is not None)
+                return httpx.Response(200, json={"status": "applied", "fingerprint": "a" * 64})
+
+            super().__init__(respond)
+
+    monkeypatch.setattr("httpx._client.HTTPTransport", Transport)
+    result = runner.invoke(app, ["config", "check-applied", "--fingerprint", "a" * 64, "--url", url])
+    assert result.exit_code == 0, result.output
+    assert routed_through_proxy == [expected_proxy]
+
+
 @pytest.mark.parametrize("source", ["- item\n", "42\n"])
 def test_non_mapping_source_returns_json_error(tmp_path: Path, source: str) -> None:
     """Nonempty scalar/list YAML roots must not escape the CLI error boundary."""

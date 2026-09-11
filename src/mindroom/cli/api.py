@@ -57,6 +57,7 @@ def get_api_response(
             headers={"Authorization": f"Bearer {token}"} if token else {},
             timeout=timeout,
             follow_redirects=False,
+            trust_env=not (token and parsed.scheme == "http"),
         )
     except httpx.TimeoutException as exc:
         msg = "MindRoom API request timed out."
