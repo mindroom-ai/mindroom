@@ -26,18 +26,26 @@ const status = {
 const json = (value: unknown, code = 200) =>
   new Response(JSON.stringify(value), { status: code });
 
+const catalog = (services: (typeof service)[]) => ({
+  agents: [
+    {
+      agent_name: "personal",
+      agent_display_name: "Personal assistant",
+      is_shared: false,
+      services,
+    },
+  ],
+});
+
 function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
   vi.mocked(fetch).mockImplementation(async (input, options) => {
     const path = String(input);
     if (overrides[path]) return overrides[path]();
-    if (path === "/api/connections")
-      return json({
-        agent_display_name: "Personal assistant",
-        services: [service],
-      });
+    if (path === "/api/connections") return json(catalog([service]));
     if (path === "/api/connections/mcp/clients")
       return json({ enabled: false, clients: [] });
-    if (path === "/api/connections/mail/status") return json(status);
+    if (path === "/api/connections/agents/personal/mail/status")
+      return json(status);
     if (path.endsWith("/disconnect")) {
       expect(options).toMatchObject({ method: "POST", body: "{}" });
       return json({ status: "disconnected", provider: "mail" });
@@ -71,7 +79,7 @@ describe("personal connections", () => {
     ).toEqual(
       [
         "/api/connections",
-        "/api/connections/mail/status",
+        "/api/connections/agents/personal/mail/status",
         "/api/connections/mcp/clients",
       ].sort(),
     );
@@ -81,18 +89,17 @@ describe("personal connections", () => {
     let finishMail!: (response: Response) => void;
     installApi({
       "/api/connections": async () =>
-        json({
-          agent_display_name: "Personal assistant",
-          services: [
+        json(
+          catalog([
             service,
             { ...service, provider: "calendar", display_name: "Calendar" },
-          ],
-        }),
-      "/api/connections/mail/status": () =>
+          ]),
+        ),
+      "/api/connections/agents/personal/mail/status": () =>
         new Promise((resolve) => {
           finishMail = resolve;
         }),
-      "/api/connections/calendar/status": async () =>
+      "/api/connections/agents/personal/calendar/status": async () =>
         json({
           ...status,
           provider: "calendar",
@@ -140,13 +147,13 @@ describe("personal connections", () => {
   it("requires confirmation before disconnecting, then refreshes status", async () => {
     let connected = true;
     installApi({
-      "/api/connections/mail/status": async () =>
+      "/api/connections/agents/personal/mail/status": async () =>
         json({
           ...status,
           connected,
           account_label: connected ? "user@example.com" : null,
         }),
-      "/api/connections/mail/disconnect": async () => {
+      "/api/connections/agents/personal/mail/disconnect": async () => {
         connected = false;
         return json({ status: "disconnected", provider: "mail" });
       },
@@ -167,9 +174,9 @@ describe("personal connections", () => {
   it("offers reset confirmation for unreadable credentials before reconnecting", async () => {
     let resetRequired = true;
     installApi({
-      "/api/connections/mail/status": async () =>
+      "/api/connections/agents/personal/mail/status": async () =>
         json({ ...status, reset_required: resetRequired }),
-      "/api/connections/mail/disconnect": async () => {
+      "/api/connections/agents/personal/mail/disconnect": async () => {
         resetRequired = false;
         return json({ status: "disconnected", provider: "mail" });
       },
@@ -199,9 +206,9 @@ describe("personal connections", () => {
       .mockReturnValue(popup as unknown as Window);
     let connected = false;
     installApi({
-      "/api/connections/mail/status": async () =>
+      "/api/connections/agents/personal/mail/status": async () =>
         json({ ...status, connected }),
-      "/api/connections/mail/connect": async () => {
+      "/api/connections/agents/personal/mail/connect": async () => {
         expect(open).toHaveBeenCalledOnce();
         return json({
           provider: "mail",
@@ -239,8 +246,7 @@ describe("personal connections", () => {
 
   it("shows an empty state for no configured services", async () => {
     installApi({
-      "/api/connections": async () =>
-        json({ agent_display_name: "Personal assistant", services: [] }),
+      "/api/connections": async () => json(catalog([])),
     });
     render(<Connections />);
     expect(
@@ -276,7 +282,7 @@ describe("personal connections", () => {
 
   it("keeps an unavailable provider disabled", async () => {
     installApi({
-      "/api/connections/mail/status": async () =>
+      "/api/connections/agents/personal/mail/status": async () =>
         json({ ...status, can_connect: false }),
     });
     render(<Connections />);
@@ -294,7 +300,8 @@ describe("personal connections", () => {
     };
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
     installApi({
-      "/api/connections/mail/connect": () => new Promise(() => {}),
+      "/api/connections/agents/personal/mail/connect": () =>
+        new Promise(() => {}),
     });
     const { unmount } = render(<Connections />);
     fireEvent.click(
@@ -302,5 +309,129 @@ describe("personal connections", () => {
     );
     unmount();
     await waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
+  });
+});
+
+describe("shared agent connections", () => {
+  it("refreshes other agents using the same account after disconnect", async () => {
+    let connected = true;
+    const sharedStatus = async () => json({ ...status, connected });
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [
+            ...catalog([service]).agents,
+            {
+              agent_name: "research",
+              agent_display_name: "Research Team",
+              is_shared: true,
+              services: [service],
+            },
+          ],
+        }),
+      "/api/connections/agents/personal/mail/status": sharedStatus,
+      "/api/connections/agents/research/mail/status": sharedStatus,
+      "/api/connections/agents/research/mail/disconnect": async () => {
+        connected = false;
+        return json({ status: "disconnected", provider: "mail" });
+      },
+    });
+    render(<Connections />);
+    const personal = await screen.findByRole("region", {
+      name: "Personal assistant",
+    });
+    const shared = await screen.findByRole("region", { name: "Research Team" });
+    expect(
+      await within(personal).findByRole("button", { name: "Disconnect Mail" }),
+    ).toBeEnabled();
+    fireEvent.click(
+      await within(shared).findByRole("button", { name: "Disconnect Mail" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Disconnect",
+      }),
+    );
+    expect(
+      await within(shared).findByRole("button", { name: "Connect Mail" }),
+    ).toBeEnabled();
+    expect(
+      await within(personal).findByRole("button", { name: "Connect Mail" }),
+    ).toBeEnabled();
+  });
+
+  it("does not load personal MCP clients for a shared-only manager", async () => {
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [
+            {
+              agent_name: "research",
+              agent_display_name: "Research Team",
+              is_shared: true,
+              services: [service],
+            },
+          ],
+        }),
+      "/api/connections/agents/research/mail/status": async () => json(status),
+    });
+    render(<Connections />);
+    expect(
+      await screen.findByRole("button", { name: "Connect Mail" }),
+    ).toBeEnabled();
+    expect(
+      vi.mocked(fetch).mock.calls.map(([url]) => String(url)),
+    ).not.toContain("/api/connections/mcp/clients");
+  });
+
+  it("keeps the same provider separate per agent and identifies shared disconnects", async () => {
+    let sharedConnected = true;
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [
+            ...catalog([service]).agents,
+            {
+              agent_name: "research",
+              agent_display_name: "Research Team",
+              is_shared: true,
+              services: [service],
+            },
+          ],
+        }),
+      "/api/connections/agents/research/mail/status": async () =>
+        json({
+          ...status,
+          connected: sharedConnected,
+          account_label: sharedConnected ? "team@example.org" : null,
+        }),
+      "/api/connections/agents/research/mail/disconnect": async () => {
+        sharedConnected = false;
+        return json({ status: "disconnected", provider: "mail" });
+      },
+    });
+    render(<Connections />);
+    const personal = await screen.findByRole("region", {
+      name: "Personal assistant",
+    });
+    const shared = await screen.findByRole("region", { name: "Research Team" });
+    expect(
+      await within(personal).findByRole("button", { name: "Connect Mail" }),
+    ).toBeEnabled();
+    expect(within(shared).getByText("Shared agent")).toBeInTheDocument();
+    fireEvent.click(
+      await within(shared).findByRole("button", { name: "Disconnect Mail" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent("Research Team");
+    expect(dialog).toHaveTextContent(/anyone using this connection/i);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
+    expect(
+      await within(shared).findByRole("button", { name: "Connect Mail" }),
+    ).toBeEnabled();
+    expect(sharedConnected).toBe(false);
+    expect(
+      within(personal).getByRole("button", { name: "Connect Mail" }),
+    ).toBeEnabled();
   });
 });

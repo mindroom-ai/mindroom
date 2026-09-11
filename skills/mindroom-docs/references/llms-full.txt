@@ -18868,8 +18868,8 @@ When no Matrix user ID claim or email-to-Matrix template is configured, strict m
 ## Personal Connections Portal
 
 Set `MINDROOM_CONNECTIONS_AGENT` to the name of a private agent to enable `/connections`.
-The portal lets each authenticated user connect only the OAuth services they want for their personal agent.
-Services come from that agent's available tools, including deferred tools and registered plugin or MCP OAuth providers.
+The portal groups OAuth services by agent: the selected private agent and shared agents for which the authenticated user is a credential manager or administrator.
+Services come from each authorized agent's available tools, including deferred tools and registered plugin or MCP OAuth providers.
 Each card loads independently, so a failed or unconnected service does not block the others.
 The portal does not expose model configuration, generic credential editing, or OAuth client administration.
 
@@ -18897,9 +18897,13 @@ agents:
         defer: true
 ```
 
-Portal access requires an explicit matching `access.users` grant or configured administrator authority.
+Access to the selected private agent requires an explicit matching `access.users` grant or configured administrator authority.
 Room-membership grants alone do not grant portal access because browser requests have no conversation membership context.
-The server resolves canonical Matrix aliases and the configured private scope; the browser cannot choose another user, agent, or credential target.
+Shared agents appear when the user is listed in `agents.<name>.credential_managers` or has configured administrator authority, even when they cannot access the selected private agent.
+Reply access alone does not grant shared connection management.
+The server resolves canonical Matrix aliases and rechecks agent and provider authorization for every status, connect, and disconnect request.
+The browser selects an authorized agent; it cannot override the credential owner or execution scope.
+Shared connections use the agent's configured credential scope, so disconnecting a shared account affects everyone using it.
 Existing requester-only provider rules still apply.
 Account linking and disconnect reuse the same OAuth state, callback, token store, and reset lifecycle used by tools.
 Operators still configure OAuth clients; shared service accounts are not displayed as personal connections.

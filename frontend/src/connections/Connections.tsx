@@ -29,9 +29,15 @@ interface ConnectionService {
   tools: string[];
 }
 
-interface ConnectionList {
+interface AgentConnections {
+  agent_name: string;
   agent_display_name: string;
+  is_shared: boolean;
   services: ConnectionService[];
+}
+
+interface ConnectionList {
+  agents: AgentConnections[];
 }
 
 interface ConnectionStatus {
@@ -42,7 +48,17 @@ interface ConnectionStatus {
   account_label: string | null;
 }
 
-function ConnectionCard({ service }: { service: ConnectionService }) {
+function ConnectionCard({
+  agent,
+  service,
+  refreshVersion,
+  onConnectionChange,
+}: {
+  agent: AgentConnections;
+  service: ConnectionService;
+  refreshVersion: number;
+  onConnectionChange: () => void;
+}) {
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -50,7 +66,7 @@ function ConnectionCard({ service }: { service: ConnectionService }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const statusRequest = useRef<AbortController | null>(null);
   const operation = useRef<AbortController | null>(null);
-  const basePath = `/api/connections/${encodeURIComponent(service.provider)}`;
+  const basePath = `/api/connections/agents/${encodeURIComponent(agent.agent_name)}/${encodeURIComponent(service.provider)}`;
 
   const loadStatus = useCallback(async () => {
     statusRequest.current?.abort();
@@ -76,11 +92,10 @@ function ConnectionCard({ service }: { service: ConnectionService }) {
 
   useEffect(() => {
     void loadStatus();
-    return () => {
-      statusRequest.current?.abort();
-      operation.current?.abort();
-    };
-  }, [loadStatus]);
+    return () => statusRequest.current?.abort();
+  }, [loadStatus, refreshVersion]);
+
+  useEffect(() => () => operation.current?.abort(), []);
 
   const connect = async () => {
     const controller = new AbortController();
@@ -98,7 +113,7 @@ function ConnectionCard({ service }: { service: ConnectionService }) {
           ),
         controller.signal,
       );
-      if (!controller.signal.aborted) await loadStatus();
+      if (!controller.signal.aborted) onConnectionChange();
     } catch (cause) {
       if (!controller.signal.aborted)
         setError(
@@ -123,7 +138,7 @@ function ConnectionCard({ service }: { service: ConnectionService }) {
         controller.signal,
         "POST",
       );
-      if (!controller.signal.aborted) await loadStatus();
+      if (!controller.signal.aborted) onConnectionChange();
     } catch (cause) {
       if (!controller.signal.aborted)
         setError(
@@ -241,8 +256,9 @@ function ConnectionCard({ service }: { service: ConnectionService }) {
               {service.display_name}?
             </DialogTitle>
             <DialogDescription>
-              This removes your saved connection. Your assistant will lose
-              access until you connect again.
+              {agent.is_shared
+                ? `This removes the saved connection used by ${agent.agent_display_name}. Anyone using this connection will lose access until you connect again.`
+                : "This removes your saved connection. Your assistant will lose access until you connect again."}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -262,6 +278,8 @@ function ConnectionCard({ service }: { service: ConnectionService }) {
 export function Connections() {
   const [connections, setConnections] = useState<ConnectionList | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const refreshConnections = () => setRefreshVersion((version) => version + 1);
   useEffect(() => {
     const controller = new AbortController();
     void requestConnection<ConnectionList>(
@@ -291,15 +309,13 @@ export function Connections() {
             Your connections
           </h1>
           <p className="text-muted-foreground">
-            Connect the services your personal assistant can use for you.
+            Connect services for your personal assistant and shared agents you
+            manage.
           </p>
-          {connections && (
-            <p className="text-sm font-medium">
-              {connections.agent_display_name}
-            </p>
-          )}
         </header>
-        <ConnectedClients />
+        {connections?.agents.some((agent) => !agent.is_shared) && (
+          <ConnectedClients />
+        )}
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
@@ -308,18 +324,43 @@ export function Connections() {
         {!connections && !error && (
           <p role="status">Loading your connections…</p>
         )}
-        {connections?.services.length === 0 && (
-          <Card>
-            <CardContent className="pt-6 text-muted-foreground">
-              No services are available for your assistant yet.
-            </CardContent>
-          </Card>
-        )}
-        <div className="grid gap-5 sm:grid-cols-2">
-          {connections?.services.map((service) => (
-            <ConnectionCard key={service.provider} service={service} />
-          ))}
-        </div>
+        {connections?.agents.map((agent) => (
+          <section
+            key={agent.agent_name}
+            aria-labelledby={`agent-${agent.agent_name}`}
+            className="space-y-4"
+          >
+            <div className="flex items-center gap-3">
+              <h2
+                id={`agent-${agent.agent_name}`}
+                className="text-xl font-semibold"
+              >
+                {agent.agent_display_name}
+              </h2>
+              <Badge variant="secondary">
+                {agent.is_shared ? "Shared agent" : "Personal agent"}
+              </Badge>
+            </div>
+            {agent.services.length === 0 && (
+              <Card>
+                <CardContent className="pt-6 text-muted-foreground">
+                  No services are available for this agent yet.
+                </CardContent>
+              </Card>
+            )}
+            <div className="grid gap-5 sm:grid-cols-2">
+              {agent.services.map((service) => (
+                <ConnectionCard
+                  key={service.provider}
+                  agent={agent}
+                  service={service}
+                  refreshVersion={refreshVersion}
+                  onConnectionChange={refreshConnections}
+                />
+              ))}
+            </div>
+          </section>
+        ))}
       </div>
     </main>
   );
