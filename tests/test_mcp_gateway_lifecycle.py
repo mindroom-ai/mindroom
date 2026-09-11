@@ -27,7 +27,6 @@ _DAY = 86_400
 _OWNER = {
     "requester_id": "@alice:example.org",
     "authenticated_user_id": "@alice:example.org",
-    "agent_name": "personal",
 }
 
 
@@ -105,7 +104,7 @@ async def test_exact_owner_revoke_all_removes_pending_and_codes(
     runtime_paths: RuntimePaths,
     client: OAuthClientInformationFull,
 ) -> None:
-    """Another original identity, agent or resource cannot list or revoke a connection."""
+    """Another original identity, account or resource cannot list or revoke a connection."""
     provider = _provider(runtime_paths, _Clock())
     code = await issue_code(provider, client)
     tokens = await provider.exchange_authorization_code(client, await issue_code(provider, client))
@@ -118,7 +117,7 @@ async def test_exact_owner_revoke_all_removes_pending_and_codes(
     for field, value in [
         ("requester_id", "@bob:example.org"),
         ("authenticated_user_id", "@alias:example.org"),
-        ("agent_name", "other"),
+        ("account_id", "other"),
     ]:
         other = {**_OWNER, field: value}
         assert await provider.list_grants(**other) == []
@@ -197,7 +196,7 @@ async def test_managed_idle_and_absolute_lifetimes(
         refresh = await provider.load_refresh_token(client, tokens.refresh_token)
         assert refresh is not None
         tokens = await provider.exchange_refresh_token(client, refresh, ["mcp:tools"])
-        row = (await provider.list_grants(**_OWNER))[0]
+        row = (await provider.list_grants(**_OWNER, account_id=account_id))[0]
         assert row["expires_at"] == 2_015_552_000
         assert row["last_used_at"] is None
     restarted = _provider(runtime_paths, clock, MINDROOM_MCP_SCIM_TOKEN="s" * 32)
@@ -205,7 +204,7 @@ async def test_managed_idle_and_absolute_lifetimes(
     current = await restarted.load_refresh_token(client, tokens.refresh_token)
     clock.now = 2_015_552_000
     assert await restarted.load_refresh_token(client, tokens.refresh_token) is None
-    assert await restarted.list_grants(**_OWNER) == []
+    assert await restarted.list_grants(**_OWNER, account_id=account_id) == []
     with pytest.raises(TokenError):
         await restarted.exchange_refresh_token(client, current, ["mcp:tools"])
 
@@ -249,7 +248,7 @@ async def test_managed_missing_inactive_mismatched_and_disabled_integration(
     assert await provider.load_access_token(tokens.access_token) is None
     assert await provider.load_refresh_token(client, tokens.refresh_token) is None
     assert not await provider.record_use(access)
-    assert await provider.list_grants(**_OWNER) == []
+    assert await provider.list_grants(**_OWNER, account_id=account_id) == []
     with pytest.raises(TokenError):
         await provider.exchange_refresh_token(client, refresh, ["mcp:tools"])
     with pytest.raises(AuthorizeError):
@@ -318,21 +317,21 @@ async def test_managed_idle_deadline_is_day_30_without_activity(
     provider, _, account_id = await _managed(runtime_paths, clock)
     tokens = await provider.exchange_authorization_code(client, await _managed_code(provider, client, account_id))
     refresh = await provider.load_refresh_token(client, tokens.refresh_token)
-    original = (await provider.list_grants(**_OWNER))[0]
+    original = (await provider.list_grants(**_OWNER, account_id=account_id))[0]
     clock.now += 29 * _DAY
     assert await provider.load_access_token("invalid") is None
-    assert (await provider.list_grants(**_OWNER))[0] == original
+    assert (await provider.list_grants(**_OWNER, account_id=account_id))[0] == original
     clock.now += _DAY
     assert await provider.load_refresh_token(client, tokens.refresh_token) is None
     with pytest.raises(TokenError):
         await provider.exchange_refresh_token(client, refresh, ["mcp:tools"])
 
 
-async def test_legacy_metadata_stays_unknown_and_absolute_expiry_never_extends(
+async def test_legacy_grants_without_account_metadata_require_new_consent(
     runtime_paths: RuntimePaths,
     client: OAuthClientInformationFull,
 ) -> None:
-    """A real old schema keeps usable bindings and original expiry, including absent account fields."""
+    """Missing old metadata cannot revive agent-bound authority after upgrade or restart."""
     clock = _Clock()
     provider = _provider(runtime_paths, clock)
     tokens = await provider.exchange_authorization_code(client, await issue_code(provider, client))
@@ -341,22 +340,13 @@ async def test_legacy_metadata_stays_unknown_and_absolute_expiry_never_extends(
     with sqlite3.connect(paths.storage_root / "mcp_gateway" / "oauth.sqlite3") as connection:
         connection.execute("UPDATE grants SET payload = json_remove(payload, '$.account_id', '$.redirect_uri')")
         connection.execute("UPDATE capabilities SET payload = json_remove(payload, '$.account_id')")
-    clock.now += 10
     reopened = _provider(paths, clock)
-    row = (await reopened.list_grants(**_OWNER))[0]
-    assert row["created_at"] is None
-    assert row["last_used_at"] is None
-    assert row["redirect_uri"] is None
-    assert row["expires_at"] == 2_002_592_000
-    assert row["idle_expires_at"] == 2_002_592_000
-    clock.now += 29 * _DAY
-    refresh = await reopened.load_refresh_token(client, tokens.refresh_token)
-    tokens = await reopened.exchange_refresh_token(client, refresh, ["mcp:tools"])
-    assert (await reopened.list_grants(**_OWNER))[0]["expires_at"] == 2_002_592_000
+    assert await reopened.list_grants(**_OWNER) == []
+    assert await reopened.load_refresh_token(client, tokens.refresh_token) is None
+    fresh = await reopened.exchange_authorization_code(client, await issue_code(reopened, client))
     restarted = _provider(paths, clock)
-    assert await restarted.load_access_token(tokens.access_token) is not None
-    clock.now = 2_002_592_000
-    assert await restarted.load_refresh_token(client, tokens.refresh_token) is None
+    assert await restarted.load_access_token(fresh.access_token) is not None
+    assert await restarted.load_access_token(tokens.access_token) is None
 
 
 async def test_revocation_wins_over_previously_loaded_use_and_refresh(

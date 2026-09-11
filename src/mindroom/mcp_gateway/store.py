@@ -8,6 +8,7 @@ import sqlite3
 from typing import TYPE_CHECKING, TypeVar
 
 from mindroom.mcp_gateway.legacy_schema import migrate_schema
+from mindroom.mcp_gateway.selection_schema import initialize_selections
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -71,6 +72,7 @@ class GatewayOAuthStore:
                 CREATE INDEX IF NOT EXISTS pending_expiry ON pending(expires_at);
             """)
             migrate_schema(connection, clock=self._clock, registration_expires_at=self.registration_expires_at)
+            initialize_selections(connection)
             connection.execute("COMMIT")
         finally:
             connection.close()
@@ -188,4 +190,8 @@ class GatewayOAuthStore:
 
     async def read(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
         """Read committed state without reserving a writer lock or running retention."""
-        return await asyncio.to_thread(lambda: self._transaction(operation, read_only=True))
+        return await asyncio.to_thread(lambda: self.read_sync(operation))
+
+    def read_sync(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
+        """Read committed authority in a worker thread immediately before provider dispatch."""
+        return self._transaction(operation, read_only=True)

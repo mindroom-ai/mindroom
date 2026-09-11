@@ -605,7 +605,7 @@ async def request_has_frontend_access(request: Request) -> bool:
     if _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") and _is_connections_path(
         request.scope["path"],
     ):
-        await require_personal_connections_user(request)
+        await require_connections_user(request)
         return True
     mindroom_api_key = auth_state.settings.mindroom_api_key
     try:
@@ -842,16 +842,16 @@ def _require_connections_route_authorized(
     raise HTTPException(status_code=403, detail="Administrator access required")
 
 
-async def require_personal_connections_user(request: Request) -> dict[str, Any]:
-    """Authenticate a personal requester only through a signed upstream Matrix identity."""
+async def require_connections_user(request: Request) -> dict[str, Any]:
+    """Authenticate a Connections user through a signed upstream Matrix identity."""
     auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     settings = auth_state.settings.trusted_upstream
     if not settings.enabled or not settings.jwt.require_jwt:
-        raise HTTPException(status_code=403, detail="Personal connections require trusted signed authentication")
+        raise HTTPException(status_code=403, detail="Connections require trusted signed authentication")
     auth_user = await _trusted_upstream_auth_user(request, settings, auth_state.trusted_upstream_jwt_client)
     matrix_user_id = auth_user.get("matrix_user_id") if auth_user is not None else None
     if not isinstance(matrix_user_id, str) or try_parse_historical_matrix_user_id(matrix_user_id) is None:
-        raise HTTPException(status_code=403, detail="Personal connections require a verified Matrix identity")
+        raise HTTPException(status_code=403, detail="Connections require a verified Matrix identity")
     request.scope["auth_user"] = auth_user
     return cast("dict[str, Any]", auth_user)
 

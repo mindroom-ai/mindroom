@@ -864,6 +864,7 @@ async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_c
         authorization_lease: _MCPAuthorizationLease | None = None,
         include_tools: Collection[str] | None = None,
         exclude_tools: Collection[str] | None = None,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> ToolResult:
         if replacement_task is not None:
             await replacement_task
@@ -876,6 +877,7 @@ async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_c
             authorization_lease=authorization_lease,
             include_tools=include_tools,
             exclude_tools=exclude_tools,
+            before_dispatch=before_dispatch,
         )
 
     monkeypatch.setattr(manager, "_connect_and_discover", connect_with_authorization_change)
@@ -1269,6 +1271,72 @@ async def test_mcp_bridge_returns_reset_guidance_for_unreadable_credentials(
     assert payload["connect_url"] is None
     assert "authenticated MindRoom dashboard" in payload["error"]
     assert "reset_oauth_connection" not in payload["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reset", [False, True], ids=["replace", "reset"])
+async def test_oauth_change_during_dispatch_callback_never_uses_stale_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    reset: bool,
+) -> None:
+    """Gateway admission may wait, so upstream credential authority must be checked afterward."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text="pong")]),
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "old-token")
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    manager = MCPServerManager(runtime_paths)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def before_dispatch() -> None:
+        entered.set()
+        await release.wait()
+
+    try:
+        await manager.sync_servers(_ConfigStub({"demo": _oauth_mcp_config()}))
+        await manager.get_request_catalog("demo", credentials_manager=credentials_manager, worker_target=worker_target)
+        old_session = _FakeClientSession.sessions[-1]
+        credential_context = manager._oauth_credential_context(
+            manager._require_state("demo"),
+            worker_target=worker_target,
+            credentials_manager=credentials_manager,
+        )
+        pending = asyncio.create_task(
+            manager.call_tool(
+                "demo",
+                "echo",
+                {},
+                credentials_manager=credentials_manager,
+                worker_target=worker_target,
+                before_dispatch=before_dispatch,
+            ),
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=10)
+            if reset:
+                async with oauth_credential_transaction(credential_context) as transaction:
+                    transaction.reset(operation_id=None)
+                    await transaction.commit()
+            else:
+                _save_mcp_oauth_credentials(runtime_paths, worker_target, "new-token")
+        finally:
+            release.set()
+        if reset:
+            with pytest.raises(OAuthConnectionRequired):
+                await asyncio.wait_for(pending, timeout=10)
+            assert _FakeClientSession.call_tool_invocation_count == 0
+        else:
+            assert (await asyncio.wait_for(pending, timeout=10)).content == "pong"
+            assert old_session.closed
+            assert _FakeClientSession.sessions[-1] is not old_session
+            assert _FakeClientSession.transport_extra_headers[-1] == {"Authorization": "Bearer new-token"}
+    finally:
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio

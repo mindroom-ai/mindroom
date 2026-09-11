@@ -59,7 +59,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
 
     runtime_paths = api_runtime_paths(request)
     if first_segment == "connections" and not (runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip():
-        raise HTTPException(status_code=404, detail="Personal connections are not enabled")
+        raise HTTPException(status_code=404, detail="Connections are not enabled")
     frontend_dir = ensure_frontend_dist_dir(runtime_paths)
     if frontend_dir is None:
         raise HTTPException(status_code=404, detail="Frontend assets are not available")

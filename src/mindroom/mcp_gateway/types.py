@@ -6,6 +6,17 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, NotRequired, TypedDict
 
+GATEWAY_AGENT_NAME_LIMIT = 256
+
+
+@dataclass(frozen=True)
+class GatewayOwner:
+    """Stable signed identity, canonical requester, and optional provisioned account."""
+
+    authenticated_user_id: str
+    requester_id: str
+    account_id: str | None = None
+
 
 @dataclass(frozen=True)
 class GatewayPrincipal:
@@ -49,6 +60,7 @@ class GatewayErrorResponse(TypedDict):
 class SearchItem(TypedDict):
     """One toolkit or function returned by gateway search."""
 
+    agent: str
     toolkit: str
     function: NotRequired[str]
     description: str
@@ -64,6 +76,7 @@ class SearchResponse(TypedDict):
 class ToolSchemaResponse(TypedDict):
     """Successful gateway schema response."""
 
+    agent: str
     toolkit: str
     function: str
     description: str

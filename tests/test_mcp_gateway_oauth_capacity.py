@@ -103,7 +103,6 @@ async def test_consent_binding_capacity_preserves_unbound_pending(
     identity = {
         "requester_id": "@alice:example.org",
         "authenticated_user_id": "@alice:example.org",
-        "agent_name": "personal",
     }
     with pytest.raises(GatewayOAuthCapacityError):
         await limited.begin_consent(state, **identity)
@@ -168,7 +167,7 @@ def _reconcile(provider: GatewayOAuthProvider) -> tuple[int, dict[str, int]]:
 
 async def _approve_for(provider: GatewayOAuthProvider, client: OAuthClientInformationFull, requester: str) -> str:
     state = await pending(provider, client)
-    identity = {"requester_id": requester, "authenticated_user_id": requester, "agent_name": "personal"}
+    identity = {"requester_id": requester, "authenticated_user_id": requester}
     consent = await provider.begin_consent(state, **identity)
     return await provider.finish_consent(state, csrf_token=consent.csrf_token, allow=True, **identity)
 
@@ -187,7 +186,6 @@ async def test_repeated_grants_charge_shared_client_per_requester_and_preserve_r
     identity = {
         "requester_id": "@alice:example.org",
         "authenticated_user_id": "@alice:example.org",
-        "agent_name": "personal",
     }
     consent = await provider.begin_consent(state, **identity)
     for _ in range(3):
@@ -264,11 +262,11 @@ async def test_pending_identity_counts_utf8_and_nonce_rotation_has_constant_char
     provider = _provider(runtime_paths, _Clock())
     state = await pending(provider, client)
     initial, _ = _reconcile(provider)
-    identity = {"requester_id": "界", "authenticated_user_id": "界界", "agent_name": "界界界"}
+    identity = {"requester_id": "界", "authenticated_user_id": "界界"}
     await provider.begin_consent(state, **identity)
-    assert _reconcile(provider)[0] == initial + 3 + 6 + 9 + 64
+    assert _reconcile(provider)[0] == initial + 3 + 6 + 64
     await provider.begin_consent(state, **identity)
-    assert _reconcile(provider)[0] == initial + 82
+    assert _reconcile(provider)[0] == initial + 73
 
 
 async def test_parallel_refresh_admits_exactly_one_pair_at_exact_global_budget(
@@ -323,7 +321,8 @@ def _copy_legacy(source: GatewayOAuthProvider, paths: RuntimePaths) -> None:
         """)
         for table in ("clients", "pending", "grants", "capabilities"):
             fields = [row[1] for row in legacy.execute("PRAGMA table_info(" + table + ")")]
-            rows = original.execute("SELECT " + ", ".join(fields) + " FROM " + table).fetchall()  # noqa: S608
+            projection = ["'personal' AS agent_name" if field == "agent_name" else field for field in fields]
+            rows = original.execute("SELECT " + ", ".join(projection) + " FROM " + table).fetchall()  # noqa: S608
             legacy.executemany("INSERT INTO " + table + " VALUES (" + ",".join("?" for _ in fields) + ")", rows)  # noqa: S608
 
 
@@ -529,106 +528,46 @@ def _assert_accounting_v1_trigger_behavior(path: Path) -> None:
         connection.execute("RELEASE v1_trigger_probe")
 
 
-async def test_legacy_migration_backfills_once_and_over_budget_authority_remains_revocable(
+async def test_legacy_migration_retires_authority_even_over_budget(
     runtime_paths: RuntimePaths,
     client: OAuthClientInformationFull,
 ) -> None:
-    """Legacy access timestamps use migration time without changing expiry or rebuilding on restart."""
+    """No quota prevents retiring grants that only consented to a single personal agent."""
     clock = _Clock()
-    provider = _provider(runtime_paths, clock)
-    tokens = await provider.exchange_authorization_code(client, await issue_code(provider, client))
-    original = await provider.load_refresh_token(client, tokens.refresh_token)
-    assert original is not None
-    for _ in range(5):
-        refresh = await provider.load_refresh_token(client, tokens.refresh_token)
-        assert refresh is not None
-        tokens = await provider.exchange_refresh_token(client, refresh, ["mcp:tools"])
-    await provider.get_client("desktop")
+    source = _provider(runtime_paths, clock)
+    tokens = await source.exchange_authorization_code(client, await issue_code(source, client))
     legacy_paths = replace(runtime_paths, storage_root=runtime_paths.storage_root / "legacy")
-    _copy_legacy(provider, legacy_paths)
-    clock.now += 10
+    _copy_legacy(source, legacy_paths)
     limited = _provider(legacy_paths, clock, MAX_BYTES=1, USER_MAX_BYTES=1)
+    assert await limited.load_refresh_token(client, tokens.refresh_token) is None
+    assert await limited.load_access_token(tokens.access_token) is None
     usage = _reconcile(limited)
-    with sqlite3.connect(limited.store.path) as connection:
-        timestamps = connection.execute(
-            "SELECT issued_at, expires_at FROM capabilities WHERE kind = 'access'",
-        ).fetchall()
-    assert timestamps == [(2_000_000_010, 2_000_000_900)] * 6
-    current = await limited.load_refresh_token(client, tokens.refresh_token)
-    assert current is not None
-    assert await limited.load_access_token(tokens.access_token) is not None
-    clock.now += 59.999
+    assert usage[1] == {}
     restarted = _provider(legacy_paths, clock)
     assert _reconcile(restarted) == usage
-    with pytest.raises(GatewayOAuthCapacityError):
-        await restarted.exchange_refresh_token(client, current, ["mcp:tools"])
-    with sqlite3.connect(restarted.store.path) as connection:
-        assert (
-            connection.execute("SELECT issued_at, expires_at FROM capabilities WHERE kind = 'access'").fetchall()
-            == timestamps
-        )
-    clock.now += 0.001
-    fresh = await restarted.exchange_refresh_token(client, current, ["mcp:tools"])
-    # A retained old refresh remains valid revocation authority even at exhausted budgets.
-    await limited.revoke_token(original)
-    assert await restarted.load_access_token(fresh.access_token) is None
-    assert _reconcile(restarted)[1] == {}
 
 
-async def test_v1_accounting_upgrade_compacts_historical_refresh_and_preserves_replay(
+async def test_v1_upgrade_retires_authority_and_reconciles_counters(
     runtime_paths: RuntimePaths,
     client: OAuthClientInformationFull,
 ) -> None:
-    """The v1-to-v2 step compacts only consumed refresh payloads and rebuilds exact counters."""
+    """Historical refresh replay rows retire with their family, preserving only client metadata."""
     path = _seed_accounting_v1(runtime_paths)
     _assert_accounting_v1_trigger_behavior(path)
     provider = _provider(runtime_paths, _Clock())
-
-    consumed = await provider.load_refresh_token(client, "consumed-refresh")
-    live_refresh = await provider.load_refresh_token(client, "live-refresh")
-    live_access = await provider.load_access_token("live-access")
-    assert consumed is not None
-    assert consumed.grant_id == "grant-legacy"
-    assert live_refresh is not None
-    assert live_refresh.grant_id == "grant-legacy"
-    assert live_access is not None
-    assert live_access.grant_id == "grant-legacy"
+    assert await provider.load_refresh_token(client, "consumed-refresh") is None
+    assert await provider.load_refresh_token(client, "live-refresh") is None
+    assert await provider.load_access_token("live-access") is None
     with sqlite3.connect(path) as connection:
-        connection.row_factory = sqlite3.Row
-        capabilities = connection.execute(
-            "SELECT token_hash, kind, grant_id, payload, expires_at, consumed FROM capabilities ORDER BY token_hash",
-        ).fetchall()
-        by_hash = {row["token_hash"]: row for row in capabilities}
-        assert by_hash["33dcf770b06b8fb8e4295828b143ef247e33dc28dc743f4291d0964d6d4b3d66"]["payload"] == "{}"
-        assert by_hash["b728f1d0c6e7e003b8864e5178967d48f779102edfbef72571192efa3201cf1b"]["payload"] != "{}"
-        assert by_hash["eb669948ad0442b93bffe753f63a98925756fe3d82c1212a9232ad8d8d748fa2"]["payload"] != "{}"
-        assert [(row["kind"], row["consumed"]) for row in capabilities] == [
-            ("refresh", 1),
-            ("refresh", 0),
-            ("access", 0),
-        ]
-        assert all(row["grant_id"] == "grant-legacy" and row["expires_at"] == 2_100_000_000.0 for row in capabilities)
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("SELECT COUNT(*) FROM grants").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM pending").fetchone()[0] == 0
         client_row = connection.execute("SELECT metadata, expires_at FROM clients").fetchone()
-        assert json.loads(client_row["metadata"])["client_name"] == "客户端"
-        assert client_row["expires_at"] == 2_100_000_000.0
-        grant_row = connection.execute("SELECT payload, expires_at, revoked FROM grants").fetchone()
-        assert json.loads(grant_row["payload"])["resource"] == "https://example.org/mcp"
-        assert (grant_row["expires_at"], grant_row["revoked"]) == (
-            2_100_000_000.0,
-            0,
-        )
-        pending_row = connection.execute("SELECT payload, expires_at, account_id FROM pending").fetchone()
-        assert json.loads(pending_row["payload"])["client_name"] == "客户端"
-        assert (pending_row["expires_at"], pending_row["account_id"]) == (
-            2_100_000_000.0,
-            "pending-account",
-        )
+        assert json.loads(client_row[0])["client_name"] == "客户端"
+        assert client_row[1] == 2_100_000_000.0
     usage = _reconcile(provider)
     migrated_bytes = path.read_bytes()
-
     reopened = _provider(runtime_paths, _Clock(now=2_000_000_123.0))
-
     assert path.read_bytes() == migrated_bytes
     assert _reconcile(reopened) == usage
 
@@ -683,14 +622,8 @@ async def test_failed_v1_migration_rolls_back_compaction_triggers_and_counters(
 
     reopened = _provider(runtime_paths, _Clock())
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
-        assert (
-            connection.execute(
-                "SELECT payload FROM capabilities WHERE token_hash = ?",
-                ("33dcf770b06b8fb8e4295828b143ef247e33dc28dc743f4291d0964d6d4b3d66",),
-            ).fetchone()[0]
-            == "{}"
-        )
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("SELECT COUNT(*) FROM capabilities").fetchone()[0] == 0
     _reconcile(reopened)
 
 
@@ -811,7 +744,7 @@ async def test_failed_migration_rolls_back_schema_counters_and_marker(
         assert "accounted_bytes" not in {row[1] for row in connection.execute("PRAGMA table_info(grants)")}
         assert connection.execute("SELECT COUNT(*) FROM capabilities").fetchone()[0] == 3
     reopened = _provider(legacy_paths, clock)
-    assert await reopened.load_access_token(tokens.access_token) is not None
+    assert await reopened.load_access_token(tokens.access_token) is None
     _reconcile(reopened)
 
 
@@ -831,7 +764,6 @@ async def test_counters_reconcile_denial_code_expiry_and_revoked_family_pruning(
     identity = {
         "requester_id": "@alice:example.org",
         "authenticated_user_id": "@alice:example.org",
-        "agent_name": "personal",
     }
     consent = await provider.begin_consent(state, **identity)
     await provider.finish_consent(state, csrf_token=consent.csrf_token, allow=False, **identity)
