@@ -28,10 +28,19 @@ function nameVariants(name: string): string[] {
   return variants;
 }
 
-export function ConnectionIcon({ names }: { names: string[] }) {
+export function ConnectionIcon({
+  names,
+  iconName,
+}: {
+  names: string[];
+  iconName?: string | null;
+}) {
   const variants = new Set(names.flatMap(nameVariants));
   // Prefer specific names (Google Calendar) over generic ones (Calendar).
-  const Icon = icons.find(({ name }) => variants.has(name))?.Icon ?? Plug;
+  const Icon =
+    (iconName ? iconMap[iconName] : undefined) ??
+    icons.find(({ name }) => variants.has(name))?.Icon ??
+    Plug;
 
   return (
     <span

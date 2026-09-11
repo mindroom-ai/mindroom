@@ -99,7 +99,10 @@ if (iconsByLibrary.lucide.length > 0) {
 // Create the icon mapping
 imports += `
 // Map of all icons we use
-export const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
+export const iconMap: Record<
+  string,
+  React.ComponentType<{ className?: string }>
+> = {
 `;
 
 // Add all the imported icons to the map

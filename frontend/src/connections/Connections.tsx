@@ -44,6 +44,7 @@ interface ConnectionTool {
   name: string;
   display_name: string;
   description: string;
+  icon: string | null;
   provider: string | null;
   requires_room_context: boolean;
 }
@@ -435,6 +436,7 @@ export function Connections() {
                       <div className="flex items-start gap-3">
                         <ConnectionIcon
                           names={[tool.name, tool.display_name]}
+                          iconName={tool.icon}
                         />
                         <div className="min-w-0 flex-1 space-y-2">
                           <CardTitle className="break-words text-lg">
