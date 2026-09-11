@@ -10,12 +10,93 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.main import app
+from mindroom.config.main import load_config
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 runner = CliRunner()
+
+
+@pytest.mark.parametrize("source", ["- item\n", "42\n"])
+def test_non_mapping_source_returns_json_error(tmp_path: Path, source: str) -> None:
+    """Nonempty scalar/list YAML roots must not escape the CLI error boundary."""
+    path = tmp_path / "config.yaml"
+    path.write_text(source)
+    result = runner.invoke(app, ["config", "check-applied", "--path", str(path), "--json"])
+    assert result.exit_code == 2
+    assert json.loads(result.stdout)["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("command", ["fingerprint", "check-applied"])
+def test_legacy_access_requires_migration_before_fingerprinting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    """Automatic migration rewrites source bytes, so capture a target only after migration."""
+    path = tmp_path / "config.yaml"
+    source = "authorization: {global_users: ['@alice:localhost']}\n"
+    path.write_text(source)
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: pytest.fail("Unexpected HTTP request"))
+    result = runner.invoke(app, ["config", command, "--path", str(path)])
+    assert result.exit_code == 2
+    assert "config migrate" in result.output
+    assert path.read_text() == source
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_explicitly_migrated_source_matches_runtime_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The migration command produces stable bytes for subsequent confirmation."""
+    path = tmp_path / "config.yaml"
+    path.write_text("authorization: {global_users: ['@alice:localhost']}\n")
+    migrated = runner.invoke(app, ["config", "migrate", "--path", str(path)])
+    assert migrated.exit_code == 0, migrated.output
+    loaded = load_config(activate_cli_runtime(path))
+    monkeypatch.setenv("MINDROOM_API_KEY", "operator-key")
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda *_args, **_kwargs: httpx.Response(
+            200,
+            json={"status": "applied", "fingerprint": loaded.source_fingerprint},
+        ),
+    )
+    fingerprint = runner.invoke(app, ["config", "fingerprint", "--path", str(path)])
+    assert fingerprint.exit_code == 0, fingerprint.output
+    assert fingerprint.stdout.strip() == loaded.source_fingerprint
+    confirmed = runner.invoke(app, ["config", "check-applied", "--path", str(path)])
+    assert confirmed.exit_code == 0, confirmed.output
+
+
+@pytest.mark.parametrize(("timeout_at", "expected_exit"), [(2.0, 1), (1.5, 2)])
+def test_http_timeout_at_wait_deadline_preserves_pending(
+    monkeypatch: pytest.MonkeyPatch,
+    timeout_at: float,
+    expected_exit: int,
+) -> None:
+    """Exhausting a known-pending wait differs from losing contact before its deadline."""
+    now = [0.0]
+
+    def get(*_args: object, **_kwargs: object) -> httpx.Response:
+        if now[0] == 0:
+            return httpx.Response(200, json={"status": "pending", "fingerprint": "a" * 64})
+        now[0] = timeout_at
+        msg = "read timed out"
+        raise httpx.ReadTimeout(msg)
+
+    monkeypatch.setenv("MINDROOM_API_KEY", "operator-key")
+    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr("mindroom.cli.config_reload.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("mindroom.cli.config_reload.time.sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    result = runner.invoke(app, ["config", "check-applied", "--fingerprint", "a" * 64, "--wait", "2", "--json"])
+    assert result.exit_code == expected_exit, result.output
+    assert json.loads(result.stdout)["status"] == ("pending" if expected_exit == 1 else "unavailable")
 
 
 @pytest.mark.parametrize(

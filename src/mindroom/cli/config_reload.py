@@ -51,9 +51,15 @@ def _wait_for_applied(
             raise ValueError(msg)
     ConfigReloadStatus(status="pending", fingerprint=expected)
     deadline = time.monotonic() + wait
+    status: ConfigReloadStatus | None = None
     while True:
         request_timeout = min(timeout, max(0.001, deadline - time.monotonic())) if wait else timeout
-        status = _request_status(runtime_paths, url, request_timeout)
+        try:
+            status = _request_status(runtime_paths, url, request_timeout)
+        except TimeoutError:
+            if status is not None and wait and time.monotonic() >= deadline:
+                return status
+            raise
         if status.status != "unavailable" and status.fingerprint != expected:
             status = ConfigReloadStatus(status="pending", fingerprint=status.fingerprint)
         remaining = deadline - time.monotonic()
@@ -65,6 +71,7 @@ def _wait_for_applied(
 
 
 def _fingerprint(path: Path) -> str:
+    from mindroom.config.legacy_access import access_config_needs_migration  # noqa: PLC0415
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
     from mindroom.config.yaml_includes import (  # noqa: PLC0415
         load_yaml_config_source_with_digests,
@@ -72,10 +79,16 @@ def _fingerprint(path: Path) -> str:
     )
 
     try:
-        _, digests = load_yaml_config_source_with_digests(path)
+        data, digests = load_yaml_config_source_with_digests(path)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         msg = "Cannot fingerprint config; check its YAML and include paths."
         raise ValueError(msg) from exc
+    if not isinstance(data, dict):
+        msg = "Config YAML must contain a mapping."
+        raise ValueError(msg)  # noqa: TRY004 - invalid file contents, not a caller's argument type
+    if access_config_needs_migration(data):
+        msg = "Run 'mindroom config migrate --path <config-path>' before fingerprinting legacy access settings."
+        raise ValueError(msg)
     return source_files_fingerprint(path, digests)
 
 
@@ -96,7 +109,7 @@ def config_check_applied(
     timeout: float = typer.Option(10.0, min=0.001, help="HTTP timeout in seconds."),
     json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
-    """Confirm this config was applied; exit 0 applied, 1 pending, 2 failed/unavailable.
+    """Confirm config application; exit 0 applied, 1 pending/mismatch, 2 failed/restart-required/unavailable.
 
     The expected fingerprint is captured once, before polling. This reads
     status only: it does not write config or trigger a reload.

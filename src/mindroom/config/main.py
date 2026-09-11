@@ -1936,6 +1936,12 @@ class Config(BaseModel):
         return ResolvedRuntimeModel(model_name=resolved_model_name, context_window=resolved_context_window)
 
 
+def failed_config_source_fingerprint(exc: BaseException) -> str | None:
+    """Read optional source metadata this loader attaches after parsing succeeds."""
+    fingerprint = getattr(exc, "config_source_fingerprint", None)
+    return fingerprint if isinstance(fingerprint, str) else None
+
+
 def validate_loaded_config_source(
     data: dict[str, Any],
     source_digests: dict[Path, str],

@@ -58,6 +58,9 @@ def get_api_response(
             timeout=timeout,
             follow_redirects=False,
         )
+    except httpx.TimeoutException as exc:
+        msg = "MindRoom API request timed out."
+        raise TimeoutError(msg) from exc
     except httpx.HTTPError as exc:
         msg = "Cannot reach MindRoom; check --url / MINDROOM_URL and that its API is running."
         raise ValueError(msg) from exc

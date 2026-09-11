@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from mindroom.config.main import load_config
+from mindroom.config.main import failed_config_source_fingerprint, load_config
 from mindroom.config.yaml_includes import partial_source_files
 from mindroom.config_reload import ConfigReloadStatus
 from mindroom.event_journal_open import describe_event_journal, pending_event_journal_restart
@@ -447,7 +447,7 @@ class ConfigReloadLifecycle:
         except Exception as exc:
             self.status = ConfigReloadStatus(
                 status="failed",
-                fingerprint=getattr(exc, "config_source_fingerprint", self.status.fingerprint),
+                fingerprint=failed_config_source_fingerprint(exc) or self.status.fingerprint,
             )
             logger.exception("Configuration update failed; will retry if a new change is queued")
             # Keep watching every file the broken load read so fixing a newly
