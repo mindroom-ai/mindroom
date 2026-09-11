@@ -114,17 +114,18 @@ async def test_search_preserves_document_fields_and_filters(published_index: Pat
 async def test_merged_search_covers_more_sources_than_reader_slots(published_index: Path) -> None:
     """One query must search every assigned base despite the native child limit."""
     with Client(settings=Settings(is_persistent=True, persist_directory=str(published_index))) as client:
-        for name in ("second", "third"):
+        for name in ("second", "third", "fourth", "fifth"):
             collection = client.create_collection(name)
             collection.add(ids=[name], embeddings=[[1.0, 0.0]], documents=[name], metadatas=[{"team": "a"}])
 
     merged = _MultiKnowledgeVectorDb(
         vector_dbs=[
-            ChromaReadProxy(name, str(published_index), _Embedder()) for name in ("published", "second", "third")
+            ChromaReadProxy(name, str(published_index), _Embedder())
+            for name in ("published", "second", "third", "fourth", "fifth")
         ],
     )
-    documents = await merged.async_search(query="alpha", limit=3, filters={"team": "a"})
-    assert [document.id for document in documents] == ["a", "second", "third"]
+    documents = await merged.async_search(query="alpha", limit=5, filters={"team": "a"})
+    assert [document.id for document in documents] == ["a", "second", "third", "fourth", "fifth"]
 
 
 @pytest.mark.asyncio
@@ -241,7 +242,7 @@ async def test_cancelled_embedding_reaps_child_and_releases_capacity(
             await asyncio.Event().wait()
             return [1.0, 0.0]
 
-    for _ in range(3):
+    for _ in range(5):
         embedding_started.clear()
         task = asyncio.create_task(
             ChromaReadProxy("published", str(published_index), BlockingEmbedder()).async_search("alpha"),
@@ -251,7 +252,7 @@ async def test_cancelled_embedding_reaps_child_and_releases_capacity(
         with pytest.raises(asyncio.CancelledError):
             await task
         assert capture_read_processes[-1].poll() is not None
-    assert len(capture_read_processes) == 3
+    assert len(capture_read_processes) == 5
     assert await ChromaReadProxy("published", str(published_index), _Embedder()).async_search("alpha")
 
 
@@ -266,11 +267,11 @@ async def test_stalled_embedding_deadline_reaps_child(
         await asyncio.Event().wait()
         return ReadRequest(str(published_index), "published", "alpha", [1.0, 0.0])
 
-    for _ in range(3):
+    for _ in range(5):
         with pytest.raises(TimeoutError, match="Knowledge read timed out"):
             await read_process.read_chroma_async(prepare_request, timeout=0.05)
         assert capture_read_processes[-1].poll() is not None
-    assert len(capture_read_processes) == 3
+    assert len(capture_read_processes) == 5
 
 
 @pytest.mark.asyncio
@@ -338,9 +339,9 @@ async def test_native_error_logs_redacted_child_diagnostics(
 
 @pytest.mark.asyncio
 async def test_saturated_reads_leave_executor_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two blocked native reads must not let queued reads starve unrelated application work."""
+    """Four blocked native reads must not let queued reads starve unrelated application work."""
     release = Event()
-    active = [Event(), Event()]
+    active = [Event() for _ in range(4)]
     started: list[int] = []
 
     def blocked_child(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
@@ -352,10 +353,10 @@ async def test_saturated_reads_leave_executor_available(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(subprocess, "run", blocked_child)
     loop = asyncio.get_running_loop()
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         loop.set_default_executor(executor)
         tasks = [
-            asyncio.create_task(asyncio.to_thread(read_chroma, ReadRequest("unused", "published"))) for _ in range(4)
+            asyncio.create_task(asyncio.to_thread(read_chroma, ReadRequest("unused", "published"))) for _ in range(6)
         ]
         try:
             for _ in range(200):

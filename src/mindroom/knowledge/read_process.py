@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 # https://github.com/chroma-core/chroma/pull/7692 and verifying lock waits no longer stall the application.
 
 # Avoid turning simultaneous searches into unbounded native index copies.
-_read_slots = BoundedSemaphore(2)
+_read_slots = BoundedSemaphore(4)
 _CHILD_ENV_KEYS = (
     "PATH",
     "HOME",
