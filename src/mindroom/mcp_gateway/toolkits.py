@@ -113,6 +113,11 @@ class _GatewayMCPToolkit(MindRoomMCPToolkit):
     """Keep the exact request configuration attached to every upstream dispatch."""
 
     context: AgentToolContext
+    require_current_access: Callable[[], None] | None
+
+    async def _before_dispatch(self) -> None:
+        if self.require_current_access is not None:
+            await run_gateway_sync(self.require_current_access)
 
     async def _call_tool_with_error_payload(self, tool_name: str, arguments: dict[str, object]) -> ToolResult:
         if self.manager is None:
@@ -127,6 +132,7 @@ class _GatewayMCPToolkit(MindRoomMCPToolkit):
             include_tools=self.include_tools,
             exclude_tools=self.exclude_tools,
             expected_config=self.context.config,
+            before_dispatch=self._before_dispatch,
         )
 
 
@@ -134,6 +140,7 @@ async def _build_selected(
     context: AgentToolContext,
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
+    require_current_access: Callable[[], None] | None,
 ) -> Toolkit:
     server_id = entry.name.removeprefix("mcp_")
     server = context.config.mcp_servers.get(server_id) if entry.name.startswith("mcp_") else None
@@ -160,6 +167,7 @@ async def _build_selected(
             call_timeout_seconds=cast("float | None", entry.tool_config_overrides.get("call_timeout_seconds")),
         )
         toolkit.context = context
+        toolkit.require_current_access = require_current_access
         # Generic OAuth bridge dispatch cannot carry per-function approval policy.
         typed_names = {tool.function_name for tool in catalog.tools}
         toolkit.async_functions = {
@@ -180,9 +188,10 @@ async def run_toolkit_operation[T](
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
     operation: Callable[[Toolkit], Awaitable[T]],
+    require_current_access: Callable[[], None] | None = None,
 ) -> T:
     """Build, connect, operate on, and close one selected gateway toolkit."""
-    toolkit = await _build_selected(context, entry, manager)
+    toolkit = await _build_selected(context, entry, manager, require_current_access)
     tracker = SyncToolCompletionTracker()
     pending: asyncio.Task[Any] | None = None
     cancelled = False

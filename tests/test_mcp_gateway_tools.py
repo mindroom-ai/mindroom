@@ -7,7 +7,7 @@ import json
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pytest
 from agno.tools import Toolkit
@@ -27,6 +27,9 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
+from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
+from mindroom.mcp_gateway.selection import GatewaySelections
+from mindroom.mcp_gateway.types import GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.catalog import TOOL_METADATA, ConfigField, ensure_tool_registry_loaded
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA, BUILTIN_TOOL_REGISTRY, TOOL_REGISTRY
@@ -45,6 +48,7 @@ if TYPE_CHECKING:
 
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
+    from mindroom.mcp_gateway.types import InvocationResult
 
 
 @pytest.fixture
@@ -98,6 +102,31 @@ async def test_metadata_search_never_constructs_toolkit(
     limited = await gateway.search_tools(context, limit=1)
     assert "error" not in limited
     assert len(limited["results"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_query_finds_later_selection_after_default_result_limit(context: AgentToolContext) -> None:
+    """Query filtering reaches a later agent even when the first fills an unfiltered search."""
+    config = context.config.model_copy(deep=True)
+    config.agents["later"] = config.agents["personal"].model_copy(
+        update={"private": None, "credential_managers": [context.requester_id]},
+    )
+    user = resolve_connection_user(
+        ApiSnapshot(
+            generation=1,
+            runtime_paths=context.runtime_paths,
+            config_data=config.model_dump(),
+            runtime_config=config,
+        ),
+        context.requester_id,
+    )
+    contexts = [resolve_connection_agent(user, name) for name in user.agent_names]
+    initial = await gateway.search_agents(contexts, limit=1)
+    assert "error" not in initial
+    assert [item["agent"] for item in initial["results"]] == ["personal"]
+    later = await gateway.search_agents(contexts, query="later", limit=1)
+    assert "error" not in later
+    assert [item["agent"] for item in later["results"]] == ["later"]
 
 
 @pytest.mark.asyncio
@@ -776,6 +805,115 @@ def _connected_mcp_context(context: AgentToolContext, monkeypatch: pytest.Monkey
         worker_target=context.worker_target,
     )
     return context
+
+
+@pytest.mark.asyncio
+async def test_mcp_deselection_before_construction_prevents_provider_contact(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revocation during metadata resolution stops the subsequent authenticated catalog request."""
+    context = _connected_mcp_context(context, monkeypatch)
+    monkeypatch.setattr(_FakeClientSession, "sessions", [])
+    provider = GatewayOAuthProvider(context.runtime_paths, public_url="https://assistant.example.org")
+    selections = GatewaySelections(provider.store)
+    owner = GatewayOwner(context.requester_id, context.requester_id)
+    await selections.set(owner, (context.agent_name,))
+    waiting, release = threading.Event(), threading.Event()
+    require_entry = gateway._require_entry
+
+    def paused_entry(context: AgentToolContext, name: str) -> EffectiveToolConfig:
+        entry = require_entry(context, name)
+        waiting.set()
+        assert release.wait(10)
+        return entry
+
+    def require_access() -> None:
+        selections.require_selected(owner, context.agent_name)
+
+    monkeypatch.setattr(gateway, "_require_entry", paused_entry)
+    manager = MCPServerManager(context.runtime_paths, validate_agent_function_names=False)
+    try:
+        await manager.sync_servers(context.config, discover=False)
+        pending = asyncio.create_task(
+            gateway.get_tool(
+                context,
+                toolkit="mcp_example",
+                function="example_echo",
+                manager=manager,
+                require_current_access=require_access,
+            ),
+        )
+        try:
+            assert await asyncio.to_thread(waiting.wait, 10)
+            await selections.set(owner, ())
+        finally:
+            release.set()
+        result = await asyncio.wait_for(pending, timeout=10)
+        assert "error" in result
+        assert _FakeClientSession.sessions == []
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("oauth", [False, True], ids=["unauthenticated", "oauth"])
+async def test_mcp_deselection_while_queued_prevents_remote_dispatch(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+    oauth: bool,
+) -> None:
+    """A prepared upstream call must recheck exposure after waiting for a remote call slot."""
+    context = _connected_mcp_context(context, monkeypatch)
+    if not oauth:
+        context = _mcp_context(context, oauth=False)
+    provider = GatewayOAuthProvider(context.runtime_paths, public_url="https://assistant.example.org")
+    selections = GatewaySelections(provider.store)
+    owner = GatewayOwner(context.requester_id, context.requester_id)
+    await selections.set(owner, (context.agent_name,))
+    waiting = asyncio.Event()
+
+    class DispatchGate(asyncio.Semaphore):
+        """Signal when the real manager queues this call."""
+
+        async def acquire(self) -> Literal[True]:
+            """Notify the test before waiting for a remote call slot."""
+            waiting.set()
+            return await super().acquire()
+
+    def require_access() -> None:
+        selections.require_selected(owner, context.agent_name)
+
+    manager = MCPServerManager(context.runtime_paths, validate_agent_function_names=False)
+    pending: asyncio.Task[InvocationResult] | None = None
+    gate = DispatchGate(0)
+    try:
+        await manager.sync_servers(context.config, discover=False)
+        schema = await gateway.get_tool(context, toolkit="mcp_example", function="example_echo", manager=manager)
+        assert "error" not in schema
+        state = next(iter(manager._scoped_states.values())) if oauth else manager._states["example"]
+        state.semaphore = gate
+        pending = asyncio.create_task(
+            gateway.invoke_tool(
+                context,
+                toolkit="mcp_example",
+                function="example_echo",
+                arguments={},
+                manager=manager,
+                require_current_config=require_access,
+            ),
+        )
+        await asyncio.wait_for(waiting.wait(), timeout=10)
+        await selections.set(owner, ())
+        gate.release()
+        result = await asyncio.wait_for(pending, timeout=10)
+        assert "error" in result
+        assert _FakeClientSession.call_tool_invocation_count == 0
+    finally:
+        gate.release()
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio

@@ -60,14 +60,17 @@ class GatewaySelections:
         return tuple(json.loads(row["agents"])) if row else None
 
     def _save(self, connection: sqlite3.Connection, owner: GatewayOwner, payload: str) -> tuple[str, ...]:
-        self._read(connection, owner)
+        previous = self._read(connection, owner)
+        names = tuple(json.loads(payload))
         connection.execute(
             """INSERT INTO gateway_selections (owner_key, requester_id, account_id, agents) VALUES (?, ?, ?, ?)
                ON CONFLICT(owner_key) DO UPDATE SET agents = excluded.agents""",
             (_owner_key(owner), owner.requester_id, owner.account_id, payload),
         )
-        self.store.require_capacity(connection, requester_id=owner.requester_id)
-        return tuple(json.loads(payload))
+        # Withdrawing exposure must remain possible after an operator lowers the quotas.
+        if previous is None or not set(names).issubset(previous):
+            self.store.require_capacity(connection, requester_id=owner.requester_id)
+        return names
 
     async def get(self, owner: GatewayOwner, default_agents: tuple[str, ...]) -> tuple[str, ...]:
         """Persist the initial default once, without overwriting a deliberate empty selection."""

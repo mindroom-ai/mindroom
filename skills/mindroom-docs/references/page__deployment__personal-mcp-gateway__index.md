@@ -48,6 +48,7 @@ On Connections, enable **Expose through MCP** for each agent you want your clien
 One saved selection applies to every connected MCP client for your account, in either authentication mode.
 The eligible personal agent is selected once by default; shared agents start off.
 You can turn every agent off, and the empty selection survives restarts and new client connections.
+Turning agents off remains available when stored data exceeds a lowered gateway or per-user quota.
 New agents are not automatically added to an existing selection.
 
 The page lists all assigned tools, including those without browser authentication.
@@ -57,6 +58,7 @@ A shared agent's authored worker and credential scopes still determine whose ser
 Your selection changes only your clients, without changing another user's selection or disconnecting services.
 
 Eligibility and selection are checked again after tool preparation and hooks, before a provider action starts.
+Upstream MCP calls repeat that check after waiting for a remote call slot.
 Actions already running may finish after an agent is turned off.
 Removing eligibility hides a saved choice; restoring that permission can restore the previously saved choice.
 Selections are bound to the signed Matrix identity, canonical requester, and provisioned account when enabled.

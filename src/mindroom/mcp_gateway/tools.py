@@ -173,7 +173,9 @@ async def _selected_operation[T](
 
     async def selected() -> T:
         entry = await run_gateway_sync(_require_entry, context, name)
-        return await run_toolkit_operation(context, entry, manager, authorized)
+        if require_current_access is not None:
+            await run_gateway_sync(require_current_access)
+        return await run_toolkit_operation(context, entry, manager, authorized, require_current_access)
 
     with (
         tool_runtime_context(None),

@@ -864,6 +864,7 @@ async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_c
         authorization_lease: _MCPAuthorizationLease | None = None,
         include_tools: Collection[str] | None = None,
         exclude_tools: Collection[str] | None = None,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> ToolResult:
         if replacement_task is not None:
             await replacement_task
@@ -876,6 +877,7 @@ async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_c
             authorization_lease=authorization_lease,
             include_tools=include_tools,
             exclude_tools=exclude_tools,
+            before_dispatch=before_dispatch,
         )
 
     monkeypatch.setattr(manager, "_connect_and_discover", connect_with_authorization_change)

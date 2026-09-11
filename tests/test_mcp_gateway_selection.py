@@ -99,6 +99,31 @@ async def test_capacity_failure_rolls_back_selection_and_accounting(provider: Ga
     assert after == before
 
 
+@pytest.mark.parametrize("global_limit", [False, True], ids=["requester", "global"])
+async def test_over_quota_selection_can_only_be_narrowed(
+    provider: GatewayOAuthProvider,
+    runtime_paths: RuntimePaths,
+    global_limit: bool,
+) -> None:
+    """Lowered storage budgets cannot prevent users from withdrawing existing exposure."""
+    selection = GatewaySelections(provider.store)
+    await selection.set(_OWNER, ("personal", "shared"))
+    if global_limit:
+        provider.store.max_bytes = 1
+    else:
+        provider.store.user_max_bytes = 1
+    assert await selection.set(_OWNER, ("personal",)) == ("personal",)
+    with pytest.raises(SelectionAccessDeniedError):
+        selection.require_selected(_OWNER, "shared")
+    with pytest.raises(GatewayOAuthCapacityError):
+        await selection.set(_OWNER, ("personal", "shared"))
+    assert await selection.set(_OWNER, ()) == ()
+    reopened = GatewayOAuthProvider(runtime_paths, public_url="https://example.org")
+    assert await GatewaySelections(reopened.store).get(_OWNER, ("personal",)) == ()
+    with pytest.raises(SelectionAccessDeniedError):
+        selection.require_selected(_OWNER, "personal")
+
+
 async def test_selection_rejects_duplicate_or_unbounded_names(provider: GatewayOAuthProvider) -> None:
     """Storage accepts only bounded unique agent names, including an empty selection."""
     selection = GatewaySelections(provider.store)
