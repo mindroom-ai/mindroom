@@ -157,7 +157,10 @@ def preload_matrix_call_dependencies(config: Config) -> None:
     if not config.calls.enabled or not matrix_calls_dependencies_available():
         return
     # LiveKit registers plugins on the main thread, so this import must not be offloaded.
-    from livekit.plugins import openai  # noqa: F401, PLC0415
+    try:
+        from livekit.plugins import openai  # noqa: F401, PLC0415
+    except Exception:
+        logger.warning("calls_dependency_preload_failed", exc_info=True)
 
 
 def maybe_build_call_manager(

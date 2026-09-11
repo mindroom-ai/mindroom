@@ -2245,12 +2245,22 @@ class TestMultiAgentOrchestrator:
             assert "router" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("calls_enabled", "dependencies_available"), [(False, True), (True, False), (True, True)])
+    @pytest.mark.parametrize(
+        ("calls_enabled", "dependencies_available", "import_error"),
+        [
+            (False, True, None),
+            (True, False, None),
+            (True, True, None),
+            (True, True, ImportError),
+            (True, True, RuntimeError),
+        ],
+    )
     async def test_orchestrator_initialize_uses_custom_config_path(
         self,
         tmp_path: Path,
         calls_enabled: bool,
         dependencies_available: bool,
+        import_error: type[Exception] | None,
     ) -> None:
         """Load the owned config and prepare optional call SDKs before creating bots."""
         config_path = tmp_path / "custom-config.yaml"
@@ -2262,6 +2272,9 @@ class TestMultiAgentOrchestrator:
         def record_import(name: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
             if name == "livekit.plugins":
                 call_import_threads.append(threading.current_thread())
+                if import_error is not None:
+                    msg = "Broken optional call plugin"
+                    raise import_error(msg)
             return original_import(name, *args, **kwargs)
 
         def create_bot(*_args: object) -> None:
@@ -2287,12 +2300,13 @@ class TestMultiAgentOrchestrator:
                     },
                 ),
             ),
-            patch.object(_MultiAgentOrchestrator, "_create_managed_bot", side_effect=create_bot),
+            patch.object(_MultiAgentOrchestrator, "_create_managed_bot", side_effect=create_bot) as create_managed_bot,
             patch(
                 "mindroom.matrix_rtc.call_manager.matrix_calls_dependencies_available",
                 return_value=dependencies_available,
             ),
             patch("builtins.__import__", new=record_import),
+            capture_logs() as logs,
         ):
             orchestrator = _MultiAgentOrchestrator(
                 runtime_paths=resolve_runtime_paths(
@@ -2304,6 +2318,8 @@ class TestMultiAgentOrchestrator:
             await orchestrator.initialize()
 
         mock_load_config.assert_called_once()
+        create_managed_bot.assert_called_once()
+        assert any(log["event"] == "calls_dependency_preload_failed" for log in logs) is (import_error is not None)
         assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
 
     @pytest.mark.asyncio
