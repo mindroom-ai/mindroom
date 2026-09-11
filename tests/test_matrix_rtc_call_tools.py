@@ -20,7 +20,7 @@ from agno.tools.function import Function
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -39,6 +39,7 @@ from mindroom.matrix_rtc.call_tools import (
     build_call_tools,
 )
 from mindroom.memory import MemoryPromptParts
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -55,6 +56,8 @@ from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, ma
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
+
+    from agno.agent import Agent as AgnoAgent
 
     from mindroom.message_target import MessageTarget
     from mindroom.response_turn import ResponseTurnContext
@@ -764,6 +767,98 @@ def test_wrap_processes_unprocessed_toolkit_function_schema() -> None:
     _wrap(function)
     assert set(function.parameters["properties"]) == {"a", "b"}
     assert set(function.parameters["required"]) == {"a", "b"}
+
+
+@pytest.mark.asyncio
+async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live must receive every context file before delegating, without crossing caller scopes."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                AGENT: AgentConfig(
+                    display_name="Helper",
+                    instructions=["Keep the caller's preferences."],
+                    private=AgentPrivateConfig(per="user_agent", context_files=["USER.md", "SOUL.md"]),
+                ),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test")},
+        ),
+        runtime_paths,
+    )
+
+    async def respond(_turn: ResponseTurnContext, **kwargs: object) -> str:
+        return cast("AgnoAgent", kwargs["reusable_agent"]).role or ""
+
+    monkeypatch.setattr("mindroom.ai.ai_response", respond)
+    for requester, name, other in (("@alice:example.org", "Alice", "Bob"), ("@bob:example.org", "Bob", "Alice")):
+        identity = build_tool_execution_identity(
+            channel="matrix",
+            agent_name=AGENT,
+            runtime_paths=runtime_paths,
+            requester_id=requester,
+            room_id="!call:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=requester,
+        )
+        workspace = resolve_agent_runtime(
+            AGENT,
+            config,
+            runtime_paths,
+            execution_identity=identity,
+            create=True,
+        ).workspace
+        assert workspace is not None
+        (workspace.root / "USER.md").write_text(f"The caller is {name}.")
+        (workspace.root / "SOUL.md").write_text("Use a warm, concise voice.")
+        support = SimpleNamespace(
+            build_context=lambda target, *, user_id, **_kwargs: make_test_tool_runtime_context(
+                agent_name=AGENT,
+                target=target,
+                requester_id=user_id,
+                client=MagicMock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                relations=make_relation_lookup(),
+                conversation_reader=make_conversation_reader_mock(),
+                hook_registry=MagicMock(),
+            ),
+            build_execution_identity=lambda identity=identity, **_kwargs: identity,
+            run_in_context=lambda *, operation, **_kwargs: operation(),
+        )
+        tooling = await build_call_tools(
+            agent_name=AGENT,
+            config=config,
+            runtime_paths=runtime_paths,
+            tool_support=support,
+            room_id="!call:example.org",
+            requester_id=requester,
+            session_id=requester,
+            authorize_operation=_authorized_call_operation,
+            enable_responder=True,
+            reconcile_spoken_response=False,
+        )
+        assert tooling.close is not None
+        try:
+            assert tooling.get_system_prompt is not None
+            prompt = await tooling.get_system_prompt()
+            assert f"The caller is {name}." in prompt
+            assert f"The caller is {other}." not in prompt
+            assert "Use a warm, concise voice." in prompt
+            assert "Keep the caller's preferences." in prompt
+            assert tooling.tools == ()
+            # The first delegated turn reuses the prepared agent and its context snapshot.
+            (workspace.root / "USER.md").write_text("This file changed after the call started.")
+            assert tooling.responder is not None
+            response = await tooling.responder("Who am I?", None)
+            assert f"The caller is {name}." in response.text
+            assert "This file changed" not in response.text
+        finally:
+            await tooling.close()
 
 
 @pytest.mark.asyncio
@@ -1748,7 +1843,13 @@ async def test_build_call_tools_hides_agno_added_knowledge_function_needing_appr
     knowledge = Knowledge(name="docs")
 
     def create_knowledge_agent(*_args: object, **kwargs: object) -> KnowledgeToolDescribingAgent:
-        agent = KnowledgeToolDescribingAgent(name="Helper", id=AGENT, knowledge=knowledge, search_knowledge=True)
+        agent = KnowledgeToolDescribingAgent(
+            name="Helper",
+            id=AGENT,
+            model=Claude(id="claude-sonnet-5"),
+            knowledge=knowledge,
+            search_knowledge=True,
+        )
         agent.tool_function_filter = cast("Callable[[Function], bool]", kwargs["tool_function_filter"])
         monkeypatch.setattr(
             agent,

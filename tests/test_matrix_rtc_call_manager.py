@@ -456,6 +456,7 @@ def _stub_join_externals(monkeypatch: pytest.MonkeyPatch) -> None:
             instructions="You are Helper.",
             execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
             responder=AsyncMock(return_value=CallAgentResponse("answer")),
+            get_system_prompt=AsyncMock(return_value="You are Helper."),
         )
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
@@ -747,7 +748,8 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(
         tooling_kwargs.update(kwargs)
         return CallAgentTooling(
             tools=(),
-            instructions="Detailed private agent workspace instructions.",
+            instructions="",
+            get_system_prompt=AsyncMock(return_value="Detailed agent workspace instructions."),
             execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
             responder=respond,
             close=close_responder,
@@ -775,7 +777,7 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(
     assert options.voice == "marin"
     assert options.respond is respond
     assert options.close_responder is close_responder
-    assert "Detailed private agent workspace instructions." not in options.instructions
+    assert (await options.get_instructions()).startswith("Detailed agent workspace instructions.")
     assert await options.respond("Check status", None) == CallAgentResponse("Completed: Check status")
     assert services == ["openai_live"]
     assert tooling_kwargs["enable_responder"] is True

@@ -111,9 +111,11 @@ _VOICE_STYLE_ADDENDUM = (
 )
 
 _LIVE_VOICE_INSTRUCTIONS = (
-    "You are the voice interface for a MindRoom agent. Speak briefly and naturally. "
-    "Delegate every substantive request to the agent, including questions, research, "
-    "memory, and actions. Relay its answer conversationally. Never claim to have "
+    "You are speaking as this agent in a live voice call. Use the identity, instructions, "
+    "and context above. Speak briefly and naturally, without markdown. "
+    "Answer directly when the answer is already in the supplied context or conversation. "
+    "Delegate requests needing tools, research, additional memory, or actions to the agent; "
+    "it executes the tool workflows described above. Relay its answer conversationally. Never claim to have "
     "checked information or completed work until the agent returns the result."
 )
 
@@ -1181,11 +1183,16 @@ class CallManager:
             )
         if self._call_config.backend == "live":
             live_config = cast("LiveCallProfile", self._call_config)
-            if backend.realtime_api_key is None or tooling.responder is None:
+            get_system_prompt = tooling.get_system_prompt
+            if backend.realtime_api_key is None or tooling.responder is None or get_system_prompt is None:
                 msg = "Live call agent was not fully materialized"
                 raise RuntimeError(msg)
+
+            async def get_live_instructions() -> str:
+                return f"{await get_system_prompt()}\n\n{_LIVE_VOICE_INSTRUCTIONS}"
+
             return LiveVoiceAgentOptions(
-                instructions=_LIVE_VOICE_INSTRUCTIONS,
+                get_instructions=get_live_instructions,
                 model=live_config.model,
                 api_key=backend.realtime_api_key,
                 voice=live_config.voice,

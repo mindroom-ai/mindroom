@@ -136,8 +136,9 @@ async def test_live_sdk_routes_delegation_and_closes_owned_work(provider: _Provi
     async def close_responder() -> None:
         order.append("responder_closed")
 
+    system_prompt = "You are Helper. The caller is Alice.\n" + "Preserve every context section.\n" * 1200
     options = LiveVoiceAgentOptions(
-        instructions="Delegate substantive requests to the configured agent.",
+        get_instructions=AsyncMock(return_value=system_prompt),
         model="gpt-live-1",
         api_key="test-api-key",
         voice="vesper",
@@ -153,15 +154,13 @@ async def test_live_sdk_routes_delegation_and_closes_owned_work(provider: _Provi
         start = await provider.socket.next_event("session.start")
         assert start["session"]["model"] == "gpt-live-1"
         assert start["session"]["audio"]["output"]["voice"] == "vesper"
-        assert start["session"]["instructions"] == options.instructions
+        assert start["session"]["instructions"] == system_prompt
         assert start["session"]["delegation"] == {"type": "client"}
         assert provider.connection is not None
         url, headers = provider.connection
         assert url == "wss://api.openai.com/v1/live/sessions"
         assert headers["Authorization"] == "Bearer test-api-key"
 
-        agent = cast("Agent", bridge._live_agent)
-        assert isinstance(agent.duplex_session, GPTLiveSession)
         provider.socket.feed(
             {"type": "session.input_transcript.delta", "delta": "Check status.", "start_ms": 0, "end_ms": 100},
         )
@@ -209,7 +208,7 @@ async def test_live_sdk_identical_spoken_retry_survives_delegate_failure(
             retry_transcribed.set()
 
     options = LiveVoiceAgentOptions(
-        instructions="Delegate requests.",
+        get_instructions=AsyncMock(return_value="Delegate requests."),
         model="gpt-live-1",
         api_key="test-api-key",
         voice="marin",
@@ -256,6 +255,34 @@ async def test_live_sdk_identical_spoken_retry_survives_delegate_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True], ids=["failed", "cancelled"])
+async def test_live_prompt_preparation_failure_closes_responder_before_provider_start(
+    provider: _ProviderHTTP,
+    cancelled: bool,
+) -> None:
+    """Preparing the full prompt must not leak the cached agent on failed call startup."""
+    error = asyncio.CancelledError if cancelled else RuntimeError
+    close_responder = AsyncMock()
+    options = LiveVoiceAgentOptions(
+        get_instructions=AsyncMock(side_effect=error("prompt preparation stopped")),
+        model="gpt-live-1",
+        api_key="test-api-key",
+        voice="marin",
+        respond=AsyncMock(),
+        close_responder=close_responder,
+    )
+    bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
+    bridge._room = SimpleNamespace(disconnect=AsyncMock())
+    try:
+        with pytest.raises(error, match="prompt preparation stopped"):
+            await bridge.start_agent(options)
+    finally:
+        await bridge.aclose()
+    close_responder.assert_awaited_once()
+    assert provider.connection is None
+
+
+@pytest.mark.asyncio
 async def test_live_sdk_configuration_failure_releases_owned_resources(
     provider: _ProviderHTTP,
     monkeypatch: pytest.MonkeyPatch,
@@ -269,7 +296,7 @@ async def test_live_sdk_configuration_failure_releases_owned_resources(
     monkeypatch.setattr(GPTLiveSession, "_update_instructions", reject_configuration)
     close_responder = AsyncMock()
     options = LiveVoiceAgentOptions(
-        instructions="Delegate requests.",
+        get_instructions=AsyncMock(return_value="Delegate requests."),
         model="gpt-live-1",
         api_key="test-api-key",
         voice="marin",
@@ -319,7 +346,7 @@ async def test_live_sdk_disconnect_returns_control_without_reusing_delegations(
         terminated.set()
 
     options = LiveVoiceAgentOptions(
-        instructions="Delegate requests.",
+        get_instructions=AsyncMock(return_value="Delegate requests."),
         model="gpt-live-1",
         api_key="test-api-key",
         voice="marin",

@@ -64,7 +64,7 @@ async def start_audio(
     session.start = AsyncMock()
     options = (
         LiveVoiceAgentOptions(
-            instructions="Speak.",
+            get_instructions=AsyncMock(return_value="Speak."),
             model="gpt-live-1",
             api_key="test",
             voice="marin",
