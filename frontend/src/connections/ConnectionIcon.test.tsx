@@ -6,14 +6,22 @@ import { ConnectionIcon } from "./ConnectionIcon";
 afterEach(cleanup);
 
 describe("configured icons", () => {
-  it("uses an explicit Lucide icon outside the generated registry", async () => {
-    const { container } = render(
-      <ConnectionIcon names={["Google Calendar"]} iconName="Book" />,
-    );
-    await waitFor(() =>
-      expect(container.querySelector(".lucide-book")).toBeInTheDocument(),
-    );
-  });
+  it.each([
+    ["Book", "book"],
+    ["AlarmCheck", "alarm-clock-check"],
+  ])(
+    "uses the explicit Lucide icon %s outside the generated registry",
+    async (iconName, className) => {
+      const { container } = render(
+        <ConnectionIcon names={["Google Calendar"]} iconName={iconName} />,
+      );
+      await waitFor(() =>
+        expect(
+          container.querySelector(`.lucide-${className}`),
+        ).toBeInTheDocument(),
+      );
+    },
+  );
 
   it.each(["__proto__", "constructor", "toString", "icons"])(
     "safely falls back for the non-icon name %s on both pages",
