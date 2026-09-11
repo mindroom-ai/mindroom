@@ -1078,6 +1078,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.openai_compat"
 depends_on = [
+    "mindroom.api.response_activity",
     "mindroom.knowledge.utils",
     "mindroom.agent_run_context",
     "mindroom.ai",
@@ -1160,6 +1161,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
+    "mindroom.api.response_activity",
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.legacy_private_storage",
@@ -3356,6 +3358,7 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.main"
 depends_on = [
+    "mindroom.cli.response_activity",
     "mindroom.cli.thread_export",
     "mindroom",
     "mindroom.avatar_generation",
@@ -5460,4 +5463,24 @@ depends_on = [
     "mindroom.redaction",
     "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.read_protocol",
+]
+
+[[modules]]
+path = "mindroom.response_activity"
+depends_on = []
+
+[[modules]]
+path = "mindroom.api.response_activity"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.response_activity",
+    "mindroom.runtime_state",
+]
+
+[[modules]]
+path = "mindroom.cli.response_activity"
+depends_on = [
+    "mindroom.cli.config",
+    "mindroom.constants",
+    "mindroom.response_activity",
 ]

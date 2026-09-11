@@ -35,34 +35,83 @@ mindroom [OPTIONS] COMMAND [ARGS]...
  mindroom config init   Create a starter config
  mindroom run           Start the system
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --install-completion            Install completion for the current shell.              │
-│ --show-completion               Show completion for the current shell, to copy it or   │
-│                                 customize the installation.                            │
-│ --help                -h        Show this message and exit.                            │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version             Show the current version of Mindroom.                              │
-│ run                 Run the mindroom multi-agent system.                               │
-│ doctor              Check your environment for common issues.                          │
-│ connect             Pair this local MindRoom install with the hosted provisioning      │
-│                     service.                                                           │
-│ local-stack-setup   Start local Synapse + MindRoom Chat using Docker only.             │
-│ config              Manage MindRoom configuration files.                               │
-│ plugins             Validate and vendor external MindRoom plugins.                     │
-│ desktop             Connect allowlisted local applications to cloud MindRoom over      │
-│                     Matrix E2EE.                                                       │
-│ avatars             Generate and sync managed avatar assets.                           │
-│ threads             Export Matrix threads to local files.                              │
-│ journal             Inspect and rebind the durable event journal.                      │
-│ service             Install and manage MindRoom as a background user service.          │
-│ trigger             Send signed external triggers.                                     │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --install-completion            Install completion for the current shell.    │
+│ --show-completion               Show completion for the current shell, to    │
+│                                 copy it or customize the installation.       │
+│ --help                -h        Show this message and exit.                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ check-active-responses   Check live responses; exit 0 idle, 1 busy, or 2     │
+│                          unavailable.                                        │
+│ version                  Show the current version of Mindroom.               │
+│ run                      Run the mindroom multi-agent system.                │
+│ doctor                   Check your environment for common issues.           │
+│ connect                  Pair this local MindRoom install with the hosted    │
+│                          provisioning service.                               │
+│ local-stack-setup        Start local Synapse + MindRoom Chat using Docker    │
+│                          only.                                               │
+│ config                   Manage MindRoom configuration files.                │
+│ plugins                  Validate and vendor external MindRoom plugins.      │
+│ desktop                  Connect allowlisted local applications to cloud     │
+│                          MindRoom over Matrix E2EE.                          │
+│ avatars                  Generate and sync managed avatar assets.            │
+│ threads                  Export Matrix threads to local files.               │
+│ journal                  Inspect and rebind the durable event journal.       │
+│ service                  Install and manage MindRoom as a background user    │
+│                          service.                                            │
+│ trigger                  Send signed external triggers.                      │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
 
 <!-- OUTPUT:END -->
+
+## check-active-responses
+
+Check whether the running MindRoom process has active response work.
+
+```bash
+mindroom check-active-responses
+mindroom check-active-responses --json
+mindroom check-active-responses --url http://127.0.0.1:8765 --timeout 5
+```
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | The runtime is ready, admission is open, and no tracked response work is active. |
+| `1` | Matrix operations or OpenAI-compatible requests are active. |
+| `2` | Status is unavailable, including startup, runtime replacement, connection failure, or an incompatible server. |
+
+The command reads a fresh snapshot from `GET /api/responses/activity`.
+Like health and readiness, this is an unauthenticated operational probe; it exposes only runtime phase, admission state, and aggregate counts.
+It does not expose room, user, agent, message, or tool details.
+The bundled API must be enabled and connected to the orchestrator; an API-only process cannot report the full runtime as idle.
+Responses carry `Cache-Control: no-store`.
+
+`active_matrix_operations` uses the same live admission gate as config reloads.
+It includes response planning, waiting for response locks, generation, delivery, and other admitted Matrix operations such as voice and external-trigger delivery.
+Nested admission slots count separately, so this is a conservative work count, not a count of unique responses.
+`active_openai_requests` counts chat completion HTTP requests through the end of the response body, including streaming, and clears on errors or cancellation.
+Persisted native tool-approval waits have released their live response slots and do not count as active work; publishing or resuming an approval does count while admitted.
+Interactive waits that still own a live slot remain busy.
+
+This is a point-in-time observation, not a drain or a restart lock.
+New work can start immediately after the check.
+Unadmitted queued work and unrelated background jobs are outside these counters.
+For multiple MindRoom processes, check each process directly rather than a load-balanced service.
+
+The URL defaults to `MINDROOM_URL` from the selected runtime environment, then `http://127.0.0.1:8765`.
+Use `--config /path/to/config.yaml` to select an environment, `--url` to override the server, and `--timeout` to bound the HTTP request (10 seconds by default).
+The CLI sends `MINDROOM_API_KEY` as a bearer token when configured, for gateways that require it.
+
+For an in-container check:
+
+```bash
+docker exec <container> mindroom check-active-responses --url http://127.0.0.1:8765
+kubectl exec <pod> -c mindroom -- mindroom check-active-responses --url http://127.0.0.1:8765
+```
 
 ## version
 
