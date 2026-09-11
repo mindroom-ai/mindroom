@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from mindroom import agents
 from mindroom.api import config_lifecycle
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.mcp_gateway import accounts, external_auth
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
@@ -74,7 +75,7 @@ def test_external_clients_share_dashboard_agent_selection(
         display_name="Research",
         role="Shared tools",
         tools=["calculator"],
-        credential_managers=["@alice:example.org"],
+        access=ResponderAccessConfig(users=["@alice:example.org"]),
     )
     selection = "/api/connections/mcp/selection"
     assert external_client.get(selection, headers=headers).json()["agents"] == {"personal": None}
@@ -97,6 +98,30 @@ def test_external_clients_share_dashboard_agent_selection(
         assert response.status_code == 200, response.text
         results = response.json()["result"]["structuredContent"]["results"]
         assert {(item["agent"], item["toolkit"]) for item in results} == {("shared", "calculator")}
+
+    # Retaining credential management cannot preserve execution after access is revoked.
+    config.agents["shared"].access.users = []
+    config.agents["shared"].credential_managers = ["@alice:example.org"]
+    response = external_client.post(
+        "/mcp",
+        headers={**MCP_HEADERS, **credential()},
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "invoke_tool",
+                "arguments": {
+                    "agent": "shared",
+                    "toolkit": "calculator",
+                    "function": "add",
+                    "arguments": {"a": 1, "b": 2},
+                },
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["isError"] is True
 
 
 @pytest.fixture(params=PROFILES, ids=["bearer", "signed-assertion"])
