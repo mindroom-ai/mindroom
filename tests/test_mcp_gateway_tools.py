@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.api.personal_agent import PersonalAgentContext
+    from mindroom.config.models import EffectiveToolConfig
 
 
 @pytest.fixture
@@ -170,6 +171,36 @@ async def test_gateway_rechecks_tool_metadata_after_discovery(
         assert response == {
             "error": {"code": "tool_not_found", "message": "This tool is not assigned to your personal agent."},
         }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["search", "schema", "invoke"])
+async def test_gateway_rechecks_room_requirement_after_selection(
+    context: PersonalAgentContext,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """A registry change while construction is scheduled invalidates the selected toolkit."""
+    original = gateway_toolkits._build_native
+
+    def reload_before_build(selected_context: PersonalAgentContext, entry: EffectiveToolConfig) -> Toolkit:
+        monkeypatch.setattr(TOOL_METADATA[entry.name], "requires_room_context", True)
+        return original(selected_context, entry)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Gateway constructed a toolkit after its room requirement changed")
+
+    monkeypatch.setattr(gateway_toolkits, "_build_native", reload_before_build)
+    monkeypatch.setattr(agents, "build_agent_toolkit", forbidden)
+    if operation == "search":
+        response = await gateway.search_tools(context, toolkit="calculator")
+    elif operation == "schema":
+        response = await gateway.get_tool(context, toolkit="calculator", function="add")
+    else:
+        response = await gateway.invoke_tool(context, toolkit="calculator", function="add", arguments={"a": 2, "b": 3})
+    assert response == {
+        "error": {"code": "tool_not_found", "message": "This tool is not assigned to your personal agent."},
+    }
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sync
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode
+from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 
 if TYPE_CHECKING:
@@ -74,6 +75,10 @@ def _build_native(context: PersonalAgentContext, entry: EffectiveToolConfig) -> 
     from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
+    # Plugin metadata can change after selection while this build is scheduled.
+    metadata = TOOL_METADATA.get(entry.name)
+    if metadata is not None and metadata.requires_room_context:
+        raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
     runtime = resolve_agent_runtime(
         context.agent_name,
         context.config,
