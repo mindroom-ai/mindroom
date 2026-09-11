@@ -31,33 +31,30 @@ mindroom [OPTIONS] COMMAND [ARGS]...
  mindroom config init   Create a starter config
  mindroom run           Start the system
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --install-completion            Install completion for the current shell.    │
-│ --show-completion               Show completion for the current shell, to    │
-│                                 copy it or customize the installation.       │
-│ --help                -h        Show this message and exit.                  │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ check-active-responses   Check live responses; exit 0 idle, 1 busy, or 2     │
-│                          unavailable.                                        │
-│ version                  Show the current version of Mindroom.               │
-│ run                      Run the mindroom multi-agent system.                │
-│ doctor                   Check your environment for common issues.           │
-│ connect                  Pair this local MindRoom install with the hosted    │
-│                          provisioning service.                               │
-│ local-stack-setup        Start local Synapse + MindRoom Chat using Docker    │
-│                          only.                                               │
-│ config                   Manage MindRoom configuration files.                │
-│ plugins                  Validate and vendor external MindRoom plugins.      │
-│ desktop                  Connect allowlisted local applications to cloud     │
-│                          MindRoom over Matrix E2EE.                          │
-│ avatars                  Generate and sync managed avatar assets.            │
-│ threads                  Export Matrix threads to local files.               │
-│ journal                  Inspect and rebind the durable event journal.       │
-│ service                  Install and manage MindRoom as a background user    │
-│                          service.                                            │
-│ trigger                  Send signed external triggers.                      │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --install-completion            Install completion for the current shell.              │
+│ --show-completion               Show completion for the current shell, to copy it or   │
+│                                 customize the installation.                            │
+│ --help                -h        Show this message and exit.                            │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ check-active-responses   Check live responses; exit 0 idle, 1 busy, or 2 unavailable.  │
+│ version                  Show the current version of Mindroom.                         │
+│ run                      Run the mindroom multi-agent system.                          │
+│ doctor                   Check your environment for common issues.                     │
+│ connect                  Pair this local MindRoom install with the hosted provisioning │
+│                          service.                                                      │
+│ local-stack-setup        Start local Synapse + MindRoom Chat using Docker only.        │
+│ config                   Manage MindRoom configuration files.                          │
+│ plugins                  Validate and vendor external MindRoom plugins.                │
+│ desktop                  Connect allowlisted local applications to cloud MindRoom over │
+│                          Matrix E2EE.                                                  │
+│ avatars                  Generate and sync managed avatar assets.                      │
+│ threads                  Export Matrix threads to local files.                         │
+│ journal                  Inspect and rebind the durable event journal.                 │
+│ service                  Install and manage MindRoom as a background user service.     │
+│ trigger                  Send signed external triggers.                                │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
