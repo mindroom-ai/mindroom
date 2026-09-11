@@ -35,30 +35,33 @@ mindroom [OPTIONS] COMMAND [ARGS]...
  mindroom config init   Create a starter config
  mindroom run           Start the system
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --install-completion            Install completion for the current shell.              │
-│ --show-completion               Show completion for the current shell, to copy it or   │
-│                                 customize the installation.                            │
-│ --help                -h        Show this message and exit.                            │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ check-active-responses   Check live responses; exit 0 idle, 1 busy, or 2 unavailable.  │
-│ version                  Show the current version of Mindroom.                         │
-│ run                      Run the mindroom multi-agent system.                          │
-│ doctor                   Check your environment for common issues.                     │
-│ connect                  Pair this local MindRoom install with the hosted provisioning │
-│                          service.                                                      │
-│ local-stack-setup        Start local Synapse + MindRoom Chat using Docker only.        │
-│ config                   Manage MindRoom configuration files.                          │
-│ plugins                  Validate and vendor external MindRoom plugins.                │
-│ desktop                  Connect allowlisted local applications to cloud MindRoom over │
-│                          Matrix E2EE.                                                  │
-│ avatars                  Generate and sync managed avatar assets.                      │
-│ threads                  Export Matrix threads to local files.                         │
-│ journal                  Inspect and rebind the durable event journal.                 │
-│ service                  Install and manage MindRoom as a background user service.     │
-│ trigger                  Send signed external triggers.                                │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --install-completion            Install completion for the current shell.    │
+│ --show-completion               Show completion for the current shell, to    │
+│                                 copy it or customize the installation.       │
+│ --help                -h        Show this message and exit.                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ check-active-responses   Check live responses; exit 0 idle, 1 busy, or 2     │
+│                          unavailable.                                        │
+│ version                  Show the current version of Mindroom.               │
+│ run                      Run the mindroom multi-agent system.                │
+│ doctor                   Check your environment for common issues.           │
+│ connect                  Pair this local MindRoom install with the hosted    │
+│                          provisioning service.                               │
+│ local-stack-setup        Start local Synapse + MindRoom Chat using Docker    │
+│                          only.                                               │
+│ config                   Manage MindRoom configuration files.                │
+│ plugins                  Validate and vendor external MindRoom plugins.      │
+│ desktop                  Connect allowlisted local applications to cloud     │
+│                          MindRoom over Matrix E2EE.                          │
+│ avatars                  Generate and sync managed avatar assets.            │
+│ threads                  Export Matrix threads to local files.               │
+│ journal                  Inspect and rebind the durable event journal.       │
+│ service                  Install and manage MindRoom as a background user    │
+│                          service.                                            │
+│ trigger                  Send signed external triggers.                      │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -133,9 +136,9 @@ Show the current MindRoom version.
 
  Show the current version of Mindroom.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -169,25 +172,29 @@ Start MindRoom with your configuration.
  - Manages agent room memberships
  - Starts the bundled dashboard/API server (disable with --no-api)
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
-│                                          ERROR)                                        │
-│                                          [env var: LOG_LEVEL]                          │
-│                                          [default: INFO]                               │
-│ --config        -c              PATH     Use this config file path. Defaults the       │
-│                                          storage location to the selected config       │
-│                                          directory unless --storage-path is set.       │
-│ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
-│                                          (state, sessions, tracking)                   │
-│ --api               --no-api             Start the bundled dashboard/API server        │
-│                                          alongside the bot                             │
-│                                          [default: api]                                │
-│ --api-port                      INTEGER  Port for the bundled dashboard/API server     │
-│                                          [default: 8765]                               │
-│ --api-host                      TEXT     Host for the bundled dashboard/API server     │
-│                                          [default: 0.0.0.0]                            │
-│ --help          -h                       Show this message and exit.                   │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, │
+│                                          WARNING, ERROR)                     │
+│                                          [env var: LOG_LEVEL]                │
+│                                          [default: INFO]                     │
+│ --config        -c              PATH     Use this config file path. Defaults │
+│                                          the storage location to the         │
+│                                          selected config directory unless    │
+│                                          --storage-path is set.              │
+│ --storage-path  -s              PATH     Base directory for persistent       │
+│                                          MindRoom data (state, sessions,     │
+│                                          tracking)                           │
+│ --api               --no-api             Start the bundled dashboard/API     │
+│                                          server alongside the bot            │
+│                                          [default: api]                      │
+│ --api-port                      INTEGER  Port for the bundled dashboard/API  │
+│                                          server                              │
+│                                          [default: 8765]                     │
+│ --api-host                      TEXT     Host for the bundled dashboard/API  │
+│                                          server                              │
+│                                          [default: 0.0.0.0]                  │
+│ --help          -h                       Show this message and exit.         │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -216,16 +223,17 @@ See the [Matrix Desktop Bridge](tools/desktop.md) guide for the complete secure 
 
  Connect allowlisted local applications to cloud MindRoom over Matrix E2EE.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ login   Log in once, create an Olm device, and save its access token privately.        │
-│ pair    Claim one requester-agent pairing through authenticated Matrix E2EE.           │
-│ setup   Log in when needed, then claim one requester-agent pairing.                    │
-│ run     Run the outbound-only Matrix sync loop and execute locally authorized          │
-│         commands.                                                                      │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ login   Log in once, create an Olm device, and save its access token         │
+│         privately.                                                           │
+│ pair    Claim one requester-agent pairing through authenticated Matrix E2EE. │
+│ setup   Log in when needed, then claim one requester-agent pairing.          │
+│ run     Run the outbound-only Matrix sync loop and execute locally           │
+│         authorized commands.                                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -253,33 +261,38 @@ Log in when no saved local Desktop session exists, then claim the requester-agen
 
  Log in when needed, then claim one requester-agent pairing.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --code                              TEXT  Short-lived code returned by !desktop     │
-│                                              setup.                                    │
-│                                              [required]                                │
-│ *  --controller-user-id                TEXT  Pinned cloud controller Matrix user.      │
-│                                              [required]                                │
-│ *  --controller-device-id              TEXT  Pinned cloud controller device.           │
-│                                              [required]                                │
-│ *  --controller-ed25519                TEXT  Pinned controller fingerprint. [required] │
-│    --user-id                           TEXT  Expected Matrix user ID; required for     │
-│                                              password login and optional for SSO.      │
-│    --homeserver                        TEXT  Matrix homeserver URL; defaults to the    │
-│                                              configured MindRoom homeserver.           │
-│    --cloudflare-access                       Authenticate Matrix requests              │
-│                                              interactively with the local cloudflared  │
-│                                              CLI.                                      │
-│                                              [env var:                                 │
-│                                              MINDROOM_DESKTOP_CLOUDFLARE_ACCESS]       │
-│    --matrix-http-headers-file          PATH  Owner-only JSON file of HTTP headers      │
-│                                              added to every Matrix request.            │
-│                                              [env var:                                 │
-│                                              MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FIL… │
-│    --config                    -c      PATH  MindRoom config path used for runtime     │
-│                                              env.                                      │
-│    --storage-path              -s      PATH  Desktop bridge state directory.           │
-│    --help                      -h            Show this message and exit.               │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ *  --code                              TEXT  Short-lived code returned by    │
+│                                              !desktop setup.                 │
+│                                              [required]                      │
+│ *  --controller-user-id                TEXT  Pinned cloud controller Matrix  │
+│                                              user.                           │
+│                                              [required]                      │
+│ *  --controller-device-id              TEXT  Pinned cloud controller device. │
+│                                              [required]                      │
+│ *  --controller-ed25519                TEXT  Pinned controller fingerprint.  │
+│                                              [required]                      │
+│    --user-id                           TEXT  Expected Matrix user ID;        │
+│                                              required for password login and │
+│                                              optional for SSO.               │
+│    --homeserver                        TEXT  Matrix homeserver URL; defaults │
+│                                              to the configured MindRoom      │
+│                                              homeserver.                     │
+│    --cloudflare-access                       Authenticate Matrix requests    │
+│                                              interactively with the local    │
+│                                              cloudflared CLI.                │
+│                                              [env var:                       │
+│                                              MINDROOM_DESKTOP_CLOUDFLARE_AC… │
+│    --matrix-http-headers-file          PATH  Owner-only JSON file of HTTP    │
+│                                              headers added to every Matrix   │
+│                                              request.                        │
+│                                              [env var:                       │
+│                                              MINDROOM_DESKTOP_MATRIX_HTTP_H… │
+│    --config                    -c      PATH  MindRoom config path used for   │
+│                                              runtime env.                    │
+│    --storage-path              -s      PATH  Desktop bridge state directory. │
+│    --help                      -h            Show this message and exit.     │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -307,61 +320,62 @@ Create and privately save the dedicated local desktop Matrix device.
 
  Log in once, create an Olm device, and save its access token privately.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --user-id                                     TEXT                 Expected Matrix     │
-│                                                                    user ID; required   │
-│                                                                    for password login  │
-│                                                                    and optional for    │
-│                                                                    SSO.                │
-│ --homeserver                                  TEXT                 Matrix homeserver   │
-│                                                                    URL; defaults to    │
-│                                                                    the configured      │
-│                                                                    MindRoom            │
-│                                                                    homeserver.         │
-│ --login-method                                [auto|password|sso]  Matrix login        │
-│                                                                    method. Auto uses   │
-│                                                                    password when       │
-│                                                                    advertised,         │
-│                                                                    otherwise browser   │
-│                                                                    SSO.                │
-│                                                                    [default: auto]     │
-│ --sso-idp                                     TEXT                 Matrix SSO          │
-│                                                                    identity-provider   │
-│                                                                    ID. Selects SSO     │
-│                                                                    when login method   │
-│                                                                    is auto.            │
-│ --open-browser           --no-open-browser                         Open Matrix SSO in  │
-│                                                                    the default         │
-│                                                                    browser; otherwise  │
-│                                                                    print the URL.      │
-│                                                                    [default:           │
-│                                                                    open-browser]       │
-│ --cloudflare-access                                                Authenticate Matrix │
-│                                                                    requests            │
-│                                                                    interactively with  │
-│                                                                    the local           │
-│                                                                    cloudflared CLI.    │
-│                                                                    [env var:           │
-│                                                                    MINDROOM_DESKTOP_C… │
-│ --replace                                                          Replace the saved   │
-│                                                                    session with a      │
-│                                                                    fresh Matrix        │
-│                                                                    device.             │
-│ --matrix-http-head…                           PATH                 Owner-only JSON     │
-│                                                                    file of HTTP        │
-│                                                                    headers added to    │
-│                                                                    every Matrix        │
-│                                                                    request.            │
-│                                                                    [env var:           │
-│                                                                    MINDROOM_DESKTOP_M… │
-│ --config             -c                       PATH                 MindRoom config     │
-│                                                                    path used for       │
-│                                                                    runtime env.        │
-│ --storage-path       -s                       PATH                 Desktop bridge      │
-│                                                                    state directory.    │
-│ --help               -h                                            Show this message   │
-│                                                                    and exit.           │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --user-id                                 TEXT             Expected Matrix   │
+│                                                            user ID; required │
+│                                                            for password      │
+│                                                            login and         │
+│                                                            optional for SSO. │
+│ --homeserver                              TEXT             Matrix homeserver │
+│                                                            URL; defaults to  │
+│                                                            the configured    │
+│                                                            MindRoom          │
+│                                                            homeserver.       │
+│ --login-method                            [auto|password|  Matrix login      │
+│                                           sso]             method. Auto uses │
+│                                                            password when     │
+│                                                            advertised,       │
+│                                                            otherwise browser │
+│                                                            SSO.              │
+│                                                            [default: auto]   │
+│ --sso-idp                                 TEXT             Matrix SSO        │
+│                                                            identity-provider │
+│                                                            ID. Selects SSO   │
+│                                                            when login method │
+│                                                            is auto.          │
+│ --open-browser        --no-open-brows…                     Open Matrix SSO   │
+│                                                            in the default    │
+│                                                            browser;          │
+│                                                            otherwise print   │
+│                                                            the URL.          │
+│                                                            [default:         │
+│                                                            open-browser]     │
+│ --cloudflare-ac…                                           Authenticate      │
+│                                                            Matrix requests   │
+│                                                            interactively     │
+│                                                            with the local    │
+│                                                            cloudflared CLI.  │
+│                                                            [env var:         │
+│                                                            MINDROOM_DESKTOP… │
+│ --replace                                                  Replace the saved │
+│                                                            session with a    │
+│                                                            fresh Matrix      │
+│                                                            device.           │
+│ --matrix-http-h…                          PATH             Owner-only JSON   │
+│                                                            file of HTTP      │
+│                                                            headers added to  │
+│                                                            every Matrix      │
+│                                                            request.          │
+│                                                            [env var:         │
+│                                                            MINDROOM_DESKTOP… │
+│ --config          -c                      PATH             MindRoom config   │
+│                                                            path used for     │
+│                                                            runtime env.      │
+│ --storage-path    -s                      PATH             Desktop bridge    │
+│                                                            state directory.  │
+│ --help            -h                                       Show this message │
+│                                                            and exit.         │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -487,14 +501,14 @@ Generate and sync managed avatar assets.
 
  Generate and sync managed avatar assets.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ generate   Generate missing managed avatar files in the workspace.                     │
-│ sync       Sync configured room and root-space avatars to Matrix using the initialized │
-│            router account.                                                             │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ generate   Generate missing managed avatar files in the workspace.           │
+│ sync       Sync configured room and root-space avatars to Matrix using the   │
+│            initialized router account.                                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -526,10 +540,10 @@ Use `--force` to overwrite them after changing avatar prompts or styles.
 
  Generate missing managed avatar files in the workspace.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --force            Overwrite existing managed workspace avatar files.                  │
-│ --help   -h        Show this message and exit.                                         │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --force            Overwrite existing managed workspace avatar files.        │
+│ --help   -h        Show this message and exit.                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -557,13 +571,13 @@ Use `--force` to replace them.
 
  Usage: root avatars sync [OPTIONS]
 
- Sync configured room and root-space avatars to Matrix using the initialized router
- account.
+ Sync configured room and root-space avatars to Matrix using the initialized
+ router account.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --force            Replace existing Matrix room and root-space avatars.                │
-│ --help   -h        Show this message and exit.                                         │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --force            Replace existing Matrix room and root-space avatars.      │
+│ --help   -h        Show this message and exit.                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -591,13 +605,13 @@ Export Matrix threads to local files.
 
  Export Matrix threads to local files.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ export   Export Matrix threads through a running MindRoom instance to searchable YAML  │
-│          files.                                                                        │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ export   Export Matrix threads through a running MindRoom instance to        │
+│          searchable YAML files.                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -655,33 +669,46 @@ An interrupted pass preserves completed files; rerun the export to finish the pa
 
  Usage: root threads export [OPTIONS]
 
- Export Matrix threads through a running MindRoom instance to searchable YAML files.
+ Export Matrix threads through a running MindRoom instance to searchable YAML
+ files.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --url                                         TEXT     Running MindRoom URL; defaults  │
-│                                                        to MINDROOM_URL or              │
-│                                                        localhost:8765.                 │
-│ --config            -c                        PATH     Use this config file path.      │
-│ --storage-path      -s                        PATH     Base directory for persistent   │
-│                                                        MindRoom data.                  │
-│ --output            -o                        PATH     Output directory. Defaults to   │
-│                                                        <storage>/thread_exports.       │
-│ --room              -r                        TEXT     Filter exported rooms by a      │
-│                                                        substring of the room key,      │
-│                                                        alias, name, or Matrix room ID. │
-│ --watch                                                Repeat the export forever on a  │
-│                                                        fixed interval.                 │
-│ --interval                                    INTEGER  Watch interval in seconds.      │
-│                                                        [default: 300]                  │
-│ --max-thread-roots                            INTEGER  Maximum thread roots to         │
-│                                                        enumerate per room.             │
-│                                                        [default: 2000]                 │
-│ --invited-rooms         --no-invited-rooms             Include rooms joined through    │
-│                                                        authorized invites              │
-│                                                        (user-created rooms).           │
-│                                                        [default: invited-rooms]        │
-│ --help              -h                                 Show this message and exit.     │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --url                                         TEXT     Running MindRoom URL; │
+│                                                        defaults to           │
+│                                                        MINDROOM_URL or       │
+│                                                        localhost:8765.       │
+│ --config            -c                        PATH     Use this config file  │
+│                                                        path.                 │
+│ --storage-path      -s                        PATH     Base directory for    │
+│                                                        persistent MindRoom   │
+│                                                        data.                 │
+│ --output            -o                        PATH     Output directory.     │
+│                                                        Defaults to           │
+│                                                        <storage>/thread_exp… │
+│ --room              -r                        TEXT     Filter exported rooms │
+│                                                        by a substring of the │
+│                                                        room key, alias,      │
+│                                                        name, or Matrix room  │
+│                                                        ID.                   │
+│ --watch                                                Repeat the export     │
+│                                                        forever on a fixed    │
+│                                                        interval.             │
+│ --interval                                    INTEGER  Watch interval in     │
+│                                                        seconds.              │
+│                                                        [default: 300]        │
+│ --max-thread-roots                            INTEGER  Maximum thread roots  │
+│                                                        to enumerate per      │
+│                                                        room.                 │
+│                                                        [default: 2000]       │
+│ --invited-rooms         --no-invited-rooms             Include rooms joined  │
+│                                                        through authorized    │
+│                                                        invites (user-created │
+│                                                        rooms).               │
+│                                                        [default:             │
+│                                                        invited-rooms]        │
+│ --help              -h                                 Show this message and │
+│                                                        exit.                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -732,12 +759,12 @@ Each refusal is a different problem and says so:
 
  Inspect and rebind the durable event journal.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ adopt   Bind this install to the configured event-journal database.                    │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ adopt   Bind this install to the configured event-journal database.          │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -808,15 +835,15 @@ Stop MindRoom and try again. Use `--force` only when you are certain nothing is 
  recovery ownership without any error. This is how you say the change was
  deliberate.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --config        -c      PATH  Use this config file path.                               │
-│ --storage-path  -s      PATH  Base directory for persistent MindRoom data.             │
-│ --yes           -y            Adopt without confirming, even when another journal is   │
-│                               already bound.                                           │
-│ --force                       Adopt even though another process still has this         │
-│                               install's journal open.                                  │
-│ --help          -h            Show this message and exit.                              │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --config        -c      PATH  Use this config file path.                     │
+│ --storage-path  -s      PATH  Base directory for persistent MindRoom data.   │
+│ --yes           -y            Adopt without confirming, even when another    │
+│                               journal is already bound.                      │
+│ --force                       Adopt even though another process still has    │
+│                               this install's journal open.                   │
+│ --help          -h            Show this message and exit.                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -853,26 +880,26 @@ On Linux, MindRoom uses systemd user services.
 
  Install and manage MindRoom as a background user service.
 
- MindRoom runs the version installed by this command through `uv tool run` and starts
- automatically at login.
+ MindRoom runs the version installed by this command through `uv tool run` and
+ starts automatically at login.
  Rerun `mindroom service install` after upgrading MindRoom.
 
  Supported platforms:
  - macOS: launchd (`~/Library/LaunchAgents/`)
  - Linux: systemd user services (`~/.config/systemd/user/`)
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ install     Install and start MindRoom as a background user service.                   │
-│ uninstall   Stop and remove the MindRoom user service.                                 │
-│ start       Start the installed MindRoom user service.                                 │
-│ stop        Stop the installed MindRoom user service without removing it.              │
-│ restart     Restart the installed MindRoom user service.                               │
-│ status      Show MindRoom service status and recent logs.                              │
-│ logs        Follow MindRoom service logs.                                              │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ install     Install and start MindRoom as a background user service.         │
+│ uninstall   Stop and remove the MindRoom user service.                       │
+│ start       Start the installed MindRoom user service.                       │
+│ stop        Stop the installed MindRoom user service without removing it.    │
+│ restart     Restart the installed MindRoom user service.                     │
+│ status      Show MindRoom service status and recent logs.                    │
+│ logs        Follow MindRoom service logs.                                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -901,11 +928,11 @@ Use `--no-confirm` for non-interactive setup.
 
  Install and start MindRoom as a background user service.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --skip-deps             Skip uv dependency check.                                      │
-│ --no-confirm  -y        Skip confirmation prompts.                                     │
-│ --help        -h        Show this message and exit.                                    │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --skip-deps             Skip uv dependency check.                            │
+│ --no-confirm  -y        Skip confirmation prompts.                           │
+│ --help        -h        Show this message and exit.                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -933,11 +960,12 @@ Show MindRoom service status and recent logs.
 
  Show MindRoom service status and recent logs.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --logs  -l      INTEGER  Number of recent log lines to show. Use 0 to hide logs.       │
-│                          [default: 10]                                                 │
-│ --help  -h               Show this message and exit.                                   │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --logs  -l      INTEGER  Number of recent log lines to show. Use 0 to hide   │
+│                          logs.                                               │
+│                          [default: 10]                                       │
+│ --help  -h               Show this message and exit.                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -966,10 +994,10 @@ On macOS, log files are preserved under `~/Library/Logs/mindroom/`.
 
  Stop and remove the MindRoom user service.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --no-confirm  -y        Skip confirmation prompts.                                     │
-│ --help        -h        Show this message and exit.                                    │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --no-confirm  -y        Skip confirmation prompts.                           │
+│ --help        -h        Show this message and exit.                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -1009,14 +1037,14 @@ Runs a series of checks in one pass:
  Runs connectivity, configuration, and credential checks in a single pass
  so you can fix everything before running `mindroom run`.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --config        -c      PATH  Use this config file path. Defaults the storage location │
-│                               to the selected config directory unless --storage-path   │
-│                               is set.                                                  │
-│ --storage-path  -s      PATH  Base directory for persistent MindRoom data (state,      │
-│                               sessions, tracking)                                      │
-│ --help          -h            Show this message and exit.                              │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --config        -c      PATH  Use this config file path. Defaults the        │
+│                               storage location to the selected config        │
+│                               directory unless --storage-path is set.        │
+│ --storage-path  -s      PATH  Base directory for persistent MindRoom data    │
+│                               (state, sessions, tracking)                    │
+│ --help          -h            Show this message and exit.                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -1047,18 +1075,24 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 
  Manage MindRoom configuration files.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init       Create a starter config.yaml with a personal agent and model.               │
-│ show       Display the current config file with syntax highlighting.                   │
-│ edit       Open config.yaml in your default editor.                                    │
-│ validate   Validate config.yaml and check for common issues.                           │
-│ resolve    Print the fully merged config YAML with all !include tags resolved.         │
-│ path       Show the resolved config file path and search locations.                    │
-│ migrate    Migrate config.yaml to membership access settings.                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ init            Create a starter config.yaml with a personal agent and       │
+│                 model.                                                       │
+│ show            Display the current config file with syntax highlighting.    │
+│ edit            Open config.yaml in your default editor.                     │
+│ validate        Validate config.yaml and check for common issues.            │
+│ resolve         Print the fully merged config YAML with all !include tags    │
+│                 resolved.                                                    │
+│ path            Show the resolved config file path and search locations.     │
+│ migrate         Migrate config.yaml to membership access settings.           │
+│ fingerprint     Print the config source SHA-256, including all transitively  │
+│                 included files.                                              │
+│ check-applied   Confirm config application; exit 0 applied, 1                │
+│                 pending/mismatch, 2 failed/restart-required/unavailable.     │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -1178,6 +1212,41 @@ mindroom config resolve
 mindroom config resolve --path ./config.yaml
 ```
 
+### config fingerprint and config check-applied
+
+Confirm that the running runtime finished applying a particular config source:
+
+```bash
+mindroom config fingerprint --path ./config.yaml
+mindroom config check-applied --path ./config.yaml --wait 300
+mindroom config check-applied --fingerprint <sha256> --url https://example.org --json
+```
+
+`fingerprint` hashes the source bytes captured by the YAML loader, including all transitively included YAML and text files.
+A single file uses its plain SHA-256; multiple files combine their relative paths and content hashes.
+Moving the same tree to another directory preserves its fingerprint.
+Comments and formatting changes affect the fingerprint; unrelated files and environment variables do not.
+
+Legacy access settings must be migrated with `mindroom config migrate --path <config-path>` before capturing a fingerprint.
+Both commands reject these files with exit `2`: automatic migration would rewrite their source bytes during reload.
+Explicit `--fingerprint` values must likewise identify the migrated source.
+
+`check-applied` captures the expected fingerprint once before polling the authenticated `GET /api/config/reload-status` endpoint.
+It requires `MINDROOM_API_KEY` and HTTPS for remote endpoints.
+Without `--wait`, it checks once.
+`--timeout` bounds each HTTP request; `--wait` bounds the polling period.
+Neither command changes config or triggers a reload.
+
+Exit codes are `0` for matching completed application, `1` for pending or a different fingerprint (including wait expiration), and `2` for matching failure, restart required, or unavailable status.
+JSON output identifies the expected and observed fingerprints.
+Only the latest reload result is retained in memory.
+
+The runtime acknowledges a fingerprint after its reload plan finishes, including changes that need no agent restart.
+A loaded API config cache does not count as completion.
+Known event-journal changes requiring a process restart return `restart_required`.
+Completion does not guarantee that every bot or external service is healthy.
+If parsing fails before the include tree is known, the failure has no fingerprint and cannot settle a wait for a particular fingerprint.
+
 ## connect
 
 Pair this local MindRoom install with a provisioning service.
@@ -1234,54 +1303,59 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 
  Start local Synapse + MindRoom Chat using Docker only.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --synapse-dir                                 PATH                 Directory           │
-│                                                                    containing Synapse  │
-│                                                                    docker-compose.yml  │
-│                                                                    (from               │
-│                                                                    mindroom-stack      │
-│                                                                    settings).          │
-│                                                                    [default:           │
-│                                                                    local/matrix]       │
-│ --homeserver-url                              TEXT                 Homeserver URL that │
-│                                                                    MindRoom Chat and   │
-│                                                                    MindRoom should     │
-│                                                                    use.                │
-│                                                                    [default:           │
-│                                                                    http://localhost:8… │
-│ --server-name                                 TEXT                 Matrix server name  │
-│                                                                    (default: inferred  │
-│                                                                    from                │
-│                                                                    --homeserver-url    │
-│                                                                    hostname).          │
-│ --cinny-port                                  INTEGER RANGE        Local host port for │
-│                                               [1<=x<=65535]        the MindRoom Chat   │
-│                                                                    container.          │
-│                                                                    [default: 8080]     │
-│ --cinny-image                                 TEXT                 Docker image for    │
-│                                                                    MindRoom Chat.      │
-│                                                                    [default:           │
-│                                                                    ghcr.io/mindroom-a… │
-│ --cinny-container-n…                          TEXT                 Container name for  │
-│                                                                    MindRoom Chat       │
-│                                                                    (legacy default     │
-│                                                                    retained for        │
-│                                                                    compatibility).     │
-│                                                                    [default:           │
-│                                                                    mindroom-cinny-loc… │
-│ --skip-synapse                                                     Skip starting       │
-│                                                                    Synapse (assume it  │
-│                                                                    is already          │
-│                                                                    running).           │
-│ --persist-env             --no-persist-env                         Persist Matrix      │
-│                                                                    local dev settings  │
-│                                                                    to .env next to     │
-│                                                                    config.yaml.        │
-│                                                                    [default:           │
-│                                                                    persist-env]        │
-│ --help                -h                                           Show this message   │
-│                                                                    and exit.           │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --synapse-dir                             PATH              Directory        │
+│                                                             containing       │
+│                                                             Synapse          │
+│                                                             docker-compose.… │
+│                                                             (from            │
+│                                                             mindroom-stack   │
+│                                                             settings).       │
+│                                                             [default:        │
+│                                                             local/matrix]    │
+│ --homeserver-url                          TEXT              Homeserver URL   │
+│                                                             that MindRoom    │
+│                                                             Chat and         │
+│                                                             MindRoom should  │
+│                                                             use.             │
+│                                                             [default:        │
+│                                                             http://localhos… │
+│ --server-name                             TEXT              Matrix server    │
+│                                                             name (default:   │
+│                                                             inferred from    │
+│                                                             --homeserver-url │
+│                                                             hostname).       │
+│ --cinny-port                              INTEGER RANGE     Local host port  │
+│                                           [1<=x<=65535]     for the MindRoom │
+│                                                             Chat container.  │
+│                                                             [default: 8080]  │
+│ --cinny-image                             TEXT              Docker image for │
+│                                                             MindRoom Chat.   │
+│                                                             [default:        │
+│                                                             ghcr.io/mindroo… │
+│ --cinny-containe…                         TEXT              Container name   │
+│                                                             for MindRoom     │
+│                                                             Chat (legacy     │
+│                                                             default retained │
+│                                                             for              │
+│                                                             compatibility).  │
+│                                                             [default:        │
+│                                                             mindroom-cinny-… │
+│ --skip-synapse                                              Skip starting    │
+│                                                             Synapse (assume  │
+│                                                             it is already    │
+│                                                             running).        │
+│ --persist-env          --no-persist-e…                      Persist Matrix   │
+│                                                             local dev        │
+│                                                             settings to .env │
+│                                                             next to          │
+│                                                             config.yaml.     │
+│                                                             [default:        │
+│                                                             persist-env]     │
+│ --help             -h                                       Show this        │
+│                                                             message and      │
+│                                                             exit.            │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -1309,13 +1383,13 @@ Send signed external trigger requests from cron jobs and watcher scripts.
 
  Send signed external triggers.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ keygen   Generate an Ed25519 trigger signing key.                                      │
-│ send     Send a signed external trigger request.                                       │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ keygen   Generate an Ed25519 trigger signing key.                            │
+│ send     Send a signed external trigger request.                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -1343,11 +1417,11 @@ Generate an Ed25519 signing key pair for an external trigger.
 
  Generate an Ed25519 trigger signing key.
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --private-key-file          PATH  Path where the base64 raw Ed25519 private key should │
-│                                   be written.                                          │
-│ --help              -h            Show this message and exit.                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --private-key-file          PATH  Path where the base64 raw Ed25519 private  │
+│                                   key should be written.                     │
+│ --help              -h            Show this message and exit.                │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -1375,31 +1449,39 @@ Send one signed trigger request to MindRoom.
 
  Send a signed external trigger request.
 
-╭─ Arguments ────────────────────────────────────────────────────────────────────────────╮
-│ *    trigger_id      TEXT  Configured external trigger id. [required]                  │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --key-file                           FILE   Base64 raw Ed25519 private key file.    │
-│                                                [required]                              │
-│ *  --kind                               TEXT   Trigger payload kind. [required]        │
-│ *  --message                            TEXT   Trigger payload message. [required]     │
-│    --event-id                           TEXT   Optional idempotency event id.          │
-│    --title                              TEXT   Optional trigger title.                 │
-│    --thread-key                         TEXT   Optional key; deliveries sharing it     │
-│                                                land in one Matrix thread on new_thread │
-│                                                triggers.                               │
-│    --data-json                          TEXT   Optional JSON object for trigger data.  │
-│    --timeout                            FLOAT  HTTP request timeout in seconds.        │
-│                                                [default: 10.0]                         │
-│    --verify-tls      --no-verify-tls           Verify TLS certificates.                │
-│                                                [default: verify-tls]                   │
-│    --url                                TEXT   MindRoom base URL.                      │
-│                                                [env var: MINDROOM_URL]                 │
-│                                                [default: http://127.0.0.1:8765]        │
-│    --key-id                             TEXT   Trigger signing key id.                 │
-│                                                [default: default]                      │
-│    --help        -h                            Show this message and exit.             │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Arguments ──────────────────────────────────────────────────────────────────╮
+│ *    trigger_id      TEXT  Configured external trigger id. [required]        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ *  --key-file                           FILE   Base64 raw Ed25519 private    │
+│                                                key file.                     │
+│                                                [required]                    │
+│ *  --kind                               TEXT   Trigger payload kind.         │
+│                                                [required]                    │
+│ *  --message                            TEXT   Trigger payload message.      │
+│                                                [required]                    │
+│    --event-id                           TEXT   Optional idempotency event    │
+│                                                id.                           │
+│    --title                              TEXT   Optional trigger title.       │
+│    --thread-key                         TEXT   Optional key; deliveries      │
+│                                                sharing it land in one Matrix │
+│                                                thread on new_thread          │
+│                                                triggers.                     │
+│    --data-json                          TEXT   Optional JSON object for      │
+│                                                trigger data.                 │
+│    --timeout                            FLOAT  HTTP request timeout in       │
+│                                                seconds.                      │
+│                                                [default: 10.0]               │
+│    --verify-tls      --no-verify-tls           Verify TLS certificates.      │
+│                                                [default: verify-tls]         │
+│    --url                                TEXT   MindRoom base URL.            │
+│                                                [env var: MINDROOM_URL]       │
+│                                                [default:                     │
+│                                                http://127.0.0.1:8765]        │
+│    --key-id                             TEXT   Trigger signing key id.       │
+│                                                [default: default]            │
+│    --help        -h                            Show this message and exit.   │
+╰──────────────────────────────────────────────────────────────────────────────╯
 
 
 ```

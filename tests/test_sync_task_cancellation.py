@@ -2679,7 +2679,7 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
     """A hot-reload restart of the first sync task generation must not end the service."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
-    config = MagicMock(spec=Config)
+    config = MagicMock(spec=Config, source_fingerprint=None)
     config.agents = {"general": MagicMock()}
     _configure_mock_access(config)
     config.teams = {}
@@ -2751,7 +2751,7 @@ async def test_start_runtime_ingests_before_membership_setup_but_defers_semantic
     """Owned joins need ingestion while semantic work waits for published grants."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
-    config = MagicMock(spec=Config)
+    config = MagicMock(spec=Config, source_fingerprint=None)
     config.agents = {"general": MagicMock()}
     _configure_mock_access(config, members_of_rooms={"general": ["grant"]})
     config.teams = {}
@@ -2862,7 +2862,7 @@ def _orchestrator_with_membership_startup_bots(
     """Build the narrow startup runtime used by publication-ordering tests."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.0)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    config = MagicMock(spec=Config)
+    config = MagicMock(spec=Config, source_fingerprint=None)
     config.agents = {"general": MagicMock()}
     _configure_mock_access(config, members_of_rooms={"general": ["grant"]})
     config.teams = {}

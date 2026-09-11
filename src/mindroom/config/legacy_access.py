@@ -66,7 +66,7 @@ class AccessMigrationError(ValueError):
     """Raised when a retired access value has no safe membership equivalent."""
 
 
-def _access_config_needs_migration(data: dict[str, Any]) -> bool:
+def access_config_needs_migration(data: dict[str, Any]) -> bool:
     """Return whether authored config data contains any retired access field."""
     if "access_model" in data or "matrix_room_access" in data:
         return True
@@ -80,7 +80,7 @@ def validate_access_migration_source(
     config_path: Path,
 ) -> None:
     """Reject a legacy access migration composed from more than one source file."""
-    if _access_config_needs_migration(data) and source_files != frozenset({config_path.resolve()}):
+    if access_config_needs_migration(data) and source_files != frozenset({config_path.resolve()}):
         msg = "Automatic access migration does not support !include configurations"
         raise AccessMigrationError(msg)
 
@@ -501,7 +501,7 @@ def _migrate_matrix_room_access(
 
 def migrate_access_config_data(data: dict[str, Any]) -> _AccessMigrationResult:
     """Split retired access fields into explicit membership capabilities."""
-    if not _access_config_needs_migration(data):
+    if not access_config_needs_migration(data):
         return _AccessMigrationResult(data=data, changed=False)
 
     migrated = deepcopy(data)

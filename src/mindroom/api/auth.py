@@ -29,6 +29,20 @@ if TYPE_CHECKING:
 
 router = APIRouter(tags=["auth"])
 
+
+def require_operator_key(request: Request, authorization: str | None) -> None:
+    """Require the runtime's configured operator bearer key, regardless of user auth mode."""
+    runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
+    configured_key = runtime_paths.env_value("MINDROOM_API_KEY")
+    if not configured_key:
+        raise HTTPException(status_code=503, detail="This operational check requires MINDROOM_API_KEY")
+    token = (
+        authorization.removeprefix("Bearer ").strip() if authorization and authorization.startswith("Bearer ") else None
+    )
+    if token is None or not secrets.compare_digest(token.encode(), configured_key.encode()):
+        raise HTTPException(status_code=401, detail="Missing or invalid credentials")
+
+
 _PLATFORM_AUTH_COOKIE_NAME = "mindroom_jwt"
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
