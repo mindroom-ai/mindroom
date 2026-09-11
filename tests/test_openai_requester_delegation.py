@@ -109,6 +109,8 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     ) -> str:
         assert ctx.requester_id == "@alice:example.org"
         assert execution_identity.requester_id == ctx.requester_id
+        (identity,) = config_lifecycle.app_state(api.client.app).openai_responses
+        assert (identity.responder, identity.requester_id) == ("leader", "@alice:example.org")
         tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
         return await tool.delegate_task("specialist", "help")
 
@@ -140,6 +142,7 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     assert "specialist result" in response.text
     assert len(child_calls) == 1
     assert get_detached_requester_context() is None
+    assert not config_lifecycle.app_state(api.client.app).openai_responses
 
 
 @pytest.mark.parametrize(("key", "target"), [("legacy-key", "specialist"), ("alice-key", "forbidden")])

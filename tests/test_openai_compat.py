@@ -2627,18 +2627,25 @@ class TestAutoRouting:
 
     def test_auto_routes_to_suggested_agent(self, app_client: TestClient) -> None:
         """Auto model routes to the agent suggested by suggest_responder()."""
+        observed: list[tuple[str | None, str | None]] = []
+
+        async def respond(*_args: object, **_kwargs: object) -> str:
+            (identity,) = config_lifecycle.app_state(app_client.app).openai_responses
+            observed.append((identity.responder, identity.requester_id))
+            return "Here is your code"
+
         with (
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", side_effect=respond),
         ):
             mock_route.return_value = "code"
-            mock_ai.return_value = "Here is your code"
 
             response = app_client.post(
                 "/v1/chat/completions",
                 json={
                     "model": "auto",
                     "messages": [{"role": "user", "content": "Write Python code"}],
+                    "user": "@bob:example.org",
                 },
             )
 
@@ -2647,6 +2654,7 @@ class TestAutoRouting:
         # Response model field shows the resolved agent, not "auto"
         assert data["model"] == "code"
         assert data["choices"][0]["message"]["content"] == "Here is your code"
+        assert observed == [("code", None)]
 
     def test_auto_fallback_when_routing_fails(self, app_client: TestClient) -> None:
         """When suggest_responder returns None, falls back to first agent."""
@@ -5343,3 +5351,126 @@ class TestKnowledgeIntegration:
         assert mock_ai.call_args.kwargs["knowledge"] is None
         data = response.json()
         assert data["choices"][0]["message"]["content"] == "Response without knowledge"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_response_activity_tracks_full_openai_request(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """OpenAI work remains visible through generation and streaming finalization."""
+    state = config_lifecycle.app_state(app_client.app)
+    observed: list[int] = []
+
+    async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
+        observed.append(len(state.openai_responses))
+        if not stream:
+            return JSONResponse({"ok": True})
+
+        async def chunks() -> AsyncIterator[str]:
+            observed.append(len(state.openai_responses))
+            yield "data: hello\n\n"
+            observed.append(len(state.openai_responses))
+
+        return StreamingResponse(chunks())
+
+    monkeypatch.setattr(openai_compat, "_chat_completions", complete)
+    response = app_client.post(
+        "/v1/chat/completions",
+        json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
+    )
+    assert response.status_code == 200, response.text
+    assert observed == ([1, 1, 1] if stream else [1])
+    assert len(state.openai_responses) == 0
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_response_activity_releases_failed_openai_request(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """Generation and stream failures cannot leak an activity slot."""
+    state = config_lifecycle.app_state(app_client.app)
+    observed: list[int] = []
+
+    async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
+        observed.append(len(state.openai_responses))
+        if not stream:
+            message = "generation failed"
+            raise RuntimeError(message)
+
+        async def chunks() -> AsyncIterator[str]:
+            observed.append(len(state.openai_responses))
+            yield "data: hello\n\n"
+            message = "generation failed"
+            raise RuntimeError(message)
+
+        return StreamingResponse(chunks())
+
+    monkeypatch.setattr(openai_compat, "_chat_completions", complete)
+    with pytest.raises(RuntimeError, match="generation failed"):
+        app_client.post(
+            "/v1/chat/completions",
+            json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
+        )
+    assert observed == ([1, 1] if stream else [1])
+    assert len(state.openai_responses) == 0
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_response_activity_releases_cancelled_openai_request(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A cancelled HTTP request releases activity only after its stream unwinds."""
+    import httpx  # noqa: PLC0415
+
+    state = config_lifecycle.app_state(app_client.app)
+
+    async def check() -> None:
+        started = asyncio.Event()
+        unwound: list[int] = []
+
+        async def wait_for_cancel() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                unwound.append(len(state.openai_responses))
+
+        async def complete(*_args: object, **_kwargs: object) -> JSONResponse | StreamingResponse:
+            if not stream:
+                await wait_for_cancel()
+                return JSONResponse({})
+
+            async def chunks() -> AsyncIterator[str]:
+                yield "data: hello\n\n"
+                await wait_for_cancel()
+
+            return StreamingResponse(chunks())
+
+        monkeypatch.setattr(openai_compat, "_chat_completions", complete)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_client.app),
+            base_url="http://test",
+        ) as client:
+            task = asyncio.create_task(
+                client.post(
+                    "/v1/chat/completions",
+                    json={"model": "general", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
+                ),
+            )
+            try:
+                await asyncio.wait_for(started.wait(), timeout=2)
+                assert len(state.openai_responses) == 1
+            finally:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        assert unwound == [1]
+        assert len(state.openai_responses) == 0
+
+    asyncio.run(check())

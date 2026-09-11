@@ -24,7 +24,7 @@ from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictStr, TypeAdapter
 from starlette.background import BackgroundTask
@@ -75,6 +75,7 @@ from mindroom.api.openai_streaming_protocol import (
 from mindroom.api.openai_streaming_protocol import (
     is_error_response as _is_error_response,
 )
+from mindroom.api.response_activity import track_openai_request
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
@@ -88,6 +89,7 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
+from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.routing import suggest_responder
 from mindroom.teams import (
     TeamMode,
@@ -514,6 +516,7 @@ async def list_models(
 @router.post("/chat/completions", response_model=None)
 async def chat_completions(
     request: Request,
+    activity: Annotated[ResponseIdentity, Depends(track_openai_request, scope="request")],
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
@@ -530,7 +533,16 @@ async def chat_completions(
     if isinstance(authority, JSONResponse):
         return authority
     with detached_requester_context(authority):
-        response = await _chat_completions(request, req, config, runtime_paths, prompt, thread_history, authority)
+        response = await _chat_completions(
+            request,
+            req,
+            config,
+            runtime_paths,
+            prompt,
+            thread_history,
+            authority,
+            activity,
+        )
     if isinstance(response, StreamingResponse):
         body_iterator = response.body_iterator
         response.body_iterator = context_bound_async_stream(
@@ -548,6 +560,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
     prompt: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     authority: DetachedRequesterContext | None,
+    activity: ResponseIdentity,
 ) -> JSONResponse | StreamingResponse:
     """Execute a completion inside its authenticated requester boundary."""
     # Resolve auto-routing if model is "auto"
@@ -566,6 +579,9 @@ async def _chat_completions(  # noqa: C901, PLR0912
 
     if not _requester_allows_model(agent_name, authority):
         return _error_response(403, "This requester is not authorized for the model", code="permission_denied")
+
+    activity.responder = agent_name
+    activity.requester_id = authority.requester_id if authority is not None else None
 
     # Derive a namespaced session ID from request headers or fallback UUID.
     session_id = _derive_session_id(agent_name, request)

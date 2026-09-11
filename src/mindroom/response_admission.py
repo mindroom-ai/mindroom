@@ -40,6 +40,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    from mindroom.response_activity import ResponseIdentity
+
 
 class ResponseAdmissionRefusedError(Exception):
     """Raised when a response waiting through replacement loses its runtime.
@@ -57,6 +59,7 @@ class ResponseAdmissionRefusedError(Exception):
 class ResponseAdmissionGate:
     """Track in-flight responses and close admission while a replacement runs."""
 
+    response_identities: set[ResponseIdentity] = field(default_factory=set, init=False, repr=False)
     _in_flight_response_count: int = field(default=0, init=False)
     _closed: bool = field(default=False, init=False)
     _open_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)

@@ -7,7 +7,7 @@ import threading
 import weakref
 from contextlib import ExitStack
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import yaml
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
+    from mindroom.response_activity import ResponseIdentity
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
     from mindroom.workers.backend import WorkerBackend
@@ -122,6 +123,8 @@ class _MindroomAppState:
     thread_export_runner: WorkspaceThreadExportRunner | None = None
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
     external_trigger_runtime: ExternalTriggerRuntime | None = None
+    response_admission_gate: ResponseAdmissionGate | None = None
+    openai_responses: set[ResponseIdentity] = field(default_factory=set)
     script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
     mcp_gateway_runtime: GatewayRuntime | None = None
 

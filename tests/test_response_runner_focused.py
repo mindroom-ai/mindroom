@@ -38,6 +38,7 @@ from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -2796,6 +2797,72 @@ async def test_setup_cancellation_preserves_cancel_when_placeholder_cleanup_fail
             await response
 
     cancelled_note.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+@pytest.mark.parametrize("is_team", [False, True])
+async def test_lifecycle_identity_uses_canonical_requester_before_lock_wait(
+    tmp_path: Path,
+    outcome: str,
+    is_team: bool,
+) -> None:
+    """Admitted lock waits retain canonical identity and release it on every exit."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    if is_team:
+        bot.config.teams["helpers"] = TeamConfig(display_name="Helpers", role="Help users", agents=["general"])
+        runner = ResponseRunner(replace(runner.deps, agent_name="helpers"))
+    gate = bot.admission_gate
+    request = _plain_request(_target())
+    envelope = request.response_envelope
+    request = replace(
+        request,
+        response_envelope=replace(
+            envelope,
+            origin=replace(envelope.origin, requester_id="@alice:example.org"),
+        ),
+    )
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def blocked_lifecycle(**_kwargs: object) -> str:
+        started.set()
+        await finish.wait()
+        if outcome == "error":
+            message = "lifecycle failed"
+            raise RuntimeError(message)
+        return "$response"
+
+    with patch.object(runner._lifecycle_coordinator, "run_locked_response", new=blocked_lifecycle):
+        task = asyncio.create_task(
+            runner._run_locked_response_lifecycle(
+                request,
+                response_kind="agent",
+                locked_operation=AsyncMock(),
+            ),
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        try:
+            assert gate.in_flight_response_count == 1
+            (identity,) = gate.response_identities
+            assert identity.responder == ("team/helpers" if is_team else "general")
+            assert identity.requester_id == "@alice:example.org"
+            assert request.user_id == "@user:localhost"
+        finally:
+            if outcome == "cancel":
+                task.cancel()
+            finish.set()
+            if outcome == "error":
+                with pytest.raises(RuntimeError, match="lifecycle failed"):
+                    await task
+            elif outcome == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                assert await task == "$response"
+    assert gate.response_identities == set()
+    assert gate.in_flight_response_count == 0
 
 
 @pytest.mark.asyncio

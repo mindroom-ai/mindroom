@@ -148,6 +148,7 @@ from .delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
+from .response_activity import ResponseIdentity as ActiveResponseIdentity
 from .response_admission import ResponseAdmissionRefusedError
 from .response_lifecycle import (
     QueuedHumanNoticeReservation,
@@ -2376,6 +2377,15 @@ class ResponseRunner:
                     **request.response_envelope.target.log_context,
                 )
                 raise ResponseAdmissionRefusedError
+        identity = ActiveResponseIdentity(
+            responder=(
+                f"team/{self.deps.agent_name}"
+                if self.deps.agent_name in self.deps.runtime.config.teams
+                else self.deps.agent_name
+            ),
+            requester_id=request.response_envelope.requester_id,
+        )
+        self._admission_gate.response_identities.add(identity)
         self._in_flight_response_count += 1
         try:
             resolved_target = request.response_envelope.target
@@ -2427,6 +2437,7 @@ class ResponseRunner:
                     placeholder_event_id=early_placeholder.placeholder_event_id,
                 ) from cause
         finally:
+            self._admission_gate.response_identities.remove(identity)
             self._in_flight_response_count -= 1
             self._admission_gate.release()
 

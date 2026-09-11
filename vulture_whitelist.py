@@ -368,3 +368,6 @@ _.image_to_image  # FalTools registers this override as an image-editing tool (s
 _.generate_media  # FalTools registers this override as a media-generation tool (src/mindroom/custom_tools/fal.py)
 
 _collections_to_query  # Agno calls this hook to resolve the exact published read collection.
+
+response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
+detailed_response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)

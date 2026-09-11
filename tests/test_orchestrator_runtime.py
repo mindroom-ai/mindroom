@@ -1000,9 +1000,11 @@ class TestAgentBot(AgentBotTestBase):
             *,
             thread_export_runner: object,
             leave_matrix_room: object,
+            response_admission_gate: object,
         ) -> None:
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
+            assert response_admission_gate is mock_orchestrator._response_admission_gate
             assert shutdown_requested is not None
             shutdown_requested.set()
             try:
@@ -1081,9 +1083,11 @@ class TestAgentBot(AgentBotTestBase):
             *,
             thread_export_runner: object,
             leave_matrix_room: object,
+            response_admission_gate: object,
         ) -> None:
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
+            assert response_admission_gate is mock_orchestrator._response_admission_gate
             assert shutdown_requested is not None
             shutdown_requested.set()
             api_shutdown_started.set()
@@ -1152,9 +1156,11 @@ class TestAgentBot(AgentBotTestBase):
             *,
             thread_export_runner: object,
             leave_matrix_room: object,
+            response_admission_gate: object,
         ) -> None:
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
+            assert response_admission_gate is mock_orchestrator._response_admission_gate
             assert shutdown_requested is not None
             shutdown_requested.set()
 

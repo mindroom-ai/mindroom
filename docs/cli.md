@@ -42,27 +42,75 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version             Show the current version of Mindroom.                              │
-│ run                 Run the mindroom multi-agent system.                               │
-│ doctor              Check your environment for common issues.                          │
-│ connect             Pair this local MindRoom install with the hosted provisioning      │
-│                     service.                                                           │
-│ local-stack-setup   Start local Synapse + MindRoom Chat using Docker only.             │
-│ config              Manage MindRoom configuration files.                               │
-│ plugins             Validate and vendor external MindRoom plugins.                     │
-│ desktop             Connect allowlisted local applications to cloud MindRoom over      │
-│                     Matrix E2EE.                                                       │
-│ avatars             Generate and sync managed avatar assets.                           │
-│ threads             Export Matrix threads to local files.                              │
-│ journal             Inspect and rebind the durable event journal.                      │
-│ service             Install and manage MindRoom as a background user service.          │
-│ trigger             Send signed external triggers.                                     │
+│ check-active-responses   Check live responses; exit 0 idle, 1 busy, or 2 unavailable.  │
+│ version                  Show the current version of Mindroom.                         │
+│ run                      Run the mindroom multi-agent system.                          │
+│ doctor                   Check your environment for common issues.                     │
+│ connect                  Pair this local MindRoom install with the hosted provisioning │
+│                          service.                                                      │
+│ local-stack-setup        Start local Synapse + MindRoom Chat using Docker only.        │
+│ config                   Manage MindRoom configuration files.                          │
+│ plugins                  Validate and vendor external MindRoom plugins.                │
+│ desktop                  Connect allowlisted local applications to cloud MindRoom over │
+│                          Matrix E2EE.                                                  │
+│ avatars                  Generate and sync managed avatar assets.                      │
+│ threads                  Export Matrix threads to local files.                         │
+│ journal                  Inspect and rebind the durable event journal.                 │
+│ service                  Install and manage MindRoom as a background user service.     │
+│ trigger                  Send signed external triggers.                                │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
 
 <!-- OUTPUT:END -->
+
+## check-active-responses
+
+Check the running process's admitted Matrix work and OpenAI-compatible requests.
+
+```
+mindroom check-active-responses
+mindroom check-active-responses --json
+mindroom check-active-responses --details
+mindroom check-active-responses --details --json
+```
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Runtime ready, admission open, and no admitted Matrix work or active OpenAI requests. |
+| `1` | Admitted Matrix work or OpenAI-compatible requests are active. |
+| `2` | Status unavailable, including startup, replacement, connection failure, or an incompatible server. |
+
+The command reads `GET /api/responses/activity`, an unauthenticated operational probe exposing only runtime phase, admission state, and counts.
+The bundled API must be enabled and connected to the orchestrator; an API-only process cannot report the runtime as idle.
+Responses carry `Cache-Control: no-store`.
+
+`--details` uses `GET /api/responses/activity/details` and adds one row per response observed at the central Matrix response lifecycle or OpenAI request entry point.
+Rows contain `channel`, `responder`, and `requester_id`.
+The responder is the configured agent or `team/<team-name>`; the requester comes from the canonical response envelope or authenticated OpenAI requester context.
+Unknown identities are `null` in JSON and labeled unknown in text.
+Identities are held only in memory; no database, history, or Matrix lookups are added.
+
+Detailed access requires a configured `MINDROOM_API_KEY` and the matching bearer token, including when browser proxy authentication is enabled.
+The CLI reads that key from the selected runtime environment.
+The endpoint returns `503` if no key is configured and `401` for a missing or invalid token; the CLI exits `2` for either failure.
+Aggregate output never includes identities.
+
+`active_matrix_operations` reads the existing admission count, including planning and response lock waits.
+Nested admission slots count separately, so this is not a count of unique responses.
+Detailed rows describe response lifecycles and do not need to match that count; planning and other admitted work can be busy before a response identity is available.
+`active_openai_requests` counts chat completion HTTP requests through their normal response-body lifetime.
+Persisted approval waits, delivery recovery outside admission, cleanup that outlives its response, unadmitted queues, and unrelated background jobs are outside this snapshot.
+
+This is a point-in-time observation, not a drain or restart lock.
+New work can start immediately afterward.
+For multiple processes, check each process directly.
+
+The URL defaults to `MINDROOM_URL` from the selected environment, then `http://127.0.0.1:8765`.
+Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to bound the request (10 seconds by default).
+The CLI sends `MINDROOM_API_KEY` when configured; credentialed remote requests require HTTPS, while loopback HTTP is supported.
+Redirects are disabled.
 
 ## version
 

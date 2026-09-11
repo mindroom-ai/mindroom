@@ -34,6 +34,7 @@ from mindroom.api.mcp_gateway import gateway_cors_origins, gateway_lifespan, ins
 from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
+from mindroom.api.response_activity import router as response_activity_router
 from mindroom.api.schedules import router as schedules_router
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
@@ -727,6 +728,7 @@ app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
 app.include_router(integrations_router, dependencies=[Depends(verify_user)])
 app.include_router(matrix_router, dependencies=[Depends(verify_user)])
 app.include_router(thread_exports_router, dependencies=[Depends(verify_user)])
+app.include_router(response_activity_router)  # Aggregate operational probe, like health/readiness.
 app.include_router(oauth_router)
 app.include_router(schedules_router, dependencies=[Depends(verify_user)])
 app.include_router(knowledge_router, dependencies=[Depends(verify_user)])

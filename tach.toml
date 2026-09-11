@@ -967,6 +967,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.config_lifecycle"
 depends_on = [
+    "mindroom.response_activity",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
@@ -1078,6 +1079,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.openai_compat"
 depends_on = [
+    "mindroom.response_activity",
+    "mindroom.api.response_activity",
     "mindroom.knowledge.utils",
     "mindroom.agent_run_context",
     "mindroom.ai",
@@ -1162,6 +1165,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
+    "mindroom.api.response_activity",
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.legacy_private_storage",
@@ -1934,6 +1938,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.response_activity",
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
@@ -1977,7 +1982,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.response_admission"
-depends_on = []
+depends_on = ["mindroom.response_activity"]
 visibility = [
     "mindroom.api.external_triggers",
     "mindroom.bot",
@@ -3367,6 +3372,7 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.main"
 depends_on = [
+    "mindroom.cli.response_activity",
     "mindroom.cli.thread_export",
     "mindroom",
     "mindroom.avatar_generation",
@@ -5493,3 +5499,15 @@ depends_on = ["mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.types"]
 [[modules]]
 path = "mindroom.mcp_gateway.selection_schema"
 depends_on = []
+
+[[modules]]
+path = "mindroom.response_activity"
+depends_on = []
+
+[[modules]]
+path = "mindroom.api.response_activity"
+depends_on = ["mindroom.api.config_lifecycle", "mindroom.response_activity", "mindroom.runtime_state"]
+
+[[modules]]
+path = "mindroom.cli.response_activity"
+depends_on = ["mindroom.cli.config", "mindroom.constants", "mindroom.response_activity"]
