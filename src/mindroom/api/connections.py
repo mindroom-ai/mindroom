@@ -11,13 +11,15 @@ from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.auth import require_connections_user
-from mindroom.api.connection_agents import CONNECTIONS_HEADERS, resolve_connection_user
+from mindroom.api.connection_agents import CONNECTIONS_HEADERS, resolve_connection_agent, resolve_connection_user
+from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
+    from mindroom.api.connection_agents import ConnectionUserContext
     from mindroom.constants import RuntimePaths
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.catalog import ToolMetadata
@@ -30,6 +32,7 @@ class ConnectionService(BaseModel):
 
     provider: str
     is_shared: bool
+    can_manage: bool
     display_name: str
     description: str
     icon: str | None
@@ -53,12 +56,13 @@ class AgentConnections(BaseModel):
     agent_name: str
     agent_display_name: str
     is_shared: bool
+    can_use: bool
     services: list[ConnectionService]
     tools: list[ConnectionTool]
 
 
 class ConnectionsCatalog(BaseModel):
-    """Agents whose connections the authenticated user may manage."""
+    """Agents the authenticated user may use or manage connections for."""
 
     agents: list[AgentConnections]
 
@@ -80,6 +84,7 @@ class _EmptyMutation(BaseModel):
 @dataclass(frozen=True)
 class _Connections:
     runtime_paths: RuntimePaths
+    user: ConnectionUserContext
     catalog: ConnectionsCatalog
     providers: dict[str, OAuthProvider]
 
@@ -95,15 +100,20 @@ async def _connections(request: Request, response: Response) -> _Connections:
     if request.query_params:
         raise HTTPException(400, "Connection target overrides are not accepted", headers=CONNECTIONS_HEADERS)
     requester_id = cast("str", auth_user["matrix_user_id"])
-    user = resolve_connection_user(snapshot, requester_id)
+    user = resolve_connection_user(
+        snapshot,
+        requester_id,
+        membership_index=config_lifecycle.app_state(request.app).agent_reply_memberships,
+    )
     config = user.config
-    if not user.agent_names:
+    if not user.visible_agent_names:
         raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)
     providers = load_oauth_providers_for_snapshot(snapshot)
     metadata = resolved_tool_metadata_for_runtime(snapshot.runtime_paths, config, tolerate_plugin_load_errors=True)
-    agents = [_agent_connections(name, config, providers, metadata) for name in user.agent_names]
+    agents = [_agent_connections(name, user, providers, metadata) for name in user.visible_agent_names]
     return _Connections(
         runtime_paths=snapshot.runtime_paths,
+        user=user,
         catalog=ConnectionsCatalog(agents=agents),
         providers=providers,
     )
@@ -111,13 +121,14 @@ async def _connections(request: Request, response: Response) -> _Connections:
 
 def _agent_connections(
     agent_name: str,
-    config: Config,
+    user: ConnectionUserContext,
     providers: dict[str, OAuthProvider],
     metadata: dict[str, ToolMetadata],
 ) -> AgentConnections:
     """List assigned toolkits and group their browser connections by provider."""
     services: dict[str, ConnectionService] = {}
     tools: list[ConnectionTool] = []
+    config = user.config
     entity = config.resolve_entity(agent_name)
     for tool_name in entity.available_tools:
         tool = metadata.get(tool_name)
@@ -136,11 +147,13 @@ def _agent_connections(
         )
         if provider is None:
             continue
+        shared = not provider.requester_scoped_credentials and entity.execution_scope in {None, "shared"}
         service = services.setdefault(
             provider.id,
             ConnectionService(
                 provider=provider.id,
-                is_shared=not provider.requester_scoped_credentials and entity.execution_scope in {None, "shared"},
+                is_shared=shared,
+                can_manage=agent_name in user.credential_agent_names or not shared,
                 display_name=provider.display_name,
                 description=tool.description,
                 icon=tool.icon,
@@ -154,6 +167,7 @@ def _agent_connections(
         agent_name=agent_name,
         agent_display_name=agent.display_name,
         is_shared=agent.private is None,
+        can_use=agent_name in user.agent_names,
         services=list(services.values()),
         tools=tools,
     )
@@ -162,11 +176,20 @@ def _agent_connections(
 _ConnectionsContext = Annotated[_Connections, Depends(_connections)]
 
 
-def _require_provider(context: _Connections, agent_name: str, provider_id: str) -> OAuthProvider:
+def _service(context: _Connections, agent_name: str, provider_id: str) -> ConnectionService:
+    """Resolve the displayed service permissions before account operations."""
     for agent in context.catalog.agents:
-        if agent.agent_name == agent_name and any(service.provider == provider_id for service in agent.services):
-            return context.providers[provider_id]
+        if agent.agent_name == agent_name:
+            for service in agent.services:
+                if service.provider == provider_id:
+                    return service
     raise HTTPException(404, "Connection is not available", headers=CONNECTIONS_HEADERS)
+
+
+def _require_management(context: _Connections, agent_name: str, provider_id: str) -> OAuthProvider:
+    if not _service(context, agent_name, provider_id).can_manage:
+        raise HTTPException(403, "Credential management is required", headers=CONNECTIONS_HEADERS)
+    return context.providers[provider_id]
 
 
 def _require_same_origin(request: Request, context: _Connections) -> None:
@@ -192,9 +215,22 @@ async def catalog(context: _ConnectionsContext) -> ConnectionsCatalog:
 @router.get("/agents/{agent_name}/{provider_id}/status")
 async def status(agent_name: str, provider_id: str, request: Request, context: _ConnectionsContext) -> ConnectionStatus:
     """Load status for one authorized agent and provider."""
-    _require_provider(context, agent_name, provider_id)
+    service = _service(context, agent_name, provider_id)
+    provider = context.providers[provider_id]
     try:
-        result = await oauth.status(provider_id, request, agent_name=agent_name)
+        if service.can_manage:
+            result = await oauth.status(provider_id, request, agent_name=agent_name)
+        else:
+            agent = resolve_connection_agent(context.user, agent_name)
+            credential_context = resolve_oauth_credential_context(
+                provider,
+                context.runtime_paths,
+                get_runtime_credentials_manager(context.runtime_paths),
+                agent.worker_target,
+                execution_identity=agent.execution_identity,
+                config=agent.config,
+            )
+            result = await oauth.connection_status(request, credential_context)
     except HTTPException as exc:
         raise HTTPException(
             exc.status_code,
@@ -205,10 +241,10 @@ async def status(agent_name: str, provider_id: str, request: Request, context: _
     personal = not result.has_service_account_config
     return ConnectionStatus(
         provider=provider_id,
-        connected=result.connected and personal,
-        can_connect=result.has_client_config and personal,
+        connected=result.connected and (personal or not service.can_manage),
+        can_connect=result.has_client_config and personal and service.can_manage,
         reset_required=result.reset_required,
-        account_label=result.email if personal else None,
+        account_label=result.email if personal and service.can_manage else None,
     )
 
 
@@ -222,7 +258,7 @@ async def connect(
 ) -> oauth.OAuthConnectResponse:
     """Start existing OAuth state handling with an authorized agent target."""
     _require_same_origin(request, context)
-    provider = _require_provider(context, agent_name, provider_id)
+    provider = _require_management(context, agent_name, provider_id)
     if oauth_provider_service_account_configured(provider, context.runtime_paths):
         raise HTTPException(
             409,
@@ -249,7 +285,7 @@ async def disconnect(
 ) -> dict[str, str]:
     """Reset the authorized agent's scoped provider credentials."""
     _require_same_origin(request, context)
-    _require_provider(context, agent_name, provider_id)
+    _require_management(context, agent_name, provider_id)
     try:
         return await oauth.disconnect(provider_id, request, agent_name=agent_name)
     except HTTPException as exc:

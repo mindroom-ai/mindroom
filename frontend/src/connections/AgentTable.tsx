@@ -87,6 +87,12 @@ const columns: ColumnDef<AgentTableRow>[] = [
     header: "MCP access",
     cell: ({ row }) => {
       const mcp = row.original.mcp;
+      if (!row.original.can_use)
+        return (
+          <span className="text-xs text-muted-foreground">
+            Credential management only
+          </span>
+        );
       if (!mcp.selection?.enabled)
         return <span className="text-muted-foreground">—</span>;
       const choice = mcp.selectedTools(row.original.agent_name);

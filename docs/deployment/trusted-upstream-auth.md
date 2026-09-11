@@ -78,10 +78,10 @@ When no Matrix user ID claim or email-to-Matrix template is configured, strict m
 ## Connections Portal
 
 Set `MINDROOM_CONNECTIONS_AGENT` to the name of a private agent to enable `/connections`.
-The portal lists assigned tools and groups OAuth services by agent: the selected private agent and shared agents for which the authenticated user is a credential manager or administrator.
+The portal lists assigned tools and groups OAuth services by agent: the selected private agent and shared agents the authenticated user can use or manage credentials for.
 Services come from each authorized agent's available tools, including deferred tools and registered plugin or MCP OAuth providers.
 Tools without browser authentication also appear, and room-dependent tools are marked **MindRoom only**.
-Each service card loads independently, so a failed or unconnected service does not block the others.
+Each service status loads independently, so a failed or unconnected service does not block the others.
 The portal does not expose model configuration, generic credential editing, or OAuth client administration.
 
 ```bash
@@ -108,10 +108,12 @@ agents:
         defer: true
 ```
 
-Access to the selected private agent requires an explicit matching `access.users` grant or configured administrator authority.
-Room-membership grants alone do not grant portal access because browser requests have no conversation membership context.
-Shared agents appear when the user is listed in `agents.<name>.credential_managers` or has configured administrator authority, even when they cannot access the selected private agent.
-Reply access alone does not grant shared connection management.
+Agent use requires a matching `access.users` grant, configured administrator authority, or verified membership in a configured grant room.
+Conversation-only `access.current_room_members` grants do not apply because browser and MCP requests have no current Matrix room.
+Shared agents also appear when the user is listed in `agents.<name>.credential_managers`, even when they cannot use that agent.
+Users with agent access can select its compatible MCP tools and see shared connection availability without the connected account identity.
+Credential managers and administrators can manage shared connections; users can manage their own requester-scoped connections.
+Credential management alone does not grant MCP tool access.
 The server resolves canonical Matrix aliases and rechecks agent and provider authorization for every status, connect, and disconnect request.
 The browser selects an authorized agent; it cannot override the credential owner or execution scope.
 Shared connections keep their configured credential scope: `worker_scope: shared` is per agent, while an unset scope uses the installation-wide store.

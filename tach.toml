@@ -850,6 +850,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
+    "mindroom.api.connections",
     "mindroom.api.oauth",
     "mindroom.api.tools",
     "mindroom.custom_tools.config_manager",
@@ -1120,6 +1121,7 @@ depends_on = [
     "mindroom.api.connection_agents",
     "mindroom.constants",
     "mindroom.oauth",
+    "mindroom.oauth.credential_lifecycle",
     "mindroom.oauth.service",
     "mindroom.tool_system.catalog",
 ]
@@ -1258,6 +1260,7 @@ depends_on = [
 path = "mindroom.api.dashboard_credential_scope"
 depends_on = [
     "mindroom.agent_policy",
+    "mindroom.api.config_lifecycle",
     "mindroom.authorization",
     "mindroom.matrix.identity",
     "mindroom.tool_system.worker_routing",

@@ -2634,6 +2634,7 @@ async def _run_api_server(
     thread_export_runner: WorkspaceThreadExportRunner | None = None,
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
+    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api import main as api_main  # noqa: PLC0415
@@ -2644,6 +2645,8 @@ async def _run_api_server(
     api_state.thread_export_runner = thread_export_runner
     api_state.leave_matrix_room = leave_matrix_room
     api_state.response_admission_gate = response_admission_gate
+    if agent_reply_memberships is not None:
+        api_state.agent_reply_memberships = agent_reply_memberships
     if script_runtime is not None:
         api_main.bind_script_runtime(
             api_main.app,
@@ -2676,6 +2679,7 @@ async def _run_api_server(
         api_state.thread_export_runner = None
         api_state.leave_matrix_room = None
         api_state.response_admission_gate = None
+        api_state.agent_reply_memberships = AgentReplyMembershipIndex()
         if script_runtime is not None:
             await script_runtime.unbind_api()
             api_main.unbind_script_runtime(api_main.app)
@@ -3036,6 +3040,7 @@ async def main(
                     thread_export_runner=orchestrator._thread_export_runner,
                     leave_matrix_room=orchestrator.leave_matrix_room,
                     response_admission_gate=orchestrator._response_admission_gate,
+                    agent_reply_memberships=orchestrator.agent_reply_memberships,
                 ),
                 name="api_server",
             )

@@ -5,15 +5,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
+import nio
 import pytest
 
 from mindroom import agents
 from mindroom.api import config_lifecycle, mcp_selection
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
+from tests.access_schema_support import membership_index
 from tests.api.test_mcp_clients import _connect
 from tests.api.test_mcp_gateway_api import (
     MCP_HEADERS,
@@ -23,6 +28,7 @@ from tests.api.test_mcp_gateway_api import (
     gateway_client,  # noqa: F401
     signed_headers,  # noqa: F401
 )
+from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -30,6 +36,125 @@ if TYPE_CHECKING:
     from fastapi.testclient import TestClient
 
 SELECTION = "/api/connections/mcp/selection"
+
+
+@pytest.mark.parametrize("current_room_only", [False, True])
+def test_room_membership_grants_require_room_independent_access(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+    current_room_only: bool,
+) -> None:
+    """Named room grants allow MCP tools; conversation-only grants do not escape the room."""
+    snapshot = config_lifecycle.require_api_state(gateway_client.app).snapshot
+    config = bind_runtime_paths(snapshot.runtime_config, snapshot.runtime_paths)
+    snapshot.runtime_config = config
+    config.agents["shared"] = AgentConfig(
+        display_name="Shared",
+        role="Shared tools",
+        tools=["calculator"],
+        rooms=["project"],
+        access=ResponderAccessConfig(
+            current_room_members=current_room_only,
+            members_of_rooms=[] if current_room_only else ["project"],
+        ),
+    )
+    memberships = asyncio.run(membership_index(config, {"project": {"@alice:example.org"}}))
+    config_lifecycle.app_state(gateway_client.app).agent_reply_memberships = memberships
+    alice = signed_headers("alice")
+    token = _connect(gateway_client, alice)["access_token"]
+    response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {"shared": None}})
+    if current_room_only:
+        assert response.status_code == 404
+        return
+    assert response.status_code == 200, response.text
+    result = _call(
+        gateway_client,
+        token,
+        "invoke_tool",
+        {
+            "agent": "shared",
+            "toolkit": "calculator",
+            "function": "add",
+            "arguments": {"a": 1, "b": 2},
+        },
+    )
+    assert not result["isError"]
+    assert json.loads(result["structuredContent"]["result"])["result"] == 3
+    memberships.mark_room_unready(config, snapshot.runtime_paths, "!project:example.com", reason="membership_unknown")
+    assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {}
+    assert _call(gateway_client, token, "search_tools", {})["structuredContent"] == {"results": []}
+    assert _call(
+        gateway_client,
+        token,
+        "get_tool",
+        {
+            "agent": "shared",
+            "toolkit": "calculator",
+            "function": "add",
+        },
+    )["isError"]
+
+
+@pytest.mark.parametrize("async_body", [False, True], ids=["sync", "async"])
+def test_membership_revocation_during_preparation_stops_tool_body(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    async_body: bool,
+) -> None:
+    """A live room departure revokes a prepared call without a config or selection change."""
+    snapshot = config_lifecycle.require_api_state(gateway_client.app).snapshot
+    config = bind_runtime_paths(snapshot.runtime_config, snapshot.runtime_paths)
+    snapshot.runtime_config = config
+    config.agents["personal"].access = ResponderAccessConfig(members_of_rooms=["project"])
+    memberships = asyncio.run(membership_index(config, {"project": {"@alice:example.org"}}))
+    config_lifecycle.app_state(gateway_client.app).agent_reply_memberships = memberships
+    token = _connect(gateway_client, signed_headers("alice"))["access_token"]
+    paused, release = threading.Event(), threading.Event()
+    events: list[str] = []
+    monkeypatch.setattr(
+        agents,
+        "build_agent_toolkit",
+        _native_dispatch_builder("hook", async_body, paused, release, events),
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(
+            _call,
+            gateway_client,
+            token,
+            "invoke_tool",
+            {
+                "agent": "personal",
+                "toolkit": "calculator",
+                "function": "async_account" if async_body else "account",
+                "arguments": {},
+            },
+        )
+        try:
+            assert paused.wait(10), "Tool hook never paused"
+            event = nio.RoomMemberEvent.from_dict(
+                {
+                    "type": "m.room.member",
+                    "state_key": "@alice:example.org",
+                    "sender": "@alice:example.org",
+                    "event_id": "$departure",
+                    "origin_server_ts": 1,
+                    "content": {"membership": "leave"},
+                },
+            )
+            assert isinstance(event, nio.RoomMemberEvent)
+            memberships.apply_member_event(
+                config,
+                snapshot.runtime_paths,
+                "!project:example.com",
+                event,
+                control_user_id="@router:example.org",
+            )
+        finally:
+            release.set()
+        assert pending.result(timeout=10)["isError"]
+    assert "body" not in events
+    assert "close" in events
 
 
 @pytest.mark.parametrize("all_tools", [False, True], ids=["custom", "all-tools"])
@@ -45,7 +170,7 @@ def test_removed_tools_cannot_block_access_withdrawal(
         display_name="Shared",
         role="Shared tools",
         tools=["calculator"],
-        credential_managers=["@alice:example.org"],
+        access=ResponderAccessConfig(users=["@alice:example.org"]),
     )
     headers = {**signed_headers("alice"), "Origin": ORIGIN}
     browser_tools = ["calculator", "duckduckgo"]
@@ -133,13 +258,34 @@ def test_selection_defaults_and_empty_are_user_scoped(
     assert gateway_client.get(SELECTION, headers=signed_headers("bob")).json()["agents"] == {"personal": None}
 
 
-def test_shared_only_manager_can_select_assigned_shared_agent(
+def test_shared_only_user_can_select_assigned_shared_agent(
     gateway_client: TestClient,
     signed_headers: Callable[[str], dict[str, str]],
 ) -> None:
-    """Shared selection needs credential management, independently of personal-agent access."""
+    """Shared selection follows agent access independently of personal-agent access."""
     config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
     config.agents["personal"].access.users = ["@bob:example.org"]
+    config.agents["shared"] = AgentConfig(
+        display_name="Shared",
+        role="Shared tools",
+        tools=["calculator"],
+        access=ResponderAccessConfig(users=["@alice:example.org"]),
+    )
+    alice = signed_headers("alice")
+    assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {}
+    response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {"shared": None}})
+    assert response.status_code == 200, response.text
+    assert response.json()["agents"] == {"shared": None}
+    config.agents["shared"].access.users = []
+    assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {}
+
+
+def test_credential_manager_without_agent_access_cannot_select_tools(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """Account management alone cannot authorize a direct MCP call."""
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
     config.agents["shared"] = AgentConfig(
         display_name="Shared",
         role="Shared tools",
@@ -147,12 +293,20 @@ def test_shared_only_manager_can_select_assigned_shared_agent(
         credential_managers=["@alice:example.org"],
     )
     alice = signed_headers("alice")
-    assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {}
+    token = _connect(gateway_client, alice)["access_token"]
     response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {"shared": None}})
-    assert response.status_code == 200, response.text
-    assert response.json()["agents"] == {"shared": None}
-    config.agents["shared"].credential_managers = []
-    assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {}
+    assert response.status_code == 404
+    assert _call(
+        gateway_client,
+        token,
+        "invoke_tool",
+        {
+            "agent": "shared",
+            "toolkit": "calculator",
+            "function": "add",
+            "arguments": {"a": 1, "b": 2},
+        },
+    )["isError"]
 
 
 @pytest.mark.parametrize(
@@ -222,7 +376,7 @@ def test_all_clients_follow_selection_and_agent_qualified_tools(
         display_name="Shared",
         role="Shared tools",
         tools=["calculator"],
-        credential_managers=["@alice:example.org"],
+        access=ResponderAccessConfig(users=["@alice:example.org"]),
     )
     alice = signed_headers("alice")
     tokens = [_connect(gateway_client, alice)["access_token"] for _ in range(2)]

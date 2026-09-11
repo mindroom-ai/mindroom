@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
     """Serve the real API with signed users and one private agent."""
     key = _trusted_upstream_jwt_key()
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
@@ -397,6 +397,101 @@ def test_catalog_lists_only_authorized_agents(shared_portal: dict[str, Any], use
     agents = response.json()["agents"]
     assert [agent["agent_name"] for agent in agents] == expected
     assert all(agent["is_shared"] == (agent["agent_name"] != "personal") for agent in agents)
+
+
+def test_agent_user_sees_shared_connection_without_management(shared_portal: dict[str, Any]) -> None:
+    """Using a shared agent reveals availability without shared-account mutation authority."""
+    shared_portal["payload"]["agents"]["research"]["access"] = {"users": ["@bob:example.org"]}
+    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    client, headers = shared_portal["client"], shared_portal["headers"]
+    response = client.get("/api/connections", headers=headers["bob"])
+    research = next(agent for agent in response.json()["agents"] if agent["agent_name"] == "research")
+    assert research["can_use"] is True
+    assert research["services"][0]["can_manage"] is False
+    base = "/api/connections/agents/research/google_drive"
+    connect = client.post(f"{base}/connect", headers=headers["alice"], json={})
+    state = parse_qs(urlparse(connect.json()["auth_url"]).query)["state"][0]
+    assert (
+        client.get(
+            "/api/oauth/google_drive/callback",
+            params={"code": "test-code", "state": state},
+            headers=headers["alice"],
+            follow_redirects=False,
+        ).status_code
+        == 307
+    )
+    status = client.get(f"{base}/status", headers=headers["bob"])
+    assert status.status_code == 200, status.text
+    assert status.json()["connected"] is True
+    assert status.json()["account_label"] is None
+    assert status.json()["can_connect"] is False
+    for action in ("connect", "disconnect"):
+        assert client.post(f"{base}/{action}", headers=headers["bob"], json={}).status_code == 403
+        assert (
+            client.post(f"/api/oauth/google_drive/{action}?agent_name=research", headers=headers["bob"]).status_code
+            == 403
+        )
+    assert client.get(f"{base}/status", headers=headers["alice"]).json()["connected"] is True
+
+
+@pytest.mark.parametrize("requester_provider", [False, True])
+def test_agent_user_can_manage_only_their_personal_connection(
+    shared_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    requester_provider: bool,
+) -> None:
+    """A shared agent's user credentials remain owned by each authorized requester."""
+    agent = shared_portal["payload"]["agents"]["research"]
+    agent["access"] = {"users": ["@alice:example.org", "@bob:example.org"]}
+    agent["worker_scope"] = "shared" if requester_provider else "user_agent"
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        requester_scoped_credentials=requester_provider,
+    )
+    monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (provider,))
+    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    client, headers = shared_portal["client"], shared_portal["headers"]
+    base = "/api/connections/agents/research/google_drive"
+    response = client.get("/api/connections", headers=headers["bob"])
+    research = next(agent for agent in response.json()["agents"] if agent["agent_name"] == "research")
+    assert research["services"][0]["can_manage"] is True
+    connect = client.post(f"{base}/connect", headers=headers["bob"], json={})
+    assert connect.status_code == 200, connect.text
+    state = parse_qs(urlparse(connect.json()["auth_url"]).query)["state"][0]
+    assert (
+        client.get(
+            "/api/oauth/google_drive/callback",
+            params={"code": "test-code", "state": state},
+            headers=headers["bob"],
+            follow_redirects=False,
+        ).status_code
+        == 307
+    )
+    assert client.get(f"{base}/status", headers=headers["bob"]).json()["connected"] is True
+    assert client.get(f"{base}/status", headers=headers["alice"]).json()["connected"] is False
+    assert client.post(f"{base}/disconnect", headers=headers["alice"], json={}).status_code == 200
+    assert client.get(f"{base}/status", headers=headers["bob"]).json()["connected"] is True
+    assert client.post(f"{base}/disconnect", headers=headers["bob"], json={}).status_code == 200
+
+    connect = client.post(f"{base}/connect", headers=headers["bob"], json={})
+    state = parse_qs(urlparse(connect.json()["auth_url"]).query)["state"][0]
+    agent["access"]["users"] = ["@alice:example.org"]
+    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    callback = client.get(
+        "/api/oauth/google_drive/callback",
+        params={"code": "test-code", "state": state},
+        headers=headers["bob"],
+        follow_redirects=False,
+    )
+    assert callback.status_code == 403
+    agent["access"]["users"].append("@bob:example.org")
+    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    assert client.get(f"{base}/status", headers=headers["bob"]).json()["connected"] is False
 
 
 @pytest.mark.parametrize(

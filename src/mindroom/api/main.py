@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom import constants, file_watcher
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
@@ -64,7 +65,6 @@ if TYPE_CHECKING:
 
     from starlette.types import ASGIApp, Receive, Scope, Send
 
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.response_admission import ResponseAdmissionGate
@@ -297,6 +297,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         app_state.thread_export_runner = None
         app_state.leave_matrix_room = None
         app_state.external_trigger_runtime = None
+        app_state.agent_reply_memberships = AgentReplyMembershipIndex()
         app_state.script_worker_keepalive = None
         bind_script_tool_broker(api_app, None)
         app_state.api_state = ApiState(
@@ -329,6 +330,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             app_state.thread_export_runner = None
             app_state.leave_matrix_room = None
             app_state.external_trigger_runtime = None
+            app_state.agent_reply_memberships = AgentReplyMembershipIndex()
             app_state.script_worker_keepalive = None
             bind_script_tool_broker(api_app, None)
         previous_state.snapshot = config_lifecycle._published_snapshot(
