@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 PERSONAL_RESPONSE_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
 
 
+class PersonalAgentAccessDeniedError(HTTPException):
+    """The configured personal agent is valid but unavailable to this requester."""
+
+
 @dataclass(frozen=True)
 class PersonalAgentContext:
     """One authorized personal agent with an explicit private credential owner."""
@@ -70,7 +74,11 @@ def resolve_personal_agent(
     if requester_id not in config.administrators and not any(
         fnmatchcase(requester_id, pattern) for pattern in access.users
     ):
-        raise HTTPException(403, "Personal agent access is required", headers=PERSONAL_RESPONSE_HEADERS)
+        raise PersonalAgentAccessDeniedError(
+            403,
+            "Personal agent access is required",
+            headers=PERSONAL_RESPONSE_HEADERS,
+        )
     identity = build_tool_execution_identity(
         channel=channel,
         agent_name=agent_name,

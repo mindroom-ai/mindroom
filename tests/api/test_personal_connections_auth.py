@@ -221,7 +221,7 @@ def test_administrator_and_disabled_portal_preserve_dashboard_access(
     [
         "/api/connections",
         "/api/connections/",
-        "/api/connections/google_drive/status",
+        "/api/connections/agents/personal/google_drive/status",
         "/api/oauth/google_drive/callback",
         "/api/oauth/google_drive/success",
         "/api/oauth/google_drive/reset",
