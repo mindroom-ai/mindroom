@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from starlette.requests import Request
 
+    from mindroom.api.connection_agents import ConnectionUserContext
     from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
     from mindroom.mcp_gateway.selection import AgentSelections, GatewaySelections
 
@@ -60,6 +61,38 @@ async def _selection_choices(request: Request, origin: str) -> AgentSelections:
     return {name: None if tools is None else tuple(tools) for name, tools in mutation["agents"].items()}
 
 
+def _available_choices(
+    choices: AgentSelections,
+    context: ConnectionUserContext,
+    *,
+    previous: AgentSelections | None = None,
+) -> AgentSelections:
+    """Hide stale choices and discard them on save without accepting new unavailable tools."""
+    metadata = (
+        resolved_tool_metadata_for_runtime(context.runtime_paths, context.config, tolerate_plugin_load_errors=True)
+        if any(choices.values())
+        else {}
+    )
+    result: AgentSelections = {}
+    for name, tools in choices.items():
+        if name not in context.agent_names:
+            continue
+        if tools is None:
+            result[name] = None
+            continue
+        available = {
+            tool
+            for tool in context.config.resolve_entity(name).available_tools
+            if tool in metadata and not metadata[tool].requires_room_context
+        }
+        if previous is not None and set(tools) - available - set(previous.get(name) or ()):
+            raise HTTPException(400, "Tool is not available for MCP")
+        selected = tuple(tool for tool in tools if tool in available)
+        if selected:
+            result[name] = selected
+    return result
+
+
 async def _handle_selection(
     request: Request,
     runtime_for_request: Callable[[Request], _SelectionRuntime],
@@ -81,35 +114,19 @@ async def _handle_selection(
         account_id=owner.account_id,
     )
     runtime_for_request(request)
+    defaults = (context.personal_agent_name,) if context.personal_agent_name is not None else ()
+    saved = await runtime.selections.get(context.owner, defaults)
     if choices is None:
-        defaults = (context.personal_agent_name,) if context.personal_agent_name is not None else ()
-        saved = await runtime.selections.get(context.owner, defaults)
+        selected = _available_choices(saved, context)
     else:
         if any(name not in context.agent_names for name in choices):
             raise HTTPException(404, "Agent is not available")
-        metadata = (
-            resolved_tool_metadata_for_runtime(
-                context.runtime_paths,
-                context.config,
-                tolerate_plugin_load_errors=True,
-            )
-            if any(choices.values())
-            else {}
-        )
-        for name, tools in choices.items():
-            available = context.config.resolve_entity(name).available_tools
-            if tools is not None and any(
-                tool not in available or tool not in metadata or metadata[tool].requires_room_context for tool in tools
-            ):
-                raise HTTPException(400, "Tool is not available for MCP")
+        selected = _available_choices(choices, context, previous=saved)
         try:
-            saved = await runtime.selections.set(context.owner, choices)
+            selected = await runtime.selections.set(context.owner, selected)
         except ValueError as exc:
             raise HTTPException(400, "Invalid agent selection") from exc
-    return JSONResponse(
-        {"enabled": True, "agents": {name: tools for name, tools in saved.items() if name in context.agent_names}},
-        headers=CONNECTIONS_HEADERS,
-    )
+    return JSONResponse({"enabled": True, "agents": selected}, headers=CONNECTIONS_HEADERS)
 
 
 def selection_routes(runtime_for_request: Callable[[Request], _SelectionRuntime]) -> list[Route]:

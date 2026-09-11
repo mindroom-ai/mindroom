@@ -50,6 +50,7 @@ Under **MCP access**, select all compatible tools for an agent or choose tools i
 Each tool selection applies only to that agent, even when another agent has the same tool.
 An individual selection covers the configured toolkit or MCP server, rather than individual functions inside it.
 Selecting **All tools** includes future compatible tools assigned to that agent; a custom selection includes only the tools you checked.
+Custom selections hide tools that are no longer available and discard those stale choices when saved.
 One saved selection applies to every connected MCP client for your account, in either authentication mode.
 The eligible personal agent is selected once by default; shared agents start off.
 You can turn every agent off, and the empty selection survives restarts and new client connections.

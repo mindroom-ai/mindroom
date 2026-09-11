@@ -32,6 +32,41 @@ if TYPE_CHECKING:
 SELECTION = "/api/connections/mcp/selection"
 
 
+def test_removed_tools_cannot_block_other_agent_withdrawal(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """Old browser state and fresh reads can both withdraw access after a tool is removed."""
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    config.agents["personal"].tools = ["calculator", "duckduckgo"]
+    config.agents["shared"] = AgentConfig(
+        display_name="Shared",
+        role="Shared tools",
+        tools=["calculator"],
+        credential_managers=["@alice:example.org"],
+    )
+    headers = {**signed_headers("alice"), "Origin": ORIGIN}
+    original = {"personal": ["calculator", "duckduckgo"], "shared": None}
+    assert gateway_client.post(SELECTION, headers=headers, json={"agents": original}).status_code == 200
+    config.agents["personal"].tools = ["calculator"]
+    assert gateway_client.get(SELECTION, headers=headers).json()["agents"] == {
+        "personal": ["calculator"],
+        "shared": None,
+    }
+    response = gateway_client.post(
+        SELECTION,
+        headers=headers,
+        json={"agents": {"personal": original["personal"]}},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["agents"] == {"personal": ["calculator"]}
+    config.agents["personal"].tools = []
+    assert gateway_client.get(SELECTION, headers=headers).json()["agents"] == {}
+    response = gateway_client.post(SELECTION, headers=headers, json={"agents": {"personal": ["calculator"]}})
+    assert response.status_code == 200, response.text
+    assert response.json()["agents"] == {}
+
+
 def test_withdrawal_does_not_require_plugin_metadata(
     gateway_client: TestClient,
     signed_headers: Callable[[str], dict[str, str]],
