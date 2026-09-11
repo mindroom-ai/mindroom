@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_room_context=True,
     icon="Workflow",
     icon_color="text-teal-500",
     dependencies=["agno"],

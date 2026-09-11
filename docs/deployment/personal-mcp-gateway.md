@@ -36,7 +36,7 @@ MINDROOM_MCP_GATEWAY_ENABLED=true
 
 The selected agent must use `private.per: user` or `private.per: user_agent`.
 Access requires an explicit matching `access.users` grant or administrator authority; room membership alone is insufficient.
-Both eager and deferred assigned tools are discoverable.
+Both eager and deferred assigned tools are discoverable when their metadata permits execution without a Matrix room runtime.
 The client cannot choose another agent, user, or credential owner.
 
 `MINDROOM_PUBLIC_URL` must be an HTTPS origin without a path, query, or fragment.
@@ -327,7 +327,8 @@ Provisioned directory records are administrator-managed and outside the OAuth lo
 ## Execution limits
 
 - Tools requiring native confirmation or configured approval cannot run through the gateway; they return `approval_required`.
-- Tools requiring a live Matrix conversation are unavailable through this transport.
+- Toolkits marked `requires_room_context` in their metadata are omitted from discovery and rejected on direct schema and invocation requests before construction.
+  This includes Matrix messaging, subagent sessions, scheduling, conversation attachments, and other tools that require the live Matrix room runtime.
 - MCP generic bridge dispatchers are excluded; only selected, filtered typed functions are exposed.
 - Search returns at most 10 items and 16 KiB. A selected schema is limited to 32 KiB; tool arguments and result payloads to 64 KiB each.
 - HTTP request bodies and MCP tool responses are limited to 128 KiB. JSON-encoded request IDs are limited to 128 bytes; the `MCP-Protocol-Version` header to 64 UTF-8 bytes. Calls have a 60-second gateway deadline, with configurable active-call limits (defaults: 16 per grant, 32 per authoritative requester across grants, and 128 per process). A cancelled or timed-out call retains its capacity until its local background work and toolkit cleanup finish, including its grant and requester allowances.

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_room_context=True,
     icon="Calendar",
     icon_color="text-emerald-500",
     dependencies=["agno"],

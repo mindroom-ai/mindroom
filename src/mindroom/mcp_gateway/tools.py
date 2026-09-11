@@ -96,6 +96,7 @@ def _entries(context: PersonalAgentContext) -> dict[str, EffectiveToolConfig]:
             enable_dynamic_tools_manager=False,
         ).runtime_tool_configs
         if entry.authored_name in authored
+        and ((metadata := TOOL_METADATA.get(entry.name)) is None or not metadata.requires_room_context)
     }
 
 

@@ -160,7 +160,7 @@
       "icon": "MessageSquare",
       "icon_color": "text-emerald-500",
       "name": "matrix_api",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -184,7 +184,7 @@
       "icon": "MessageSquare",
       "icon_color": "text-green-500",
       "name": "matrix_message",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -208,7 +208,7 @@
       "icon": "LayoutList",
       "icon_color": "text-blue-500",
       "name": "matrix_room",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -871,7 +871,7 @@
       "icon": "MessageCircleMore",
       "icon_color": "text-cyan-500",
       "name": "thread_summary",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -6155,7 +6155,7 @@
       "icon": "Workflow",
       "icon_color": "text-teal-500",
       "name": "subagents",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -7128,7 +7128,7 @@
       "icon": "FaChartBar",
       "icon_color": "text-cyan-500",
       "name": "usage_stats",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -7259,7 +7259,7 @@
       "icon": "FiShield",
       "icon_color": "text-emerald-600",
       "name": "approved_egress",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "special",
       "status": "available"
     },
@@ -7639,7 +7639,7 @@
       "icon": "Paperclip",
       "icon_color": "text-teal-500",
       "name": "attachments",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -8084,7 +8084,7 @@
       "icon": "Workflow",
       "icon_color": "text-violet-500",
       "name": "dynamic_workflow",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -8112,7 +8112,7 @@
       "icon": "Webhook",
       "icon_color": "text-emerald-500",
       "name": "external_trigger_manager",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -8848,7 +8848,7 @@
       "icon": "Share2",
       "icon_color": "text-emerald-500",
       "name": "report_publishing",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -8875,7 +8875,7 @@
       "icon": "Calendar",
       "icon_color": "text-emerald-500",
       "name": "scheduler",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -9086,7 +9086,7 @@
       "icon": "Cpu",
       "icon_color": "text-purple-500",
       "name": "thread_model",
-      "requires_room_context": false,
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },

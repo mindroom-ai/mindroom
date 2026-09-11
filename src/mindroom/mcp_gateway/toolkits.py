@@ -75,9 +75,10 @@ def _build_native(context: PersonalAgentContext, entry: EffectiveToolConfig) -> 
     from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
+    # Plugin metadata can change after selection while this build is scheduled.
     metadata = TOOL_METADATA.get(entry.name)
     if metadata is not None and metadata.requires_room_context:
-        raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
+        raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
     runtime = resolve_agent_runtime(
         context.agent_name,
         context.config,

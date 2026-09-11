@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_room_context=True,
     icon="MessageSquare",
     icon_color="text-green-500",
     dependencies=["agno"],

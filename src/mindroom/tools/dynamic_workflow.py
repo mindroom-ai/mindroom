@@ -17,6 +17,7 @@ register_builtin_tool_metadata(
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,
+        requires_room_context=True,
         icon="Workflow",
         icon_color="text-violet-500",
         config_fields=[
