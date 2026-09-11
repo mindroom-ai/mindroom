@@ -71,6 +71,14 @@ mindroom check-active-responses --json
 mindroom check-active-responses --url http://127.0.0.1:8765 --timeout 5
 ```
 
+To include the active responder and requester identities, configure the operator key and request details:
+
+```bash
+export MINDROOM_API_KEY='<operator-key>'
+mindroom check-active-responses --details
+mindroom check-active-responses --details --json
+```
+
 | Exit code | Meaning |
 | --- | --- |
 | `0` | The runtime is ready, admission is open, and no tracked response work is active. |
@@ -82,6 +90,19 @@ Like health and readiness, this is an unauthenticated operational probe; it expo
 It does not expose room, user, agent, message, or tool details.
 The bundled API must be enabled and connected to the orchestrator; an API-only process cannot report the full runtime as idle.
 Responses carry `Cache-Control: no-store`.
+
+`--details` reads `GET /api/responses/activity/details` and adds a `responses` list while preserving the same idle, busy, and unavailable exit codes.
+Detailed access requires a nonempty `MINDROOM_API_KEY` in the selected runtime configuration and the exact matching bearer token on every request, including deployments that trust browser proxy authentication.
+The CLI reads that key from the selected environment; a missing key, rejected key, or incompatible detailed response exits `2` as unavailable.
+Calling the endpoint directly returns `503` when no operator key is configured and `401` when the bearer token is missing or does not match.
+
+Each detailed row identifies its `matrix` or `openai` channel, the configured response-owning agent or `team/<team-name>`, the canonical requester ID known to that operation, and an `operations` slot count.
+`requester_id` is a full Matrix user ID after configured human-alias resolution, not a display name; it can remain unknown for work that has no authenticated requester binding.
+Rows with the same channel, responder, and requester are grouped, so `operations` can be greater than one.
+The JSON fields `responder` and `requester_id` are `null` when metadata is unavailable; text output labels them as `unknown responder` and `unknown requester`.
+Internal delegated agents and individual team members are not enumerated separately unless they own another tracked response.
+Identity reporting does not query the database, response history, or Matrix to fill gaps.
+The aggregate endpoint remains identity-free.
 
 `active_matrix_operations` combines live admission slots with active delivery recovery.
 It includes response planning, waiting for response locks, generation, delivery, and other admitted Matrix operations such as voice and external-trigger delivery.
@@ -96,6 +117,8 @@ This is a point-in-time observation, not a drain or a restart lock.
 New work can start immediately after the check.
 Unadmitted queued work and unrelated background jobs are outside these counters.
 For multiple MindRoom processes, check each process directly rather than a load-balanced service.
+Detailed reads walk the process's live in-memory entries on the runtime loop and reconcile their grouped slot totals with the aggregate counters.
+They do not provide durable history, and later snapshots can differ as operations start, finish, or acquire identity metadata.
 
 The URL defaults to `MINDROOM_URL` from the selected runtime environment, then `http://127.0.0.1:8765`.
 Use `--config /path/to/config.yaml` to select an environment, `--url` to override the server, and `--timeout` to bound the HTTP request (10 seconds by default).
