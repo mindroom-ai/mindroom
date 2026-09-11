@@ -364,7 +364,7 @@ class CascadedVoiceAgentOptions:
 class LiveVoiceAgentOptions:
     """GPT-Live speech with delegation to the normal MindRoom agent."""
 
-    instructions: str
+    get_instructions: Callable[[], Awaitable[str]]
     model: str
     api_key: str
     voice: str

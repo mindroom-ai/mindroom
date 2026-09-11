@@ -161,14 +161,14 @@ class _LiveDelegationRunner:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
 
-def _build_live_agent(options: LiveVoiceAgentOptions) -> Agent:  # noqa: C901 - SDK class is defined lazily
+def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agent:  # noqa: C901 - SDK class is defined lazily
     """Load the optional SDK only when a Live call starts."""
     from livekit.agents import Agent  # noqa: PLC0415
     from livekit.plugins.openai.realtime import GPTLiveSession  # noqa: PLC0415
 
     class LiveCallAgent(Agent):
         def __init__(self) -> None:
-            super().__init__(instructions=options.instructions, tools=[])
+            super().__init__(instructions=instructions, tools=[])
             self._delegations: _LiveDelegationRunner | None = None
             self._live_session: GPTLiveSession | None = None
             self._provider_close_task: asyncio.Task[None] | None = None
@@ -240,6 +240,7 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
             raise TypeError(msg)
         if options.close_responder is not None:
             self._owned_speech_resource_closers += (options.close_responder,)
+        instructions = await options.get_instructions()
         model = GPTLiveModel(
             model=options.model,
             api_key=options.api_key,
@@ -252,7 +253,7 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
         )
         self._owned_speech_resource_closers += (model.aclose,)
         session = AgentSession(llm=model)
-        self._live_agent = _build_live_agent(options)
+        self._live_agent = _build_live_agent(options, instructions)
         await self._start_session(session, self._live_agent, options, rtc_module=rtc, room_io_module=room_io)
         if options.greeting_instructions:
             session.generate_reply(instructions=options.greeting_instructions)

@@ -116,6 +116,7 @@ class CallAgentTooling:
     responder: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]] | None = None
     finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
     close: Callable[[], Awaitable[None]] | None = None
+    get_system_prompt: Callable[[], Awaitable[str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -221,7 +222,7 @@ class _CallResponseTracker:
 
 @dataclass
 class _CallAgentCache:
-    """Own one serially reused cascaded agent for the lifetime of a call."""
+    """Own one serially reused delegate for the lifetime of a call."""
 
     agent_name: str
     config: Config
@@ -234,6 +235,35 @@ class _CallAgentCache:
     knowledge_identity: tuple[int, ...] = ()
     refresh_scheduler: KnowledgeRefreshScheduler | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def get_system_prompt(self, *, requester_id: str) -> str:
+        """Prepare the full caller-bound prompt and retain its agent for delegation."""
+        scheduler = (
+            self.context.orchestrator.knowledge_refresh_scheduler if self.context.orchestrator is not None else None
+        )
+        resolution = await resolve_agent_knowledge_access_async(
+            self.agent_name,
+            self.config,
+            self.runtime_paths,
+            refresh_scheduler=scheduler,
+            execution_identity=self.execution_identity,
+        )
+
+        async def render(agent: AgnoAgent) -> str:
+            session, run_context, tools = await _prepare_call_agent_tools(
+                agent,
+                agent_name=self.agent_name,
+                session_id=self.session_id,
+                requester_id=requester_id,
+            )
+            return await _render_system_prompt(agent, session, run_context, tools)
+
+        return await self.run(
+            knowledge=resolution.knowledge,
+            knowledge_identity=knowledge_runtime_identity(resolution.knowledge),
+            refresh_scheduler=scheduler,
+            operation=render,
+        )
 
     async def run(
         self,
@@ -470,6 +500,7 @@ async def build_call_tools(
             responder=responder,
             finalize_spoken_response=response_tracker.finalize if reconcile_spoken_response else None,
             close=functools.partial(_close_cascaded_call_resources, response_tracker, agent_cache),
+            get_system_prompt=functools.partial(agent_cache.get_system_prompt, requester_id=requester_id),
         )
 
     refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
@@ -497,6 +528,49 @@ async def build_call_tools(
             eager_deferred_tools=True,
         ),
     )
+    session, run_context, effective_tools = await _prepare_call_agent_tools(
+        agent,
+        agent_name=agent_name,
+        session_id=session_id,
+        requester_id=requester_id,
+    )
+    tools: list[Any] = []
+    visible_functions: list[Function | dict[Any, Any]] = []
+    for tool in effective_tools:
+        if not isinstance(tool, Function):
+            msg = f"Voice calls cannot expose provider-native tool definitions for agent {agent_name}"
+            raise TypeError(msg)
+        if _function_requires_text_chat(tool, config):
+            logger.info("call_tool_hidden_needs_text_chat", tool=tool.name, agent=agent_name)
+            continue
+        visible_functions.append(tool)
+        tools.append(
+            _wrap_agno_function(
+                tool,
+                context=context,
+                agent_name=agent_name,
+                config=config,
+                authorize_operation=authorize_operation,
+            ),
+        )
+    instructions = await _render_system_prompt(agent, session, run_context, visible_functions)
+    logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
+    return CallAgentTooling(
+        tools=tuple(tools),
+        instructions=instructions,
+        execution_identity=execution_identity,
+    )
+
+
+async def _prepare_call_agent_tools(
+    agent: AgnoAgent,
+    *,
+    agent_name: str,
+    session_id: str,
+    requester_id: str,
+) -> tuple[AgnoAgentSession, RunContext, list[Function | dict[Any, Any]]]:
+    """Prepare canonical tool instructions before rendering a call's system prompt."""
+    assert agent.model is not None
     run_id = f"{session_id}:voice"
     session = AgnoAgentSession(session_id=session_id, agent_id=agent_name, user_id=requester_id)
     run_output = RunOutput(
@@ -527,32 +601,7 @@ async def build_call_tools(
         session=session,
         async_mode=True,
     )
-    tools: list[Any] = []
-    visible_functions: list[Function | dict[Any, Any]] = []
-    for tool in effective_tools:
-        if not isinstance(tool, Function):
-            msg = f"Voice calls cannot expose provider-native tool definitions for agent {agent_name}"
-            raise TypeError(msg)
-        if _function_requires_text_chat(tool, config):
-            logger.info("call_tool_hidden_needs_text_chat", tool=tool.name, agent=agent_name)
-            continue
-        visible_functions.append(tool)
-        tools.append(
-            _wrap_agno_function(
-                tool,
-                context=context,
-                agent_name=agent_name,
-                config=config,
-                authorize_operation=authorize_operation,
-            ),
-        )
-    instructions = await _render_system_prompt(agent, session, run_context, visible_functions)
-    logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
-    return CallAgentTooling(
-        tools=tuple(tools),
-        instructions=instructions,
-        execution_identity=execution_identity,
-    )
+    return session, run_context, effective_tools
 
 
 async def _run_call_agent(

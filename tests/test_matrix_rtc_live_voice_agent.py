@@ -32,7 +32,7 @@ class CommentarySink:
 
 def _options(respond: object, **kwargs: object) -> LiveVoiceAgentOptions:
     return LiveVoiceAgentOptions(
-        instructions="Delegate tasks to the backend.",
+        get_instructions=AsyncMock(return_value="Delegate tasks to the backend."),
         model="gpt-live-1",
         api_key="test-key",
         voice="marin",
