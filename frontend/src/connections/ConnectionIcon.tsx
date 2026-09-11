@@ -1,5 +1,5 @@
 import { Plug } from "lucide-react";
-import { iconMap } from "@/components/Integrations/iconMapping";
+import { getIconForTool, iconMap } from "@/components/Integrations/iconMapping";
 
 const icons = Object.entries(iconMap)
   .map(([name, Icon]) => ({
@@ -37,17 +37,15 @@ export function ConnectionIcon({
 }) {
   const variants = new Set(names.flatMap(nameVariants));
   // Prefer specific names (Google Calendar) over generic ones (Calendar).
-  const Icon =
-    (iconName ? iconMap[iconName] : undefined) ??
-    icons.find(({ name }) => variants.has(name))?.Icon ??
-    Plug;
+  const fallbackIcon =
+    icons.find(({ name }) => variants.has(name))?.Icon ?? Plug;
 
   return (
     <span
       aria-hidden="true"
       className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted/60 text-primary ring-1 ring-inset ring-border/60"
     >
-      <Icon className="h-5 w-5" />
+      {getIconForTool(iconName ?? null, null, fallbackIcon)}
     </span>
   );
 }

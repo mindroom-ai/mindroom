@@ -133,7 +133,7 @@ mcp_servers:
     icon: SiConfluence
 ```
 
-Use an icon name bundled with the dashboard, such as `SiConfluence`, `SiGooglecalendar`, or `Calendar`.
+Use a Lucide icon name such as `Book` or `Calendar`, or a bundled React Icons name such as `SiConfluence` or `SiGooglecalendar`.
 Connections uses the explicit icon first, then matches the server's name when the icon is omitted or unavailable, and finally falls back to a plug icon.
 This setting is display metadata and works with every transport, with or without OAuth.
 
