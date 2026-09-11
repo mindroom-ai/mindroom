@@ -27,7 +27,11 @@ class ResponseTrackingHandle:
 
 @dataclass
 class ResponseActivityTracker:
-    """Track live operations with synchronous, cancellation-safe cleanup."""
+    """Track live operations with synchronous, cancellation-safe cleanup.
+
+    The owning runtime event loop must perform all mutations and reads; this
+    process-local registry does not provide cross-thread synchronization.
+    """
 
     _entries: dict[object, ResponseTrackingHandle] = field(default_factory=dict, init=False, repr=False)
 

@@ -127,13 +127,14 @@ def _configure_details_runtime(
         (None, {}, 503),
         ("test-key", {}, 401),
         ("test-key", {"Authorization": "Bearer wrong-key"}, 401),
+        ("test-key", {"Authorization": b"Bearer \xff"}, 401),
     ],
 )
 def test_response_activity_details_requires_configured_matching_key(
     test_client: TestClient,
     temp_config_file: Path,
     api_key: str | None,
-    headers: dict[str, str],
+    headers: dict[str, str | bytes],
     status_code: int,
 ) -> None:
     """Detailed identities fail closed without the selected runtime's exact operator key."""
@@ -193,6 +194,33 @@ def test_response_activity_details_groups_identities_and_reconciles_unknown_slot
         "status": "busy",
     }
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_response_activity_details_coalesces_tracked_and_untracked_unknown_slots(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """One unknown identity row includes both tracked and metadata-free admitted slots."""
+    _configure_details_runtime(test_client, temp_config_file, api_key="test-key")
+    state = config_lifecycle.app_state(test_client.app)
+    gate = ResponseAdmissionGate()
+    state.response_admission_gate = gate
+    assert gate.admit()
+    assert gate.admit()
+    set_runtime_ready()
+
+    with gate.track_response():
+        response = test_client.get(
+            "/api/responses/activity/details",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    gate.release()
+    gate.release()
+    assert response.status_code == 200
+    assert response.json()["responses"] == [
+        {"channel": "matrix", "responder": None, "requester_id": None, "operations": 2},
+    ]
 
 
 def test_response_activity_details_uses_api_key_even_with_trusted_upstream(

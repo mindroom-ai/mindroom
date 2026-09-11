@@ -25,20 +25,10 @@ def _is_loopback(host: str) -> bool:
         return host == "localhost"
 
 
-def _request_activity(  # noqa: C901
-    runtime_paths: RuntimePaths,
-    url: str | None,
-    timeout: float,
-    *,
-    details: bool = False,
-) -> ResponseActivity | DetailedResponseActivity:
+def _validated_activity_url(runtime_paths: RuntimePaths, url: str | None) -> tuple[str, str, str]:
+    """Resolve and validate one API base URL, returning its scheme and host."""
     import httpx  # noqa: PLC0415
 
-    from mindroom.response_activity import DetailedResponseActivity, ResponseActivity  # noqa: PLC0415
-
-    if not math.isfinite(timeout):
-        msg = "--timeout must be finite."
-        raise ValueError(msg)
     base_url = url or runtime_paths.env_value("MINDROOM_URL") or DEFAULT_MINDROOM_URL
     try:
         parsed_url = httpx.URL(base_url)
@@ -54,11 +44,29 @@ def _request_activity(  # noqa: C901
     ):
         msg = "Use an absolute HTTP(S) URL without credentials, query, or fragment."
         raise ValueError(msg)
+    return base_url, parsed_url.scheme, parsed_url.host
+
+
+def _request_activity(
+    runtime_paths: RuntimePaths,
+    url: str | None,
+    timeout: float,
+    *,
+    details: bool = False,
+) -> ResponseActivity | DetailedResponseActivity:
+    import httpx  # noqa: PLC0415
+
+    from mindroom.response_activity import DetailedResponseActivity, ResponseActivity  # noqa: PLC0415
+
+    if not math.isfinite(timeout):
+        msg = "--timeout must be finite."
+        raise ValueError(msg)
+    base_url, scheme, host = _validated_activity_url(runtime_paths, url)
     token = runtime_paths.env_value("MINDROOM_API_KEY")
     if details and not token:
         msg = "MINDROOM_API_KEY is required for --details."
         raise ValueError(msg)
-    if token and parsed_url.scheme == "http" and not _is_loopback(parsed_url.host):
+    if token and scheme == "http" and not _is_loopback(host):
         msg = "Use HTTPS when sending MINDROOM_API_KEY to a remote endpoint."
         raise ValueError(msg)
     headers = {"Authorization": f"Bearer {token}"} if token else {}

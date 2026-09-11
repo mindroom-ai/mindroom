@@ -49,22 +49,31 @@ def update_openai_response_identity(
     )
 
 
-@router.get("/activity")
-async def response_activity(request: Request) -> JSONResponse:
-    """Read live counters on the runtime loop without scanning logs or storage."""
+def _response_activity_snapshot(request: Request) -> ResponseActivity:
+    """Capture shared aggregate fields from live process state."""
     state = config_lifecycle.app_state(request.app)
     gate = state.response_admission_gate
-    snapshot = ResponseActivity(
+    return ResponseActivity(
         runtime_phase=get_runtime_state().phase,
         admission_paused=gate.closed if gate is not None else None,
         active_matrix_operations=gate.active_operation_count if gate is not None else None,
         active_openai_requests=state.openai_response_tracker.count,
     )
+
+
+def _activity_json_response(snapshot: ResponseActivity) -> JSONResponse:
+    """Serialize one activity snapshot with its shared status policy."""
     return JSONResponse(
         snapshot.model_dump(),
         status_code=503 if snapshot.status == "unavailable" else 200,
         headers={"Cache-Control": "no-store"},
     )
+
+
+@router.get("/activity")
+async def response_activity(request: Request) -> JSONResponse:
+    """Read live counters on the runtime loop without scanning logs or storage."""
+    return _activity_json_response(_response_activity_snapshot(request))
 
 
 @router.get("/activity/details")
@@ -80,21 +89,24 @@ async def detailed_response_activity(
     token = (
         authorization.removeprefix("Bearer ").strip() if authorization and authorization.startswith("Bearer ") else None
     )
-    if token is None or not secrets.compare_digest(token, configured_key):
+    if token is None or not secrets.compare_digest(token.encode(), configured_key.encode()):
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
+    aggregate = _response_activity_snapshot(request)
     state = config_lifecycle.app_state(request.app)
     gate = state.response_admission_gate
-    matrix_count = gate.active_operation_count if gate is not None else None
     matrix_identities = gate.response_tracker.snapshot() if gate is not None else ()
-    openai_count = state.openai_response_tracker.count
     openai_identities = state.openai_response_tracker.snapshot()
 
     responses: list[ActiveResponseInfo] = []
     for channel, total, identities in (
-        ("matrix", matrix_count or 0, matrix_identities),
-        ("openai", openai_count, openai_identities),
+        ("matrix", aggregate.active_matrix_operations or 0, matrix_identities),
+        ("openai", aggregate.active_openai_requests, openai_identities),
     ):
+        grouped_identities = Counter(identities)
+        unknown_operations = total - len(identities)
+        if unknown_operations > 0:
+            grouped_identities[ResponseIdentity()] += unknown_operations
         responses.extend(
             ActiveResponseInfo(
                 channel=channel,
@@ -102,28 +114,13 @@ async def detailed_response_activity(
                 requester_id=identity.requester_id,
                 operations=operations,
             )
-            for identity, operations in Counter(identities).items()
+            for identity, operations in grouped_identities.items()
         )
-        unknown_operations = total - len(identities)
-        if unknown_operations > 0:
-            responses.append(
-                ActiveResponseInfo(
-                    channel=channel,
-                    responder=None,
-                    requester_id=None,
-                    operations=unknown_operations,
-                ),
-            )
 
-    snapshot = DetailedResponseActivity(
-        runtime_phase=get_runtime_state().phase,
-        admission_paused=gate.closed if gate is not None else None,
-        active_matrix_operations=matrix_count,
-        active_openai_requests=openai_count,
-        responses=responses,
+    snapshot = DetailedResponseActivity.model_validate(
+        {
+            **aggregate.model_dump(exclude={"status"}),
+            "responses": responses,
+        },
     )
-    return JSONResponse(
-        snapshot.model_dump(),
-        status_code=503 if snapshot.status == "unavailable" else 200,
-        headers={"Cache-Control": "no-store"},
-    )
+    return _activity_json_response(snapshot)
