@@ -32,6 +32,7 @@ class ConnectionService(BaseModel):
     is_shared: bool
     display_name: str
     description: str
+    icon: str | None
     tools: list[str]
 
 
@@ -41,6 +42,7 @@ class ConnectionTool(BaseModel):
     name: str
     display_name: str
     description: str
+    icon: str | None
     provider: str | None
     requires_room_context: bool
 
@@ -127,6 +129,7 @@ def _agent_connections(
                 name=tool_name,
                 display_name=tool.display_name,
                 description=tool.description,
+                icon=tool.icon,
                 provider=provider.id if provider is not None else None,
                 requires_room_context=tool.requires_room_context,
             ),
@@ -140,6 +143,7 @@ def _agent_connections(
                 is_shared=not provider.requester_scoped_credentials and entity.execution_scope in {None, "shared"},
                 display_name=provider.display_name,
                 description=tool.description,
+                icon=tool.icon,
                 tools=[],
             ),
         )

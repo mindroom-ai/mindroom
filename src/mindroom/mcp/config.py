@@ -110,6 +110,7 @@ class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = Field(default=True, description="Whether the server is active")
+    icon: str | None = Field(default=None, description="Optional dashboard icon name, such as SiConfluence or Calendar")
     description: str | None = Field(
         default=None,
         description="What the server provides; appended to the OAuth bridge tool descriptions shown to the model. Requires auth.",
@@ -134,10 +135,10 @@ class MCPServerConfig(BaseModel):
     max_concurrent_calls: int = Field(default=1, ge=1, description="Maximum concurrent calls")
     auto_reconnect: bool = Field(default=True, description="Whether to reconnect automatically")
 
-    @field_validator("description")
+    @field_validator("description", "icon")
     @classmethod
-    def normalize_description(cls, value: str | None) -> str | None:
-        """Collapse blank descriptions to None so callers can test truthiness."""
+    def normalize_display_metadata(cls, value: str | None) -> str | None:
+        """Trim optional display metadata and collapse blank values to None."""
         if value is None:
             return None
         return value.strip() or None
