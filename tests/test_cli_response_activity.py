@@ -103,9 +103,14 @@ def test_cli_timeout_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert json.loads(result.stdout)["status"] == "unavailable"
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://localhost:9876", "http://127.0.0.1:9876", "http://[::1]:9876", "https://remote.test"],
+)
 def test_cli_uses_selected_environment_and_explicit_url(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    base_url: str,
 ) -> None:
     """Selected env credentials and explicit URL must reach the API without leaking the token."""
     (tmp_path / ".env").write_text("MINDROOM_URL=http://unused.test\nMINDROOM_API_KEY=test-secret\n")
@@ -113,7 +118,7 @@ def test_cli_uses_selected_environment_and_explicit_url(
     monkeypatch.delenv("MINDROOM_URL", raising=False)
 
     def get(url: str, **kwargs: object) -> httpx.Response:
-        assert url == "http://localhost:9876/base/api/responses/activity"
+        assert url == f"{base_url}/base/api/responses/activity"
         assert kwargs["headers"] == {"Authorization": "Bearer test-secret"}
         assert kwargs["timeout"] == 3.0
         assert kwargs["follow_redirects"] is False
@@ -127,13 +132,41 @@ def test_cli_uses_selected_environment_and_explicit_url(
             "--config",
             str(tmp_path / "config.yaml"),
             "--url",
-            "http://localhost:9876/base/",
+            f"{base_url}/base/",
             "--timeout",
             "3",
         ],
     )
     assert result.exit_code == 0, result.output
     assert "No active responses" in result.stdout
+    assert "test-secret" not in result.output
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://remote.test", "http://10.0.0.1", "http://localhost.remote.test", "http://[::2]"],
+)
+def test_cli_rejects_credentials_over_remote_http(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    url: str,
+) -> None:
+    """A remote probe must not transmit credentials in cleartext."""
+    monkeypatch.setenv("MINDROOM_API_KEY", "test-secret")
+    sent: list[str] = []
+
+    def get(url: str, **_kwargs: object) -> httpx.Response:
+        sent.append(url)
+        return httpx.Response(200, json=_snapshot())
+
+    monkeypatch.setattr(httpx, "get", get)
+    result = runner.invoke(
+        app,
+        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--url", url, "--json"],
+    )
+    assert result.exit_code == 2
+    assert not sent
+    assert "HTTPS" in json.loads(result.stdout)["detail"]
     assert "test-secret" not in result.output
 
 

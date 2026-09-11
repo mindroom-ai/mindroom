@@ -21,6 +21,8 @@ Scope: the gate covers Matrix-driven response lifecycles plus requester-driven
 voice operations and external-trigger delivery. Direct agent-run entry points
 that bypass Matrix response policy, such as the OpenAI-compatible API in
 ``mindroom.api.openai_compat``, remain outside it.
+Delivery recovery is counted separately for activity reporting and does not
+participate in admission decisions, so it can still run during replacement.
 
 Every state transition is deliberately synchronous. No critical section here
 contains an ``await``, so the single-threaded event loop cannot interleave one
@@ -33,12 +35,12 @@ interrupted and permanently leak a slot, wedging replacement admission.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
 
 class ResponseAdmissionRefusedError(Exception):
@@ -58,6 +60,7 @@ class ResponseAdmissionGate:
     """Track in-flight responses and close admission while a replacement runs."""
 
     _in_flight_response_count: int = field(default=0, init=False)
+    _active_recovery_count: int = field(default=0, init=False)
     _closed: bool = field(default=False, init=False)
     _open_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
@@ -69,6 +72,20 @@ class ResponseAdmissionGate:
     def in_flight_response_count(self) -> int:
         """Return the number of admitted response-planning or lifecycle slots."""
         return self._in_flight_response_count
+
+    @property
+    def active_operation_count(self) -> int:
+        """Return admitted work plus recovery that runs outside normal admission."""
+        return self._in_flight_response_count + self._active_recovery_count
+
+    @contextmanager
+    def track_recovery(self) -> Iterator[None]:
+        """Observe recovery without changing its ability to run during replacement."""
+        self._active_recovery_count += 1
+        try:
+            yield
+        finally:
+            self._active_recovery_count -= 1
 
     @property
     def closed(self) -> bool:

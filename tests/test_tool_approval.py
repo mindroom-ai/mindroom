@@ -1345,9 +1345,12 @@ async def test_removed_owner_cleanup_recovers_notice_after_matrix_device_change(
     client.user_id = "@mindroom_router:localhost"
     client.device_id = "NEWDEVICE"
     client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", client.user_id)}
-    client.room_send = AsyncMock(
-        return_value=nio.RoomSendResponse(event_id="$notice-new-device", room_id="!room:localhost"),
-    )
+
+    async def send_notice(**_kwargs: object) -> nio.RoomSendResponse:
+        assert transport.response_admission_gate.active_operation_count == 1
+        return nio.RoomSendResponse(event_id="$notice-new-device", room_id="!room:localhost")
+
+    client.room_send = AsyncMock(side_effect=send_notice)
     client.room_messages = AsyncMock(
         return_value=nio.RoomMessagesResponse(
             room_id="!room:localhost",
@@ -1378,6 +1381,7 @@ async def test_removed_owner_cleanup_recovers_notice_after_matrix_device_change(
         ):
             assert await transport._discard_unavailable("agent@removed", continuation, reason)
 
+        assert transport.response_admission_gate.active_operation_count == 0
         if accepted_before_crash:
             client.room_send.assert_not_awaited()
             expected_event_id = "$notice-old-device"

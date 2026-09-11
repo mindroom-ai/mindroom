@@ -21,6 +21,7 @@ from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_up
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
 from mindroom.matrix.room_history_reads import find_outbox_delivery_event_id_via_room_messages
 from mindroom.matrix_delivery import MatrixDeliveryWorker
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.tool_approval import DEFAULT_ROUTER_MANAGED_ROOM_REASON, ToolApprovalTransportError
 
 if TYPE_CHECKING:
@@ -125,6 +126,7 @@ class ApprovalMatrixTransport:
     entity_configured: Callable[[str], bool] | None = None
     entity_permanently_unavailable: Callable[[str], bool] | None = None
     recover_unavailable_final: Callable[[str, ApprovalContinuation], Awaitable[bool]] | None = None
+    response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate)
     _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
@@ -295,40 +297,41 @@ class ApprovalMatrixTransport:
         reason: str,
     ) -> bool:
         """Expire visible cards, then atomically release the removed owner's sources."""
-        assert self.journal_provider is not None
-        store = self.journal_provider().principal(principal_id)
-        current = await store.approval_continuation(continuation.approval_id)
-        if current is None:
-            return True
-        final_delivery = await store.load_matrix_delivery(
-            delivery_id=current.source_event_ids[0],
-            stage=DeliveryStage.FINAL,
-        )
-        if final_delivery is not None:
-            return self.recover_unavailable_final is not None and await self.recover_unavailable_final(
-                principal_id,
-                current,
-            )
-        if current.state != "failing":
-            current = await store.request_approval_failure(
-                current.approval_id,
-                reason,
-                expected_state=current.state,
-                expected_generation=current.generation,
-                expected_runtime_generation=current.runtime_generation,
-            )
+        with self.response_admission_gate.track_recovery():
+            assert self.journal_provider is not None
+            store = self.journal_provider().principal(principal_id)
+            current = await store.approval_continuation(continuation.approval_id)
             if current is None:
+                return True
+            final_delivery = await store.load_matrix_delivery(
+                delivery_id=current.source_event_ids[0],
+                stage=DeliveryStage.FINAL,
+            )
+            if final_delivery is not None:
+                return self.recover_unavailable_final is not None and await self.recover_unavailable_final(
+                    principal_id,
+                    current,
+                )
+            if current.state != "failing":
+                current = await store.request_approval_failure(
+                    current.approval_id,
+                    reason,
+                    expected_state=current.state,
+                    expected_generation=current.generation,
+                    expected_runtime_generation=current.runtime_generation,
+                )
+                if current is None:
+                    return False
+            manager = approval_manager.get_approval_store()
+            if manager is None or not await manager.expire_continuation_cards(current.approval_id):
                 return False
-        manager = approval_manager.get_approval_store()
-        if manager is None or not await manager.expire_continuation_cards(current.approval_id):
-            return False
-        notice_store = await self._deliver_unavailable_notice(current, reason)
-        if notice_store is None:
-            return False
-        return await store.discard_unavailable_approval_continuation(
-            current.approval_id,
-            notice_principal_id=notice_store.principal_id,
-        )
+            notice_store = await self._deliver_unavailable_notice(current, reason)
+            if notice_store is None:
+                return False
+            return await store.discard_unavailable_approval_continuation(
+                current.approval_id,
+                notice_principal_id=notice_store.principal_id,
+            )
 
     async def _approval_thread_relation(
         self,

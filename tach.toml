@@ -724,6 +724,7 @@ depends_on = [
     "mindroom.matrix.message_builder",
     "mindroom.matrix.room_history_reads",
     "mindroom.matrix_delivery",
+    "mindroom.response_admission",
     "mindroom.tool_approval",
 ]
 visibility = ["mindroom.orchestrator"]
@@ -1971,6 +1972,7 @@ path = "mindroom.response_admission"
 depends_on = []
 visibility = [
     "mindroom.api.external_triggers",
+    "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.bot_runtime_view",
     "mindroom.matrix_rtc.call_manager",

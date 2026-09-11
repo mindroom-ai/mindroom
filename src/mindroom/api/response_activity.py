@@ -35,7 +35,7 @@ async def response_activity(request: Request) -> JSONResponse:
     snapshot = ResponseActivity(
         runtime_phase=get_runtime_state().phase,
         admission_paused=gate.closed if gate is not None else None,
-        active_matrix_operations=gate.in_flight_response_count if gate is not None else None,
+        active_matrix_operations=gate.active_operation_count if gate is not None else None,
         active_openai_requests=state.active_openai_requests,
     )
     return JSONResponse(

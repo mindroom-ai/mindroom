@@ -96,6 +96,21 @@ def test_openai_request_blocks_idle(test_client: TestClient) -> None:
     assert response.json()["active_openai_requests"] == 1
 
 
+def test_recovery_work_blocks_idle(test_client: TestClient) -> None:
+    """Delivery recovery counts alongside admitted work without reserving admission."""
+    gate = ResponseAdmissionGate()
+    config_lifecycle.app_state(main.app).response_admission_gate = gate
+    set_runtime_ready()
+    with gate.track_recovery():
+        response = test_client.get("/api/responses/activity")
+        assert response.json()["status"] == "busy"
+        assert response.json()["active_matrix_operations"] == 1
+        assert gate.admit()
+        assert test_client.get("/api/responses/activity").json()["active_matrix_operations"] == 2
+        gate.release()
+    assert test_client.get("/api/responses/activity").json()["status"] == "idle"
+
+
 @pytest.mark.asyncio
 async def test_embedded_api_binds_and_clears_live_gate(
     monkeypatch: pytest.MonkeyPatch,

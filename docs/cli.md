@@ -87,9 +87,11 @@ It does not expose room, user, agent, message, or tool details.
 The bundled API must be enabled and connected to the orchestrator; an API-only process cannot report the full runtime as idle.
 Responses carry `Cache-Control: no-store`.
 
-`active_matrix_operations` uses the same live admission gate as config reloads.
+`active_matrix_operations` combines live admission slots with active delivery recovery.
 It includes response planning, waiting for response locks, generation, delivery, and other admitted Matrix operations such as voice and external-trigger delivery.
-Nested admission slots count separately, so this is a conservative work count, not a count of unique responses.
+It also includes frozen approval-final recovery, outbox resends, stale-response recovery, and unavailable-owner settlement while they run.
+Recovery is observed without changing its ability to run during runtime replacement.
+Nested slots count separately, so this is a conservative work count, not a count of unique responses.
 `active_openai_requests` counts chat completion HTTP requests through the end of the response body, including streaming, and clears on errors or cancellation.
 Persisted native tool-approval waits have released their live response slots and do not count as active work; publishing or resuming an approval does count while admitted.
 Interactive waits that still own a live slot remain busy.
@@ -102,6 +104,7 @@ For multiple MindRoom processes, check each process directly rather than a load-
 The URL defaults to `MINDROOM_URL` from the selected runtime environment, then `http://127.0.0.1:8765`.
 Use `--config /path/to/config.yaml` to select an environment, `--url` to override the server, and `--timeout` to bound the HTTP request (10 seconds by default).
 The CLI sends `MINDROOM_API_KEY` as a bearer token when configured, for gateways that require it.
+Credentialed requests require HTTPS except on loopback URLs such as `http://127.0.0.1:8765`.
 
 For an in-container check:
 

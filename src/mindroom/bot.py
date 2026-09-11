@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from contextvars import Context
 from dataclasses import replace
 from functools import cached_property
@@ -155,8 +156,7 @@ from .visible_response_reconciliation import VisibleResponseReconciler, VisibleR
 from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-    from contextlib import AbstractAsyncContextManager
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from datetime import datetime
     from pathlib import Path
 
@@ -1479,7 +1479,8 @@ class AgentBot:
         onto the same event.
         """
         try:
-            outcome = await self._delivery_gateway.recover_deliveries()
+            with self.admission_gate.track_recovery():
+                outcome = await self._delivery_gateway.recover_deliveries()
         except Exception:
             self.logger.exception("Delivery recovery failed")
             return False
@@ -1842,14 +1843,15 @@ class AgentBot:
 
     async def recover_approval_final(self, approval_id: str) -> bool:
         """Recover one frozen approval answer, owning any recovery-only client lifetime."""
-        opened_recovery_client = self.client is None
-        try:
-            if opened_recovery_client:
-                await self._open_approval_recovery_client()
-            return await self._response_runner.recover_approval_final(approval_id)
-        finally:
-            if opened_recovery_client:
-                await self._close_approval_recovery_client()
+        with self.admission_gate.track_recovery():
+            opened_recovery_client = self.client is None
+            try:
+                if opened_recovery_client:
+                    await self._open_approval_recovery_client()
+                return await self._response_runner.recover_approval_final(approval_id)
+            finally:
+                if opened_recovery_client:
+                    await self._close_approval_recovery_client()
 
     async def _close_approval_recovery_client(self) -> None:
         """Close a recovery-only Matrix client without starting normal bot services."""
@@ -1874,9 +1876,12 @@ class AgentBot:
             unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),
         )
 
-    def response_recovery_scope(self, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
+    @asynccontextmanager
+    async def response_recovery_scope(self, room_id: str, event_id: str) -> AsyncIterator[bool]:
         """Expose the delivery owner's startup operation to fleet discovery."""
-        return self._delivery_gateway.response_recovery_scope(room_id, event_id)
+        with self.admission_gate.track_recovery():
+            async with self._delivery_gateway.response_recovery_scope(room_id, event_id) as allowed:
+                yield allowed
 
     async def _response_recovery_ready(self, turn_record: TurnRecord) -> bool:
         """Prove that a terminal response is complete or still durably owned."""

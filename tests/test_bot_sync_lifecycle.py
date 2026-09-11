@@ -9,6 +9,7 @@ only ever happened to share a sync callback with.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -22,6 +23,7 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, current_task_is_proce
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.hooks import EVENT_AGENT_STARTED
+from mindroom.matrix_delivery import RecoveryOutcome
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from tests.journal_helpers import admit_dispatch_event
 from tests.threading_helpers import (
@@ -30,11 +32,99 @@ from tests.threading_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.bot import AgentBot
 
 
 class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
     """Startup, checkpoint certification, redaction ownership, and drain behavior."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("recovery_kind", ["approval", "outbox"])
+    @pytest.mark.parametrize("outcome", ["complete", "error", "cancel"])
+    @pytest.mark.parametrize("admission_closed", [False, True])
+    async def test_matrix_recovery_counts_live_work(
+        self,
+        bot: AgentBot,
+        recovery_kind: str,
+        outcome: str,
+        admission_closed: bool,
+    ) -> None:
+        """Recovery stays observable through completion, failure, and cancellation."""
+        gate = bot.admission_gate
+        if admission_closed:
+            gate.close()
+        entered = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def recover(*_args: object) -> bool | RecoveryOutcome:
+            entered.set()
+            await finish.wait()
+            if outcome == "error":
+                message = "recovery failed"
+                raise RuntimeError(message)
+            return True if recovery_kind == "approval" else RecoveryOutcome(recovered=1, failed=0)
+
+        owner = bot._response_runner if recovery_kind == "approval" else bot._delivery_gateway
+        method = "recover_approval_final" if recovery_kind == "approval" else "recover_deliveries"
+        with patch.object(owner, method, AsyncMock(side_effect=recover)):
+            operation = (
+                bot.recover_approval_final("approval")
+                if recovery_kind == "approval"
+                else bot._recover_unacknowledged_matrix_deliveries()
+            )
+            task = asyncio.create_task(operation)
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                assert gate.active_operation_count == 1
+                assert gate.in_flight_response_count == 0
+                assert gate.closed is admission_closed
+                if outcome == "cancel":
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                else:
+                    finish.set()
+                    if outcome == "error" and recovery_kind == "approval":
+                        with pytest.raises(RuntimeError, match="recovery failed"):
+                            await task
+                    else:
+                        assert await task is (outcome == "complete")
+                assert gate.active_operation_count == 0
+                assert gate.closed is admission_closed
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError, RuntimeError):
+                    await task
+
+    @pytest.mark.asyncio
+    async def test_stale_response_recovery_counts_its_visible_effect(self, bot: AgentBot) -> None:
+        """The caller's recovery edit remains active until delivery ownership is released."""
+        gate = bot.admission_gate
+
+        @asynccontextmanager
+        async def recover(_room_id: str, _event_id: str) -> AsyncIterator[bool]:
+            assert gate.active_operation_count == 1
+            try:
+                yield True
+            finally:
+                assert gate.active_operation_count == 1
+
+        async def cancelled_edit() -> None:
+            async with bot.response_recovery_scope("!room:localhost", "$event") as allowed:
+                assert allowed
+                assert gate.active_operation_count == 1
+                assert gate.close_if_idle()
+                raise asyncio.CancelledError
+
+        with (
+            patch.object(bot._delivery_gateway, "response_recovery_scope", recover),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await cancelled_edit()
+        assert gate.active_operation_count == 0
+        assert gate.closed
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("standalone", "first_sync_response"), [(False, True), (True, True), (True, False)])
@@ -159,6 +249,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         order: list[str] = []
 
         async def recover(_approval_id: str) -> bool:
+            assert bot.admission_gate.active_operation_count == 1
             assert bot.client is client
             assert bot._ingestion_session is session
             assert bot._sending_device_id == "RECOVERY_DEVICE"
@@ -166,9 +257,11 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             return True
 
         async def close_session() -> None:
+            assert bot.admission_gate.active_operation_count == 1
             order.append("session")
 
         async def close_client() -> None:
+            assert bot.admission_gate.active_operation_count == 1
             order.append("client")
 
         session.close.side_effect = close_session

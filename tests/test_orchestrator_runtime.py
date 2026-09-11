@@ -1600,6 +1600,7 @@ class TestMultiAgentOrchestrator:
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         assert orchestrator.agent_bots == {}
         assert not orchestrator.running
+        assert orchestrator._approval_transport.response_admission_gate is orchestrator._response_admission_gate
 
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:

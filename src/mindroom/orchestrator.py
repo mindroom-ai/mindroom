@@ -480,6 +480,7 @@ class _MultiAgentOrchestrator:
             ),
             entity_permanently_unavailable=lambda name: name in self._permanently_failed_entities,
             recover_unavailable_final=self._recover_unavailable_final,
+            response_admission_gate=self._response_admission_gate,
         )
         self._startup_maintenance = StartupMaintenanceController(
             recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (

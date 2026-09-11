@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from ipaddress import ip_address
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,13 @@ from mindroom.constants import DEFAULT_MINDROOM_URL
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.response_activity import ResponseActivity
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost"
 
 
 def _request_activity(runtime_paths: RuntimePaths, url: str | None, timeout: float) -> ResponseActivity:
@@ -41,6 +49,9 @@ def _request_activity(runtime_paths: RuntimePaths, url: str | None, timeout: flo
         msg = "Use an absolute HTTP(S) URL without credentials, query, or fragment."
         raise ValueError(msg)
     token = runtime_paths.env_value("MINDROOM_API_KEY")
+    if token and parsed_url.scheme == "http" and not _is_loopback(parsed_url.host):
+        msg = "Use HTTPS when sending MINDROOM_API_KEY to a remote endpoint."
+        raise ValueError(msg)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         response = httpx.get(
