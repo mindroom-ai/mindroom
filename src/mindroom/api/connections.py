@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.auth import require_personal_connections_user
-from mindroom.api.personal_agent import resolve_personal_agent
+from mindroom.api.personal_agent import PersonalAgentAccessDeniedError, resolve_personal_agent
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import oauth_provider_service_account_configured
@@ -31,6 +31,7 @@ class ConnectionService(BaseModel):
     """One available account connection, without credential storage details."""
 
     provider: str
+    is_shared: bool
     display_name: str
     description: str
     tools: list[str]
@@ -92,9 +93,8 @@ async def _connections(request: Request, response: Response) -> _Connections:
     agent_names: list[str] = []
     try:
         personal = resolve_personal_agent(snapshot, requester_id, channel="matrix")
-    except HTTPException as exc:
-        if exc.status_code != 403:
-            raise
+    except PersonalAgentAccessDeniedError:
+        pass
     else:
         agent_names.append(personal.agent_name)
     agent_names.extend(
@@ -123,7 +123,8 @@ def _agent_connections(
 ) -> AgentConnections:
     """Group an authorized agent's available OAuth tools by provider."""
     services: dict[str, ConnectionService] = {}
-    for tool_name in config.resolve_entity(agent_name).available_tools:
+    entity = config.resolve_entity(agent_name)
+    for tool_name in entity.available_tools:
         tool = metadata.get(tool_name)
         if tool is None or tool.auth_provider is None or tool.auth_provider not in providers:
             continue
@@ -132,6 +133,7 @@ def _agent_connections(
             provider.id,
             ConnectionService(
                 provider=provider.id,
+                is_shared=not provider.requester_scoped_credentials and entity.execution_scope in {None, "shared"},
                 display_name=provider.display_name,
                 description=tool.description,
                 tools=[],

@@ -24,6 +24,7 @@ import { requestConnection } from "./request";
 
 interface ConnectionService {
   provider: string;
+  is_shared: boolean;
   display_name: string;
   description: string;
   tools: string[];
@@ -256,7 +257,7 @@ function ConnectionCard({
               {service.display_name}?
             </DialogTitle>
             <DialogDescription>
-              {agent.is_shared
+              {service.is_shared
                 ? `This removes the saved connection used by ${agent.agent_display_name}. Anyone using this connection will lose access until you connect again.`
                 : "This removes your saved connection. Your assistant will lose access until you connect again."}
             </DialogDescription>

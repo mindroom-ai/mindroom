@@ -111,6 +111,7 @@ The server resolves canonical Matrix aliases and rechecks agent and provider aut
 The browser selects an authorized agent; it cannot override the credential owner or execution scope.
 Shared connections use the agent's configured credential scope, so disconnecting a shared account affects everyone using it.
 Existing requester-only provider rules still apply.
+Disconnect confirmations follow the connection's credential scope, including personal connections on shared agents.
 Account linking and disconnect reuse the same OAuth state, callback, token store, and reset lifecycle used by tools.
 Operators still configure OAuth clients; shared service accounts are not displayed as personal connections.
 

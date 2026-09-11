@@ -12,6 +12,7 @@ import { Connections } from "./Connections";
 
 const service = {
   provider: "mail",
+  is_shared: false,
   display_name: "Mail",
   description: "Read your email.",
   tools: ["mail"],
@@ -395,7 +396,7 @@ describe("shared agent connections", () => {
               agent_name: "research",
               agent_display_name: "Research Team",
               is_shared: true,
-              services: [service],
+              services: [{ ...service, is_shared: true }],
             },
           ],
         }),
@@ -434,4 +435,29 @@ describe("shared agent connections", () => {
       within(personal).getByRole("button", { name: "Connect Mail" }),
     ).toBeEnabled();
   });
+});
+
+it("describes a requester-only connection on a shared agent as personal", async () => {
+  installApi({
+    "/api/connections": async () =>
+      json({
+        agents: [
+          {
+            agent_name: "research",
+            agent_display_name: "Research Team",
+            is_shared: true,
+            services: [service],
+          },
+        ],
+      }),
+    "/api/connections/agents/research/mail/status": async () =>
+      json({ ...status, connected: true }),
+  });
+  render(<Connections />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Disconnect Mail" }),
+  );
+  const dialog = screen.getByRole("dialog");
+  expect(dialog).toHaveTextContent(/your saved connection/i);
+  expect(dialog).not.toHaveTextContent(/anyone using this connection/i);
 });

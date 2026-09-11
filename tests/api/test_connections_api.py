@@ -503,3 +503,68 @@ def test_shared_agent_requester_scoped_provider_stays_personal(
     assert client.get(f"{base}/status", headers=headers["mallory"]).json()["connected"] is False
     assert client.post(f"{base}/disconnect", headers=headers["mallory"], json={}).status_code == 200
     assert client.get(f"{base}/status", headers=headers["alice"]).json()["connected"] is True
+
+
+@pytest.mark.parametrize("invalid_target", ["missing", "shared"])
+@pytest.mark.parametrize("user", ["alice", "admin"])
+def test_invalid_personal_target_disables_shared_connections(
+    shared_portal: dict[str, Any],
+    invalid_target: str,
+    user: str,
+) -> None:
+    """A malformed portal configuration cannot become a shared credential portal."""
+    if invalid_target == "missing":
+        del shared_portal["payload"]["agents"]["personal"]
+    else:
+        shared_portal["payload"]["agents"]["personal"].pop("private")
+        shared_portal["payload"]["agents"]["personal"]["credential_managers"] = ["@alice:example.org"]
+    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    client, headers = shared_portal["client"], shared_portal["headers"][user]
+    assert client.get("/api/connections", headers=headers).status_code == 403
+    for action in ("status", "connect", "disconnect"):
+        response = client.request(
+            "GET" if action == "status" else "POST",
+            f"/api/connections/agents/research/google_drive/{action}",
+            headers=headers,
+            **({} if action == "status" else {"json": {}}),
+        )
+        assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("requester_scoped", "worker_scope", "expected_shared"),
+    [
+        (False, None, True),
+        (False, "shared", True),
+        (False, "user", False),
+        (False, "user_agent", False),
+        (True, None, False),
+        (True, "shared", False),
+        (True, "user", False),
+        (True, "user_agent", False),
+    ],
+)
+def test_catalog_reports_connection_sharing_by_provider_and_scope(
+    shared_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    requester_scoped: bool,
+    worker_scope: str | None,
+    expected_shared: bool,
+) -> None:
+    """Disconnect impact follows credential ownership rather than agent privacy."""
+    shared_portal["payload"]["agents"]["research"]["worker_scope"] = worker_scope
+    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
+    _use_runtime_auth_settings(main.app)
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        requester_scoped_credentials=requester_scoped,
+    )
+    monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (provider,))
+    response = shared_portal["client"].get("/api/connections", headers=shared_portal["headers"]["alice"])
+    assert response.status_code == 200, response.text
+    personal, research = response.json()["agents"]
+    assert personal["services"][0]["is_shared"] is False
+    assert research["is_shared"] is True
+    assert research["services"][0]["is_shared"] is expected_shared
