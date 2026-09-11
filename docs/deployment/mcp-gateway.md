@@ -1,7 +1,11 @@
+---
+icon: lucide/network
+---
+
 # MCP Gateway
 
 The optional MindRoom MCP gateway exposes your selected agents' assigned tools to external MCP clients at `/mcp`.
-It reuses the [Connections portal](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#personal-connections-portal), agent credential scopes, tool filters, and worker routing.
+It reuses the [Connections portal](trusted-upstream-auth.md#connections-portal), agent credential scopes, tool filters, and worker routing.
 Each user connects only the services they need.
 An unconnected or unavailable integration does not prevent discovery or use of another integration.
 

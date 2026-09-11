@@ -5209,10 +5209,8 @@ depends_on = ["mindroom.mcp_gateway.legacy_schema",
 path = "mindroom.api.mcp_clients"
 depends_on = [
     "mindroom.api.auth",
-    "mindroom.api.config_lifecycle",
     "mindroom.api.connection_agents",
     "mindroom.mcp_gateway.server",
-    "mindroom.requester_identity",
     "mindroom.api.mcp_identity",
 ]
 

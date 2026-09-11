@@ -64,7 +64,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("personal connections", () => {
+describe("connections", () => {
   it("shows only the server's services without loading dashboard configuration", async () => {
     render(<Connections />);
     expect(

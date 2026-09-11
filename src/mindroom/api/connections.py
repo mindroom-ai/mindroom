@@ -1,4 +1,4 @@
-"""OAuth connections for a personal agent and authorized shared agents."""
+"""Assigned tools and service connections for eligible agents."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
-from mindroom.api.auth import require_personal_connections_user
-from mindroom.api.connection_agents import resolve_connection_user
+from mindroom.api.auth import require_connections_user
+from mindroom.api.connection_agents import CONNECTIONS_HEADERS, resolve_connection_user
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.catalog import ToolMetadata
 
 router = APIRouter(prefix="/api/connections", tags=["connections"])
-_PRIVATE_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
 
 
 class ConnectionService(BaseModel):
@@ -84,25 +83,20 @@ class _Connections:
 
 
 async def _connections(request: Request, response: Response) -> _Connections:
-    response.headers.update(_PRIVATE_HEADERS)
+    response.headers.update(CONNECTIONS_HEADERS)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     agent_name = (snapshot.runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()
     if not agent_name:
-        raise HTTPException(404, "Personal connections are not enabled", headers=_PRIVATE_HEADERS)
-    auth_user = await require_personal_connections_user(request)
+        raise HTTPException(404, "Connections are not enabled", headers=CONNECTIONS_HEADERS)
+    auth_user = await require_connections_user(request)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    agent_name = (snapshot.runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()
-    if not agent_name:
-        raise HTTPException(404, "Personal connections are not enabled", headers=_PRIVATE_HEADERS)
     if request.query_params:
-        raise HTTPException(400, "Connection target overrides are not accepted", headers=_PRIVATE_HEADERS)
-    config = snapshot.runtime_config
-    if config is None:
-        raise HTTPException(503, "Connections are unavailable", headers=_PRIVATE_HEADERS)
+        raise HTTPException(400, "Connection target overrides are not accepted", headers=CONNECTIONS_HEADERS)
     requester_id = cast("str", auth_user["matrix_user_id"])
     user = resolve_connection_user(snapshot, requester_id)
+    config = user.config
     if not user.agent_names:
-        raise HTTPException(403, "No connections are available for this account", headers=_PRIVATE_HEADERS)
+        raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)
     providers = load_oauth_providers_for_snapshot(snapshot)
     metadata = resolved_tool_metadata_for_runtime(snapshot.runtime_paths, config, tolerate_plugin_load_errors=True)
     agents = [_agent_connections(name, config, providers, metadata) for name in user.agent_names]
@@ -168,17 +162,21 @@ def _require_provider(context: _Connections, agent_name: str, provider_id: str) 
     for agent in context.catalog.agents:
         if agent.agent_name == agent_name and any(service.provider == provider_id for service in agent.services):
             return context.providers[provider_id]
-    raise HTTPException(404, "Connection is not available", headers=_PRIVATE_HEADERS)
+    raise HTTPException(404, "Connection is not available", headers=CONNECTIONS_HEADERS)
 
 
 def _require_same_origin(request: Request, context: _Connections) -> None:
     public_url = context.runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
     parsed = urlsplit(public_url)
     if parsed.scheme != "https" or not parsed.netloc:
-        raise HTTPException(403, "Personal connections require an HTTPS public origin", headers=_PRIVATE_HEADERS)
+        raise HTTPException(403, "Connections require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
     expected = f"{parsed.scheme}://{parsed.netloc}"
     if request.headers.get("origin") != expected or request.headers.get("sec-fetch-site") == "cross-site":
-        raise HTTPException(403, "Connection changes require a same-origin request", headers=_PRIVATE_HEADERS)
+        raise HTTPException(
+            403,
+            "Connection changes require a same-origin request",
+            headers=CONNECTIONS_HEADERS,
+        )
 
 
 @router.get("")
@@ -194,7 +192,11 @@ async def status(agent_name: str, provider_id: str, request: Request, context: _
     try:
         result = await oauth.status(provider_id, request, agent_name=agent_name)
     except HTTPException as exc:
-        raise HTTPException(exc.status_code, "Connection status is unavailable", headers=_PRIVATE_HEADERS) from exc
+        raise HTTPException(
+            exc.status_code,
+            "Connection status is unavailable",
+            headers=CONNECTIONS_HEADERS,
+        ) from exc
     # Shared service accounts are runtime configuration, never a personal account.
     personal = not result.has_service_account_config
     return ConnectionStatus(
@@ -218,11 +220,19 @@ async def connect(
     _require_same_origin(request, context)
     provider = _require_provider(context, agent_name, provider_id)
     if oauth_provider_service_account_configured(provider, context.runtime_paths):
-        raise HTTPException(409, "Personal account linking is unavailable for this service", headers=_PRIVATE_HEADERS)
+        raise HTTPException(
+            409,
+            "Personal account linking is unavailable for this service",
+            headers=CONNECTIONS_HEADERS,
+        )
     try:
         return await oauth.connect(provider_id, request, agent_name=agent_name)
     except HTTPException as exc:
-        raise HTTPException(exc.status_code, "Could not start account connection", headers=_PRIVATE_HEADERS) from exc
+        raise HTTPException(
+            exc.status_code,
+            "Could not start account connection",
+            headers=CONNECTIONS_HEADERS,
+        ) from exc
 
 
 @router.post("/agents/{agent_name}/{provider_id}/disconnect")
@@ -239,4 +249,8 @@ async def disconnect(
     try:
         return await oauth.disconnect(provider_id, request, agent_name=agent_name)
     except HTTPException as exc:
-        raise HTTPException(exc.status_code, "Could not disconnect account", headers=_PRIVATE_HEADERS) from exc
+        raise HTTPException(
+            exc.status_code,
+            "Could not disconnect account",
+            headers=CONNECTIONS_HEADERS,
+        ) from exc

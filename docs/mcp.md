@@ -9,7 +9,7 @@ MindRoom acts as an MCP client for tools.
 It connects to configured servers, discovers their tool catalogs, and exposes those tools to agents.
 MindRoom does not yet consume MCP resources or prompts.
 
-To expose a personal agent's tools to external clients through one endpoint, enable the optional [Personal MCP Gateway](deployment/personal-mcp-gateway.md).
+To expose your selected agents' tools to external clients through one endpoint, enable the optional [MCP Gateway](deployment/mcp-gateway.md).
 It reuses personal Connections accounts and exposes search, schema lookup, and invocation without placing every tool schema into initial model context.
 
 ## Configuration Overview

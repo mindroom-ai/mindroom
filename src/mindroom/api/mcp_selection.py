@@ -9,9 +9,9 @@ from fastapi import HTTPException
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from mindroom.api.auth import require_personal_connections_user
+from mindroom.api.auth import require_connections_user
 from mindroom.api.config_lifecycle import rebind_current_request_snapshot
-from mindroom.api.connection_agents import PERSONAL_RESPONSE_HEADERS, resolve_connection_user
+from mindroom.api.connection_agents import CONNECTIONS_HEADERS, resolve_connection_user
 from mindroom.api.mcp_identity import resolve_gateway_browser_owner
 from mindroom.mcp_gateway.selection import SelectionAccessDeniedError
 from mindroom.mcp_gateway.server import read_gateway_body
@@ -60,12 +60,12 @@ async def _handle_selection(
     request: Request,
     runtime_for_request: Callable[[Request], _SelectionRuntime],
 ) -> JSONResponse:
-    user = await require_personal_connections_user(request)
+    user = await require_connections_user(request)
     try:
         runtime = runtime_for_request(request)
     except HTTPException as exc:
         if exc.status_code == 404 and request.method in {"GET", "HEAD"}:
-            return JSONResponse({"enabled": False, "selected_agents": []}, headers=PERSONAL_RESPONSE_HEADERS)
+            return JSONResponse({"enabled": False, "selected_agents": []}, headers=CONNECTIONS_HEADERS)
         raise
     if request.query_params:
         raise HTTPException(400, "Selection target overrides are not accepted")
@@ -89,7 +89,7 @@ async def _handle_selection(
             raise HTTPException(400, "Invalid agent selection") from exc
     return JSONResponse(
         {"enabled": True, "selected_agents": [name for name in saved if name in context.agent_names]},
-        headers=PERSONAL_RESPONSE_HEADERS,
+        headers=CONNECTIONS_HEADERS,
     )
 
 
@@ -100,20 +100,24 @@ def selection_routes(runtime_for_request: Callable[[Request], _SelectionRuntime]
         try:
             return await _handle_selection(request, runtime_for_request)
         except HTTPException as exc:
-            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=PERSONAL_RESPONSE_HEADERS)
+            return JSONResponse(
+                {"detail": exc.detail},
+                status_code=exc.status_code,
+                headers=CONNECTIONS_HEADERS,
+            )
         except SelectionAccessDeniedError:
             return JSONResponse(
                 {"detail": "Account access has changed"},
                 status_code=403,
-                headers=PERSONAL_RESPONSE_HEADERS,
+                headers=CONNECTIONS_HEADERS,
             )
         except GatewayOAuthCapacityError:
             return JSONResponse(
                 {"detail": "Selection storage is temporarily full"},
                 status_code=503,
-                headers=PERSONAL_RESPONSE_HEADERS,
+                headers=CONNECTIONS_HEADERS,
             )
         except TimeoutError:
-            return JSONResponse({"detail": "Request timed out"}, status_code=408, headers=PERSONAL_RESPONSE_HEADERS)
+            return JSONResponse({"detail": "Request timed out"}, status_code=408, headers=CONNECTIONS_HEADERS)
 
     return [Route("/api/connections/mcp/selection", selection, methods=["GET", "POST"])]

@@ -71,7 +71,7 @@ When no Matrix user ID claim is configured, strict mode only accepts a Matrix id
 That derivation can use the verified JWT email claim even when `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is not configured.
 When no Matrix user ID claim or email-to-Matrix template is configured, strict mode rejects `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` because that header is not backed by a signed identity.
 
-## Personal Connections Portal
+## Connections Portal
 
 Set `MINDROOM_CONNECTIONS_AGENT` to the name of a private agent to enable `/connections`.
 The portal lists assigned tools and groups OAuth services by agent: the selected private agent and shared agents for which the authenticated user is a credential manager or administrator.
@@ -126,7 +126,7 @@ Use a runtime build containing the portal before enabling the routes.
 
 Connect and disconnect requests require an HTTPS public origin and a same-origin `Origin` header matching `MINDROOM_PUBLIC_URL`, or the request base URL when unset.
 The portal API returns private, non-cacheable account status and never returns token or OAuth client configuration.
-The optional [MCP Gateway](https://docs.mindroom.chat/deployment/personal-mcp-gateway/) reuses these accounts to expose selected agents' tools to external MCP clients.
+The optional [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) reuses these accounts to expose selected agents' tools to external MCP clients.
 When enabled, the portal lets each user choose which eligible agents are exposed through every one of their MCP clients.
 Its machine endpoints use separate gateway OAuth bearer authentication; the browser consent page uses this same signed login.
 

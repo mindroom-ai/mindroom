@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
@@ -21,11 +21,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
-PERSONAL_RESPONSE_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
-
-
-class _PersonalAgentAccessDeniedError(HTTPException):
-    """The configured personal agent is valid but unavailable to this requester."""
+CONNECTIONS_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
 
 
 @dataclass(frozen=True)
@@ -51,100 +47,49 @@ class ConnectionUserContext:
     personal_agent_name: str | None
 
 
-def _build_agent_context(
-    agent_name: str,
-    requester_id: str,
-    config: Config,
-    paths: RuntimePaths,
-    channel: Literal["matrix", "mcp"],
-) -> AgentToolContext:
-    identity = build_tool_execution_identity(
-        channel=channel,
-        agent_name=agent_name,
-        runtime_paths=paths,
-        requester_id=requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
-    target = build_agent_toolkit_worker_target(
-        config.resolve_entity(agent_name).execution_scope,
-        agent_name,
-        is_private=config.agents[agent_name].private is not None,
-        execution_identity=identity,
-        runtime_paths=paths,
-    )
-    return AgentToolContext(agent_name, requester_id, config, paths, identity, target)
-
-
-def _resolve_personal_agent(
-    snapshot: ApiSnapshot,
-    requester_id: str,
-    *,
-    channel: Literal["matrix", "mcp"] = "mcp",
-) -> AgentToolContext:
-    """Authorize an authenticated requester against the current operator-selected agent.
-
-    Authentication belongs to the transport boundary. This resolver never reads
-    browser selectors, cookies, owner defaults, or ambient execution identity.
-    """
-    paths = snapshot.runtime_paths
-    agent_name = (paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()
-    if not agent_name:
-        raise HTTPException(404, "Personal connections are not enabled", headers=PERSONAL_RESPONSE_HEADERS)
-    config = snapshot.runtime_config
-    if config is None:
-        raise HTTPException(503, "Personal connections are unavailable", headers=PERSONAL_RESPONSE_HEADERS)
-    agent = config.agents.get(agent_name)
-    if agent is None or agent.private is None or agent.private.per not in {"user", "user_agent"}:
-        raise HTTPException(403, "Personal connections require a private agent", headers=PERSONAL_RESPONSE_HEADERS)
-    if try_parse_historical_matrix_user_id(requester_id) is None:
-        raise HTTPException(
-            403,
-            "Personal connections require a verified Matrix identity",
-            headers=PERSONAL_RESPONSE_HEADERS,
-        )
-    requester_id = resolve_human_requester_alias(requester_id, config, paths)
-    access = resolve_responder_access(config, agent_name)
-    # API callers have no conversation membership context. Require explicit grants.
-    if requester_id not in config.administrators and not any(
-        fnmatchcase(requester_id, pattern) for pattern in access.users
-    ):
-        raise _PersonalAgentAccessDeniedError(
-            403,
-            "Personal agent access is required",
-            headers=PERSONAL_RESPONSE_HEADERS,
-        )
-    return _build_agent_context(agent_name, requester_id, config, paths, channel)
-
-
 def resolve_connection_user(
     snapshot: ApiSnapshot,
     authenticated_user_id: str,
     *,
     account_id: str | None = None,
 ) -> ConnectionUserContext:
-    """Resolve eligible personal/shared agents without granting authority from saved selections."""
-    try:
-        personal = _resolve_personal_agent(snapshot, authenticated_user_id)
-    except _PersonalAgentAccessDeniedError:
-        personal = None
+    """Resolve current agent eligibility without constructing execution targets."""
+    paths = snapshot.runtime_paths
+    agent_name = (paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()
+    if not agent_name:
+        raise HTTPException(404, "Connections are not enabled", headers=CONNECTIONS_HEADERS)
     config = snapshot.runtime_config
-    assert config is not None  # The personal resolver validates the publication even when access is denied.
-    requester_id = resolve_human_requester_alias(authenticated_user_id, config, snapshot.runtime_paths)
+    if config is None:
+        raise HTTPException(503, "Connections are unavailable", headers=CONNECTIONS_HEADERS)
+    agent = config.agents.get(agent_name)
+    if agent is None or agent.private is None or agent.private.per not in {"user", "user_agent"}:
+        raise HTTPException(403, "Connections require a configured private agent", headers=CONNECTIONS_HEADERS)
+    if try_parse_historical_matrix_user_id(authenticated_user_id) is None:
+        raise HTTPException(
+            403,
+            "Connections require a verified Matrix identity",
+            headers=CONNECTIONS_HEADERS,
+        )
+    requester_id = resolve_human_requester_alias(authenticated_user_id, config, paths)
+    access = resolve_responder_access(config, agent_name)
+    # API callers have no conversation membership context. Require explicit grants.
+    personal_agent_name = (
+        agent_name
+        if requester_id in config.administrators or any(fnmatchcase(requester_id, pattern) for pattern in access.users)
+        else None
+    )
     shared = tuple(
         name
-        for name, agent in config.agents.items()
-        if agent.private is None
-        and is_sender_allowed_for_agent_credential_management(requester_id, name, config, snapshot.runtime_paths)
+        for name, shared_agent in config.agents.items()
+        if shared_agent.private is None
+        and is_sender_allowed_for_agent_credential_management(requester_id, name, config, paths)
     )
     return ConnectionUserContext(
         GatewayOwner(authenticated_user_id, requester_id, account_id),
         config,
-        snapshot.runtime_paths,
-        ((personal.agent_name,) if personal is not None else ()) + shared,
-        personal.agent_name if personal is not None else None,
+        paths,
+        ((personal_agent_name,) if personal_agent_name is not None else ()) + shared,
+        personal_agent_name,
     )
 
 
@@ -154,5 +99,29 @@ def resolve_connection_agent(
 ) -> AgentToolContext:
     """Build one eligible agent target using its actual privacy and execution scope."""
     if agent_name not in user.agent_names:
-        raise HTTPException(404, "Agent is not available", headers=PERSONAL_RESPONSE_HEADERS)
-    return _build_agent_context(agent_name, user.owner.requester_id, user.config, user.runtime_paths, "mcp")
+        raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
+    identity = build_tool_execution_identity(
+        channel="mcp",
+        agent_name=agent_name,
+        runtime_paths=user.runtime_paths,
+        requester_id=user.owner.requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    target = build_agent_toolkit_worker_target(
+        user.config.resolve_entity(agent_name).execution_scope,
+        agent_name,
+        is_private=user.config.agents[agent_name].private is not None,
+        execution_identity=identity,
+        runtime_paths=user.runtime_paths,
+    )
+    return AgentToolContext(
+        agent_name,
+        user.owner.requester_id,
+        user.config,
+        user.runtime_paths,
+        identity,
+        target,
+    )

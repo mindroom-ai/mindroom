@@ -22,9 +22,13 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
-from mindroom.api.auth import require_personal_connections_user
+from mindroom.api.auth import require_connections_user
 from mindroom.api.config_lifecycle import app_state, rebind_current_request_snapshot, require_api_state
-from mindroom.api.connection_agents import PERSONAL_RESPONSE_HEADERS, resolve_connection_agent, resolve_connection_user
+from mindroom.api.connection_agents import (
+    CONNECTIONS_HEADERS,
+    resolve_connection_agent,
+    resolve_connection_user,
+)
 from mindroom.api.mcp_clients import client_routes
 from mindroom.api.mcp_identity import resolve_gateway_browser_owner
 from mindroom.api.mcp_scim import scim_routes
@@ -57,7 +61,7 @@ if TYPE_CHECKING:
     from mindroom.mcp_gateway.types import GatewayToolResponse
 
 logger = get_logger(__name__)
-_MACHINE_HEADERS = {**PERSONAL_RESPONSE_HEADERS, "Access-Control-Allow-Origin": "*"}
+_MACHINE_HEADERS = {**CONNECTIONS_HEADERS, "Access-Control-Allow-Origin": "*"}
 
 
 def _enabled(paths: RuntimePaths) -> bool:
@@ -374,7 +378,7 @@ def _runtime(request: Request, *, paths: RuntimePaths | None = None) -> GatewayR
     try:
         external_settings = ExternalAuthSettings.from_paths(paths)
     except ValueError as exc:
-        raise HTTPException(404, "MCP gateway is disabled", headers=PERSONAL_RESPONSE_HEADERS) from exc
+        raise HTTPException(404, "MCP gateway is disabled", headers=CONNECTIONS_HEADERS) from exc
     if (
         runtime is None
         or runtime.external_settings != external_settings
@@ -382,14 +386,14 @@ def _runtime(request: Request, *, paths: RuntimePaths | None = None) -> GatewayR
         or (paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/") != runtime.origin
         or (paths.env_value("MINDROOM_MCP_SCIM_TOKEN") or "") != runtime.scim_token
     ):
-        raise HTTPException(404, "MCP gateway is disabled", headers=PERSONAL_RESPONSE_HEADERS)
+        raise HTTPException(404, "MCP gateway is disabled", headers=CONNECTIONS_HEADERS)
     return runtime
 
 
 def _local_runtime(request: Request) -> GatewayRuntime:
     runtime = _runtime(request)
     if runtime.external_settings is not None:
-        raise HTTPException(404, "Built-in MCP authorization is disabled", headers=PERSONAL_RESPONSE_HEADERS)
+        raise HTTPException(404, "Built-in MCP authorization is disabled", headers=CONNECTIONS_HEADERS)
     return runtime
 
 
@@ -405,7 +409,7 @@ def _form(body: bytes) -> dict[str, str]:
 
 def _require_form_content_type(request: Request) -> None:
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/x-www-form-urlencoded":
-        raise HTTPException(415, "URL-encoded form required", headers=PERSONAL_RESPONSE_HEADERS)
+        raise HTTPException(415, "URL-encoded form required", headers=CONNECTIONS_HEADERS)
 
 
 def _onboarding_source(request: Request) -> str:
@@ -483,7 +487,7 @@ async def _oauth(request: Request) -> Response:
         return JSONResponse({"error": "invalid_request"}, status_code=exc.status_code, headers=_MACHINE_HEADERS)
     except TimeoutError:
         return JSONResponse({"error": "request_timeout"}, status_code=408, headers=_MACHINE_HEADERS)
-    response.headers.update(PERSONAL_RESPONSE_HEADERS if operation == "authorize" else _MACHINE_HEADERS)
+    response.headers.update(CONNECTIONS_HEADERS if operation == "authorize" else _MACHINE_HEADERS)
     return response
 
 
@@ -518,7 +522,7 @@ async def _metadata(request: Request) -> Response:
 
 async def _consent(request: Request) -> Response:
     runtime = _local_runtime(request)
-    user = await require_personal_connections_user(request)
+    user = await require_connections_user(request)
     owner = await resolve_gateway_browser_owner(request, user, runtime.provider)
     context = resolve_connection_user(
         rebind_current_request_snapshot(request),
@@ -526,15 +530,15 @@ async def _consent(request: Request) -> Response:
         account_id=owner.account_id,
     )
     if not context.agent_names:
-        raise HTTPException(403, "Agent access is required", headers=PERSONAL_RESPONSE_HEADERS)
+        raise HTTPException(403, "Agent access is required", headers=CONNECTIONS_HEADERS)
     try:
         if request.method == "POST":
             if request.headers.get("origin") != runtime.origin or request.headers.get("sec-fetch-site") == "cross-site":
-                raise HTTPException(403, "Same-origin consent required", headers=PERSONAL_RESPONSE_HEADERS)
+                raise HTTPException(403, "Same-origin consent required", headers=CONNECTIONS_HEADERS)
             _require_form_content_type(request)
             fields = _form(await read_gateway_body(request))
             if set(fields) != {"state", "csrf_token", "decision"} or fields["decision"] not in {"allow", "deny"}:
-                raise HTTPException(400, "Invalid consent form", headers=PERSONAL_RESPONSE_HEADERS)
+                raise HTTPException(400, "Invalid consent form", headers=CONNECTIONS_HEADERS)
             redirect = await runtime.provider.finish_consent(
                 fields["state"],
                 requester_id=context.owner.requester_id,
@@ -543,10 +547,10 @@ async def _consent(request: Request) -> Response:
                 csrf_token=fields["csrf_token"],
                 allow=fields["decision"] == "allow",
             )
-            return RedirectResponse(redirect, status_code=303, headers=PERSONAL_RESPONSE_HEADERS)
+            return RedirectResponse(redirect, status_code=303, headers=CONNECTIONS_HEADERS)
         state = request.query_params.get("state", "")
         if not state or len(state) > 256:
-            raise HTTPException(400, "Invalid consent state", headers=PERSONAL_RESPONSE_HEADERS)
+            raise HTTPException(400, "Invalid consent state", headers=CONNECTIONS_HEADERS)
         consent = await runtime.provider.begin_consent(
             state,
             requester_id=context.owner.requester_id,
@@ -559,13 +563,13 @@ async def _consent(request: Request) -> Response:
         return JSONResponse(
             {"error": "temporarily_unavailable"},
             status_code=503,
-            headers={**PERSONAL_RESPONSE_HEADERS, "Retry-After": "60"},
+            headers={**CONNECTIONS_HEADERS, "Retry-After": "60"},
         )
     except AuthorizeError as exc:
         raise HTTPException(
             400,
             "Consent is invalid, expired, or belongs to another user",
-            headers=PERSONAL_RESPONSE_HEADERS,
+            headers=CONNECTIONS_HEADERS,
         ) from exc
     agent_names = tuple(context.config.get_agent(agent).display_name for agent in saved if agent in context.agent_names)
     return HTMLResponse(
@@ -577,7 +581,7 @@ async def _consent(request: Request) -> Response:
             csrf_token=consent.csrf_token,
         ),
         headers={
-            **PERSONAL_RESPONSE_HEADERS,
+            **CONNECTIONS_HEADERS,
             # Native browser form POSTs send Origin:null under no-referrer.
             # Keep an origin for CSRF checks without exposing the consent URL.
             "Referrer-Policy": "strict-origin",
@@ -596,7 +600,7 @@ class _MCPEndpoint:
             await JSONResponse(
                 {"error": "gateway_disabled"},
                 status_code=exc.status_code,
-                headers=PERSONAL_RESPONSE_HEADERS,
+                headers=CONNECTIONS_HEADERS,
             )(scope, receive, send)
             return
         await runtime.server(scope, receive, send)

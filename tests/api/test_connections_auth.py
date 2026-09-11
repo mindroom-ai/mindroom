@@ -1,4 +1,4 @@
-"""Signed identity and static boundaries for the personal connections portal."""
+"""Signed identity and static boundaries for the connections portal."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -74,7 +74,7 @@ def connections_auth_client(
 
         @api_app.get("/api/connections/identity")
         async def personal_identity(request: Request) -> dict[str, Any]:
-            return await auth.require_personal_connections_user(request)
+            return await auth.require_connections_user(request)
 
         @api_app.api_route("/api/{path:path}", methods=["GET", "POST"])
         async def protected_route(user: Annotated[dict[str, Any], Depends(auth.verify_user)]) -> dict[str, Any]:
@@ -250,7 +250,7 @@ def test_disabled_connections_frontend_is_unavailable(
     """A disabled portal does not serve a frontend whose API cannot be used."""
     portal = tmp_path / "connections"
     (portal / "assets").mkdir(parents=True)
-    (portal / "index.html").write_text("personal connections")
+    (portal / "index.html").write_text("connections")
     (portal / "assets" / "portal.js").write_text("portal asset")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
     client = connections_auth_client(MINDROOM_CONNECTIONS_AGENT=portal_setting)
@@ -277,9 +277,9 @@ def test_missing_connections_bundle_never_returns_administrator_html(
 @pytest.mark.parametrize(
     ("path", "content"),
     [
-        ("/connections", "personal connections"),
-        ("/connections/", "personal connections"),
-        ("/connections/nested", "personal connections"),
+        ("/connections", "connections"),
+        ("/connections/", "connections"),
+        ("/connections/nested", "connections"),
         ("/connections/assets/portal.js", "portal asset"),
     ],
 )
@@ -295,7 +295,7 @@ def test_connections_static_routes_use_only_dedicated_bundle(
     (tmp_path / "index.html").write_text("administrator dashboard")
     portal = tmp_path / "connections"
     (portal / "assets").mkdir(parents=True)
-    (portal / "index.html").write_text("personal connections")
+    (portal / "index.html").write_text("connections")
     (portal / "assets" / "portal.js").write_text("portal asset")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
     response = connections_auth_client().get(path, headers=signed_connections_headers("alice"))
@@ -317,7 +317,7 @@ def test_connections_static_rejects_traversal_and_missing_assets(
     """Encoded traversal and missing scripts must not expose administrator assets."""
     (tmp_path / "index.html").write_text("administrator dashboard")
     (tmp_path / "connections").mkdir()
-    (tmp_path / "connections" / "index.html").write_text("personal connections")
+    (tmp_path / "connections" / "index.html").write_text("connections")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
     response = connections_auth_client().get(path, headers=signed_connections_headers("alice"))
     assert response.status_code == 404

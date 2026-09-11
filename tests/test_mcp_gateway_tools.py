@@ -16,7 +16,7 @@ from mcp.types import CallToolResult, TextContent
 
 from mindroom import agents, constants
 from mindroom.api.config_lifecycle import ApiSnapshot
-from mindroom.api.connection_agents import _resolve_personal_agent, resolve_connection_agent, resolve_connection_user
+from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
 from mindroom.config.main import Config
 from mindroom.config.models import ToolConfigEntry
 from mindroom.config.plugin import PluginEntryConfig
@@ -78,10 +78,11 @@ def context(tmp_path: Path) -> AgentToolContext:
             },
         },
     )
-    return _resolve_personal_agent(
+    user = resolve_connection_user(
         ApiSnapshot(generation=1, runtime_paths=paths, config_data=config.model_dump(), runtime_config=config),
         "@alice:example.org",
     )
+    return resolve_connection_agent(user, "personal")
 
 
 @pytest.mark.asyncio

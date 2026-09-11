@@ -11416,7 +11416,7 @@ MindRoom acts as an MCP client for tools.
 It connects to configured servers, discovers their tool catalogs, and exposes those tools to agents.
 MindRoom does not yet consume MCP resources or prompts.
 
-To expose a personal agent's tools to external clients through one endpoint, enable the optional [Personal MCP Gateway](https://docs.mindroom.chat/deployment/personal-mcp-gateway/).
+To expose your selected agents' tools to external clients through one endpoint, enable the optional [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/).
 It reuses personal Connections accounts and exposes search, schema lookup, and invocation without placing every tool schema into initial model context.
 
 ## Configuration Overview
@@ -18871,7 +18871,7 @@ When no Matrix user ID claim is configured, strict mode only accepts a Matrix id
 That derivation can use the verified JWT email claim even when `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is not configured.
 When no Matrix user ID claim or email-to-Matrix template is configured, strict mode rejects `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` because that header is not backed by a signed identity.
 
-## Personal Connections Portal
+## Connections Portal
 
 Set `MINDROOM_CONNECTIONS_AGENT` to the name of a private agent to enable `/connections`.
 The portal lists assigned tools and groups OAuth services by agent: the selected private agent and shared agents for which the authenticated user is a credential manager or administrator.
@@ -18926,7 +18926,7 @@ Use a runtime build containing the portal before enabling the routes.
 
 Connect and disconnect requests require an HTTPS public origin and a same-origin `Origin` header matching `MINDROOM_PUBLIC_URL`, or the request base URL when unset.
 The portal API returns private, non-cacheable account status and never returns token or OAuth client configuration.
-The optional [MCP Gateway](https://docs.mindroom.chat/deployment/personal-mcp-gateway/) reuses these accounts to expose selected agents' tools to external MCP clients.
+The optional [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) reuses these accounts to expose selected agents' tools to external MCP clients.
 When enabled, the portal lets each user choose which eligible agents are exposed through every one of their MCP clients.
 Its machine endpoints use separate gateway OAuth bearer authentication; the browser consent page uses this same signed login.
 
@@ -18994,7 +18994,7 @@ Existing Supabase platform auth and standalone API-key auth remain available whe
 # MCP Gateway
 
 The optional MindRoom MCP gateway exposes your selected agents' assigned tools to external MCP clients at `/mcp`.
-It reuses the [Connections portal](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#personal-connections-portal), agent credential scopes, tool filters, and worker routing.
+It reuses the [Connections portal](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#connections-portal), agent credential scopes, tool filters, and worker routing.
 Each user connects only the services they need.
 An unconnected or unavailable integration does not prevent discovery or use of another integration.
 

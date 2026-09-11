@@ -1,4 +1,4 @@
-"""Signed personal management of external MCP client connections."""
+"""Signed user management of external MCP client connections."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from fastapi import HTTPException
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from mindroom.api.auth import require_personal_connections_user
-from mindroom.api.connection_agents import PERSONAL_RESPONSE_HEADERS
+from mindroom.api.auth import require_connections_user
+from mindroom.api.connection_agents import CONNECTIONS_HEADERS
 from mindroom.api.mcp_identity import resolve_gateway_browser_owner
 from mindroom.mcp_gateway.server import read_gateway_body
 
@@ -46,7 +46,7 @@ async def _list_clients(request: Request, runtime: _ClientRuntime, owner: Gatewa
     )
     return JSONResponse(
         {"enabled": True, "clients": grants[:100], "next_cursor": grants[99]["id"] if len(grants) > 100 else None},
-        headers=PERSONAL_RESPONSE_HEADERS,
+        headers=CONNECTIONS_HEADERS,
     )
 
 
@@ -75,16 +75,16 @@ async def _revoke_clients(request: Request, runtime: _ClientRuntime, owner: Gate
     )
     if grant_id is not None and not revoked:
         raise HTTPException(404, "Client connection not found")
-    return JSONResponse({"success": True}, headers=PERSONAL_RESPONSE_HEADERS)
+    return JSONResponse({"success": True}, headers=CONNECTIONS_HEADERS)
 
 
 async def _handle_clients(request: Request, runtime_for_request: Callable[[Request], _ClientRuntime]) -> JSONResponse:
-    user = await require_personal_connections_user(request)
+    user = await require_connections_user(request)
     try:
         runtime = runtime_for_request(request)
     except HTTPException as exc:
         if exc.status_code == 404 and request.method in {"GET", "HEAD"}:
-            return JSONResponse({"enabled": False, "clients": []}, headers=PERSONAL_RESPONSE_HEADERS)
+            return JSONResponse({"enabled": False, "clients": []}, headers=CONNECTIONS_HEADERS)
         raise
     owner = await resolve_gateway_browser_owner(request, user, runtime.provider)
     if request.method in {"GET", "HEAD"}:
@@ -102,10 +102,10 @@ def client_routes(runtime_for_request: Callable[[Request], _ClientRuntime]) -> l
             return JSONResponse(
                 {"detail": exc.detail},
                 status_code=exc.status_code,
-                headers={**(exc.headers or {}), **PERSONAL_RESPONSE_HEADERS},
+                headers={**(exc.headers or {}), **CONNECTIONS_HEADERS},
             )
         except TimeoutError:
-            return JSONResponse({"detail": "Request timed out"}, status_code=408, headers=PERSONAL_RESPONSE_HEADERS)
+            return JSONResponse({"detail": "Request timed out"}, status_code=408, headers=CONNECTIONS_HEADERS)
 
     return [
         Route("/api/connections/mcp/clients", clients, methods=["GET"]),
