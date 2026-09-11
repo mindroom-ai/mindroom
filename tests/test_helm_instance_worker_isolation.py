@@ -1403,7 +1403,11 @@ def test_runtime_chart_approved_egress_can_opt_out_of_runtime_config_overlay(tmp
     assert "MINDROOM_APPROVED_EGRESS_TOKEN" in runtime_env
 
 
-def test_runtime_chart_approved_egress_can_chain_agent_vault_parent(tmp_path: Path) -> None:
+@pytest.mark.parametrize("bypass_domains", [[], ["downloads.example.test", ".objects.example.test"]])
+def test_runtime_chart_approved_egress_can_chain_agent_vault_parent(
+    tmp_path: Path,
+    bypass_domains: list[str],
+) -> None:
     """Tokened Agent Vault traffic should chain through Squid while grants keep worker IPs."""
     values_path = tmp_path / "values.yaml"
     values_path.write_text(
@@ -1416,6 +1420,7 @@ def test_runtime_chart_approved_egress_can_chain_agent_vault_parent(tmp_path: Pa
                         "enabled": True,
                         "host": "agent-vault",
                         "port": 14322,
+                        "bypassDomains": bypass_domains,
                     },
                 },
                 "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
@@ -1501,6 +1506,134 @@ def test_runtime_chart_approved_egress_can_chain_agent_vault_parent(tmp_path: Pa
     assert "always_direct allow !egress_has_token" in conf
     assert "never_direct allow egress_has_token" in conf
     assert "name=agentvault" not in conf
+    if bypass_domains:
+        assert "acl egress_bypass_parent dstdomain -n downloads.example.test .objects.example.test" in conf
+        assert conf.index("cache_peer_access agent-vault deny egress_bypass_parent") < conf.index(
+            "cache_peer_access agent-vault allow egress_has_token",
+        )
+        assert conf.index("always_direct allow egress_bypass_parent") < conf.index(
+            "always_direct allow !egress_has_token",
+        )
+    else:
+        assert "egress_bypass_parent" not in conf
+
+
+def test_runtime_chart_parent_bypass_domains_change_proxy_rollout_checksum(tmp_path: Path) -> None:
+    """Changing bypass routing updates the mounted config and forces the proxy to restart."""
+    checksums = set()
+    configs = set()
+    for domains in ([], ["downloads.example.test"], ["downloads.example.test", ".objects.example.test"]):
+        values_path = tmp_path / "values.yaml"
+        values_path.write_text(yaml.safe_dump({"approvedEgress": {"parentProxy": {"bypassDomains": domains}}}))
+        docs = _render_chart(
+            Path("cluster/k8s/runtime"),
+            "workers.backend=kubernetes",
+            "workers.sandbox.proxyToken.value=test-token",
+            "approvedEgress.enabled=true",
+            "approvedEgress.image.tag=v0.1.0",
+            "approvedEgress.parentProxy.enabled=true",
+            values_files=(values_path,),
+        )
+        deployment = _resource(docs, "Deployment", "mindroom-demo-mindroom-runtime-egress-proxy")
+        checksum = deployment["spec"]["template"]["metadata"]["annotations"]["checksum/squid-config"]
+        config = _resource(docs, "ConfigMap", "mindroom-demo-mindroom-runtime-egress-proxy-squid-config")["data"][
+            "squid.conf"
+        ]
+        configs.add(config)
+        checksums.add(checksum)
+    assert len(configs) == 3
+    assert len(checksums) == 3
+
+
+@pytest.mark.parametrize(
+    "bypass_domains",
+    [
+        "downloads.example.test",
+        {"downloads.example.test": True},
+        False,
+        0,
+        [False],
+        [42],
+        [None],
+        [{}],
+        [[]],
+        [""],
+        ["https://downloads.example.test"],
+        ["downloads.example.test:443"],
+        ["downloads.example.test/path"],
+        ["*.example.test"],
+        [".example..test"],
+        ["-n"],
+        ["/etc/passwd"],
+        ["example.test other.test"],
+        ["example.test\nhttp_access allow all"],
+        ["example.test\tother.test"],
+        ["example.test#comment"],
+        ["example.test\\other.test"],
+        ["-example.test"],
+        ["example-.test"],
+        [f"{'a' * 64}.test"],
+        [".".join(["a" * 63] * 4)],
+    ],
+)
+def test_runtime_chart_rejects_invalid_parent_bypass_domains(tmp_path: Path, bypass_domains: object) -> None:
+    """Malformed values cannot add Squid directives or silently widen parent bypass rules."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(yaml.safe_dump({"approvedEgress": {"parentProxy": {"bypassDomains": bypass_domains}}}))
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        "approvedEgress.parentProxy.enabled=true",
+        values_files=(values_path,),
+    )
+    assert completed.returncode != 0
+    assert "approvedEgress.parentProxy.bypassDomains" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "CDN.example.test",
+        "xn--bcher-kva.example.test",
+        f"{'a' * 63}.example.test",
+        "." + ".".join(["a" * 63] * 3 + ["b" * 61]),
+    ],
+)
+def test_runtime_chart_accepts_valid_parent_bypass_domain_boundaries(domain: str) -> None:
+    """Valid DNS labels, ASCII internationalized names, and maximum lengths remain usable."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        "approvedEgress.parentProxy.enabled=true",
+        set_string_args=(f"approvedEgress.parentProxy.bypassDomains[0]={domain}",),
+    )
+    config = _resource(docs, "ConfigMap", "mindroom-demo-mindroom-runtime-egress-proxy-squid-config")
+    assert f"acl egress_bypass_parent dstdomain -n {domain}" in config["data"]["squid.conf"]
+
+
+def test_runtime_chart_parent_bypass_domains_are_inactive_without_parent(tmp_path: Path) -> None:
+    """Preconfigured bypass domains cannot enable a parent or change egress authorization."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump({"approvedEgress": {"parentProxy": {"bypassDomains": ["downloads.example.test"]}}}),
+    )
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=v0.1.0",
+        values_files=(values_path,),
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-demo-mindroom-runtime-egress-proxy")
+    assert "checksum/squid-config" not in deployment["spec"]["template"]["metadata"].get("annotations", {})
+    assert not any(doc["kind"] == "ConfigMap" and doc["metadata"]["name"].endswith("-squid-config") for doc in docs)
 
 
 @pytest.mark.parametrize("deadline", [None, 1, 1800, 2147483647])

@@ -347,6 +347,25 @@ approvedEgress:
 
 With this setup, workers mint Agent Vault tokens through the API port (`14321`), workers proxy tool egress to the approved egress Service, Squid enforces allowlists and dynamic grants using the real worker IP, and Squid forwards requests carrying `Proxy-Authorization` to Agent Vault (`login=PASSTHRU`) for credential injection.
 Tokenless traffic egresses directly from Squid after the normal policy check.
+For signed URLs or other destinations that must skip parent-proxy credential injection, set `approvedEgress.parentProxy.bypassDomains`:
+
+```yaml
+approvedEgress:
+  parentProxy:
+    enabled: true
+    bypassDomains:
+      - downloads.example.test
+      - .objects.example.test
+```
+
+This list defaults to empty and applies only when chart-managed approved egress and its parent proxy are enabled.
+An entry without a leading dot matches that exact hostname; a leading dot matches the domain and its subdomains, following [Squid domain ACL syntax](https://www.squid-cache.org/Doc/config/acl/).
+Use ASCII domain names (Punycode for internationalized names), without URL schemes, ports, paths, `*` wildcards, or whitespace; invalid entries fail chart rendering.
+Matching uses the request hostname without reverse DNS lookups.
+Bypass destinations still require the normal allowlist or dynamic grant and remain subject to the proxy's destination and port restrictions.
+Other token-bearing requests continue through the configured parent.
+Changing the list changes the chart's Squid config checksum and rolls the proxy Deployment automatically.
+
 When `agentVault.accessTool.enabled` is set, self-service vault grants also keep `agentVault.ownerEmail` as an admin on each worker vault; the Kubernetes worker init container uses that owner account to mint and attach the proxy-role agent token.
 The chart rejects the unsafe default combination of chart-managed approved egress plus Agent Vault without `approvedEgress.parentProxy`, because that would be vault-first and break dynamic grants.
 

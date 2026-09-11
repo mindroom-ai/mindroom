@@ -638,6 +638,10 @@ approvedEgress:
     enabled: false
     host: agent-vault
     port: 14322
+    # Route these destinations directly after the normal allowlist/grant check.
+    # Use an exact hostname or a leading dot for a domain and its subdomains.
+    # Useful for signed URLs that must skip parent-proxy credential injection.
+    bypassDomains: []
   resources:
     requests:
       cpu: 100m
