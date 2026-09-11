@@ -170,7 +170,7 @@ function ConnectionCard({
       <CardHeader>
         <div className="flex items-start gap-3">
           <ConnectionIcon
-            names={[service.provider, service.display_name]}
+            names={[service.provider, service.display_name, ...service.tools]}
             iconName={service.icon}
           />
           <div className="min-w-0 flex-1 space-y-2">
