@@ -227,11 +227,20 @@ app.kubernetes.io/component: runtime
 include /etc/squid/squid.conf
 
 acl egress_has_token req_header Proxy-Authorization .
+{{- with .Values.approvedEgress.parentProxy.bypassDomains }}
+acl egress_bypass_parent dstdomain -n {{ join " " . }}
+{{- end }}
 dns_defnames on
 cache_peer {{ .Values.approvedEgress.parentProxy.host }} parent {{ .Values.approvedEgress.parentProxy.port }} 0 no-query no-digest login=PASSTHRU
+{{- if .Values.approvedEgress.parentProxy.bypassDomains }}
+cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} deny egress_bypass_parent
+{{- end }}
 cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} allow egress_has_token
 cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} deny all
 nonhierarchical_direct off
+{{- if .Values.approvedEgress.parentProxy.bypassDomains }}
+always_direct allow egress_bypass_parent
+{{- end }}
 always_direct allow !egress_has_token
 never_direct allow egress_has_token
 {{- end -}}

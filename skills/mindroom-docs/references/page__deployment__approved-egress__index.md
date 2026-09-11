@@ -82,6 +82,23 @@ When `parentProxy.enabled` is true, workers use the approved egress Service for 
 Squid enforces the allowlist and dynamic grants, then forwards requests that carry `Proxy-Authorization` to the Agent Vault parent with `login=PASSTHRU` so the vault still validates the worker's proxy-role token and injects credentials.
 Tokenless traffic remains direct from Squid after the policy check.
 
+Use `approvedEgress.parentProxy.bypassDomains` for signed URLs that must skip the credential-injecting parent:
+
+```yaml
+approvedEgress:
+  parentProxy:
+    enabled: true
+    bypassDomains:
+      - downloads.example.test
+      - .objects.example.test
+```
+
+The default empty list preserves the normal parent routing.
+Plain hostnames match exactly; a leading dot includes the domain and its subdomains.
+Use ASCII domain names without schemes, ports, paths, `*` wildcards, or whitespace; matching does not perform reverse DNS lookups.
+These destinations still pass the normal allowlist or dynamic-grant checks and destination/port restrictions before Squid connects directly.
+Changing bypass domains updates the chart-managed config checksum so the proxy restarts with the new routing rules.
+
 Do not leave Agent Vault tool traffic pointed directly at the chart-managed Agent Vault MITM Service when chart-managed approved egress is enabled.
 That path either bypasses Squid, or forces Squid behind the vault where worker identity is lost.
 The chart rejects direct URLs to the chart-managed Agent Vault proxy Service, including short and cluster-local DNS names, unless `approvedEgress.parentProxy` is enabled.
