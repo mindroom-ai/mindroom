@@ -128,10 +128,15 @@ def test_catalog_lists_tools_without_browser_authentication(portal: dict[str, An
     assert tools["matrix_message"]["requires_room_context"] is True
 
 
-@pytest.mark.parametrize("with_oauth", [False, True])
+@pytest.mark.parametrize(
+    ("with_oauth", "provider_name", "expected_provider_name"),
+    [(False, None, None), (True, "  Wiki sign-in  ", "Wiki sign-in"), (True, "   ", "MCP Wiki")],
+)
 def test_catalog_uses_mcp_display_metadata_without_exposing_model_instructions(
     portal: dict[str, Any],
     with_oauth: bool,
+    provider_name: str | None,
+    expected_provider_name: str | None,
 ) -> None:
     """Tool copy and connection summaries stay separate from OAuth labels and model instructions."""
     server: dict[str, Any] = {
@@ -144,7 +149,7 @@ def test_catalog_uses_mcp_display_metadata_without_exposing_model_instructions(
         server["description"] = "Model-only instructions for handling connection errors"
         server["auth"] = {
             "type": "oauth",
-            "display_name": "Wiki sign-in",
+            "display_name": provider_name,
             "discovery": "manual",
             "authorization_url": "https://auth.example.test/authorize",
             "token_url": "https://auth.example.test/token",
@@ -162,7 +167,7 @@ def test_catalog_uses_mcp_display_metadata_without_exposing_model_instructions(
     assert agent["tools"][0]["description"] == "Search and edit team documentation"
     assert "Model-only" not in response.text
     if with_oauth:
-        assert agent["services"][0]["display_name"] == "Wiki sign-in"
+        assert agent["services"][0]["display_name"] == expected_provider_name
         assert agent["services"][0]["description"] == "Search and edit team documentation"
     else:
         assert agent["services"] == []

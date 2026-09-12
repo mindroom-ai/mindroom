@@ -125,7 +125,7 @@ def validate_mcp_agent_overrides(tool_name: str, overrides: dict[str, object]) -
 
 def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetadata:
     tool_name = mcp_tool_name(server_id)
-    provider_name = (server_config.auth.display_name or "").strip() if server_config.auth is not None else None
+    provider_name = server_config.auth.display_name if server_config.auth is not None else None
     is_oauth = server_config.auth is not None
     manager = require_mcp_server_manager()
     catalog = None

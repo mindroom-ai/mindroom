@@ -79,6 +79,12 @@ class MCPOAuthConfig(BaseModel):
     client_config_services: list[str] = Field(default_factory=list, description="Provider-specific client config")
     shared_client_config_services: list[str] = Field(default_factory=list, description="Shared client config services")
 
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        """Trim OAuth labels so blank names use the provider and catalog fallbacks."""
+        return (value.strip() or None) if value is not None else None
+
     @field_validator("provider_id")
     @classmethod
     def validate_provider_id(cls, value: str | None) -> str | None:
