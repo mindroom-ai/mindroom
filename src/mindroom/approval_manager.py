@@ -24,7 +24,7 @@ from mindroom.event_journal import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.redaction import redact_sensitive_data
-from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, valid_auto_approve_seconds
+from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, valid_auto_approve_seconds
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
@@ -255,6 +255,8 @@ class _ApprovalManager:
         approval_id: str,
         continuation_id: str,
         continuation_generation: int,
+        entity_name: str,
+        response_event_id: str | None,
         tool_call_id: str,
         tool_name: str,
         arguments: dict[str, Any],
@@ -264,7 +266,7 @@ class _ApprovalManager:
         expires_at_ns: int,
         agent_name: str | None = None,
         thread_id: str | None = None,
-        grant_operation: str | None = None,
+        grant_operation: ApprovalOperation | None = None,
     ) -> ApprovalCardReservation | None:
         """Prepare one exact frozen payload without creating delivery debt."""
         return await self._prepare_approval_card(
@@ -283,6 +285,12 @@ class _ApprovalManager:
                 "continuation_id": continuation_id,
                 "continuation_generation": continuation_generation,
                 "tool_call_id": tool_call_id,
+                "response_event_id": response_event_id,
+                **(
+                    {"approval_scope": grant_operation.scope_wire("0" * 64, entity_name, agent_name or entity_name)}
+                    if grant_operation is not None
+                    else {}
+                ),
             },
         )
 
@@ -374,7 +382,7 @@ class _ApprovalManager:
         approver_user_id: str,
         expires_at_ns: int,
         target_fields: dict[str, object],
-        grant_operation: str | None = None,
+        grant_operation: ApprovalOperation | None = None,
     ) -> ApprovalCardReservation | None:
         """Prepare one shared pending-card payload for a typed exact-call target."""
         if self.prepare_event is None:
@@ -408,12 +416,15 @@ class _ApprovalManager:
         else:
             grant_operation = None
         content.update(target_fields)
+        if grant_operation is None:
+            content.pop("approval_scope", None)
         prepared = await self.prepare_event(room_id, thread_id, content)
         if prepared is None:
             return None
         if prepared.get("approvable", True) is not True:
             grant_operation = None
             prepared.pop("auto_approve_options", None)
+            prepared.pop("approval_scope", None)
         return ApprovalCardReservation(
             delivery_id=approval_id,
             tool_call_id=tool_call_id,
@@ -500,7 +511,9 @@ class _ApprovalManager:
             store=self.cards,
             send=self.send_delivery,
             event_type=_EVENT_TYPE,
-            resend_after_reconciliation_miss=False,
+            resend_after_reconciliation_miss=lambda delivery: (
+                delivery.payload.get("status") == "approved" and delivery.payload.get("approvable") is False
+            ),
             sending_device_id=None if self.sending_device is None else self.sending_device(),
             resolve_delivered=self.resolve_delivery,
         )
@@ -1090,6 +1103,8 @@ class _ApprovalManager:
             result["arguments_truncated"] = True
         if reason:
             result["resolution_reason"] = reason
+        if status == "approved":
+            result["approval_provenance"] = {"kind": "once"}
         return result
 
     @staticmethod

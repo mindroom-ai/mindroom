@@ -148,7 +148,7 @@ def reserve_deliveries(
     ):
         return False
     for card in cards:
-        approval_grants.reserve_identity(
+        scoped_card = approval_grants.reserve_identity(
             transaction,
             card_principal_id,
             continuation_principal_id,
@@ -156,7 +156,7 @@ def reserve_deliveries(
             card,
             membership_epoch,
         )
-        if approval_grants.apply_active(transaction, card_principal_id, delivery_id=card.delivery_id):
+        if approval_grants.apply_active(transaction, card_principal_id, card=scoped_card):
             continue
         approval_card_state.reserve_delivery(
             transaction,
@@ -165,7 +165,7 @@ def reserve_deliveries(
             thread_id=continuation.thread_id,
             membership_epoch=membership_epoch,
             identity=(continuation_id, expected_generation, card.tool_call_id),
-            card=card,
+            card=scoped_card,
         )
     return (
         approval_continuations.activate(

@@ -77,9 +77,11 @@ async def _offload_oversized_full_arguments(
     room_id: str,
     send_content: dict[str, Any],
 ) -> dict[str, Any]:
-    """Move oversized arguments to a sidecar without weakening approval integrity."""
+    """Keep large evidence outside timed receipts, which gain decision metadata later."""
     full_arguments = send_content.get("full_arguments")
-    if not isinstance(full_arguments, dict) or content_fits_normal_event(send_content):
+    if not isinstance(full_arguments, dict) or (
+        not send_content.get("auto_approve_options") and content_fits_normal_event(send_content)
+    ):
         return send_content
     offloaded = {key: value for key, value in send_content.items() if key != "full_arguments"}
     room_encrypted = await resolve_room_encryption_for_delivery(

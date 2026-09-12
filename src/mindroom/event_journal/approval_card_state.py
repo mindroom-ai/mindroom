@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.tool_approval_grants import ApprovalOperation
+
     from .backend import Row, Transaction
 
 from . import outbox
@@ -38,7 +40,7 @@ class ApprovalCardReservation:
     tool_call_id: str
     event_type: str
     payload: Mapping[str, object]
-    grant_operation: str | None = None
+    grant_operation: ApprovalOperation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,8 +124,19 @@ def stored_resolution(
             status=decision,
             reason=reason or TIMEOUT_REASON,
         )
+    original = decode_object_payload(row["payload_json"], description=description)
+    retained_fields = {
+        "approval_scope",
+        "response_event_id",
+        "continuation_id",
+        "continuation_generation",
+        "tool_call_id",
+        "full_arguments_file",
+        "full_arguments_url",
+        "full_arguments_info",
+    }
     return _resolved_content(
-        resolution,
+        {**resolution, **{key: value for key, value in original.items() if key in retained_fields}},
         requested_status=requested_status,
         decision=decision,
         reason=reason,
@@ -134,9 +147,6 @@ def _compact_terminal_content(content: Mapping[str, Any]) -> dict[str, Any]:
     """Keep previews while dropping pending review data that Matrix edits would duplicate."""
     pending_fields = {
         "full_arguments",
-        "full_arguments_file",
-        "full_arguments_url",
-        "full_arguments_info",
         "auto_approve_options",
     }
     return {key: value for key, value in content.items() if key not in pending_fields}
@@ -156,6 +166,7 @@ def _resolved_content(
     stored["status"] = decision
     if decision != "approved":
         stored.pop("auto_approval", None)
+        stored.pop("approval_provenance", None)
     stored["resolution_reason"] = reason
     stored["resolved_by"] = None
     body = stored.get("body")

@@ -31,7 +31,7 @@ from mindroom.event_journal import (
 from mindroom.matrix.large_messages import content_fits_normal_event
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
-from mindroom.tool_approval_grants import grant_operation
+from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
 from tests.conftest import test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 
@@ -289,7 +289,9 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                 assert (await _approve(manager, "$origin-0-0")).consumed
                 sent.clear()
             else:
-                assert sent == []
+                assert len(sent) == 1
+                assert sent[0].payload["status"] == "approved"
+                assert sent[0].payload["approvable"] is False
                 stored = await responder.approval_continuation(name)
                 assert stored is not None
                 assert stored.state == "ready"
@@ -341,11 +343,11 @@ async def test_grant_batch_terminal_edits_fit_after_large_inline_argument_cards(
 
 
 @pytest.mark.asyncio
-async def test_subsequent_granted_call_has_no_new_matrix_card(
+async def test_subsequent_granted_call_publishes_exact_terminal_receipt(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """A future matching call executes without publishing another approval card."""
+    """Automatic calls retain exact reviewable history without another pending card."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     sent = []
@@ -360,7 +362,23 @@ async def test_subsequent_granted_call_has_no_new_matrix_card(
         await _approve(manager, first)
         sent.clear()
         await _card(journal, manager, "subsequent")
-        assert sent == []
+        assert len(sent) == 1
+        receipt = sent[0]
+        assert receipt.stage is DeliveryStage.INITIAL
+        assert receipt.payload["status"] == "approved"
+        assert receipt.payload["approvable"] is False
+        assert receipt.payload["arguments"] == {"command": "subsequent"}
+        assert receipt.payload["approval_provenance"]["grant_card_event_id"] == first
+        assert receipt.payload["response_event_id"] == "$waiting-subsequent"
+        assert "auto_approval" not in receipt.payload
+        assert "auto_approve_options" not in receipt.payload
+        assert (
+            await journal.principal("router@shared").pending_approval_card(
+                room_id="!room:test",
+                card_event_id="$card-subsequent",
+            )
+            is None
+        )
         continuation = await journal.principal("agent@code").approval_continuation("subsequent")
         assert continuation is not None
         assert continuation.state == "ready"
@@ -375,6 +393,124 @@ async def test_subsequent_granted_call_has_no_new_matrix_card(
         assert audit["continuation_id"] == "subsequent"
         assert audit["tool_call_id"] == "call-subsequent"
         assert audit["grant_id"]
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_receipts_preserve_scope_and_original_timed_decision(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Grouping uses journal scope, while each call retains its exact decision provenance."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    sent: list[MatrixDelivery] = []
+
+    async def send(delivery: MatrixDelivery) -> str:
+        sent.append(delivery)
+        return "$" + delivery.delivery_id
+
+    manager.send_delivery = send
+    try:
+        first = await _card(journal, manager, "first")
+        await _card(journal, manager, "sibling")
+        await _card(journal, manager, "other", requester="@other:test")
+        originals = {delivery.delivery_id: delivery.payload for delivery in sent}
+        first_scope = originals["card-first"]["approval_scope"]
+        assert first_scope["id"] == originals["card-sibling"]["approval_scope"]["id"]
+        assert first_scope["id"] != originals["card-other"]["approval_scope"]["id"]
+        assert first_scope["operation"] == {"tool_name": "shell"}
+        assert first_scope["entity_name"] == "code"
+        assert originals["card-first"]["response_event_id"] == "$waiting-first"
+        await _approve(manager, first)
+        await _card(journal, manager, "later")
+        origin = next(
+            delivery.payload
+            for delivery in sent
+            if delivery.delivery_id == "card-first" and delivery.stage is DeliveryStage.FINAL
+        )
+        sibling = next(
+            delivery.payload
+            for delivery in sent
+            if delivery.delivery_id == "card-sibling" and delivery.stage is DeliveryStage.FINAL
+        )
+        later = next(delivery.payload for delivery in sent if delivery.delivery_id == "card-later")
+        provenance = origin["approval_provenance"]
+        assert provenance["kind"] == "timed_grant"
+        assert provenance["grant_card_event_id"] == first
+        assert provenance["granted_by"] == "@human:test"
+        assert provenance["duration_seconds"] == 600
+        assert provenance["expires_at"] == origin["auto_approval"]["expires_at"]
+        assert sibling["approval_provenance"] == provenance
+        assert later["approval_provenance"] == provenance
+        assert origin["approval_scope"] == first_scope
+        assert origin["tool_call_id"] == "call-first"
+        assert origin["response_event_id"] == "$waiting-first"
+        assert "auto_approval" not in sibling
+        assert "auto_approval" not in later
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_device", ["test-device", "replacement-device"])
+async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    recovery_device: str,
+) -> None:
+    """A failed receipt send survives recovery and leaves an approval-only tombstone."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    manager.sending_device = lambda: "test-device"
+    delivered: list[MatrixDelivery] = []
+    try:
+        first = await _card(journal, manager, "first")
+        await _approve(manager, first)
+
+        async def fail_send(_delivery: MatrixDelivery) -> str:
+            msg = "Matrix is temporarily unavailable"
+            raise TimeoutError(msg)
+
+        manager.send_delivery = fail_send
+        await _card(journal, manager, "deferred", command="original command")
+        await manager.cards.maintain_approval_grants()
+        pending = await manager.cards.load_matrix_delivery(delivery_id="card-deferred", stage=DeliveryStage.INITIAL)
+        assert pending is not None
+        assert pending.payload["arguments"] == {"command": "original command"}
+        assert pending.acknowledged_event_id is None
+    finally:
+        await manager.shutdown()
+    manager = _manager(journal, tmp_path)
+
+    async def recover_send(delivery: MatrixDelivery) -> str:
+        delivered.append(delivery)
+        return "$receipt-deferred"
+
+    manager.send_delivery = recover_send
+    manager.sending_device = lambda: recovery_device
+
+    async def no_receipt_in_history(_delivery: MatrixDelivery) -> str | None:
+        return None
+
+    manager.resolve_delivery = no_receipt_in_history
+    try:
+        await manager.recover_cards_on_startup()
+        assert len(delivered) == 1
+        assert delivered[0].payload["arguments"] == {"command": "original command"}
+        assert (
+            await manager.cards.load_matrix_delivery(delivery_id="card-deferred", stage=DeliveryStage.INITIAL) is None
+        )
+        assert await manager.cards.is_terminal_approval_card(
+            room_id="!room:test",
+            card_event_id="$receipt-deferred",
+        )
+        await manager.recover_cards_on_startup()
+        assert len(delivered) == 1
+        continuation = await journal.principal("agent@code").approval_continuation("deferred")
+        assert continuation is not None
+        assert continuation.calls[0].decision.value == "approved"
     finally:
         await manager.shutdown()
 
@@ -508,6 +644,13 @@ def test_mcp_dispatch_identity_includes_remote_operation_and_binding() -> None:
         mcp_servers={"files": MCPServerConfig(transport="streamable-http", url="https://files.example/mcp")},
     )
     read = grant_operation(config, "files_call_tool", {"tool_name": "read", "arguments": {"path": "/one"}})
+    assert read is not None
+    assert read.scope_wire("scope", "team", "code") == {
+        "id": "scope",
+        "entity_name": "team",
+        "invoking_agent": "code",
+        "operation": {"tool_name": "files_call_tool", "mcp_server_id": "files", "mcp_tool_name": "read"},
+    }
     assert read == grant_operation(config, "files_call_tool", {"tool_name": "read", "arguments": {"path": "/two"}})
     assert read != grant_operation(config, "files_call_tool", {"tool_name": "delete", "arguments": {"path": "/one"}})
     assert grant_operation(config, "files_call_tool", {"arguments": {}}) is None
@@ -872,6 +1015,8 @@ async def _card(
         approval_id="card-" + name,
         continuation_id=name,
         continuation_generation=0,
+        entity_name=agent,
+        response_event_id=continuation.response_event_id,
         tool_call_id="call-" + name,
         tool_name="shell",
         arguments={"command": name if command is None else command} if approvable else {"command": "x" * 300000},
@@ -881,7 +1026,7 @@ async def _card(
         expires_at_ns=9_000_000_000_000_000_000,
         agent_name=agent,
         thread_id=thread,
-        grant_operation=operation,
+        grant_operation=ApprovalOperation(operation, "shell") if operation is not None else None,
     )
     assert card is not None
     assert await manager.reserve_and_publish(

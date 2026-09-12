@@ -263,6 +263,8 @@ class ApprovalResponseCoordinator:
                 approval_id=f"{continuation.approval_id}-{continuation.generation}-{index}",
                 continuation_id=continuation.approval_id,
                 continuation_generation=continuation.generation,
+                entity_name=continuation.entity_name,
+                response_event_id=continuation.response_event_id,
                 tool_call_id=call.tool_call_id,
                 tool_name=call.tool_name,
                 arguments=deepcopy(dict(tool.tool_args or {})),
