@@ -293,6 +293,7 @@ Shared failure preparation fences the observed continuation and settles cards, a
 Receipt publication uses the existing Matrix outbox, including restart reconciliation; after a device change, a missing terminal receipt may be republished because it offers no action.
 Clients deduplicate those receipts by their exact approval and tool-call identity, scoped to the event sender.
 Acknowledged terminal receipts retire their payloads while retaining the existing grant audit and approval tombstone; unacknowledged receipt debt remains recoverable.
+Replies to duplicate receipt events are verified against the router's exact Matrix event and retained grant audit, then remembered as terminal aliases even after payload retirement.
 Approval creation and source-redaction admission serialize on the existing room-membership row, so creation cannot acquire a source that deletion already settled.
 Recovery can finish a failing approval whose INITIAL was already retired only after card expiration; `event_journal/legacy_approval_recovery.py` proves no FINAL debt and exact tombstones for its acknowledged response and every owned source inside the current owner's transaction.
 That cleanup settles journal ownership without sending replacement text or recording tool success.

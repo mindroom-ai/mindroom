@@ -807,6 +807,31 @@ def retire(
     return True
 
 
+def remember_terminal_alias(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    card_event_id: str,
+    delivery_id: str,
+) -> None:
+    """Remember a transport-verified alias only when retained grant audit proves it terminal."""
+    transaction.execute(
+        """
+        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
+        SELECT audit.principal_id, audit.room_id, ? FROM approval_grant_cards AS audit
+        WHERE audit.principal_id = ? AND audit.room_id = ? AND audit.delivery_id = ?
+          AND audit.grant_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = audit.principal_id AND cards.delivery_id = audit.delivery_id
+          )
+        ON CONFLICT (principal_id, card_event_id) DO NOTHING
+        """,
+        (card_event_id, principal_id, room_id, delivery_id),
+    )
+
+
 def is_terminal_card(
     transaction: Transaction,
     principal_id: str,

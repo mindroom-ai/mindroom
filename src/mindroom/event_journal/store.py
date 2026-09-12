@@ -1283,6 +1283,18 @@ class PrincipalStore:
             ),
         )
 
+    async def remember_terminal_approval_alias(self, *, room_id: str, card_event_id: str, delivery_id: str) -> None:
+        """Retain a transport-verified receipt alias without changing its decision."""
+        await self._backend.write(
+            lambda transaction: approvals.remember_terminal_alias(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                card_event_id=card_event_id,
+                delivery_id=delivery_id,
+            ),
+        )
+
     async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool:
         """Return whether one delivered approval action is durably terminal."""
         return await self._backend.read(

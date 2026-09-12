@@ -14,7 +14,7 @@ from mindroom.approval_inbound import parse_approval_response_event
 from mindroom.approval_manager import ApprovalActionResult, ApprovalManager
 from mindroom.approval_receipt import build_approval_receipt
 from mindroom.approval_response import ApprovalResponseCoordinator
-from mindroom.approval_transport import _approval_delivery_content
+from mindroom.approval_transport import ApprovalMatrixTransport, _approval_delivery_content
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
@@ -450,6 +450,98 @@ async def test_automatic_receipt_reply_is_consumed_before_maintenance(
         assert continuation.calls[0].decision.value == "approved"
         await owner.maintain_approval_grants()
         assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=receipt_event_id)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retire_before_reply", [False, True])
+async def test_republished_receipt_aliases_remain_terminal(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retire_before_reply: bool,
+) -> None:
+    """Both physical copies remain approval actions after a changed-device resend."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
+    manager.sending_device = lambda: "original-device"
+    owner = journal.principal("router@shared")
+    try:
+        first = await _card(journal, manager, "first")
+        await _approve(manager, first)
+
+        async def lose_acknowledgement(_delivery: MatrixDelivery) -> str:
+            msg = "Matrix accepted the receipt but its response was lost"
+            raise TimeoutError(msg)
+
+        manager.send_delivery = lose_acknowledgement
+        old_event_id = await _card(journal, manager, "subsequent")
+        manager.sending_device = lambda: "replacement-device"
+        manager.resolve_delivery = AsyncMock(return_value=None)
+        manager.send_delivery = AsyncMock(return_value="$replacement-receipt")
+        assert (
+            await manager._worker().flush(delivery_id="card-subsequent", stage=DeliveryStage.INITIAL)
+            == "$replacement-receipt"
+        )
+        if retire_before_reply:
+            await owner.maintain_approval_grants()
+
+        async def get_event(room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+            response = nio.RoomGetEventResponse()
+            response.event = nio.UnknownEvent.from_dict(
+                {
+                    "event_id": event_id,
+                    "room_id": room_id,
+                    "sender": "@other:test" if event_id == "$untrusted-receipt" else "@router:test",
+                    "origin_server_ts": 1000,
+                    "type": "io.mindroom.tool_approval",
+                    "content": {
+                        "approval_id": "unknown" if event_id == "$unknown-delivery" else "card-subsequent",
+                    },
+                },
+            )
+            return response
+
+        router = MagicMock(
+            agent_name="router",
+            running=True,
+            approval_room_ids=frozenset({"!room:test"}),
+            client=MagicMock(user_id="@router:test", room_get_event=AsyncMock(side_effect=get_event)),
+        )
+        transport = ApprovalMatrixTransport(bot_provider=lambda name: router if name == "router" else None)
+        manager.resolve_action_delivery = transport.resolve_approval_action_delivery
+        for event_id in ("$untrusted-receipt", "$unknown-delivery"):
+            result = await manager.handle_card_response(
+                room_id="!room:test",
+                sender_id="@human:test",
+                card_event_id=event_id,
+                status="denied",
+                reason="Do not run this.",
+                authorize_responder=lambda _agent: True,
+            )
+            assert result.consumed is False
+            assert not await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=event_id)
+        for event_id in (old_event_id, "$replacement-receipt"):
+            before_consume = AsyncMock()
+            result = await manager.handle_card_response(
+                room_id="!room:test",
+                sender_id="@human:test",
+                card_event_id=event_id,
+                status="denied",
+                reason="Do not run this.",
+                authorize_responder=lambda _agent: True,
+                before_consume=before_consume,
+            )
+            assert result.consumed is True
+            before_consume.assert_awaited_once()
+        await owner.maintain_approval_grants()
+        assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=old_event_id)
+        assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id="$replacement-receipt")
+        continuation = await journal.principal("agent@code").approval_continuation("subsequent")
+        assert continuation is not None
+        assert continuation.calls[0].decision.value == "approved"
     finally:
         await manager.shutdown()
 

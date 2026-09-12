@@ -739,26 +739,27 @@ class ApprovalManager:
             delivery_id=delivery_id,
             stage=DeliveryStage.INITIAL,
         )
-        if (
-            delivery is None
-            or delivery.room_id != room_id
+        if delivery is not None and (
+            delivery.room_id != room_id
             or delivery.event_type != _EVENT_TYPE
             or delivery.payload.get("approval_id") != delivery_id
-            or delivery.acknowledged_event_id not in {None, card_event_id}
         ):
             return None
-        acknowledgement = await cards.acknowledge_matrix_delivery(
-            delivery_id=delivery_id,
-            stage=DeliveryStage.INITIAL,
-            event_id=card_event_id,
-            delivered_projections=(),
-        )
-        if acknowledgement.settled_event_id != card_event_id:
-            return None
-        return await cards.pending_approval_card(
+        if delivery is not None and delivery.acknowledged_event_id in {None, card_event_id}:
+            acknowledgement = await cards.acknowledge_matrix_delivery(
+                delivery_id=delivery_id,
+                stage=DeliveryStage.INITIAL,
+                event_id=card_event_id,
+                delivered_projections=(),
+            )
+            if acknowledgement.settled_event_id == card_event_id:
+                return await cards.pending_approval_card(room_id=room_id, card_event_id=card_event_id)
+        await cards.remember_terminal_approval_alias(
             room_id=room_id,
             card_event_id=card_event_id,
+            delivery_id=delivery_id,
         )
+        return None
 
     async def _record_and_flush_resolution(
         self,

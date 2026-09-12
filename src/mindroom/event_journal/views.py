@@ -521,6 +521,14 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
     ) -> RecordedApprovalDecision: ...
 
     async def retire_approval_card(self, *, delivery_id: str, card_event_id: str) -> bool: ...  # noqa: D102
+    async def remember_terminal_approval_alias(  # noqa: D102
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+        delivery_id: str,
+    ) -> None: ...
+
     async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool: ...  # noqa: D102
     async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> StoredApprovalCard | None: ...  # noqa: D102
 
