@@ -13518,6 +13518,9 @@ Membership mutation methods return a boolean success result and surface transpor
 `get_room_state_event` returns `(True, content)` for a successful object response, `(True, None)` when Matrix confirms the event is missing, and `(False, None)` for other Matrix errors or malformed non-object content.
 Transport exceptions from both read methods propagate to the caller.
 Rooms created via `create_room` are retained for the creating bot across room cleanup and restarts, the same way rooms it is invited to are kept.
+When reconciling an existing plugin-owned room, call the synchronous `retain_room(room_id)` after verifying the bound bot is still a member.
+It restores the same local retention record used by the bot's membership lifecycle, changes no Matrix membership, and raises `OSError` if persistence fails.
+Retention applies only to managed entities with invite acceptance enabled; it does not override disabled invitation policy.
 
 ### Transport objects
 
@@ -17512,7 +17515,9 @@ After a device change, standalone deliveries that reply outside a journal turn r
 
 On startup, MindRoom detects orphaned bot memberships left over from a previous configuration.
 When an agent is removed from `config.yaml`, its Matrix bot account may still be a member of rooms it previously joined.
-The cleanup process leaves those rooms safely without ejecting currently configured entities from their required rooms.
+The global sweep removes only persisted bot identities that no longer belong to a configured router, agent, or team.
+Current entities reconcile their own configured and retained rooms after startup hooks and invitation handling, so the early global sweep cannot remove them before that reconciliation.
+An entity that cannot start keeps its memberships until its own lifecycle recovers.
 This runs automatically — no manual intervention is needed.
 
 ## Identity Management

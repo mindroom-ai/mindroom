@@ -113,7 +113,9 @@ def remember_invited_room(path: Path, room_id: str) -> None:
     if room_id in room_ids:
         return
     room_ids.add(room_id)
-    save_invited_rooms(path, room_ids)
+    if not save_invited_rooms(path, room_ids):
+        msg = f"Failed to retain invited room {room_id}"
+        raise OSError(msg)
 
 
 def _invite_acceptance_policy(config: Config, agent_name: str) -> InviteAcceptancePolicy | None:

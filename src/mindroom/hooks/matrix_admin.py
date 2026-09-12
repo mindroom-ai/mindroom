@@ -58,7 +58,7 @@ class _BoundHookMatrixAdmin:
             power_users=power_user_ids,
         )
         if room_id is not None:
-            self._persist_created_room_for_creator(room_id)
+            self.retain_room(room_id)
         return room_id
 
     async def invite_user(self, room_id: str, user_id: str) -> bool:
@@ -141,12 +141,11 @@ class _BoundHookMatrixAdmin:
         )
         return isinstance(response, nio.RoomPutStateResponse)
 
-    def _persist_created_room_for_creator(self, room_id: str) -> None:
-        """Record a room the bound managed entity created so cleanup preserves it.
+    def retain_room(self, room_id: str) -> None:
+        """Retain a plugin-owned room for the bound managed entity across cleanup.
 
-        The creator is never invited into its own room, so the invite-accept
-        lifecycle that records invited rooms never fires for it. Persist here so
-        ``leave_unconfigured_rooms`` keeps plugin-created rooms across restarts.
+        Plugins reconciling existing rooms can restore this local ownership
+        record without creating a room or changing Matrix membership.
         """
         if self.config is None:
             return

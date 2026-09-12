@@ -583,6 +583,9 @@ Membership mutation methods return a boolean success result and surface transpor
 `get_room_state_event` returns `(True, content)` for a successful object response, `(True, None)` when Matrix confirms the event is missing, and `(False, None)` for other Matrix errors or malformed non-object content.
 Transport exceptions from both read methods propagate to the caller.
 Rooms created via `create_room` are retained for the creating bot across room cleanup and restarts, the same way rooms it is invited to are kept.
+When reconciling an existing plugin-owned room, call the synchronous `retain_room(room_id)` after verifying the bound bot is still a member.
+It restores the same local retention record used by the bot's membership lifecycle, changes no Matrix membership, and raises `OSError` if persistence fails.
+Retention applies only to managed entities with invite acceptance enabled; it does not override disabled invitation policy.
 
 ### Transport objects
 
