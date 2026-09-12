@@ -29,6 +29,7 @@ from mindroom.matrix.client_room_admin import (
     join_room,
     leave_room,
 )
+from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, AgentMatrixUser, login_agent_user
 from mindroom.matrix_identifiers import (
@@ -92,6 +93,7 @@ async def _configure_managed_room_access(
     room_policy: EffectiveRoomPolicy,
     *,
     context: str,
+    snapshot: RoomStateSnapshot | None = None,
 ) -> bool:
     """Apply configured room joinability/discoverability policy for one managed room."""
     target_join_rule = room_policy.join_policy
@@ -107,7 +109,7 @@ async def _configure_managed_room_access(
         context=context,
     )
 
-    join_rule_ok = await ensure_room_join_rule(client, room_id, target_join_rule)
+    join_rule_ok = await ensure_room_join_rule(client, room_id, target_join_rule, snapshot=snapshot)
     visibility_ok = await ensure_room_directory_visibility(client, room_id, target_directory_visibility)
     if join_rule_ok and visibility_ok:
         return True
@@ -196,21 +198,23 @@ async def _reconcile_joined_existing_room(
     explicit_room_name: str | None,
     room_policy: EffectiveRoomPolicy,
     admin_user_ids: Sequence[str] = (),
+    snapshot: RoomStateSnapshot | None = None,
 ) -> None:
     """Reconcile name, topic, power levels, encryption, and access policy for one joined managed room."""
     topic_room_name = explicit_room_name or _room_key_to_name(room_key)
     if explicit_room_name is not None:
-        await ensure_room_name(client, room_id, explicit_room_name)
-    await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths)
-    await ensure_managed_room_power_levels(client, room_id, admin_user_ids)
+        await ensure_room_name(client, room_id, explicit_room_name, snapshot=snapshot)
+    await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths, snapshot=snapshot)
+    await ensure_managed_room_power_levels(client, room_id, admin_user_ids, snapshot=snapshot)
     if _managed_room_should_be_encrypted(room_policy):
-        await ensure_room_encryption_enabled(client, room_id)
+        await ensure_room_encryption_enabled(client, room_id, snapshot=snapshot)
     await _configure_managed_room_access(
         client=client,
         room_key=room_key,
         room_id=room_id,
         room_policy=room_policy,
         context="existing_room_reconciliation",
+        snapshot=snapshot,
     )
 
 
@@ -223,8 +227,6 @@ async def _ensure_room_exists(
     room_name: str | None = None,
     power_users: list[str] | None = None,
     admin_user_ids: Sequence[str] = (),
-    *,
-    room_locks: dict[str, asyncio.Lock],
 ) -> str | None:
     """Ensure a room exists, creating it if necessary.
 
@@ -237,7 +239,6 @@ async def _ensure_room_exists(
         power_users: List of user IDs to grant power levels to
         room_policy: Resolved membership room policy
         admin_user_ids: Concrete Matrix user IDs granted room admin power (100)
-        room_locks: Pass-local locks serializing aliases that resolve to the same room
 
     Returns:
         Room ID if room exists or was created, None on failure
@@ -254,7 +255,6 @@ async def _ensure_room_exists(
     response = await client.room_resolve_alias(full_alias)
     if isinstance(response, nio.RoomResolveAliasResponse):
         room_id = str(response.room_id)
-        explicit_room_name = room_name
         logger.debug("managed_room_alias_resolved", room_key=room_key, room_alias=full_alias, room_id=room_id)
 
         # Update our state if needed
@@ -264,37 +264,6 @@ async def _ensure_room_exists(
             _add_room(room_key, room_id, full_alias, room_name, runtime_paths)
             logger.info("managed_room_state_updated", room_key=room_key, room_id=room_id, room_alias=full_alias)
 
-        # Room existence and room membership are separate concerns. Existing
-        # private rooms may be managed outside MindRoom, so don't force a join
-        # attempt here just to record that the alias resolves.
-        joined_room = room_id in client.rooms
-        if not joined_room:
-            joined_room_ids = await get_joined_rooms(client)
-            joined_room = joined_room_ids is not None and room_id in joined_room_ids
-
-        if joined_room:
-            async with room_locks.setdefault(room_id, asyncio.Lock()):
-                await _reconcile_joined_existing_room(
-                    client,
-                    room_key,
-                    room_id,
-                    config,
-                    runtime_paths,
-                    explicit_room_name=explicit_room_name,
-                    room_policy=room_policy,
-                    admin_user_ids=admin_user_ids,
-                )
-        else:
-            logger.warning(
-                "Managed room exists but service account is not joined; skipping existing-room reconciliation",
-                room_key=room_key,
-                room_id=room_id,
-                room_alias=full_alias,
-                hint=(
-                    "If this room should be router-managed, invite the router or make the room joinable. "
-                    "If it is externally managed, this warning is expected."
-                ),
-            )
         return room_id
 
     # Room alias doesn't exist on server, so we can create it
@@ -353,7 +322,7 @@ async def ensure_all_rooms_exist(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> dict[str, str]:
-    """Ensure all configured rooms exist and invite user account.
+    """Resolve or create configured rooms before joining and reconciling them.
 
     Args:
         client: Matrix client to use for room creation
@@ -370,7 +339,6 @@ async def ensure_all_rooms_exist(
     all_rooms = config.get_all_configured_rooms()
 
     pending_rooms = iter(room_key for room_key in all_rooms if not room_key.startswith("!"))
-    room_locks: dict[str, asyncio.Lock] = {}
 
     async def reconcile_rooms() -> None:
         for room_key in pending_rooms:
@@ -389,7 +357,6 @@ async def ensure_all_rooms_exist(
                     power_users=power_users,
                     room_policy=room_policy,
                     admin_user_ids=admin_user_ids,
-                    room_locks=room_locks,
                 )
             except RuntimeError:
                 logger.exception(
@@ -407,6 +374,54 @@ async def ensure_all_rooms_exist(
             workers.create_task(reconcile_rooms())
 
     return room_ids
+
+
+async def reconcile_managed_rooms(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    room_ids: dict[str, str],
+) -> dict[str, RoomStateSnapshot]:
+    """Apply managed policy after joining, retaining fresh state for invitations."""
+    snapshots: dict[str, RoomStateSnapshot] = {}
+    pending = iter(room_ids.items())
+    locks: dict[str, asyncio.Lock] = {}
+
+    async def reconcile_rooms() -> None:
+        for room_key, room_id in pending:
+            try:
+                async with locks.setdefault(room_id, asyncio.Lock()):
+                    snapshot = await read_room_state(client, room_id)
+                    if snapshot is None:
+                        continue
+                    membership = snapshot.events.get(("m.room.member", client.user_id), {})
+                    if membership.get("membership") != "join":
+                        logger.warning("Managed room is not joined; skipping policy", room_id=room_id)
+                        continue
+                    policy = resolve_room_policy(config, room_key)
+                    room_config = config.rooms.get(room_key)
+                    name = (
+                        (room_config.display_name or _room_key_to_name(room_key)) if room_config is not None else None
+                    )
+                    await _reconcile_joined_existing_room(
+                        client,
+                        room_key,
+                        room_id,
+                        config,
+                        runtime_paths,
+                        explicit_room_name=name,
+                        room_policy=policy,
+                        admin_user_ids=_room_admin_user_ids(policy),
+                        snapshot=snapshot,
+                    )
+                    snapshots[room_id] = snapshot
+            except RuntimeError:
+                logger.exception("Failed managed room policy; continuing with remaining rooms", room_id=room_id)
+
+    async with asyncio.TaskGroup() as workers:
+        for _ in range(min(4, len(room_ids))):
+            workers.create_task(reconcile_rooms())
+    return snapshots
 
 
 async def _ensure_root_space_exists(
@@ -469,20 +484,25 @@ async def ensure_root_space(
         return None
 
     root_space_id = await _ensure_root_space_exists(client, config, runtime_paths)
-    if root_space_id is None:
+    snapshot = await read_room_state(client, root_space_id) if root_space_id is not None else None
+    if root_space_id is None or snapshot is None:
         return None
-
-    if not await ensure_room_name(client, root_space_id, config.matrix_space.name):
+    if not await ensure_room_name(client, root_space_id, config.matrix_space.name, snapshot=snapshot):
         logger.warning("Failed to set root space name; skipping child linking", space_id=root_space_id)
         return None
 
-    if admin_user_ids and not await ensure_room_admin_power_levels(client, root_space_id, admin_user_ids):
+    if admin_user_ids and not await ensure_room_admin_power_levels(
+        client,
+        root_space_id,
+        admin_user_ids,
+        snapshot=snapshot,
+    ):
         logger.warning("Failed to grant root space admin power; skipping child linking", space_id=root_space_id)
         return None
 
     server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
     for room_id in dict.fromkeys(room_ids.values()):
-        if not await add_room_to_space(client, root_space_id, room_id, server_name):
+        if not await add_room_to_space(client, root_space_id, room_id, server_name, snapshot=snapshot):
             logger.warning(
                 "Failed to link room to root space; aborting reconciliation",
                 space_id=root_space_id,
@@ -537,10 +557,13 @@ async def ensure_user_in_rooms(
     )
     try:
         logger.info("matrix_user_logged_in", user_id=user_client.user_id)
-
+        joined_room_ids = set(await get_joined_rooms(user_client) or ())
         for room_key, room_id in room_ids.items():
+            if room_id in joined_room_ids:
+                continue
             join_outcome = await join_room(user_client, room_id)
             if join_outcome is RoomJoinOutcome.JOINED:
+                joined_room_ids.add(room_id)
                 logger.info("matrix_user_joined_room", user_id=user_client.user_id, room_id=room_id, room_key=room_key)
             else:
                 logger.warning(

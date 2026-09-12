@@ -39,10 +39,10 @@ main() entry
 │ ─────────────────│
 │ 1. try_start()   │
 │    each bot      │
-│ 2. Setup rooms   │
-│    & memberships │
-│ 3. Create sync   │
+│ 2. Create sync   │
 │    tasks         │
+│ 3. Background    │
+│    room setup    │
 └────────┬─────────┘
          │
          ▼
@@ -69,9 +69,18 @@ main() entry
 **Key details:**
 
 - **Entity order**: Router first, then agents, then teams
-- **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents, teams, and users, then bots join
+- **Room setup** (`_setup_rooms_and_memberships`): Resolve/create rooms and the root Space, join the router, reconcile managed policy once, then invite and join the remaining identities
 - **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; `matrix_sync.mode: classic` uses Classic `/v3/sync`, while `sliding` uses MSC4186 Simplified Sliding Sync on a homeserver advertising `org.matrix.simplified_msc3575`
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
+
+Room administration uses a fresh, pass-local full-state snapshot for each policy reconciliation instead of separate name, topic, power-level, encryption, and join-rule reads.
+Satisfied power-level policy uses the snapshot fast path; a required power-level write rereads current grants so intervening administrator changes are preserved.
+Root Space child links share one fresh Space snapshot rather than fetching every child separately.
+Managed-room invitations reuse joined and invited memberships from those snapshots; internal-user and configured-user invitations share one roster.
+The internal user logs in once and joins only rooms absent from its fresh joined-room inventory, falling back to idempotent join attempts if that inventory is unavailable.
+Alias resolution and directory visibility still require fresh reads, and the authoritative reply-membership refresh remains a separate startup barrier.
+No configuration hash or persisted state cache suppresses remote drift checks on the next startup or relevant config update.
+The duplicate full pass is removed, including its incidental retry of failed operations; transport retries remain with nio and returned administrative failures are retried on the next setup attempt.
 
 ## Session Storage Recovery
 
