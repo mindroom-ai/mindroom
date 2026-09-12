@@ -11,6 +11,7 @@ import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.event_journal import AdmissionFacts, IngestionBatchAdmission, RoomMembershipPosition
+from tests.conftest import install_call_manager_mock
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_bot_ready_hook import (
     _CONSUMER_GENERATION,
@@ -215,10 +216,7 @@ async def test_authoritative_join_requests_call_reconciliation_after_frame_publi
     manager = MagicMock()
     manager.on_sync_room_membership = AsyncMock()
     manager.reconcile_joined_rooms = AsyncMock()
-    bot._call_manager = manager
-    client = MagicMock(spec=nio.AsyncClient)
-    client.rooms = {room_id: nio.MatrixRoom(room_id, bot.matrix_id.full_id)}
-    bot.client = client
+    install_call_manager_mock(bot, manager)
     with (
         patch.object(bot, "journal_principal", return_value=principal),
         patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock()),
@@ -236,11 +234,6 @@ async def test_call_room_updates_are_preserved_while_reconciliation_is_running(t
     bot = _agent_bot(tmp_path)
     first_room_id = "!first-call:localhost"
     second_room_id = "!second-call:localhost"
-    client = MagicMock(spec=nio.AsyncClient)
-    client.rooms = {
-        room_id: nio.MatrixRoom(room_id, bot.matrix_id.full_id) for room_id in (first_room_id, second_room_id)
-    }
-    bot.client = client
     first_started = asyncio.Event()
     second_started = asyncio.Event()
     release_first = asyncio.Event()
@@ -256,7 +249,7 @@ async def test_call_room_updates_are_preserved_while_reconciliation_is_running(t
 
     manager = MagicMock()
     manager.reconcile_joined_rooms = AsyncMock(side_effect=reconcile)
-    bot._call_manager = manager
+    install_call_manager_mock(bot, manager)
 
     with patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock()):
         try:
