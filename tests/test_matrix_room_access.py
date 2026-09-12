@@ -51,6 +51,7 @@ async def test_configure_managed_room_access_applies_effective_policy(
         ANY,
         "!lobby:example.com",
         "knock",
+        snapshot=None,
     )
     ensure_visibility.assert_awaited_once_with(
         ANY,
@@ -220,6 +221,7 @@ async def test_existing_room_reconciliation_always_applies_room_policy(
         room_id="!lobby:example.com",
         room_policy=policy,
         context="existing_room_reconciliation",
+        snapshot=None,
     )
 
 
@@ -315,5 +317,13 @@ async def test_aliases_of_same_room_do_not_reconcile_concurrently(
     monkeypatch.setattr(matrix_rooms, "_add_room", Mock())
     monkeypatch.setattr(matrix_rooms, "_reconcile_joined_existing_room", reconcile)
     result = await matrix_rooms.ensure_all_rooms_exist(client, config, runtime_paths_for(config))
+    client.user_id = "@router:example.com"
+    client.room_get_state.return_value = nio.RoomGetStateResponse(
+        [
+            {"type": "m.room.member", "state_key": client.user_id, "content": {"membership": "join"}},
+        ],
+        "!same:example.com",
+    )
+    await matrix_rooms.reconcile_managed_rooms(client, config, runtime_paths_for(config), result)
     assert result == {"first": "!same:example.com", "second": "!same:example.com"}
     assert peak == 1
