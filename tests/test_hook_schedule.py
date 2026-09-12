@@ -93,7 +93,7 @@ async def test_schedule_hook_rewrites_message_text(tmp_path: Path) -> None:
     conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
     ) as mock_send:
         await execute_scheduled_workflow(
@@ -120,7 +120,7 @@ async def test_schedule_hook_can_suppress_synthetic_message(tmp_path: Path) -> N
     set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [suppress])]))
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
     ) as mock_send:
         await execute_scheduled_workflow(
@@ -153,7 +153,7 @@ async def test_schedule_hook_suppression_log_includes_workflow_thread_context(
     capsys.readouterr()
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
     ):
         await execute_scheduled_workflow(

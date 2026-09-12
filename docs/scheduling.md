@@ -160,3 +160,38 @@ Older missed one-time tasks are marked failed instead of executing unexpectedly.
 Only the router restores persisted schedules after startup — individual agents do not restore their own.
 
 On shutdown, the router cancels its in-memory scheduled tasks before exiting.
+
+### Recurring task recovery
+
+Recurring timers save their next due time under the runtime storage directory in `tracking/recurring_schedules/`.
+After a restart, they wait for Matrix sync readiness and run the latest missed occurrence if it falls within the catch-up window.
+The same window applies when a live timer wakes late.
+The default window is one hour:
+
+```yaml
+scheduler_catch_up_grace_seconds: 3600
+```
+
+Set this to `0` to disable catch-up for unattempted occurrences.
+Ordinary future timers still run when catch-up is disabled.
+Multiple missed occurrences coalesce into one run; older occurrences outside the window are skipped.
+The checkpoint retains the most recent skipped time and reason, and structured logs report skips and coalescing.
+Normal future occurrences keep their original cron cadence.
+
+Each trigger has a stable Matrix transaction ID derived from its schedule identity and intended execution time.
+Before sending, MindRoom durably freezes its content and sending device.
+Temporary checkpoint failures keep the timer alive and retry without repeating an acknowledged delivery.
+A retry reuses that content and transaction ID, so a restart after Matrix accepts a trigger does not create another trigger on the same device.
+Already-attempted deliveries remain pending until acknowledged, independently of the catch-up window.
+Already-triggered agent work continues through normal event recovery.
+Invalid content discovered before delivery is frozen fails the occurrence and advances the timer.
+If the Matrix login device changes while delivery is unresolved, automatic resending is held and logs report that reconciliation is needed.
+
+The checkpoint directory must survive restarts.
+On first adoption without a checkpoint, or after a workflow edit, MindRoom establishes a future cursor without replaying unknown past occurrences.
+Cancelling a schedule still prevents its pending timer from firing.
+Cancellation does not erase Matrix schedule history or local checkpoints.
+
+The trigger transaction does not make arbitrary `schedule:fired` hook side effects exactly-once.
+Hooks can replay after a crash or preparation failure before trigger content is durably frozen.
+Recurring hooks receive a `correlation_id` that is stable for that occurrence and changes for the next one; use it with an idempotent destination when performing side effects.

@@ -660,6 +660,7 @@ matrix_sync:
 
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
+scheduler_catch_up_grace_seconds: 3600  # Recurring catch-up window; 0 disables it
 ```
 
 Retired access fields in a monolithic configuration are migrated automatically when the file loads.

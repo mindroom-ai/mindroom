@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.constants import resolve_runtime_paths
+from mindroom.config.main import Config
 from mindroom.scheduling import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow, _run_cron_task
+from tests.conftest import test_runtime_paths as runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.asyncio
-async def test_cancel_mid_wait_cron_task() -> None:
+async def test_cancel_mid_wait_cron_task(tmp_path: Path) -> None:
     """Test that cancellation during wait periods propagates correctly."""
     client = AsyncMock()
-    config = AsyncMock()
-    runtime_paths = resolve_runtime_paths()
+    client.homeserver = "https://example.org"
+    client.user_id = "@router:example.org"
+    config = Config()
 
     workflow = ScheduledWorkflow(
         schedule_type="cron",
@@ -35,13 +41,14 @@ async def test_cancel_mid_wait_cron_task() -> None:
         workflow=workflow,
     )
 
-    # Patch croniter to return next run far in the future to guarantee sleep
-    class DummyCron:
-        def get_next(self, _) -> datetime:  # noqa: ANN001
-            return datetime.now(UTC) + timedelta(hours=1)
+    waiting = asyncio.Event()
+
+    async def wait_until_cancelled(_delay: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
 
     with (
-        patch("mindroom.scheduling.croniter", return_value=DummyCron()),
+        patch("mindroom.scheduling.asyncio.sleep", new=wait_until_cancelled),
         patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(return_value=pending_record)),
     ):
         task = asyncio.create_task(
@@ -51,11 +58,11 @@ async def test_cancel_mid_wait_cron_task() -> None:
                 workflow,
                 {},
                 config,
-                runtime_paths,
+                runtime_paths(tmp_path),
                 MagicMock(),
             ),
         )
-        await asyncio.sleep(0)  # let it start and hit sleep
+        await waiting.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

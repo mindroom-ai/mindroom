@@ -9,6 +9,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Literal, NamedTuple
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,11 @@ from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
 from mindroom.message_target import MessageTarget
+from mindroom.recurring_schedule import (
+    RecurringCheckpointUnavailableError,
+    complete_recurring_occurrence,
+    plan_recurring_occurrence,
+)
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 
 if TYPE_CHECKING:
@@ -56,7 +62,7 @@ _TASK_STATE_POLL_INTERVAL_SECONDS = 30
 # Tasks older than this are marked as failed instead of executed.
 _MISSED_TASK_MAX_AGE_SECONDS = 86400  # 24 hours
 
-# Small pause between draining overdue one-time tasks after sync is ready.
+# Small pause between draining restored tasks after sync is ready.
 _DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS = 0.25
 
 # Global task storage for running asyncio tasks
@@ -198,7 +204,7 @@ class SchedulingRuntime:
 
 @dataclass
 class _DeferredOverdueTaskStart:
-    """A one-time scheduled task that should start after Matrix sync is live."""
+    """A scheduled task that should start after Matrix sync is live."""
 
     task_id: str
     workflow: ScheduledWorkflow
@@ -472,7 +478,7 @@ def _start_scheduled_task(
 
 
 def _queue_deferred_overdue_task(task_id: str, workflow: ScheduledWorkflow) -> bool:
-    """Queue one missed one-time task to be started after Matrix sync is ready."""
+    """Queue one restored task to be started after Matrix sync is ready."""
     existing_task = _running_tasks.get(task_id)
     if existing_task is not None and not existing_task.done():
         logger.debug("Scheduled task already running; skipping deferred queue", task_id=task_id)
@@ -493,7 +499,7 @@ async def drain_deferred_overdue_tasks(
     runtime_paths: RuntimePaths,
     conversation_reader: ConversationReader,
 ) -> int:
-    """Start queued overdue one-time tasks after Matrix sync is ready."""
+    """Start queued restored tasks after Matrix sync is ready."""
     drained_count = 0
     matrix_admin = build_hook_matrix_admin(client, runtime_paths)
 
@@ -528,7 +534,7 @@ async def drain_deferred_overdue_tasks(
 
 
 def clear_deferred_overdue_tasks() -> int:
-    """Clear queued overdue one-time tasks that have not started yet."""
+    """Clear queued restored tasks that have not started yet."""
     queued_count = len(_deferred_overdue_tasks)
     _deferred_overdue_tasks.clear()
     _deferred_overdue_task_ids.clear()
@@ -536,7 +542,7 @@ def clear_deferred_overdue_tasks() -> int:
 
 
 def has_deferred_overdue_tasks() -> bool:
-    """Return whether any overdue one-time tasks are still queued."""
+    """Return whether any restored tasks are still queued."""
     return bool(_deferred_overdue_tasks)
 
 
@@ -1025,7 +1031,23 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     return
 
                 cron_string = cron_schedule.to_cron_string()
-                next_run = croniter(cron_string, datetime.now(UTC)).get_next(datetime)
+                plan_occurrence = partial(
+                    plan_recurring_occurrence,
+                    runtime_paths,
+                    homeserver=client.homeserver,
+                    sender=client.user_id,
+                    room_id=task_room_id,
+                    task_id=task_id,
+                    workflow_json=workflow.model_dump_json(),
+                    cron=cron_string,
+                    grace_seconds=config.scheduler_catch_up_grace_seconds,
+                )
+                try:
+                    occurrence = await plan_occurrence(now=datetime.now(UTC))
+                except RecurringCheckpointUnavailableError:
+                    await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+                    continue
+                next_run = occurrence.checkpoint.next_run_at
                 workflow_changed = False
 
                 while True:
@@ -1075,7 +1097,19 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     current_target = MessageTarget.for_scheduled_task(workflow)
                     continue
 
-                await scheduling_executor.execute_scheduled_workflow(
+                # A timer or state read may have stalled across more due slots.
+                # Cron has second precision; normal subsecond wake-up jitter
+                # must still fire a live timer when catch-up is disabled.
+                execute_now = datetime.now(UTC).replace(microsecond=0)
+                try:
+                    occurrence = await plan_occurrence(now=execute_now)
+                except RecurringCheckpointUnavailableError:
+                    await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+                    continue
+                if occurrence.checkpoint.next_run_at > execute_now:
+                    continue
+
+                outcome = await scheduling_executor.execute_scheduled_workflow(
                     client,
                     workflow,
                     config,
@@ -1083,7 +1117,12 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     conversation_reader,
                     task_id,
                     matrix_admin,
+                    occurrence=occurrence,
                 )
+                if outcome.status in {"retry", "held"}:
+                    await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+                    continue
+                await complete_recurring_occurrence(occurrence, cron_string, datetime.now(UTC))
                 if task_id not in running_tasks:
                     logger.info("scheduled_task_missing_from_running_tasks", task_id=task_id)
                     return
@@ -1178,7 +1217,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 task_id,
                 matrix_admin,
             )
-            final_status = "completed" if outcome.delivered else "failed"
+            final_status = "completed" if outcome.status == "delivered" else "failed"
 
             try:
                 await _save_one_time_task_status(
@@ -1732,7 +1771,7 @@ async def cancel_all_scheduled_tasks(
     return result
 
 
-async def restore_scheduled_tasks(  # noqa: C901
+async def restore_scheduled_tasks(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_id: str,
     config: Config,
@@ -1792,6 +1831,10 @@ async def restore_scheduled_tasks(  # noqa: C901
                 continue
         elif workflow.schedule_type == "cron" and not workflow.cron_schedule:
             logger.warning("skipping_recurring_task_without_cron_schedule", task_id=task_id)
+            continue
+        elif workflow.schedule_type == "cron":
+            if _queue_deferred_overdue_task(task_id, workflow):
+                restored_count += 1
             continue
 
         # Start the appropriate task

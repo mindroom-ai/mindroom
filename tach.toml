@@ -2509,6 +2509,7 @@ visibility = [
     "mindroom.matrix_rtc.call_manager",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.scheduling",
+    "mindroom.scheduling_executor",
     "mindroom.streaming",
     "mindroom.thread_summary",
 ]
@@ -3556,13 +3557,28 @@ depends_on = [
     "mindroom.matrix.conversation_reads",
     "mindroom.model_loading",
     "mindroom.scheduling_executor",
+    "mindroom.recurring_schedule",
 ]
 
 [[modules]]
 path = "mindroom.scheduling_executor"
 depends_on = [
+    "mindroom.matrix.client_delivery",
     "mindroom.constants",
     "mindroom.hooks",
+    "mindroom.recurring_schedule",
+]
+
+[[modules]]
+path = "mindroom.recurring_schedule"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.durable_write",
+    "mindroom.logging_config",
+]
+visibility = [
+    "mindroom.scheduling",
+    "mindroom.scheduling_executor",
 ]
 
 [[modules]]
@@ -4679,6 +4695,7 @@ expose = [
     "cached_room",
     "edit_message_outcome",
     "edit_message_result",
+    "prepare_message_content",
     "resolve_room_encryption_for_delivery",
     "resolve_room_encryption_outcome",
     "send_audio_message",

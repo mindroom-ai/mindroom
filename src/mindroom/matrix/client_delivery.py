@@ -413,6 +413,31 @@ async def _prepare_matrix_message(
     return _PreparedMatrixMessage(content_sent, cache_bypass)
 
 
+async def prepare_message_content(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+) -> dict[str, Any] | MatrixDeliveryFailure:
+    """Freeze content safe for delivery even if room encryption later turns on."""
+    encryption_outcome = await resolve_room_encryption_outcome(
+        client,
+        room_id,
+        operation="prepare_message",
+    )
+    if isinstance(encryption_outcome, MatrixDeliveryFailure):
+        return encryption_outcome
+    try:
+        return await prepare_large_message(
+            client,
+            room_id,
+            content,
+            room_encrypted=encryption_outcome,
+            prepare_for_encrypted_delivery=True,
+        )
+    except MatrixEventTooLargeError as error:
+        return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
+
+
 async def send_message_outcome(
     client: nio.AsyncClient,
     room_id: str,
@@ -426,8 +451,8 @@ async def send_message_outcome(
 ) -> MatrixSendOutcome:
     """Send a message to a Matrix room and return the delivered payload or a typed failure.
 
-    ``content_is_prepared`` is reserved for durable payloads already frozen in
-    the outbox. Those bytes must reach Matrix verbatim so the durable record
+    ``content_is_prepared`` is reserved for payloads already frozen in
+    durable storage. Those bytes must reach Matrix verbatim so the durable record
     remains an exact description of the wire event.
     """
     if not _can_send_to_encrypted_room(client, room_id, operation=operation):
@@ -915,6 +940,7 @@ __all__ = [
     "can_send_to_encrypted_room",
     "edit_message_outcome",
     "edit_message_result",
+    "prepare_message_content",
     "resolve_room_encryption_for_delivery",
     "resolve_room_encryption_outcome",
     "send_audio_message",

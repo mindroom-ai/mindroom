@@ -28,7 +28,12 @@ async def send_matrix_message(
     # why-lazy: client_delivery imports config through Matrix formatting helpers during facade startup.
     from mindroom.matrix.client_delivery import send_message_result  # noqa: PLC0415
 
-    return await send_message_result(client, room_id, content, message_type=message_type)
+    return await send_message_result(
+        client,
+        room_id,
+        content,
+        message_type=message_type,
+    )
 
 
 async def send_hook_message(
