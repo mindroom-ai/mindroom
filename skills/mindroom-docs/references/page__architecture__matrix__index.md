@@ -209,7 +209,10 @@ After a device change, standalone deliveries that reply outside a journal turn r
 
 On startup, MindRoom detects orphaned bot memberships left over from a previous configuration.
 When an agent is removed from `config.yaml`, its Matrix bot account may still be a member of rooms it previously joined.
-The cleanup process leaves those rooms safely without ejecting currently configured entities from their required rooms.
+The global sweep removes only persisted bot identities that no longer belong to a configured router, agent, or team.
+Current entities reconcile their own configured and retained rooms after startup hooks and invitation handling, so the early global sweep cannot remove them before that reconciliation.
+An entity that cannot start keeps its memberships until its own lifecycle recovers.
+Unreadable or invalid retention files stop membership initialization instead of being treated as empty ownership records.
 This runs automatically — no manual intervention is needed.
 
 ## Identity Management
