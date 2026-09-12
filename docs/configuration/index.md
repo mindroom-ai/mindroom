@@ -815,6 +815,8 @@ prompts:
 
 `mindroom avatars generate` only creates missing local avatar files by default.
 Run `mindroom avatars generate --force` to overwrite existing managed workspace avatar files after changing prompts or styles.
+Generation uses `GOOGLE_API_KEY` for Gemini prompt creation and `OPENAI_API_KEY` for 1024x1024 high-quality PNG rendering with `gpt-image-2.5-sunburst`.
+Both keys also support the file-based `GOOGLE_API_KEY_FILE` and `OPENAI_API_KEY_FILE` forms.
 `mindroom avatars sync` only fills missing Matrix avatars by default.
 Run `mindroom avatars sync --force` to replace existing Matrix room or root-space avatars.
 
