@@ -33,6 +33,10 @@ from mindroom.tool_approval_grants import grant_operation
 from tests.conftest import test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
 
 @pytest.mark.asyncio
 async def test_terminal_wire_edits_preserve_thread_scope_for_grant_and_revocation(
@@ -531,11 +535,6 @@ async def test_two_store_reservation_and_grant_race_cannot_strand_pending_call(
         await second_manager.shutdown()
         await journal.close()
         await second_journal.close()
-
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-    from pathlib import Path
 
 
 @pytest.mark.asyncio
