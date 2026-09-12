@@ -12,7 +12,11 @@ from typing import TYPE_CHECKING, Never, Protocol, cast, runtime_checkable
 from agno.exceptions import ContextWindowExceededError, ModelProviderError, RetryableModelProviderError
 from agno.models.message import Message
 
-from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES, is_model_safeguard_refusal
+from mindroom.error_handling import (
+    TRANSIENT_PROVIDER_STATUS_CODES,
+    IncompleteResponsesStreamError,
+    is_model_safeguard_refusal,
+)
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 
@@ -482,7 +486,9 @@ def _route_text(value: str | None) -> str | None:
 
 
 def _should_retry(error: Exception) -> bool:
-    return not isinstance(error, RetryableModelProviderError) and not is_model_safeguard_refusal(error)
+    return not isinstance(error, (RetryableModelProviderError, IncompleteResponsesStreamError)) and not (
+        is_model_safeguard_refusal(error)
+    )
 
 
 def _should_learn(error: Exception, media_kinds: frozenset[MediaKind]) -> bool:

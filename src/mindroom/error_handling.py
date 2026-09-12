@@ -31,6 +31,10 @@ class ModelSafeguardRefusalError(ModelProviderError):
     """Raised when a provider explicitly stops generation for safeguards."""
 
 
+class IncompleteResponsesStreamError(ModelProviderError):
+    """A Responses stream cannot safely reuse accumulated output in a retry."""
+
+
 def is_model_safeguard_refusal(error: Exception | str) -> bool:
     """Recognize typed refusals and the exact text Agno preserves in errored runs."""
     return isinstance(error, ModelSafeguardRefusalError) or str(error).strip() == MODEL_SAFEGUARD_REFUSAL_MESSAGE
