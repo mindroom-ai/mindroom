@@ -421,6 +421,7 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert call_manager.reconcile_joined_rooms.await_count == 2
+    assert [request.args for request in call_manager.reconcile_joined_rooms.await_args_list] == [(), ()]
 
 
 def test_router_sync_loop_start_revokes_room_backed_grants(tmp_path: Path) -> None:

@@ -378,7 +378,8 @@ class AgentBot:
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _call_manager: CallManager | None
-    _calls_reconcile_pending: bool
+    _calls_full_reconcile_pending: bool
+    _call_rooms_reconcile_pending: set[str]
     _reply_membership_sync: AgentReplyMembershipSync | None
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
@@ -465,7 +466,8 @@ class AgentBot:
         self._sync_continuity_store = SyncContinuityStore(self.storage_path, self.agent_name)
         self._deferred_overdue_task_drain_task = None
         self._call_manager: CallManager | None = None
-        self._calls_reconcile_pending = False
+        self._calls_full_reconcile_pending = False
+        self._call_rooms_reconcile_pending = set()
         self._local_membership_lock = asyncio.Lock()
         self._ingestion_admission_progress = asyncio.Event()
         self._response_recovery_diagnostic_classes = set()
@@ -1210,8 +1212,7 @@ class AgentBot:
 
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after joins and across restarts."""
-        if self._call_manager is not None:
-            self._calls_reconcile_pending = True
+        self._request_call_reconciliation(room_id)
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 
@@ -1318,7 +1319,7 @@ class AgentBot:
         self._deferred_stop_required = False
         self._deferred_stop_phase = None
         self._response_runner.resume_pending_admissions()
-        self._calls_reconcile_pending = self._call_manager is not None
+        self._request_call_reconciliation()
         if self.agent_name == ROUTER_AGENT_NAME:
             self._invalidate_agent_reply_memberships(reason="sync_loop_started")
         mark_matrix_sync_loop_started(self.agent_name)
@@ -1630,7 +1631,7 @@ class AgentBot:
                 left_room_ids=set() if joined else {room_id},
             )
             if joined:
-                self._calls_reconcile_pending = True
+                self._request_call_reconciliation(room_id)
         if not joined and admission.previous_membership == "join":
             self._room_lifecycle.forget_invited_room(room_id)
 
@@ -1723,15 +1724,31 @@ class AgentBot:
         await self._run_sync_response_side_effects(
             first_sync_response=first_sync_response,
         )
-        if self._calls_reconcile_pending:
-            self._calls_reconcile_pending = False
-            call_manager = self._call_manager
-            if call_manager is not None:
-                create_background_task(
-                    call_manager.reconcile_joined_rooms(),
-                    name=f"matrix_rtc_reconcile_{self.agent_name}",
-                    owner=self._runtime_view,
-                )
+        call_manager = self._call_manager
+        if call_manager is None or (not self._calls_full_reconcile_pending and not self._call_rooms_reconcile_pending):
+            return
+        reconcile_all = self._calls_full_reconcile_pending
+        room_ids = frozenset(self._call_rooms_reconcile_pending)
+        self._calls_full_reconcile_pending = False
+        self._call_rooms_reconcile_pending.clear()
+        reconcile = (
+            call_manager.reconcile_joined_rooms() if reconcile_all else call_manager.reconcile_joined_rooms(room_ids)
+        )
+        create_background_task(
+            reconcile,
+            name=f"matrix_rtc_reconcile_{self.agent_name}",
+            owner=self._runtime_view,
+        )
+
+    def _request_call_reconciliation(self, room_id: str | None = None) -> None:
+        """Retain full or room-scoped reconciliation intent until frame publication."""
+        if self._call_manager is None:
+            return
+        if room_id is None:
+            self._calls_full_reconcile_pending = True
+            self._call_rooms_reconcile_pending.clear()
+        elif not self._calls_full_reconcile_pending:
+            self._call_rooms_reconcile_pending.add(room_id)
 
     async def _open_owned_matrix_client(self) -> nio.AsyncClient:
         """Acquire and retain the bot's exclusive ingestion/client ownership."""
@@ -2061,7 +2078,8 @@ class AgentBot:
 
         call_manager = self._call_manager
         self._call_manager = None
-        self._calls_reconcile_pending = False
+        self._calls_full_reconcile_pending = False
+        self._call_rooms_reconcile_pending = set()
         if call_manager is not None:
             await call_manager.shutdown()
 

@@ -1840,6 +1840,90 @@ async def test_manager_reconciles_active_calls_after_sync(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_manager_reconciles_only_requested_joined_rooms(tmp_path: Path) -> None:
+    """A scoped pass must not refresh an unrelated configured call room."""
+    other_room_id = "!other-call:example.org"
+    config = _config()
+    config.agents["helper"].rooms.append(other_room_id)
+    client = _client()
+    client.rooms = {
+        ROOM_ID: _room(),
+        other_room_id: _room(room_id=other_room_id),
+    }
+    client.room_get_state.return_value = nio.RoomGetStateResponse([], ROOM_ID)
+    manager = _manager(client, FakeBridge(), tmp_path, config)
+
+    await manager.reconcile_joined_rooms({ROOM_ID})
+
+    assert [request.args[0] for request in client.room_get_state.await_args_list] == [ROOM_ID]
+
+
+@pytest.mark.asyncio
+async def test_manager_explicit_empty_reconciliation_scope_does_no_work(tmp_path: Path) -> None:
+    """An empty scoped pass is distinct from a full startup pass."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    manager = _manager(client, FakeBridge(), tmp_path)
+
+    await manager.reconcile_joined_rooms(set())
+
+    client.room_get_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manager_full_reconciliation_visits_every_configured_room(tmp_path: Path) -> None:
+    """The no-argument startup path must retain whole-account discovery."""
+    other_room_id = "!other-call:example.org"
+    config = _config()
+    config.agents["helper"].rooms.append(other_room_id)
+    client = _client()
+    client.rooms = {
+        ROOM_ID: _room(),
+        other_room_id: _room(room_id=other_room_id),
+    }
+    client.room_get_state.return_value = nio.RoomGetStateResponse([], ROOM_ID)
+    manager = _manager(client, FakeBridge(), tmp_path, config)
+
+    await manager.reconcile_joined_rooms()
+
+    assert {request.args[0] for request in client.room_get_state.await_args_list} == {ROOM_ID, other_room_id}
+
+
+@pytest.mark.asyncio
+async def test_scoped_reconciliation_does_not_join_after_room_leave(tmp_path: Path) -> None:
+    """A departure while admission is closed must fence an in-flight scoped pass."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    bridge = FakeBridge()
+    gate = ResponseAdmissionGate()
+    assert gate.close_if_idle()
+    wait_started = asyncio.Event()
+
+    async def wait_for_admission() -> bool:
+        wait_started.set()
+        await gate.wait_until_open()
+        return True
+
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        response_admission_gate=gate,
+        wait_for_admission_or_shutdown=wait_for_admission,
+    )
+    reconcile = asyncio.create_task(manager.reconcile_joined_rooms({ROOM_ID}))
+    await asyncio.wait_for(wait_started.wait(), timeout=1)
+
+    await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
+    gate.reopen()
+    await reconcile
+
+    client.room_get_state.assert_not_awaited()
+    assert bridge.connected_grant is None
+    assert manager._sessions == {}
+
+
+@pytest.mark.asyncio
 async def test_manager_skips_join_without_openai_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Manager skips join without openai key."""
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.get_api_key_for_service", lambda _service, _paths: None)
