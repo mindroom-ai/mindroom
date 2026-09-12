@@ -16,6 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.recurring_schedule import RecurringOccurrence, _RecurringCheckpoint
 from mindroom.scheduling import (
     _SCHEDULED_TASK_EVENT_TYPE,
     CronSchedule,
@@ -542,8 +543,8 @@ async def test_drain_deferred_overdue_tasks_continues_after_one_start_failure() 
 
 
 @pytest.mark.asyncio
-async def test_restore_scheduled_tasks_keeps_cron_restoration_unchanged() -> None:
-    """Recurring cron tasks should still be restored immediately."""
+async def test_restore_scheduled_tasks_defers_cron_until_sync_ready() -> None:
+    """Recurring catch-up must wait for Matrix sync readiness."""
     client = AsyncMock()
     cron_workflow = ScheduledWorkflow(
         schedule_type="cron",
@@ -582,9 +583,8 @@ async def test_restore_scheduled_tasks_keeps_cron_restoration_unchanged() -> Non
         )
 
     assert restored == 1
-    mock_start.assert_called_once()
-    assert mock_start.call_args.kwargs["matrix_admin"] is not None
-    assert len(scheduling._deferred_overdue_tasks) == 0
+    mock_start.assert_not_called()
+    assert [task.task_id for task in scheduling._deferred_overdue_tasks] == ["task_cron"]
 
 
 @pytest.mark.asyncio
@@ -693,9 +693,8 @@ async def test_restore_scheduled_tasks_uses_canonical_state_parser_for_mixed_rec
         )
 
     assert restored == 1
-    mock_start.assert_called_once()
-    assert mock_start.call_args.args[1] == "task_cron"
-    assert len(scheduling._deferred_overdue_tasks) == 0
+    mock_start.assert_not_called()
+    assert [task.task_id for task in scheduling._deferred_overdue_tasks] == ["task_cron"]
 
 
 @pytest.mark.asyncio
@@ -1239,10 +1238,13 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_cron_task_executes_latest_state_workflow() -> None:
+async def test_run_cron_task_executes_latest_state_workflow(tmp_path: Path) -> None:
     """Recurring tasks should execute using the latest persisted workflow data."""
     client = AsyncMock()
-    config = AsyncMock()
+    config = Config()
+    client.homeserver = "https://example.org"
+    client.user_id = "@router:example.org"
+    client.device_id = "TEST_DEVICE"
     initial_workflow = ScheduledWorkflow(
         schedule_type="cron",
         cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
@@ -1260,9 +1262,10 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
         thread_id="$thread123",
     )
 
-    class _ImmediateCron:
-        def get_next(self, _type: object) -> datetime:
-            return datetime.now(UTC) - timedelta(seconds=1)
+    occurrence = RecurringOccurrence(
+        tmp_path / "checkpoint.json",
+        _RecurringCheckpoint("workflow", datetime.now(UTC) - timedelta(seconds=1)),
+    )
 
     async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
         return _record("task_cron_updated", updated_workflow, status="pending")
@@ -1273,7 +1276,7 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
             "mindroom.scheduling_executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
         ) as execute_mock,
-        patch("mindroom.scheduling.croniter", return_value=_ImmediateCron()),
+        patch("mindroom.scheduling.plan_recurring_occurrence", return_value=occurrence),
     ):
         await _run_cron_task(
             client,
@@ -1281,7 +1284,7 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
             initial_workflow,
             {},
             config,
-            _runtime_paths(),
+            _test_runtime_paths(tmp_path),
             _conversation_reader(),
         )
 
@@ -1292,11 +1295,14 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_cron_task_keeps_pending_state_after_success() -> None:
+async def test_run_cron_task_keeps_pending_state_after_success(tmp_path: Path) -> None:
     """Recurring tasks should keep their pending state after firing."""
     client = AsyncMock()
     client.room_put_state = AsyncMock()
-    config = AsyncMock()
+    config = Config()
+    client.homeserver = "https://example.org"
+    client.user_id = "@router:example.org"
+    client.device_id = "TEST_DEVICE"
     workflow = ScheduledWorkflow(
         schedule_type="cron",
         cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
@@ -1307,9 +1313,10 @@ async def test_run_cron_task_keeps_pending_state_after_success() -> None:
     )
     pending_record = _record("task_cron_pending", workflow, status="pending")
 
-    class _ImmediateCron:
-        def get_next(self, _type: object) -> datetime:
-            return datetime.now(UTC) - timedelta(seconds=1)
+    occurrence = RecurringOccurrence(
+        tmp_path / "checkpoint.json",
+        _RecurringCheckpoint("workflow", datetime.now(UTC) - timedelta(seconds=1)),
+    )
 
     with (
         patch(
@@ -1320,7 +1327,7 @@ async def test_run_cron_task_keeps_pending_state_after_success() -> None:
             "mindroom.scheduling_executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
         ) as execute_mock,
-        patch("mindroom.scheduling.croniter", return_value=_ImmediateCron()),
+        patch("mindroom.scheduling.plan_recurring_occurrence", return_value=occurrence),
     ):
         await _run_cron_task(
             client,
@@ -1328,7 +1335,7 @@ async def test_run_cron_task_keeps_pending_state_after_success() -> None:
             workflow,
             {},
             config,
-            _runtime_paths(),
+            _test_runtime_paths(tmp_path),
             _conversation_reader(),
         )
 

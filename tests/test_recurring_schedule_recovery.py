@@ -1,0 +1,508 @@
+"""Recurring schedules preserve due work across process restarts."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from contextlib import suppress
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, Mock
+
+import nio
+import pytest
+
+from mindroom import recurring_schedule, scheduling, scheduling_executor
+from mindroom.config.main import Config
+from mindroom.matrix import client_delivery
+from mindroom.scheduling import CronSchedule, ScheduledWorkflow
+from tests.conftest import delivered_matrix_event, delivered_matrix_side_effect
+from tests.conftest import test_runtime_paths as runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+class Clock:
+    """Control wall time and stop a runner when it reaches its next wait."""
+
+    now = datetime(2026, 1, 15, 6, 58, tzinfo=UTC)
+
+    def utcnow(self, _tz: object = None) -> datetime:
+        """Return the controlled aware time."""
+        return self.now
+
+    async def sleep(self, _delay: float) -> None:
+        """Stop at the next timer boundary without advancing wall time."""
+        raise asyncio.CancelledError
+
+
+def workflow(hour: str = "7") -> ScheduledWorkflow:
+    """Make a daily task with synthetic room and requester identities."""
+    return ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour=hour),
+        message="Summarize the latest updates",
+        description="Daily summary",
+        room_id="!room:example.org",
+        created_by="@user:example.org",
+        new_thread=True,
+    )
+
+
+def client_for(task: ScheduledWorkflow) -> AsyncMock:
+    """Fake only Matrix IO; keep task parsing and runner behavior real."""
+    client = AsyncMock()
+    client.user_id = "@router:example.org"
+    client.device_id = "TEST_DEVICE"
+    client.homeserver = "https://example.org"
+    client.rooms = {"!room:example.org": nio.MatrixRoom("!room:example.org", client.user_id)}
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse.from_dict(
+        {"workflow": task.model_dump_json(), "status": "pending"},
+        room_id="!room:example.org",
+        event_type="com.mindroom.scheduled.task",
+        state_key="daily",
+    )
+    return client
+
+
+async def run_until_wait(
+    task: ScheduledWorkflow,
+    client: AsyncMock,
+    tmp_path: Path,
+    config: Config | None = None,
+) -> None:
+    """Run the production scheduler until it sleeps or finishes a delivery."""
+    with suppress(asyncio.CancelledError):
+        await scheduling._run_cron_task(
+            client,
+            "daily",
+            task,
+            {},
+            config or Config(),
+            runtime_paths(tmp_path),
+            AsyncMock(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_restart_catches_recent_daily_run_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recomputing from restart time would lose the due run; losing its ACK would duplicate it."""
+    clock = Clock()
+    monkeypatch.setattr(scheduling, "datetime", type("Time", (datetime,), {"now": staticmethod(clock.utcnow)}))
+    monkeypatch.setattr(scheduling.asyncio, "sleep", clock.sleep)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    task = workflow()
+    client = client_for(task)
+
+    await run_until_wait(task, client, tmp_path)
+    clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 1
+
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_future_schedule_does_not_fire_during_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catch-up must leave a later daily occurrence waiting."""
+    clock = Clock()
+    monkeypatch.setattr(scheduling, "datetime", type("Time", (datetime,), {"now": staticmethod(clock.utcnow)}))
+    monkeypatch.setattr(scheduling.asyncio, "sleep", clock.sleep)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    task = workflow("8")
+    client = client_for(task)
+
+    await run_until_wait(task, client, tmp_path)
+    clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 0
+
+
+@pytest.fixture
+def controlled_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    """Control scheduler time while leaving its persistence and delivery real."""
+    clock = Clock()
+    monkeypatch.setattr(scheduling, "datetime", type("Time", (datetime,), {"now": staticmethod(clock.utcnow)}))
+    monkeypatch.setattr(scheduling.asyncio, "sleep", clock.sleep)
+    return clock
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("restart", "grace", "fires"),
+    [
+        (datetime(2026, 1, 15, 7, 59, 59, tzinfo=UTC), 3600, 1),
+        (datetime(2026, 1, 15, 8, 0, tzinfo=UTC), 3600, 1),
+        (datetime(2026, 1, 15, 8, 0, 1, tzinfo=UTC), 3600, 0),
+        (datetime(2026, 1, 15, 7, 1, tzinfo=UTC), 0, 0),
+        (datetime(2026, 1, 15, 9, 0, tzinfo=UTC), 7200, 1),
+    ],
+)
+async def test_catch_up_grace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+    restart: datetime,
+    grace: int,
+    fires: int,
+) -> None:
+    """Boundary and custom grace values determine whether overdue work still fires."""
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    task = workflow()
+    client = client_for(task)
+    config = Config(scheduler_catch_up_grace_seconds=grace)
+    await run_until_wait(task, client, tmp_path, config)
+    controlled_clock.now = restart
+    await run_until_wait(task, client, tmp_path, config)
+    assert sent.await_count == fires
+    await run_until_wait(task, client, tmp_path, config)
+    assert sent.await_count == fires
+
+
+@pytest.mark.asyncio
+async def test_first_adoption_does_not_replay_unknown_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """An old schedule without a checkpoint may already have fired before upgrade."""
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    task = workflow()
+    await run_until_wait(task, client_for(task), tmp_path)
+    assert sent.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_multiple_missed_occurrences_coalesce(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """A frequent schedule resumes once at the latest missed slot and keeps its cadence."""
+    task = workflow()
+    task.cron_schedule = CronSchedule(minute="*/10")
+    client = client_for(task)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 37, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 1
+    checkpoint = json.loads(next((tmp_path / "mindroom_data/tracking/recurring_schedules").glob("*.json")).read_text())
+    assert checkpoint["next_run_at"] == "2026-01-15T07:40:00Z"
+    assert checkpoint["last_skipped_at"] == "2026-01-15T07:20:00Z"
+    assert checkpoint["skip_reason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("silent", [False, True])
+@pytest.mark.parametrize("crash_after_accept", [False, True])
+async def test_crash_retry_reuses_frozen_trigger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+    silent: bool,
+    crash_after_accept: bool,
+) -> None:
+    """A crash on either side of Matrix acceptance must retain one trigger identity and payload."""
+    task = workflow()
+    task.silent = silent
+    client = client_for(task)
+    accepted: dict[str, dict[str, object]] = {}
+    attempts: list[str] = []
+    fail = True
+
+    async def send(
+        _client: object,
+        _room: str,
+        content: dict[str, object],
+        **kwargs: object,
+    ) -> object:
+        nonlocal fail
+        transaction_id = str(kwargs["transaction_id"])
+        attempts.append(transaction_id)
+        if not fail or crash_after_accept:
+            if transaction_id in accepted:
+                assert accepted[transaction_id] == content
+            accepted.setdefault(transaction_id, content.copy())
+        if fail:
+            fail = False
+            raise asyncio.CancelledError
+        return await delivered_matrix_side_effect("$trigger")(_client, _room, content)
+
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", send)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 2, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path)
+    assert len(accepted) == 1
+    assert len(attempts) == 2
+    assert attempts[0] == attempts[1]
+
+
+@pytest.mark.asyncio
+async def test_crash_after_send_before_checkpoint_does_not_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """Losing the local delivery acknowledgement must resend only the same transaction."""
+    task = workflow()
+    client = client_for(task)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    complete = scheduling.complete_recurring_occurrence
+    monkeypatch.setattr(scheduling, "complete_recurring_occurrence", AsyncMock(side_effect=asyncio.CancelledError))
+    await run_until_wait(task, client, tmp_path)
+    monkeypatch.setattr(scheduling, "complete_recurring_occurrence", complete)
+    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 2
+    assert sent.await_args_list[0].kwargs["transaction_id"] == sent.await_args_list[1].kwargs["transaction_id"]
+    assert sent.await_args_list[0].args[2] == sent.await_args_list[1].args[2]
+
+
+@pytest.mark.asyncio
+async def test_device_change_holds_ambiguous_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """A new Matrix device cannot safely reuse the old device's transaction namespace."""
+    task = workflow()
+    client = client_for(task)
+    sent = AsyncMock(side_effect=asyncio.CancelledError)
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 1
+    client.device_id = "REPLACEMENT_DEVICE"
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_during_downtime_does_not_replay_previous_definition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """Editing an overdue task establishes a new cursor instead of firing stale work."""
+    task = workflow()
+    client = client_for(task)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    task.message = "Summarize a different topic"
+    await run_until_wait(task, client_for(task), tmp_path)
+    assert sent.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_task_never_replays_pending_trigger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """Cancellation in authoritative room state fences a previously attempted send."""
+    task = workflow()
+    client = client_for(task)
+    sent = AsyncMock(side_effect=asyncio.CancelledError)
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse.from_dict(
+        {"workflow": task.model_dump_json(), "status": "cancelled"},
+        room_id="!room:example.org",
+        event_type="com.mindroom.scheduled.task",
+        state_key="daily",
+    )
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_live_timer_fires_with_catch_up_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """Disabling restart catch-up must not disable ordinary timer execution."""
+
+    async def reach_due_time(_delay: float) -> None:
+        controlled_clock.now = datetime(2026, 1, 15, 7, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(scheduling.asyncio, "sleep", reach_due_time)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    task = workflow()
+    await run_until_wait(task, client_for(task), tmp_path, Config(scheduler_catch_up_grace_seconds=0))
+    assert sent.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_transaction_identity_reaches_matrix_transport(
+    tmp_path: Path,
+    controlled_clock: Clock,
+) -> None:
+    """The real hook sender and delivery stack must carry stable IDs through to nio."""
+    task = workflow()
+    client = client_for(task)
+    client.rooms = {"!room:example.org": nio.MatrixRoom("!room:example.org", client.user_id)}
+    client.room_send = AsyncMock(
+        side_effect=[asyncio.CancelledError, nio.RoomSendResponse("$trigger", "!room:example.org")],
+    )
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path)
+    assert client.room_send.await_count == 2
+    first, retry = client.room_send.await_args_list
+    assert first.kwargs["tx_id"].startswith("schedule_")
+    assert first.kwargs["tx_id"] == retry.kwargs["tx_id"]
+    assert first.kwargs["content"] == retry.kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_failed_checkpoint_write_prevents_network_send(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """A trigger cannot escape before its retry identity and content are durable."""
+    task = workflow()
+    client = client_for(task)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    with monkeypatch.context() as failure:
+        failure.setattr(recurring_schedule, "write_json_file_durable", Mock(side_effect=OSError("disk full")))
+        await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 0
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 1
+
+
+def test_negative_catch_up_grace_is_rejected() -> None:
+    """Invalid recovery windows must fail configuration validation."""
+    with pytest.raises(ValueError, match="greater than or equal"):
+        Config(scheduler_catch_up_grace_seconds=-1)
+
+
+@pytest.mark.asyncio
+async def test_live_stall_rechecks_grace_before_send(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """A late wake-up is a missed occurrence even if the process never restarted."""
+    waits = 0
+
+    async def stalled_sleep(_delay: float) -> None:
+        nonlocal waits
+        waits += 1
+        if waits > 1:
+            raise asyncio.CancelledError
+        controlled_clock.now = datetime(2026, 1, 15, 9, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(scheduling.asyncio, "sleep", stalled_sleep)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    task = workflow()
+    await run_until_wait(task, client_for(task), tmp_path)
+    assert sent.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_keeps_prepared_transport_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """Sidecar preparation must happen before freezing, never again on a resend."""
+    preparations = 0
+
+    async def prepare(_client: object, _room: str, content: dict[str, object], **_kwargs: object) -> dict[str, object]:
+        nonlocal preparations
+        preparations += 1
+        return {**content, "attachment": f"mxc://example.org/upload-{preparations}"}
+
+    monkeypatch.setattr(client_delivery, "prepare_large_message", prepare)
+    task = workflow()
+    client = client_for(task)
+    client.rooms = {"!room:example.org": nio.MatrixRoom("!room:example.org", client.user_id)}
+    client.room_send = AsyncMock(
+        side_effect=[asyncio.CancelledError, nio.RoomSendResponse("$trigger", "!room:example.org")],
+    )
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path)
+    first, retry = client.room_send.await_args_list
+    assert first.kwargs["content"] == retry.kwargs["content"]
+    assert preparations == 1
+
+
+@pytest.mark.asyncio
+async def test_frozen_sidecar_survives_encryption_enabled_before_retry(
+    tmp_path: Path,
+    controlled_clock: Clock,
+) -> None:
+    """A durable trigger prepared in plaintext must support a later encrypted send."""
+    task = workflow()
+    task.message = "x" * 100_000
+    client = client_for(task)
+    client.upload.return_value = (nio.UploadResponse("mxc://example.org/sidecar"), None)
+    client.room_send = AsyncMock(
+        side_effect=[asyncio.CancelledError, nio.RoomSendResponse("$trigger", "!room:example.org")],
+    )
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    client.rooms["!room:example.org"].encrypted = True
+    await run_until_wait(task, client, tmp_path)
+    first, retry = client.room_send.await_args_list
+    assert first.kwargs["content"] == retry.kwargs["content"]
+    frozen = first.kwargs["content"]
+    assert "url" not in frozen
+    assert frozen["file"]["key"]
+    assert frozen["file"]["iv"]
+    assert client.upload.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_delayed_ack_records_intervening_skipped_slots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """Completing an old in-flight trigger must explain the slots it coalesces."""
+    task = workflow()
+    task.cron_schedule = CronSchedule(minute="*/10")
+    client = client_for(task)
+    sent = AsyncMock(side_effect=[asyncio.CancelledError, delivered_matrix_event("$trigger")])
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 0, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 37, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    checkpoint = json.loads(next((tmp_path / "mindroom_data/tracking/recurring_schedules").glob("*.json")).read_text())
+    assert checkpoint["last_skipped_at"] == "2026-01-15T07:30:00Z"
+    assert checkpoint["skip_reason"]
+    assert checkpoint["next_run_at"] == "2026-01-15T07:40:00Z"

@@ -17,18 +17,43 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_reads import ConversationReader
 
 
+async def prepare_matrix_message(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+) -> dict[str, Any]:
+    """Prepare transport content before freezing a durable delivery."""
+    # why-lazy: client_delivery imports config during hooks facade startup.
+    from mindroom.matrix.client_delivery import MatrixDeliveryFailure, prepare_message_content  # noqa: PLC0415
+
+    prepared = await prepare_message_content(client, room_id, content)
+    if isinstance(prepared, MatrixDeliveryFailure):
+        # The typed result reports a transport failure, not invalid input.
+        raise RuntimeError(prepared.detail)  # noqa: TRY004
+    return prepared
+
+
 async def send_matrix_message(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
     *,
     message_type: str = "m.room.message",
+    transaction_id: str | None = None,
+    content_is_prepared: bool = False,
 ) -> DeliveredMatrixEvent | None:
     """Send already-built Matrix content, late-binding to avoid an import cycle."""
     # why-lazy: client_delivery imports config through Matrix formatting helpers during facade startup.
     from mindroom.matrix.client_delivery import send_message_result  # noqa: PLC0415
 
-    return await send_message_result(client, room_id, content, message_type=message_type)
+    return await send_message_result(
+        client,
+        room_id,
+        content,
+        message_type=message_type,
+        transaction_id=transaction_id,
+        content_is_prepared=content_is_prepared,
+    )
 
 
 async def send_hook_message(

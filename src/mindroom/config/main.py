@@ -466,6 +466,11 @@ class Config(BaseModel):
         default="UTC",
         description="Timezone for interpreting scheduling requests and displaying scheduled tasks (e.g., 'America/New_York')",
     )
+    scheduler_catch_up_grace_seconds: int = Field(
+        default=3600,
+        ge=0,
+        description="Maximum lateness for recovering a missed recurring task; 0 disables catch-up",
+    )
     mindroom_user: MindRoomUserConfig | None = Field(
         default=None,
         description="Configuration for the internal MindRoom user account (omit for hosted/public profiles)",
