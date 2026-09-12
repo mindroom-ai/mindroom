@@ -232,7 +232,7 @@ uv run mindroom avatars sync
 ```
 
 Avatar prompts use Gemini, while `gpt-image-2.5-sunburst` renders the final 1024x1024 high-quality PNG files.
-Both credentials can instead be supplied through `GOOGLE_API_KEY_FILE` and `OPENAI_API_KEY_FILE`.
+Both credentials can instead be supplied directly through `GOOGLE_API_KEY` and `OPENAI_API_KEY`.
 
 ## Requirements
 
