@@ -2649,7 +2649,7 @@ class TestMultiAgentOrchestrator:
         recover_approval_cards_on_startup.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_approval_transport_waits_for_runtime_support_before_startup_recovery(
+    async def test_approval_recovery_waits_for_runtime_support_before_startup_recovery(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2678,7 +2678,7 @@ class TestMultiAgentOrchestrator:
         recover_approval_cards_on_startup.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_approval_transport_waits_for_router_ready_before_startup_recovery(
+    async def test_approval_recovery_waits_for_router_ready_before_startup_recovery(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2707,7 +2707,7 @@ class TestMultiAgentOrchestrator:
         recover_approval_cards_on_startup.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_approval_transport_concurrent_startup_gates_discard_once(
+    async def test_approval_recovery_concurrent_startup_gates_discard_once(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2736,7 +2736,7 @@ class TestMultiAgentOrchestrator:
         recover_approval_cards_on_startup.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_approval_transport_reset_allows_fresh_startup_recovery(
+    async def test_approval_recovery_reset_allows_fresh_startup_recovery(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2894,22 +2894,22 @@ class TestMultiAgentOrchestrator:
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
         orchestrator.agent_bots = {"router": bot}
 
-        transport = orchestrator._approval_recovery
+        recovery = orchestrator._approval_recovery
         # The wait each attempt was scheduled with, read as the sweep runs.
         # Reading the runtime's own countdown is what tells a backoff that
         # grows apart from one that is recomputed from the same start forever.
         waits: list[float] = []
 
         async def _never_finishes() -> _ApprovalStartupSweep:
-            waits.append(transport._startup_cleanup_retry_delay)
+            waits.append(recovery._startup_cleanup_retry_delay)
             return _ApprovalStartupSweep(discarded=0, failed=1)
 
         with (
             patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
             _mock_approval_recovery(orchestrator, side_effect=_never_finishes) as recover_approval_cards_on_startup,
         ):
-            transport.reset_startup_cleanup_gate()
-            await transport.mark_startup_runtime_support_ready()
+            recovery.reset_startup_cleanup_gate()
+            await recovery.mark_startup_runtime_support_ready()
             await orchestrator.handle_bot_ready(bot)
 
             # The first pass came from the startup gates; everything after it
@@ -2919,9 +2919,9 @@ class TestMultiAgentOrchestrator:
             waiting = _retry_tasks()
             assert len(waiting) == 1
             if stop_retrying == "cancel":
-                await transport.close()
+                await recovery.close()
             else:
-                transport.reset_startup_cleanup_gate()
+                recovery.reset_startup_cleanup_gate()
             await _await_until(waiting[0].done)
             # Cancelled rather than left to expire, and nothing armed behind
             # it: a chain that re-arms itself must still be stoppable at one
@@ -2959,7 +2959,7 @@ class TestMultiAgentOrchestrator:
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
         orchestrator.agent_bots = {"router": bot}
 
-        transport = orchestrator._approval_recovery
+        recovery = orchestrator._approval_recovery
         sweeps_started = 0
         retry_is_sweeping = asyncio.Event()
         never_finishes = asyncio.Event()
@@ -2978,8 +2978,8 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
             _mock_approval_recovery(orchestrator, side_effect=_sweep),
         ):
-            transport.reset_startup_cleanup_gate()
-            await transport.mark_startup_runtime_support_ready()
+            recovery.reset_startup_cleanup_gate()
+            await recovery.mark_startup_runtime_support_ready()
             await orchestrator.handle_bot_ready(bot)
 
             # Wait until the retry has woken and is inside the sweep, not
@@ -2989,7 +2989,7 @@ class TestMultiAgentOrchestrator:
             await _await_until(retry_is_sweeping.is_set)
             assert sweeps_started == 2
 
-            await transport.close()
+            await recovery.close()
 
         assert waiting[0].cancelled()
         assert not _retry_tasks()
@@ -3018,7 +3018,7 @@ class TestMultiAgentOrchestrator:
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
         orchestrator.agent_bots = {"router": bot}
 
-        transport = orchestrator._approval_recovery
+        recovery = orchestrator._approval_recovery
         sweeps = [
             _ApprovalStartupSweep(discarded=0, failed=1),
             _ApprovalStartupSweep(discarded=1, failed=0),
@@ -3026,13 +3026,13 @@ class TestMultiAgentOrchestrator:
         # The default delay, deliberately: the retry has to still be waiting
         # when the second gate arrives, or it is not the case under test.
         with _mock_approval_recovery(orchestrator, side_effect=sweeps) as recover_approval_cards_on_startup:
-            transport.reset_startup_cleanup_gate()
-            await transport.mark_startup_runtime_support_ready()
+            recovery.reset_startup_cleanup_gate()
+            await recovery.mark_startup_runtime_support_ready()
             await orchestrator.handle_bot_ready(bot)
             waiting = _retry_tasks()
             assert len(waiting) == 1
 
-            await transport.mark_startup_runtime_support_ready()
+            await recovery.mark_startup_runtime_support_ready()
             await _await_until(waiting[0].done)
             # Cancelled, not merely finished. A task left to wake on its own
             # ends the same way from the outside and is exactly the orphan

@@ -2815,7 +2815,7 @@ async def test_start_runtime_ingests_before_membership_setup_but_defers_semantic
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=blocked_setup),
         patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()),
+        patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
     ):
@@ -2926,7 +2926,7 @@ async def test_startup_membership_publication_serializes_config_reload(
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=blocked_setup),
         patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()),
+        patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
         patch("mindroom.orchestration.config_lifecycle.asyncio.to_thread", side_effect=blocked_config_load),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
@@ -3021,7 +3021,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
             patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
             patch.object(orchestrator._startup_maintenance, "start", side_effect=replay_startup_maintenance),
             patch.object(
-                orchestrator._approval_transport,
+                orchestrator._approval_recovery,
                 "mark_startup_runtime_support_ready",
                 new=AsyncMock(),
             ) as mark_startup_runtime_support_ready,
