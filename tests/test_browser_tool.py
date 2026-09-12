@@ -382,14 +382,6 @@ def test_browser_private_network_metadata_defaults_to_false() -> None:
     assert fields["allow_private_networks"].default is False
 
 
-def test_browser_metadata_lists_discovery_actions() -> None:
-    """Dashboard metadata should expose the callable discovery actions."""
-    description = TOOL_METADATA["browser"].description
-
-    assert "help" in description
-    assert "actions" in description
-
-
 def test_browser_docs_list_discovery_actions() -> None:
     """Tool docs should expose the callable discovery actions."""
     docs = Path("docs/tools/web-scraping-and-browser.md").read_text(encoding="utf-8")

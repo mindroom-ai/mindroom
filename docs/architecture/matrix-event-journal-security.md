@@ -66,6 +66,18 @@ A team continuation without the versioned structured presentation is rejected in
 `finish()` and `discard_unavailable()` delete the continuation after terminal delivery or cleanup, and foreign-key cascades remove its sources and calls.
 
 The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.
+The shared terminal-payload boundary removes full-argument transport fields and pending duration choices before freezing edits, preserving the compact argument preview and grant acknowledgement.
+Trusted model receipts distinguish human authorization, including matching timed windows, from policy-only approval without claiming that every authorized call displayed a card.
+
+`approval_grants` retains timed-grant identity, fixed expiry, revocation state, and scope after the originating card retires.
+Its `resolution_json` contains the terminal card body and redacted argument preview needed to publish a later revocation edit.
+The approval manager's startup and deadline sweeps run journal-owned grant maintenance, which clears that payload when an unrevoked grant expires, either owning principal leaves its room membership, or the revocation edit is acknowledged.
+A revocation accepted before expiry retains its delivery material past expiry until acknowledgement; an expired grant cannot accept a new revocation.
+Unacknowledged outbox payloads remain under the existing delivery-recovery rules, and acknowledged revocation outbox rows are removed once the grant payload is cleared.
+Compact grant identity remains so duplicate actions cannot recreate a window or its retired acknowledgement.
+`approval_grant_cards` retains scope and exact-call identity while eligible cards are pending and keeps the grant reference for automatically decided calls as audit facts.
+Grant maintenance deletes retired scope rows that were never associated with a grant.
+`approval_grant_locks` contains only the principal identity used to serialize grant changes, maintenance, and card reservation.
 
 The [automatic Nio 1.0 migration](../deployment/nio-upgrade.md) settles old pending events and recreates execution, approval, and membership state atomically while preserving journal identity and message history; it never converts old unfinished work into new requests.
 

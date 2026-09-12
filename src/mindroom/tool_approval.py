@@ -83,8 +83,12 @@ class MatrixApprovalAction:
     room_id: str
     sender_id: str
     card_event_id: str | None
-    status: Literal["approved", "denied"]
+    status: Literal["approved", "denied"] | None
     reason: str | None
+    auto_approve_seconds: int | None = None
+    action: Literal["revoke_auto_approval"] | None = None
+    grant_id: str | None = None
+    current_binding: str | None = None
 
 
 def _check_callable_from_module(
@@ -225,6 +229,22 @@ async def handle_matrix_approval_action(
     sanitized_reason = action.reason.strip() if isinstance(action.reason, str) and action.reason.strip() else None
     if action.card_event_id is None:
         return ApprovalActionResult(consumed=False, resolved=False)
+    if (
+        action.action == "revoke_auto_approval"
+        and action.grant_id is not None
+        and action.status is None
+        and action.auto_approve_seconds is None
+    ):
+        return await manager.handle_grant_revocation(
+            room_id=action.room_id,
+            sender_id=action.sender_id,
+            card_event_id=action.card_event_id,
+            grant_id=action.grant_id,
+            authorize_responder=authorize_responder,
+            before_consume=before_consume,
+        )
+    if action.status is None or action.action is not None or action.grant_id is not None:
+        return ApprovalActionResult(consumed=False, resolved=False)
     return await manager.handle_card_response(
         room_id=action.room_id,
         sender_id=action.sender_id,
@@ -233,6 +253,8 @@ async def handle_matrix_approval_action(
         reason=sanitized_reason,
         before_consume=before_consume,
         authorize_responder=authorize_responder,
+        auto_approve_seconds=action.auto_approve_seconds,
+        current_binding=action.current_binding,
     )
 
 

@@ -24,6 +24,7 @@ from mindroom.tool_approval import (
     evaluate_tool_approval,
     resolve_tool_approval_approver,
 )
+from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
@@ -271,6 +272,11 @@ class ApprovalResponseCoordinator:
                 expires_at_ns=call.expires_at_ns,
                 agent_name=call.invoking_agent,
                 thread_id=target.resolved_thread_id,
+                grant_operation=(
+                    grant_operation(config, call.tool_name, dict(tool.tool_args or {}))
+                    if tool.approval_type == POLICY_CONFIRMATION_APPROVAL_TYPE
+                    else None
+                ),
             )
             if card is None:
                 raise RuntimeError(failure_reason)

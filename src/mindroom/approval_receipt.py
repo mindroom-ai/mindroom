@@ -51,7 +51,10 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
         call_label = _receipt_call_label(call.tool_name, call_ordinal)
         if call.decision is ContinuationDecision.APPROVED:
             if call.human_approval_required is True:
-                outcome = "an approval card was shown and approved before execution."
+                outcome = (
+                    "human approval was required and granted before execution, "
+                    "directly or through a matching timed approval window."
+                )
             elif call.human_approval_required is False:
                 outcome = "human approval was not required; policy approved execution."
             else:

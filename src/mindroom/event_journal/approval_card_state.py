@@ -38,6 +38,7 @@ class ApprovalCardReservation:
     tool_call_id: str
     event_type: str
     payload: Mapping[str, object]
+    grant_operation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +130,18 @@ def stored_resolution(
     )
 
 
+def _compact_terminal_content(content: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep previews while dropping pending review data that Matrix edits would duplicate."""
+    pending_fields = {
+        "full_arguments",
+        "full_arguments_file",
+        "full_arguments_url",
+        "full_arguments_info",
+        "auto_approve_options",
+    }
+    return {key: value for key, value in content.items() if key not in pending_fields}
+
+
 def _resolved_content(
     resolution: Mapping[str, Any],
     *,
@@ -137,10 +150,12 @@ def _resolved_content(
     reason: str | None,
 ) -> dict[str, Any]:
     """Rewrite visible content when a durable fence overrides an approval."""
-    stored = dict(resolution)
+    stored = _compact_terminal_content(resolution)
     if decision == requested_status:
         return stored
     stored["status"] = decision
+    if decision != "approved":
+        stored.pop("auto_approval", None)
     stored["resolution_reason"] = reason
     stored["resolved_by"] = None
     body = stored.get("body")
@@ -180,7 +195,7 @@ def terminal_content(
 ) -> dict[str, Any]:
     """Build the fail-closed terminal form of a shared approval card."""
     resolution = {
-        **content,
+        **_compact_terminal_content(content),
         "status": status,
         "approvable": False,
         "resolution_reason": reason,
