@@ -338,7 +338,7 @@ async def test_generation_uses_only_openai_for_prompts_and_images(
                     "object": "response",
                     "created_at": 1,
                     "status": "completed",
-                    "model": "gpt-5.6-luna",
+                    "model": "gpt-6-astra",
                     "output": [
                         {
                             "id": "msg_avatar",
@@ -383,8 +383,8 @@ async def test_generation_uses_only_openai_for_prompts_and_images(
         assert (workspace_avatar_dir / "agents/router.png").read_bytes() == b"avatar-bytes"
         assert [path for path, _ in requests] == ["/v1/responses", "/v1/images/generations"]
         prompt_request, image_request = [payload for _, payload in requests]
-        assert prompt_request["model"] == "gpt-5.6-luna"
-        assert prompt_request["reasoning"] == {"effort": "none"}
+        assert prompt_request["model"] == "gpt-6-astra"
+        assert prompt_request["reasoning"] == {"effort": "low"}
         assert prompt_request["store"] is False
         assert image_request["model"] == "gpt-image-2.5-sunburst"
         assert image_request["prompt"] == f"{AVATAR_CHARACTER_STYLE}, clear compass silhouette"
@@ -596,8 +596,8 @@ async def test_generate_prompt_uses_openai_prompt_model() -> None:
     assert kwargs["model"] == generate_avatars._PROMPT_MODEL
     assert kwargs["input"] == "Agent name: research\nRole: Finds information\nType: agents"
     assert kwargs["instructions"] == AVATAR_AGENT_SYSTEM_PROMPT
-    assert kwargs["reasoning"] == {"effort": "none"}
-    assert kwargs["max_output_tokens"] == 400
+    assert kwargs["reasoning"] == {"effort": "low"}
+    assert kwargs["max_output_tokens"] == 8192
     assert kwargs["store"] is False
 
 

@@ -40,10 +40,9 @@ logger = get_logger(__name__)
 _PROMPT_MODEL = OPENAI_AVATAR_PROMPT
 _IMAGE_MODEL = OPENAI_AVATAR_IMAGE
 _ROOT_SPACE_AVATAR_NAME = "root_space"
-# Team prompts include per-member breakdowns; a low cap truncates them
-# mid-sentence and the mangled prompt makes the image model answer with
-# text instead of an image.
-_PROMPT_MAX_OUTPUT_TOKENS = 400
+# Responses counts reasoning and visible text against this budget. Leave room
+# for low-effort reasoning plus team prompts with per-member breakdowns.
+_PROMPT_MAX_OUTPUT_TOKENS = 8192
 # The image model occasionally returns no image for a valid prompt, so retry
 # the complete prompt and image-generation request.
 _MAX_IMAGE_ATTEMPTS = 3
@@ -161,7 +160,7 @@ async def _generate_prompt(
         input=user_prompt,
         instructions=system_prompt,
         max_output_tokens=_PROMPT_MAX_OUTPUT_TOKENS,
-        reasoning={"effort": "none"},
+        reasoning={"effort": "low"},
         store=False,
     )
     if response.status != "completed":

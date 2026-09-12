@@ -229,7 +229,7 @@ OPENAI_API_KEY_FILE=/path/to/openai_api_key uv run mindroom avatars generate
 uv run mindroom avatars sync
 ```
 
-Avatar prompts use `gpt-5.6-luna`, while `gpt-image-2.5-sunburst` renders the final 1024x1024 high-quality PNG files.
+Avatar prompts use `gpt-6-astra`, while `gpt-image-2.5-sunburst` renders the final 1024x1024 high-quality PNG files.
 The shared credential can instead be supplied directly through `OPENAI_API_KEY`.
 
 ## Requirements

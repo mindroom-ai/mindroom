@@ -157,7 +157,7 @@ def test_current_generation_media_models() -> None:
     """Built-in media tools should use the current provider model IDs."""
     assert model_defaults.OPENAI_TRANSCRIPTION == "gpt-transcribe"
     assert model_defaults.OPENAI_AVATAR_IMAGE == "gpt-image-2.5-sunburst"
-    assert model_defaults.OPENAI_AVATAR_PROMPT == "gpt-5.6-luna"
+    assert model_defaults.OPENAI_AVATAR_PROMPT == "gpt-6-astra"
     assert model_defaults.OPENAI_IMAGE == "gpt-image-2.5-sunburst"
     assert model_defaults.GROQ_TTS == "canopylabs/orpheus-v1-english"
 

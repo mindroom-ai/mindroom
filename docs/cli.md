@@ -508,7 +508,7 @@ In a source checkout, generated files are written under `./avatars/`.
 In containerized deployments, generated overrides are written under the persistent MindRoom storage path.
 Existing managed files are skipped by default.
 Use `--force` to overwrite them after changing avatar prompts or styles.
-Generation uses `gpt-5.6-luna` for prompt creation and `gpt-image-2.5-sunburst` for PNG rendering.
+Generation uses `gpt-6-astra` for prompt creation and `gpt-image-2.5-sunburst` for PNG rendering.
 Both stages use `OPENAI_API_KEY` or the file-based `OPENAI_API_KEY_FILE` credential.
 
 <!-- CODE:START -->
