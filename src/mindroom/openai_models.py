@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from agno.exceptions import ModelProviderError
 from agno.models.deepseek import DeepSeek
@@ -22,7 +22,7 @@ from mindroom.openai_tool_search import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Generator, Iterator
 
     from agno.models.message import Message
     from agno.models.response import ModelResponse
@@ -156,7 +156,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
     ) -> Iterator[ModelResponse]:
         """Require a successful terminal event for each provider invocation."""
         completed = False
-        for chunk in super().invoke_stream(
+        stream = super().invoke_stream(
             messages,
             assistant_message,
             response_format,
@@ -164,10 +164,15 @@ class MindRoomOpenAIResponses(OpenAIResponses):
             tool_choice,
             run_response,
             compress_tool_results,
-        ):
-            # The parser publishes response_id only on response.completed.
-            completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
-            yield chunk
+        )
+        try:
+            for chunk in stream:
+                # The parser publishes response_id only on response.completed.
+                completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
+                yield chunk
+        finally:
+            # Agno returns a generator, annotated only as Iterator.
+            cast("Generator[ModelResponse, None, None]", stream).close()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
             raise ModelProviderError(
@@ -188,7 +193,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
     ) -> AsyncIterator[ModelResponse]:
         """Require a successful terminal event for each async provider invocation."""
         completed = False
-        async for chunk in super().ainvoke_stream(
+        stream = super().ainvoke_stream(
             messages,
             assistant_message,
             response_format,
@@ -196,9 +201,14 @@ class MindRoomOpenAIResponses(OpenAIResponses):
             tool_choice,
             run_response,
             compress_tool_results,
-        ):
-            completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
-            yield chunk
+        )
+        try:
+            async for chunk in stream:
+                completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
+                yield chunk
+        finally:
+            # Finalize Agno's async generator when the consumer stops at a yield.
+            await cast("AsyncGenerator[ModelResponse, None]", stream).aclose()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
             raise ModelProviderError(

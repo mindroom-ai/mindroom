@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,7 @@ from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.exceptions import ModelProviderError
 from agno.models.message import Message
+from agno.models.openai import OpenAIResponses
 from agno.run.agent import RunCompletedEvent, RunErrorEvent
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
@@ -199,6 +201,41 @@ async def test_cancelled_request_remains_cancelled() -> None:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+async def test_closing_sync_stream_closes_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Closing the wrapper must close the actual parent even when another reference keeps it alive."""
+    async with _model(_created() + _text()) as model:
+        messages = [Message(role="user", content="Check")]
+        assistant = Message(role="assistant")
+        parent = OpenAIResponses.invoke_stream(model, messages, assistant)
+        monkeypatch.setattr(OpenAIResponses, "invoke_stream", lambda *_args: parent)
+        stream = model.invoke_stream(messages, assistant)
+        assert isinstance(stream, Generator)
+        next(stream)
+        stream.close()
+        with pytest.raises(StopIteration):
+            next(parent)
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["close", "cancel"])
+async def test_closing_async_stream_closes_parent(monkeypatch: pytest.MonkeyPatch, *, cancel: bool) -> None:
+    """Early close or cancellation after a chunk must finalize the actual superclass stream."""
+    async with _model(_created() + _text()) as model:
+        messages = [Message(role="user", content="Check")]
+        assistant = Message(role="assistant")
+        parent = OpenAIResponses.ainvoke_stream(model, messages, assistant)
+        monkeypatch.setattr(OpenAIResponses, "ainvoke_stream", lambda *_args: parent)
+        stream = model.ainvoke_stream(messages, assistant)
+        assert isinstance(stream, AsyncGenerator)
+        await anext(stream)
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await stream.athrow(asyncio.CancelledError())
+        else:
+            await stream.aclose()
+        with pytest.raises(StopAsyncIteration):
+            await anext(parent)
 
 
 async def test_agent_records_truncated_followup_as_error_after_completed_tool(tmp_path: Path) -> None:
