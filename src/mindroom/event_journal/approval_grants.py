@@ -9,7 +9,12 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from mindroom.tool_approval_grants import ApprovalGrant, approval_timestamp, valid_auto_approve_seconds
+from mindroom.tool_approval_grants import (
+    ApprovalGrant,
+    ApprovalGrantRevocation,
+    approval_timestamp,
+    valid_auto_approve_seconds,
+)
 
 from . import approval_card_state, outbox
 from .models import DeliveryStage
@@ -362,7 +367,7 @@ def revoke(
     card_event_id: str,
     sender_id: str,
     grant_id: str,
-) -> str | None:
+) -> ApprovalGrantRevocation | None:
     """Record revocation debt without rewriting the original FINAL delivery."""
     lock(transaction, principal_id)
     row = transaction.fetchone(
@@ -372,9 +377,9 @@ def revoke(
     if row is None or row["requester_id"] != sender_id or not _current(transaction, principal_id, row):
         return None
     grant = _grant(row)
-    delivery_id = "approval-grant-revoked:" + grant_id
+    revocation = ApprovalGrantRevocation(str(row["original_delivery_id"]), "approval-grant-revoked:" + grant_id)
     if grant.revoked_at_ns is not None:
-        return delivery_id
+        return revocation
     now = time.time_ns()
     if grant.expires_at_ns <= now:
         return None
@@ -383,7 +388,7 @@ def revoke(
         "UPDATE approval_grants SET revoked_at_ns = ? WHERE principal_id = ? AND grant_id = ?",
         (grant.revoked_at_ns, principal_id, grant_id),
     )
-    return delivery_id
+    return revocation
 
 
 def _retire_receipts(transaction: Transaction, principal_id: str) -> None:
@@ -430,7 +435,7 @@ def _retire_receipts(transaction: Transaction, principal_id: str) -> None:
     )
 
 
-def maintain(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
+def maintain(transaction: Transaction, principal_id: str, *, grant_id: str | None = None) -> tuple[str, ...]:
     """Release spent grant payloads and prepare newly deliverable revocations.
 
     Grant identity and applied-call audit facts survive payload retirement.
@@ -439,19 +444,20 @@ def maintain(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
     a delayed acceptance cannot overwrite the later revoked state.
     """
     lock(transaction, principal_id)
-    _retire_receipts(transaction, principal_id)
-    transaction.execute(
-        """
-        DELETE FROM approval_grant_cards
-        WHERE principal_id = ? AND grant_id IS NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_cards AS cards
-              WHERE cards.principal_id = approval_grant_cards.principal_id
-                AND cards.delivery_id = approval_grant_cards.delivery_id
-          )
-        """,
-        (principal_id,),
-    )
+    if grant_id is None:
+        _retire_receipts(transaction, principal_id)
+        transaction.execute(
+            """
+            DELETE FROM approval_grant_cards
+            WHERE principal_id = ? AND grant_id IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM approval_cards AS cards
+                  WHERE cards.principal_id = approval_grant_cards.principal_id
+                    AND cards.delivery_id = approval_grant_cards.delivery_id
+              )
+            """,
+            (principal_id,),
+        )
     rows = transaction.fetchall(
         """
         SELECT grants.*, original.delivery_id AS original_id,
@@ -467,9 +473,10 @@ def maintain(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
          AND acknowledgement.delivery_id = 'approval-grant-revoked:' || grants.grant_id
          AND acknowledgement.stage = 'final'
         WHERE grants.principal_id = ? AND grants.resolution_json <> ''
+          AND (? OR grants.grant_id = ?)
         ORDER BY grants.grant_id
         """,
-        (principal_id,),
+        (principal_id, grant_id is None, grant_id),
     )
     deliveries = []
     now = time.time_ns()
@@ -485,13 +492,12 @@ def maintain(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
                 (principal_id, grant.grant_id),
             )
             continue
-        if (
-            grant.revoked_at_ns is None
-            or (row["original_id"] is not None and row["original_event_id"] is None)
-            or row["revocation_id"] is not None
-        ):
+        if grant.revoked_at_ns is None or (row["original_id"] is not None and row["original_event_id"] is None):
             continue
         delivery_id = "approval-grant-revoked:" + grant.grant_id
+        if row["revocation_id"] is not None:
+            deliveries.append(delivery_id)
+            continue
         content = json.loads(str(row["resolution_json"]))
         content["auto_approval"] = grant.wire()
         outbox.enqueue(
@@ -507,17 +513,18 @@ def maintain(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
             edits_event_id=grant.card_event_id,
         )
         deliveries.append(delivery_id)
-    transaction.execute(
-        """
-        DELETE FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND stage = 'final' AND acknowledged_event_id IS NOT NULL
-          AND EXISTS (
-              SELECT 1 FROM approval_grants AS grants
-              WHERE grants.principal_id = matrix_delivery_outbox.principal_id
-                AND 'approval-grant-revoked:' || grants.grant_id = matrix_delivery_outbox.delivery_id
-                AND grants.resolution_json = ''
-          )
-        """,
-        (principal_id,),
-    )
+    if grant_id is None:
+        transaction.execute(
+            """
+            DELETE FROM matrix_delivery_outbox
+            WHERE principal_id = ? AND stage = 'final' AND acknowledged_event_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM approval_grants AS grants
+                  WHERE grants.principal_id = matrix_delivery_outbox.principal_id
+                    AND 'approval-grant-revoked:' || grants.grant_id = matrix_delivery_outbox.delivery_id
+                    AND grants.resolution_json = ''
+              )
+            """,
+            (principal_id,),
+        )
     return tuple(deliveries)

@@ -1681,7 +1681,6 @@ class TestAgentBot(AgentBotTestBase):
                         authorize_responder=lambda _entity_name: True,
                     )
                     assert resolved.consumed is True
-                    assert resolved.resolved is True
                     await drain_restarted_runtime()
                 finally:
                     await shutdown_approval_runtime()
@@ -2133,7 +2132,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         with patch(
             "mindroom.approval_inbound.handle_matrix_approval_action",
-            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True, card_event_id="$approval")),
+            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, card_event_id="$approval")),
         ) as handle_matrix_approval_action:
             await bot._on_unknown_event(room, event)
 
@@ -2166,11 +2165,7 @@ class TestAgentBot(AgentBotTestBase):
 
         try:
             cards = bot._journal_store.principal("router@shared")
-            transport = approval_transport.ApprovalMatrixTransport(
-                runtime_paths=runtime_paths,
-                bot_provider=lambda _name: router,
-                cards_provider=lambda: cards,
-            )
+            transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: router)
             initialize_approval_store(
                 runtime_paths,
                 cards=cards,
@@ -2291,7 +2286,7 @@ class TestAgentBot(AgentBotTestBase):
             assert before_consume is None
             assert authorize_responder is not None
             assert authorize_responder("calculator") is False
-            return ApprovalActionResult(consumed=False, resolved=False)
+            return ApprovalActionResult(consumed=False)
 
         with patch(
             "mindroom.approval_inbound.handle_matrix_approval_action",
@@ -2370,7 +2365,7 @@ class TestAgentBot(AgentBotTestBase):
             assert before_consume is None
             assert authorize_responder is not None
             assert authorize_responder("calculator") is False
-            return ApprovalActionResult(consumed=False, resolved=False)
+            return ApprovalActionResult(consumed=False)
 
         with patch(
             "mindroom.approval_inbound.handle_matrix_approval_action",
@@ -3069,7 +3064,7 @@ class TestAgentBot(AgentBotTestBase):
         ) -> ApprovalActionResult:
             assert before_consume is not None
             await before_consume()
-            return ApprovalActionResult(consumed=True, resolved=True)
+            return ApprovalActionResult(consumed=True)
 
         with patch(
             "mindroom.approval_inbound.handle_matrix_approval_action",
@@ -3112,7 +3107,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with patch(
             "mindroom.approval_inbound.handle_matrix_approval_action",
-            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True)),
+            new=AsyncMock(return_value=ApprovalActionResult(consumed=True)),
         ) as handle_matrix_approval_action:
             await _dispatch_reaction(bot, room, event)
 
@@ -3137,7 +3132,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with patch(
             "mindroom.approval_inbound.handle_matrix_approval_action",
-            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True)),
+            new=AsyncMock(return_value=ApprovalActionResult(consumed=True)),
         ) as handle_matrix_approval_action:
             handled = await maybe_handle_tool_approval_reply(
                 room=room,

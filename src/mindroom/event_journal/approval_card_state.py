@@ -66,6 +66,8 @@ class RecordedApprovalDecision:
     # Whether this call is what committed the decision it offered. False both
     # when there was no row to write and when the row refused the write.
     recorded: bool
+    delivery_id: str | None = None
+    card_event_id: str | None = None
     continuation_ready: bool = False
     continuation_entity_name: str | None = None
     continuation_room_id: str | None = None

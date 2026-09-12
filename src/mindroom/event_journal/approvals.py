@@ -299,7 +299,12 @@ def _resolve_continuation(
     )
     existing = approval_card_state.decode_resolution(None if settled is None else cast("str", settled["payload_json"]))
     if existing is not None:
-        return RecordedApprovalDecision(resolution=existing, recorded=False)
+        return RecordedApprovalDecision(
+            resolution=existing,
+            recorded=False,
+            delivery_id=str(card["delivery_id"]),
+            card_event_id=card_event_id,
+        )
     generation = int(generation_value)
     continuation = transaction.fetchone(
         """
@@ -399,6 +404,8 @@ def _resolve_continuation(
     return RecordedApprovalDecision(
         resolution=stored_resolution,
         recorded=True,
+        delivery_id=str(card["delivery_id"]),
+        card_event_id=card_event_id,
         continuation_ready=state is not None and state["state"] == "ready",
         continuation_entity_name=entity_name,
         continuation_room_id=str(card["room_id"]),

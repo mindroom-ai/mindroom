@@ -26,7 +26,7 @@ if TYPE_CHECKING:
         HistoryRecoveryOutcome,
         RoomHistoryRecovery,
     )
-    from mindroom.tool_approval_grants import ApprovalGrant
+    from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation
 
     from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
     from .approvals import (
@@ -503,7 +503,7 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         card_event_id: str,
     ) -> ApprovalGrant | None: ...
 
-    async def maintain_approval_grants(self) -> tuple[str, ...]: ...  # noqa: D102
+    async def maintain_approval_grants(self, *, grant_id: str | None = None) -> tuple[str, ...]: ...  # noqa: D102
 
     async def revoke_approval_grant(  # noqa: D102
         self,
@@ -512,7 +512,7 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         card_event_id: str,
         sender_id: str,
         grant_id: str,
-    ) -> str | None: ...
+    ) -> ApprovalGrantRevocation | None: ...
 
     async def expire_unacknowledged_approval_card(  # noqa: D102
         self,

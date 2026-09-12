@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 import pytest
 
-from mindroom.approval_manager import _ApprovalManager
+from mindroom.approval_manager import ApprovalManager
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import (
     ApprovalCardReservation,
@@ -92,7 +92,7 @@ async def _approval_manager(
     fail_final: bool = False,
     unique_event_ids: bool = False,
     expected_initial_count: int = 1,
-) -> tuple[_ApprovalManager, EventJournalStore, asyncio.Event]:
+) -> tuple[ApprovalManager, EventJournalStore, asyncio.Event]:
     journal = EventJournalStore.open_sqlite(tmp_path / database_name)
     cards = journal.principal("router@shared")
     initial_sent = asyncio.Event()
@@ -117,7 +117,7 @@ async def _approval_manager(
             raise RuntimeError(message)
         return f"$terminal:{delivery.delivery_id}" if unique_event_ids else "$terminal"
 
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         prepare_event=prepare_event,
         send_delivery=send,
@@ -243,7 +243,6 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             authorize_responder=lambda _entity_name: True,
         )
         assert result.consumed is True
-        assert result.resolved is True
         committed = await cards.background_approval_decision(run_id="run-1", call_id="call-1")
         assert committed is not None
         assert committed.status == status
@@ -265,7 +264,6 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             authorize_responder=lambda _entity_name: True,
         )
         assert repeated.consumed is True
-        assert repeated.resolved is False
         persisted = await journal.principal("router@shared").background_approval_decision(
             run_id="run-1",
             call_id="call-1",

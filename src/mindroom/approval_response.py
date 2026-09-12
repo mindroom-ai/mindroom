@@ -6,9 +6,11 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom import approval_manager
+from mindroom.approval_failure import prepare_approval_failure
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_COMPLETED,
@@ -416,12 +418,14 @@ class ApprovalResponseCoordinator:
             return True
         if await self.successful_final_delivery(current) is not None:
             return False
-        if current.state != "failing":
-            current = await self.request_failure(current, reason)
-            if current is None:
-                return False
         manager = approval_manager.get_approval_store()
-        if manager is None or not await manager.expire_continuation_cards(current.approval_id):
+        current = await prepare_approval_failure(
+            current,
+            reason,
+            request_failure=partial(self.request_failure, current),
+            expire_cards=None if manager is None else manager.expire_continuation_cards,
+        )
+        if current is None:
             return False
         if await self.store.finish_approval_continuation(current.approval_id):
             return True

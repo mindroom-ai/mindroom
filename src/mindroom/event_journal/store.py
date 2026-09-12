@@ -17,7 +17,7 @@ from mindroom.history_recovery import (
     HistoryRecoveryOutcome,
     RoomHistoryRecovery,
 )
-from mindroom.tool_approval_grants import ApprovalGrant  # noqa: TC001
+from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation  # noqa: TC001
 
 from . import (
     approval_continuations,
@@ -1218,10 +1218,10 @@ class PrincipalStore:
             ),
         )
 
-    async def maintain_approval_grants(self) -> tuple[str, ...]:
+    async def maintain_approval_grants(self, *, grant_id: str | None = None) -> tuple[str, ...]:
         """Retire spent payloads and enqueue revocations after their approval edits."""
         return await self._backend.write(
-            lambda transaction: approval_grants.maintain(transaction, self._principal_id),
+            lambda transaction: approval_grants.maintain(transaction, self._principal_id, grant_id=grant_id),
         )
 
     async def revoke_approval_grant(
@@ -1231,7 +1231,7 @@ class PrincipalStore:
         card_event_id: str,
         sender_id: str,
         grant_id: str,
-    ) -> str | None:
+    ) -> ApprovalGrantRevocation | None:
         """Record durable revocation debt for ordered acknowledgement delivery."""
         return await self._backend.write(
             lambda transaction: approval_grants.revoke(

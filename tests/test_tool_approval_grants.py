@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, Literal
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
 from agno.models.response import ToolExecution
 
 from mindroom.approval_inbound import parse_approval_response_event
-from mindroom.approval_manager import ApprovalActionResult, _ApprovalManager
+from mindroom.approval_manager import ApprovalActionResult, ApprovalManager
 from mindroom.approval_receipt import build_approval_receipt
 from mindroom.approval_response import ApprovalResponseCoordinator
 from mindroom.approval_transport import _approval_delivery_content
@@ -926,14 +926,14 @@ async def test_grant_maintenance_preserves_revocation_debt_until_acknowledged(
         monkeypatch.setattr("time.time_ns", lambda: 2_000_000_600_000_000_000)
         await manager.recover_cards_on_startup()
         assert await _grant_payload(journal, grant.grant_id)
-        pending = await owner.load_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+        pending = await owner.load_matrix_delivery(delivery_id=delivery_id.delivery_id, stage=DeliveryStage.FINAL)
         assert pending is not None
         assert pending.acknowledged_event_id is None
         fail_revocation = False
         await manager.recover_cards_on_startup()
         await manager.recover_cards_on_startup()
         assert await _grant_payload(journal, grant.grant_id) == ""
-        assert await owner.load_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL) is None
+        assert await owner.load_matrix_delivery(delivery_id=delivery_id.delivery_id, stage=DeliveryStage.FINAL) is None
         sent_count = len(delivered)
         assert (
             await owner.revoke_approval_grant(
@@ -966,7 +966,7 @@ async def _grant_payload(journal: EventJournalStore, grant_id: str) -> str:
 
 async def _card(
     journal: EventJournalStore,
-    manager: _ApprovalManager,
+    manager: ApprovalManager,
     name: str,
     *,
     agent: str = "code",
@@ -1039,14 +1039,14 @@ async def _card(
     return "$card-" + name
 
 
-def _manager(journal: EventJournalStore, tmp_path: Path) -> _ApprovalManager:
+def _manager(journal: EventJournalStore, tmp_path: Path) -> ApprovalManager:
     async def prepare(_room: str, _thread: str | None, content: dict) -> dict:
         return content
 
     async def send(delivery: MatrixDelivery) -> str:
         return "$" + delivery.delivery_id + ("-edit" if delivery.stage is DeliveryStage.FINAL else "")
 
-    return _ApprovalManager(
+    return ApprovalManager(
         test_runtime_paths(tmp_path),
         cards=journal.principal("router@shared"),
         prepare_event=prepare,
@@ -1056,7 +1056,7 @@ def _manager(journal: EventJournalStore, tmp_path: Path) -> _ApprovalManager:
 
 
 async def _approve(
-    manager: _ApprovalManager,
+    manager: ApprovalManager,
     card: str,
     *,
     seconds: int = 600,
@@ -1174,7 +1174,7 @@ async def test_revoke_survives_card_retirement_and_replay_cannot_regrant(
             grant_id=grant.grant_id,
             authorize_responder=lambda _agent: True,
         )
-        assert not result.resolved
+        assert not result.consumed
         result = await manager.handle_grant_revocation(
             room_id="!room:test",
             sender_id="@human:test",
@@ -1182,7 +1182,7 @@ async def test_revoke_survives_card_retirement_and_replay_cannot_regrant(
             grant_id=grant.grant_id,
             authorize_responder=lambda _agent: True,
         )
-        assert result.resolved
+        assert result.consumed
         await _approve(manager, first)
         await _card(journal, manager, "after")
         continuation = await journal.principal("agent@code").approval_continuation("after")
@@ -1222,3 +1222,51 @@ async def test_ineligible_timed_request_leaves_call_pending(
     finally:
         await manager.shutdown()
         await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_timed_action_delivers_its_scope_without_startup_recovery(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Command delivery does not scan or settle unrelated approval debt."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        first = await _card(journal, manager, "selected")
+        await _card(journal, manager, "matching")
+        await _card(journal, manager, "unrelated", thread="$other-thread")
+        await manager.shutdown()
+        monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
+        recover = AsyncMock()
+        monkeypatch.setattr(manager, "recover_cards_on_startup", recover)
+        sent: list[MatrixDelivery] = []
+
+        async def send(delivery: MatrixDelivery) -> str:
+            sent.append(delivery)
+            return "$" + delivery.delivery_id
+
+        manager.send_delivery = send
+        await _approve(manager, first)
+        recover.assert_not_awaited()
+        assert {item.delivery_id for item in sent} == {"card-selected", "card-matching"}
+        assert all(item.stage is DeliveryStage.FINAL for item in sent)
+        unrelated = await journal.principal("agent@code").approval_continuation("unrelated")
+        assert unrelated is not None
+        assert unrelated.calls[0].decision is None
+        grant = await manager.cards.approval_grant_for_card(room_id="!room:test", card_event_id=first)
+        assert grant is not None
+        sent.clear()
+        await manager.handle_grant_revocation(
+            room_id="!room:test",
+            sender_id="@human:test",
+            card_event_id=first,
+            grant_id=grant.grant_id,
+            authorize_responder=lambda _name: True,
+        )
+        recover.assert_not_awaited()
+        assert len(sent) == 1
+        assert sent[0].payload["auto_approval"]["revoked_at"] is not None
+    finally:
+        await manager.shutdown()

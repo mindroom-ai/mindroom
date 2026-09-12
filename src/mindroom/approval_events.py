@@ -12,7 +12,7 @@ from mindroom.matrix.large_messages import sidecar_upload_is_usable
 from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS
 
-PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
+_PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +29,7 @@ class PendingApproval:
     arguments_preview_truncated: bool
     timeout_seconds: int
     created_at_ms: int
-    initial_status: PendingApprovalStatus
+    initial_status: _PendingApprovalStatus
     approvable: bool = True
     full_arguments_available: bool = False
     thread_id: str | None = None
@@ -84,7 +84,7 @@ class PendingApproval:
             arguments_preview_truncated=bool(content.get("arguments_truncated")),
             timeout_seconds=timeout_seconds,
             created_at_ms=created_at_ms,
-            initial_status=cast("PendingApprovalStatus", status),
+            initial_status=cast("_PendingApprovalStatus", status),
             approvable=_approvable(content),
             full_arguments_available=_full_arguments_available(content),
             thread_id=thread_id,
@@ -96,7 +96,7 @@ class PendingApproval:
             else (),
         )
 
-    def latest_status(self, latest_edit: dict[str, Any] | None) -> PendingApprovalStatus:
+    def latest_status(self, latest_edit: dict[str, Any] | None) -> _PendingApprovalStatus:
         """Return the visible approval status after applying the latest cached edit."""
         if latest_edit is None:
             return self.initial_status
@@ -105,7 +105,7 @@ class PendingApproval:
             return self.initial_status
         status = visible_content_from_content(cast("dict[str, object]", content)).get("status")
         if status in {"pending", "approved", "denied", "expired"}:
-            return cast("PendingApprovalStatus", status)
+            return cast("_PendingApprovalStatus", status)
         return self.initial_status
 
 

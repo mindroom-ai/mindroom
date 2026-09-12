@@ -281,6 +281,11 @@ Only the originating grant card carries mutable `auto_approval` controls; revoca
 Clients render compact history from the original event plus its latest same-sender terminal edit, retaining complete argument evidence from the original inline `full_arguments` or its encrypted/plain Matrix attachment.
 Timed cards offload large complete arguments before reservation so subsequent decision metadata does not overflow the event envelope.
 Calls covered by an existing grant atomically commit their exact-call decision, grant audit, and non-actionable approved INITIAL receipt without reserving another pending approval card.
+Timed decisions return their affected card deliveries; command handling flushes those INITIAL/FINAL effects without scanning unrelated approval debt.
+Revocation flushes the originating approval before targeted grant maintenance can publish its later edit.
+`ApprovalManager` owns deadline work and its `ApprovalRecovery` collaborator owns startup gates, retries, and unavailable-owner settlement; the orchestrator creates that collaborator before bootstrap readiness and binds the same instance to the manager.
+Transport prepares, sends, and adopts cards and unavailable-owner notices, while manager shutdown stops both recovery and deadline tasks.
+Shared failure preparation fences the observed continuation and settles cards, after each caller checks its own frozen FINAL policy: unavailable-owner cleanup preserves any FINAL, and response failure settlement protects successful FINALs.
 Receipt publication uses the existing Matrix outbox, including restart reconciliation; after a device change, a missing terminal receipt may be republished because it offers no action.
 Clients deduplicate those receipts by their exact approval and tool-call identity, scoped to the event sender.
 Acknowledged terminal receipts retire their payloads while retaining the existing grant audit and approval tombstone; unacknowledged receipt debt remains recoverable.

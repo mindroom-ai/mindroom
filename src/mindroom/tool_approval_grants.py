@@ -95,3 +95,11 @@ class ApprovalGrant:
             "expires_at": approval_timestamp(self.expires_at_ns),
             "revoked_at": None if self.revoked_at_ns is None else approval_timestamp(self.revoked_at_ns),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalGrantRevocation:
+    """Ordered delivery identities returned by a durable revocation command."""
+
+    original_delivery_id: str
+    delivery_id: str

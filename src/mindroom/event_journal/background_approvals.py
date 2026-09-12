@@ -160,6 +160,8 @@ def resolve(
         return approval_card_state.RecordedApprovalDecision(
             resolution=approval_card_state.decode_resolution(cast("str | None", row["resolution_json"])),
             recorded=False,
+            delivery_id=str(row["delivery_id"]),
+            card_event_id=card_event_id,
         )
     expired = time.time_ns() >= int(row["expires_at_ns"])
     decision_status: Literal["approved", "denied", "expired"]
@@ -189,7 +191,12 @@ def resolve(
         msg = f"Background approval call {row['call_id']!r} changed during its exact-call decision"
         raise RuntimeError(msg)
     approval_card_state.enqueue_resolution(transaction, principal_id, row, stored)
-    return approval_card_state.RecordedApprovalDecision(resolution=stored, recorded=True)
+    return approval_card_state.RecordedApprovalDecision(
+        resolution=stored,
+        recorded=True,
+        delivery_id=str(row["delivery_id"]),
+        card_event_id=card_event_id,
+    )
 
 
 def resolve_call(

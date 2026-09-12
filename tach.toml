@@ -148,6 +148,7 @@ depends_on = [
     "mindroom.turn_record",
 ]
 visibility = [
+    "mindroom.approval_recovery",
     "mindroom.agent_reply_membership_sync",
     "mindroom.approval_execution",
     "mindroom.approval_manager",
@@ -698,6 +699,7 @@ depends_on = [
     "mindroom.tool_system.tool_calls",
 ]
 visibility = [
+    "mindroom.orchestrator",
     "mindroom.approval_response",
     "mindroom.approval_transport",
     "mindroom.orchestration.script_runtime",
@@ -758,6 +760,7 @@ visibility = [
 [[modules]]
 path = "mindroom.approval_response"
 depends_on = [
+    "mindroom.approval_failure",
     "mindroom.approval_manager",
     "mindroom.constants",
     "mindroom.delivery_gateway",
@@ -1899,6 +1902,8 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
+    "mindroom.approval_manager",
+    "mindroom.approval_recovery",
     "mindroom.config_reload",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.knowledge.status",
@@ -5553,3 +5558,14 @@ depends_on = ["mindroom.constants"]
 [[modules]]
 path = "mindroom.cli.config_reload"
 depends_on = ["mindroom.cli.api", "mindroom.cli.config", "mindroom.config.legacy_access", "mindroom.config.main", "mindroom.config.yaml_includes", "mindroom.config_reload", "mindroom.constants"]
+
+
+[[modules]]
+path = "mindroom.approval_failure"
+depends_on = []
+visibility = ["mindroom.approval_recovery", "mindroom.approval_response"]
+
+[[modules]]
+path = "mindroom.approval_recovery"
+depends_on = ["mindroom.approval_failure", "mindroom.event_journal", "mindroom.logging_config"]
+visibility = ["mindroom.orchestrator"]
