@@ -211,23 +211,25 @@ async def test_busy_room_ownership_does_not_delay_other_rooms(
 
 
 @pytest.mark.parametrize("router_unavailable", [False, True])
+@pytest.mark.parametrize("target_count", [1, 2])
 async def test_exact_inventory_repairs_response_without_room_scan(
     journal_store: EventJournalStore,
     tmp_path: Path,
     router_unavailable: bool,
+    target_count: int,
 ) -> None:
     """Known delivery IDs suffice even when the resume identity is unavailable."""
     principal = journal_store.principal("agent@alice")
-    await _initial(principal, "$orphan")
+    for index in range(target_count):
+        await _initial(principal, f"$orphan-{index}")
     client = _make_client()
     config = _make_config(tmp_path)
     router = _make_client() if router_unavailable else None
     if router is not None:
         router.joined_rooms.side_effect = ConnectionError("router membership unavailable")
-    client.room_get_event.side_effect = None
-    client.room_get_event.return_value = _room_get_event_response(
+    client.room_get_event.side_effect = lambda _room, event_id: _room_get_event_response(
         _make_message_event(
-            event_id="$orphan-response",
+            event_id=event_id,
             body="Thinking...",
             timestamp_ms=NOW_MS - STALE_AGE_MS,
             room_id=ROOM,
@@ -236,6 +238,7 @@ async def test_exact_inventory_repairs_response_without_room_scan(
     )
     client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _aiter())
     with (
+        patch("mindroom.matrix.stale_stream_cleanup.asyncio.sleep", new_callable=AsyncMock) as sleep,
         patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000),
         patch(
             "mindroom.matrix.stale_stream_cleanup.edit_message_result",
@@ -254,10 +257,11 @@ async def test_exact_inventory_repairs_response_without_room_scan(
             startup_cutoff_ms=NOW_MS,
             scanned_room_ids=set(),
         )
-    assert result.cleaned_count == 1
-    assert edit.await_args.args[2] == "$orphan-response"
+    assert result.cleaned_count == target_count
+    assert edit.await_args.args[2] == f"$orphan-{target_count - 1}-response"
+    assert sleep.await_count == target_count - 1
     client.room_messages.assert_not_awaited()
-    client.room_get_event.assert_awaited_once_with(ROOM, "$orphan-response")
+    assert client.room_get_event.await_count == target_count
 
 
 async def test_failed_ownership_read_does_not_block_other_candidates(

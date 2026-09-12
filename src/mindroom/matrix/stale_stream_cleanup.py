@@ -263,6 +263,7 @@ async def recover_stale_streaming_messages(
             cleaned = 0
             interrupted: list[_InterruptedThread] = []
             failed = room_id in failed_room_ids
+            prior_edit_succeeded_by_bot: set[str] = set()
             for event_id, (bot_user_id, thread_id) in targets.items():
                 try:
                     async with response_recovery_scope(agent_names[bot_user_id], room_id, event_id) as permitted:
@@ -273,6 +274,7 @@ async def recover_stale_streaming_messages(
                         room_id=room_id,
                         actors={bot_user_id: actors[bot_user_id]},
                         target_thread_ids={event_id: thread_id},
+                        prior_edit_succeeded_by_bot=prior_edit_succeeded_by_bot,
                         bot_user_ids=set(actors),
                         config=config,
                         runtime_paths=runtime_paths,
@@ -545,6 +547,7 @@ async def _cleanup_stale_streaming_room(
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
     response_recovery_scope: _ResponseRecoveryScope,
+    prior_edit_succeeded_by_bot: set[str] | None = None,
 ) -> tuple[int, list[_InterruptedThread]]:
     """Resolve owned targets and let each bot account repair its own messages."""
     if not actors:
@@ -570,7 +573,8 @@ async def _cleanup_stale_streaming_room(
         return 0, []
 
     cleaned_count = 0
-    prior_edit_succeeded_by_bot: set[str] = set()
+    if prior_edit_succeeded_by_bot is None:
+        prior_edit_succeeded_by_bot = set()
     interrupted_threads: list[_InterruptedThread] = []
     candidate_items = sorted(
         ((k, v) for k, v in message_states.items() if v.latest_body is not None),
