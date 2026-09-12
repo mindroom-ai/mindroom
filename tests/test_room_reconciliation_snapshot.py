@@ -154,7 +154,8 @@ async def test_power_write_does_not_restore_revoked_admin_from_snapshot() -> Non
 
 
 @pytest.mark.asyncio
-async def test_one_failed_room_does_not_cancel_healthy_reconciliation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("error", [RuntimeError("policy failed"), ValueError("bad policy"), aiohttp.ClientError()])
+async def test_one_failed_room_does_not_cancel_healthy_reconciliation(tmp_path: Path, error: Exception) -> None:
     """A room-local policy failure cannot abort sibling rooms."""
     config = membership_config(tmp_path, agent_rooms=["broken", "healthy"])
     client = AsyncMock()
@@ -168,8 +169,7 @@ async def test_one_failed_room_does_not_cancel_healthy_reconciliation(tmp_path: 
 
     async def policy(_client: nio.AsyncClient, room_key: str, *_args: object, **_kwargs: object) -> None:
         if room_key == "broken":
-            message = "one room policy unavailable"
-            raise RuntimeError(message)
+            raise error
 
     with patch.object(matrix_rooms, "_reconcile_joined_existing_room", side_effect=policy):
         result = await matrix_rooms.reconcile_managed_rooms(

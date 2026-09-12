@@ -415,7 +415,7 @@ async def reconcile_managed_rooms(
                         snapshot=snapshot,
                     )
                     snapshots[room_id] = snapshot
-            except RuntimeError:
+            except Exception:
                 logger.exception("Failed managed room policy; continuing with remaining rooms", room_id=room_id)
 
     async with asyncio.TaskGroup() as workers:
