@@ -269,6 +269,18 @@ When every current source is deleted and no FINAL owns the response, its unfinis
 Fallback eligibility and edits share the delivery lock with cleanup, and the transactional ledger prevents late completion writes from restoring a deleted INITIAL or inventing an answer.
 Cleanup preserves the INITIAL identity for surviving sources, and stale history for a surviving request retries canonical preparation with a refreshed payload.
 An approval continuation retains its response INITIAL even when all source messages are deleted; the approval card remains the explicit consent surface.
+
+Native approval events expose a canonical `approval_scope` containing an opaque scope ID, entity, invoking agent, and concrete operation (including MCP server and remote tool when applicable).
+The same operation descriptor supplies the private configuration-bound grant identity and the public review metadata.
+`response_event_id` associates approval history with the response that paused; clients must not infer this association from tool names or argument similarity.
+Approved calls retain immutable `approval_provenance`: `kind: once`, or `kind: timed_grant` with grant ID, originating card, granting user, decision time, duration, and fixed expiry.
+Only the originating grant card carries mutable `auto_approval` controls; revocation and expiry do not change the historical authorization of covered calls.
+Clients render compact history from the original event plus its latest same-sender terminal edit, retaining complete argument evidence from the original inline `full_arguments` or its encrypted/plain Matrix attachment.
+Timed cards offload large complete arguments before reservation so subsequent decision metadata does not overflow the event envelope.
+Calls covered by an existing grant atomically commit their exact-call decision, grant audit, and non-actionable approved INITIAL receipt without reserving another pending approval card.
+Receipt publication uses the existing Matrix outbox, including restart reconciliation; after a device change, a missing terminal receipt may be republished because it offers no action.
+Clients deduplicate those receipts by their exact approval and tool-call identity, scoped to the event sender.
+Acknowledged terminal receipts retire their payloads while retaining the existing grant audit and approval tombstone; unacknowledged receipt debt remains recoverable.
 Approval creation and source-redaction admission serialize on the existing room-membership row, so creation cannot acquire a source that deletion already settled.
 Recovery can finish a failing approval whose INITIAL was already retired only after card expiration; `event_journal/legacy_approval_recovery.py` proves no FINAL debt and exact tombstones for its acknowledged response and every owned source inside the current owner's transaction.
 That cleanup settles journal ownership without sending replacement text or recording tool success.
