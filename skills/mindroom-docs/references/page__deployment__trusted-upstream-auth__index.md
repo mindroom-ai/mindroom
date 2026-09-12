@@ -207,6 +207,8 @@ If no public URL is configured, MindRoom uses the request origin.
 Requests marked `Sec-Fetch-Site: cross-site` are rejected even when the Origin matches.
 A successfully validated API bearer token does not require these browser headers.
 Adding a bearer header to a request authenticated by trusted upstream identity does not bypass this protection.
+The dashboard CORS allowlist controls which origins may read credentialed responses; it does not authorize cross-origin cookie or trusted-upstream mutations.
+Host the dashboard under the app's public origin, or use its development proxy, which authenticates API calls with a bearer token.
 
 Conversation-issued OAuth links for requester-scoped credentials require the intended requester to authenticate before starting authorization and again at the callback.
 Shared-agent credential links retain their short-lived, single-use delegation behavior.

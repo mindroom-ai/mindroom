@@ -1148,7 +1148,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling; it does **not** change the API server bind port, which uses `mindroom run --api-port`. | `8765` |
 | `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
-| `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the dashboard API with credentials | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
+| `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
@@ -19109,6 +19109,8 @@ If no public URL is configured, MindRoom uses the request origin.
 Requests marked `Sec-Fetch-Site: cross-site` are rejected even when the Origin matches.
 A successfully validated API bearer token does not require these browser headers.
 Adding a bearer header to a request authenticated by trusted upstream identity does not bypass this protection.
+The dashboard CORS allowlist controls which origins may read credentialed responses; it does not authorize cross-origin cookie or trusted-upstream mutations.
+Host the dashboard under the app's public origin, or use its development proxy, which authenticates API calls with a bearer token.
 
 Conversation-issued OAuth links for requester-scoped credentials require the intended requester to authenticate before starting authorization and again at the callback.
 Shared-agent credential links retain their short-lived, single-use delegation behavior.
@@ -20576,12 +20578,13 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
   --set trustedUpstreamAuth.userIdHeader=X-MindRoom-User-Id \
   --set trustedUpstreamAuth.emailHeader=X-MindRoom-User-Email \
   --set trustedUpstreamAuth.matrixUserIdHeader=X-MindRoom-Matrix-User-Id \
-  --set trustedUpstreamAuth.emailToMatrixUserIdTemplate='@{localpart}:example.org'
+  --set trustedUpstreamAuth.emailToMatrixUserIdTemplate='@{localpart}:example.org' \
+  --set trustedUpstreamAuth.emailDomain=example.com
 ```
 
 When using the provisioner, configure the platform chart with `provisioner.trustedUpstreamAuth.enabled="true"` and the matching `provisioner.trustedUpstreamAuth.*Header` values.
-If your access layer cannot supply a Matrix ID header, configure `provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate` with the same template.
-The email-to-Matrix template must contain exactly one `{localpart}` placeholder and requires the matching `emailHeader` value in both the instance and platform chart configuration.
+If your access layer cannot supply a Matrix ID header, configure `provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate` with the same template and `provisioner.trustedUpstreamAuth.emailDomain` with the allowed email domain.
+The email-to-Matrix template must contain exactly one `{localpart}` placeholder and requires the matching `emailHeader` and `emailDomain` values in both the instance and platform chart configuration.
 
 ## Runtime-Only Deployment
 
