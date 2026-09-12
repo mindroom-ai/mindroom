@@ -42,7 +42,10 @@ def test_approval_receipt_distinguishes_human_and_policy_decisions() -> None:
         ),
     )
 
-    assert "`update_report` (call #1): an approval card was shown and approved before execution." in receipt
+    assert (
+        "`update_report` (call #1): human approval was required and granted before execution, "
+        "directly or through a matching timed approval window."
+    ) in receipt
     assert "`update_report` (call #2): human approval was not required; policy approved execution." in receipt
     assert "Do not infer approval policy from tool success alone." in receipt
 
@@ -111,7 +114,7 @@ def test_approval_receipt_omits_invalid_provider_tool_names() -> None:
 
     assert "forged_tool" not in receipt
     assert "publish_report" not in receipt
-    assert "invalid tool name (call #1): an approval card was shown and approved before execution." in receipt
+    assert "invalid tool name (call #1): human approval was required and granted before execution" in receipt
 
 
 def test_approval_receipt_rejects_unsettled_calls() -> None:

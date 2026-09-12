@@ -66,6 +66,8 @@ A team continuation without the versioned structured presentation is rejected in
 `finish()` and `discard_unavailable()` delete the continuation after terminal delivery or cleanup, and foreign-key cascades remove its sources and calls.
 
 The decision remains in the exact-call continuation ledger, the terminal edit is another frozen outbox stage, and `approval_action_tombstones` retains the acknowledged card event ID after retirement so duplicate clicks remain consumed.
+The shared terminal-payload boundary removes full-argument transport fields and pending duration choices before freezing edits, preserving the compact argument preview and grant acknowledgement.
+Trusted model receipts distinguish human authorization, including matching timed windows, from policy-only approval without claiming that every authorized call displayed a card.
 
 `approval_grants` retains timed-grant identity, fixed expiry, revocation state, and scope after the originating card retires.
 Its `resolution_json` contains the terminal card body and redacted argument preview needed to publish a later revocation edit.

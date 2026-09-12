@@ -12,6 +12,7 @@ from agno.models.response import ToolExecution
 
 from mindroom.approval_inbound import parse_approval_response_event
 from mindroom.approval_manager import ApprovalActionResult, _ApprovalManager
+from mindroom.approval_receipt import build_approval_receipt
 from mindroom.approval_response import ApprovalResponseCoordinator
 from mindroom.approval_transport import _approval_delivery_content
 from mindroom.config.approval import ToolApprovalConfig
@@ -27,6 +28,7 @@ from mindroom.event_journal import (
     InboundEvent,
     MatrixDelivery,
 )
+from mindroom.matrix.large_messages import content_fits_normal_event
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval_grants import grant_operation
@@ -200,6 +202,140 @@ async def test_only_policy_pause_offers_timed_approval(
             current = await responder.approval_continuation("authored")
             assert current is not None
             assert current.calls[0].decision is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming_a_card(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reused human grant must not tell the model that another card was shown."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    monkeypatch.setattr("mindroom.approval_manager._MANAGER", manager)
+    responder = journal.principal("agent@code")
+    config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
+    coordinator = ApprovalResponseCoordinator(
+        config=lambda: config,
+        runtime_paths=test_runtime_paths(tmp_path),
+        store=responder,
+        delivery_gateway=MagicMock(spec=DeliveryGateway),
+        retry_sources=lambda _room, _sources: None,
+    )
+    sent = []
+
+    async def send(delivery: MatrixDelivery) -> str:
+        sent.append(delivery)
+        return "$" + delivery.delivery_id
+
+    manager.send_delivery = send
+    try:
+        for name in ("origin", "reuse"):
+            tool = ToolExecution(
+                tool_call_id="call-" + name,
+                tool_name="shell",
+                tool_args={"command": name},
+                requires_confirmation=True,
+                approval_type="mindroom_policy",
+            )
+            plan = await coordinator.plan_pause(((tool, "call-" + name, "shell", "code"),), requester_id="@human:test")
+            assert plan.calls[0].human_approval_required is True
+            await responder.admit(
+                InboundEvent(
+                    event_id="$source-" + name,
+                    room_id="!room:test",
+                    thread_id="$thread",
+                    kind=EventKind.MESSAGE,
+                    event_class=EventClass.ACTIONABLE,
+                    sender="@human:test",
+                    origin_server_ts=1000,
+                    source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "run"}},
+                ),
+            )
+            continuation = await coordinator.create(
+                ApprovalContinuation(
+                    approval_id=name,
+                    run_id="run-" + name,
+                    session_id="session",
+                    entity_kind="agent",
+                    entity_name="code",
+                    room_id="!room:test",
+                    thread_id="$thread",
+                    requester_id="@human:test",
+                    response_event_id="$waiting-" + name,
+                    source_event_ids=("$source-" + name,),
+                    calls=plan.calls,
+                    state="waiting",
+                    runtime_generation="runtime",
+                ),
+            )
+            await coordinator.publish_generation(
+                continuation,
+                plan,
+                target=MessageTarget(
+                    room_id="!room:test",
+                    source_thread_id="$thread",
+                    resolved_thread_id="$thread",
+                    reply_to_event_id=None,
+                    session_id="session",
+                ),
+                failure_reason="publication failed",
+            )
+            if name == "origin":
+                assert any(delivery.stage is DeliveryStage.INITIAL for delivery in sent)
+                assert (await _approve(manager, "$origin-0-0")).consumed
+                sent.clear()
+            else:
+                assert sent == []
+                stored = await responder.approval_continuation(name)
+                assert stored is not None
+                assert stored.state == "ready"
+                receipt = build_approval_receipt(stored.calls)
+                assert "human approval was required and granted" in receipt
+                assert "matching timed approval window" in receipt
+                assert "card was shown" not in receipt
+                assert "human approval was not required" not in receipt
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_grant_batch_terminal_edits_fit_after_large_inline_argument_cards(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Batch edits must keep compact previews rather than doubling inline full arguments."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    sent = []
+
+    async def send(delivery: MatrixDelivery) -> str:
+        sent.append(delivery)
+        return "$" + delivery.delivery_id
+
+    manager.send_delivery = send
+    try:
+        first = await _card(journal, manager, "first", command="x" * 40_000)
+        await _card(journal, manager, "sibling", command="y" * 40_000)
+        initial = [delivery for delivery in sent if delivery.stage is DeliveryStage.INITIAL]
+        assert len(initial) == 2
+        assert all("full_arguments" in delivery.payload for delivery in initial)
+        assert all(content_fits_normal_event(_approval_delivery_content(delivery)) for delivery in initial)
+
+        assert (await _approve(manager, first)).consumed
+        finals = [delivery for delivery in sent if delivery.stage is DeliveryStage.FINAL]
+        assert {delivery.delivery_id for delivery in finals} == {"card-first", "card-sibling"}
+        for delivery in finals:
+            wire = _approval_delivery_content(delivery)
+            assert content_fits_normal_event(wire)
+            assert wire["m.new_content"]["status"] == "approved"
+            assert wire["m.new_content"]["thread_id"] == "$thread"
+            assert wire["m.new_content"]["arguments_truncated"] is True
+            assert "full_arguments" not in wire["m.new_content"]
+            assert "auto_approve_options" not in wire["m.new_content"]
     finally:
         await manager.shutdown()
 
@@ -694,6 +830,7 @@ async def _card(
     thread: str | None = "$thread",
     operation: str | None = "binding:shell",
     approvable: bool = True,
+    command: str | None = None,
 ) -> str:
     responder = journal.principal("agent@" + agent)
     await responder.admit(
@@ -737,7 +874,7 @@ async def _card(
         continuation_generation=0,
         tool_call_id="call-" + name,
         tool_name="shell",
-        arguments={"command": name} if approvable else {"command": "x" * 300000},
+        arguments={"command": name if command is None else command} if approvable else {"command": "x" * 300000},
         room_id="!room:test",
         requester_id=requester,
         approver_user_id=requester,
