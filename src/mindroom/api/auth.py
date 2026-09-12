@@ -40,9 +40,7 @@ def require_operator_key(request: Request, authorization: str | None) -> None:
     configured_key = runtime_paths.env_value("MINDROOM_API_KEY")
     if not configured_key:
         raise HTTPException(status_code=503, detail="This operational check requires MINDROOM_API_KEY")
-    token = (
-        authorization.removeprefix("Bearer ").strip() if authorization and authorization.startswith("Bearer ") else None
-    )
+    token = _extract_bearer_token(authorization)
     if token is None or not secrets.compare_digest(token.encode(), configured_key.encode()):
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
@@ -617,39 +615,15 @@ async def request_has_frontend_access(request: Request) -> bool:
     ):
         await require_connections_user(request)
         return True
-    mindroom_api_key = auth_state.settings.mindroom_api_key
     try:
-        trusted_auth_user = await _trusted_upstream_auth_user(
-            request,
-            auth_state.settings.trusted_upstream,
-            auth_state.trusted_upstream_jwt_client,
-        )
+        auth_user = await authenticate_user(request, authorization, allow_public_paths=False)
     except HTTPException as exc:
         if exc.status_code >= 500:
             raise
         return False
-    if trusted_auth_user is not None:
-        _require_connections_route_authorized(request, trusted_auth_user, snapshot)
-        request.scope["auth_user"] = trusted_auth_user
-        return True
-
-    if auth_state.supabase_auth is None:
-        if not mindroom_api_key:
-            return True
-        token = _get_request_token(
-            request,
-            authorization,
-            cookie_names=(_STANDALONE_AUTH_COOKIE_NAME,),
-        )
-        return token is not None and secrets.compare_digest(token, mindroom_api_key)
-
-    token = _get_request_token(
-        request,
-        authorization,
-        cookie_names=(_PLATFORM_AUTH_COOKIE_NAME,),
-    )
-    user = _validate_supabase_token(token, auth_state) if token is not None else None
-    return user is not None and (not auth_state.settings.account_id or user.id == auth_state.settings.account_id)
+    if auth_state.settings.trusted_upstream.enabled:
+        _require_connections_route_authorized(request, auth_user, snapshot)
+    return True
 
 
 def sanitize_next_path(next_path: str | None) -> str:
@@ -678,7 +652,8 @@ def _request_path_with_query(request: Request) -> str:
     return f"{path}?{query}" if query else path
 
 
-def _public_origin(public_url: str | None) -> str | None:
+def public_origin(public_url: str | None) -> str | None:
+    """Extract a configured URL's origin for browser redirects, CORS, and mutation checks."""
     if not public_url:
         return None
     parsed = urlsplit(public_url.strip())
@@ -688,11 +663,11 @@ def _public_origin(public_url: str | None) -> str | None:
 
 
 def _platform_redirect_target(request: Request, auth_settings: _ApiAuthSettings, next_path: str | None) -> str:
-    public_origin = _public_origin(auth_settings.public_url)
-    if public_origin is None:
+    origin = public_origin(auth_settings.public_url)
+    if origin is None:
         return str(request.url)
     path = sanitize_next_path(next_path or _request_path_with_query(request))
-    return f"{public_origin}{path}"
+    return f"{origin}{path}"
 
 
 def login_redirect_for_request(request: Request, *, next_path: str | None = None) -> RedirectResponse | None:
@@ -888,8 +863,10 @@ def _require_browser_mutation_origin(
         or _extract_bearer_token(validated_authorization) is not None
     ):
         return
-    public_url = urlsplit(settings.public_url or str(request.base_url))
-    require_same_origin(request, f"{public_url.scheme}://{public_url.netloc}")
+    origin = public_origin(settings.public_url or str(request.base_url))
+    if origin is None:
+        raise HTTPException(403, "Browser changes require a valid public origin")
+    require_same_origin(request, origin)
 
 
 async def authenticate_user(

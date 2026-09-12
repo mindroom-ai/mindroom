@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
@@ -3832,6 +3833,28 @@ def test_cookie_mutations_require_browser_origin(
     """Only a validated bearer credential can bypass the browser mutation guard."""
     api_key_client.cookies.set("mindroom_api_key", "test-key")
     response = api_key_client.post("/api/config/load", headers=headers)
+    assert response.status_code == expected, response.text
+
+
+@pytest.mark.parametrize(
+    ("public_url", "origin", "expected"),
+    [
+        ("https://public.example.org/dashboard", "https://public.example.org", 200),
+        ("https://public.example.org", "http://testserver", 403),
+        ("missing-scheme", "://", 403),
+    ],
+)
+def test_cookie_mutations_use_configured_public_origin(
+    api_key_client: TestClient,
+    public_url: str,
+    origin: str,
+    expected: int,
+) -> None:
+    """A configured origin overrides the request host and must fail closed when invalid."""
+    state = main._app_context(api_key_client.app)
+    state.auth_state = replace(state.auth_state, settings=replace(state.auth_state.settings, public_url=public_url))
+    api_key_client.cookies.set("mindroom_api_key", "test-key")
+    response = api_key_client.post("/api/config/load", headers={"Origin": origin})
     assert response.status_code == expected, response.text
 
 

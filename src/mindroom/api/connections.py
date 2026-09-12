@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
-from mindroom.api.auth import require_connections_user, require_same_origin
+from mindroom.api.auth import public_origin, require_connections_user, require_same_origin
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     ConnectionUserContext,
@@ -209,10 +209,9 @@ def _require_management(context: _Connections, agent_name: str, provider_id: str
 
 def _require_same_origin(request: Request, context: _Connections) -> None:
     public_url = context.runtime_paths.env_value("MINDROOM_PUBLIC_URL") or str(request.base_url)
-    parsed = urlsplit(public_url)
-    if parsed.scheme != "https" or not parsed.netloc:
+    expected = public_origin(public_url)
+    if expected is None or not expected.startswith("https://"):
         raise HTTPException(403, "Connections require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
-    expected = f"{parsed.scheme}://{parsed.netloc}"
     require_same_origin(
         request,
         expected,

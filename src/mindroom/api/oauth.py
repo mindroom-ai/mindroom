@@ -327,12 +327,10 @@ async def _conversation_target_payload(
     context: OAuthCredentialContext,
     target: OAuthConnectTarget,
 ) -> dict[str, str]:
-    snapshot = await load_oauth_credentials_snapshot(context)
-    if snapshot.connection_generation != target.connection_generation:
+    payload = await _credential_context_binding_payload(context)
+    if payload["connection_generation"] != target.connection_generation:
         raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE)
-    payload = oauth_credential_binding_payload(target.binding)
     payload["conversation_requester_id"] = target.requester_id or ""
-    payload["connection_generation"] = target.connection_generation
     return payload
 
 
@@ -428,13 +426,12 @@ def _conversation_context_from_pending_payload(
     except OAuthCredentialBindingParseError as exc:
         raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE) from exc
     requester_id = payload.get("conversation_requester_id")
-    connection_generation = payload.get("connection_generation")
-    if not requester_id or not connection_generation:
+    if not requester_id:
         raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE)
     target = OAuthConnectTarget(
         binding=binding,
         requester_id=requester_id,
-        connection_generation=connection_generation,
+        connection_generation=_pending_connection_generation(payload),
     )
     return _conversation_connect_context(request, provider, runtime_paths, target)
 
