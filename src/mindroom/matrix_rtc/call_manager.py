@@ -386,11 +386,16 @@ class CallManager:
         if room is not None:
             await self._reconcile(room)
 
-    async def reconcile_joined_rooms(self) -> None:
-        """Reconcile configured calls after a successful Matrix sync response."""
+    async def reconcile_joined_rooms(self, room_ids: AbstractSet[str] | None = None) -> None:
+        """Reconcile all configured calls, or only the requested joined rooms."""
         if self._shutting_down:
             return
-        rooms = [room for room in self._client.rooms.values() if self._is_configured_call_room(room)]
+        candidates = (
+            self._client.rooms.values()
+            if room_ids is None
+            else (room for room_id in room_ids if (room := self._client.rooms.get(room_id)) is not None)
+        )
+        rooms = [room for room in candidates if self._is_configured_call_room(room)]
         self._observed_rooms.update((room.room_id, room) for room in rooms)
         await asyncio.gather(*(self._reconcile(room) for room in rooms))
 
