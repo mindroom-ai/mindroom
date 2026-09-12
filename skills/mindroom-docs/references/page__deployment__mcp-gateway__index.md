@@ -49,7 +49,7 @@ The feature is disabled by default and requires both `MINDROOM_TRUSTED_UPSTREAM_
 Connections lists agents in a searchable table, with filters for personal, shared, and MCP-enabled agents.
 The table includes agents you can use or manage credentials for; agents you can only manage have no MCP selection controls.
 Expand an agent to see each tool with a connection, and expand **Other tools** for tools that need no additional setup.
-Under **MCP access**, select all compatible tools for an agent or choose tools individually.
+Under **MCP gateway**, select all compatible tools for an agent or choose tools individually.
 Each tool selection applies only to that agent, even when another agent has the same tool.
 An individual selection covers the configured toolkit or MCP server, rather than individual functions inside it.
 Selecting **All tools** includes future compatible tools assigned to that agent; a custom selection includes only the tools you checked.

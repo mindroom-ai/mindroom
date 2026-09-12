@@ -145,7 +145,7 @@ describe("connected clients", () => {
 
     await waitFor(() =>
       expect(
-        screen.queryByRole("heading", { name: "Connected clients" }),
+        screen.queryByRole("heading", { name: "Connected MCP clients" }),
       ).not.toBeInTheDocument(),
     );
   });

@@ -167,12 +167,13 @@ export function ConnectedClients() {
         <div className="space-y-1">
           <h2
             id="connected-clients-heading"
-            className="text-2xl font-semibold tracking-tight"
+            className="text-lg font-semibold tracking-tight"
           >
-            Connected clients
+            Connected MCP clients
           </h2>
           <p className="text-sm text-muted-foreground">
-            Manage apps that can use tools from your selected agents.
+            Apps authorized to use your selected tools through the MindRoom MCP
+            gateway.
           </p>
         </div>
         {clients.length > 0 && (
@@ -267,9 +268,7 @@ export function ConnectedClients() {
                   className="shrink-0 self-start sm:self-center"
                   variant="outline"
                   disabled={busy !== null}
-                  aria-label={`Disconnect ${client.client_name}${
-                    host ? ` from ${host}` : ""
-                  }`}
+                  aria-label={`Disconnect ${client.client_name}${host ? ` from ${host}` : ""}`}
                   onClick={() => void disconnect(client)}
                 >
                   {busy === client.id ? "Disconnecting…" : "Disconnect"}
