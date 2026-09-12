@@ -225,14 +225,12 @@ When you run this from a source checkout, generated files are written under `./a
 In containerized deployments, generated overrides are stored under the persistent MindRoom storage path instead of the image-bundled `/app/avatars`.
 
 ```bash
-GOOGLE_API_KEY_FILE=/path/to/google_api_key \\
-OPENAI_API_KEY_FILE=/path/to/openai_api_key \\
-uv run mindroom avatars generate
+OPENAI_API_KEY_FILE=/path/to/openai_api_key uv run mindroom avatars generate
 uv run mindroom avatars sync
 ```
 
-Avatar prompts use Gemini, while `gpt-image-2.5-sunburst` renders the final 1024x1024 high-quality PNG files.
-Both credentials can instead be supplied directly through `GOOGLE_API_KEY` and `OPENAI_API_KEY`.
+Avatar prompts use `gpt-5.6-luna`, while `gpt-image-2.5-sunburst` renders the final 1024x1024 high-quality PNG files.
+The shared credential can instead be supplied directly through `OPENAI_API_KEY`.
 
 ## Requirements
 

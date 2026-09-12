@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Literal
 
-from google import genai
-from google.genai import types
 from openai import AsyncOpenAI
 from rich.console import Console
 from rich.panel import Panel
@@ -26,7 +24,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import room_has_avatar, set_room_avatar_from_file
 from mindroom.matrix.state import MatrixState, get_room_id, matrix_state_for_runtime
 from mindroom.matrix.users import create_agent_http_client
-from mindroom.model_defaults import GOOGLE_AVATAR_PROMPT, OPENAI_AVATAR_IMAGE
+from mindroom.model_defaults import OPENAI_AVATAR_IMAGE, OPENAI_AVATAR_PROMPT
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,7 +37,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_PROMPT_MODEL = GOOGLE_AVATAR_PROMPT
+_PROMPT_MODEL = OPENAI_AVATAR_PROMPT
 _IMAGE_MODEL = OPENAI_AVATAR_IMAGE
 _ROOT_SPACE_AVATAR_NAME = "root_space"
 # Team prompts include per-member breakdowns; a low cap truncates them
@@ -140,7 +138,7 @@ def _missing_avatar_targets(
 
 
 async def _generate_prompt(
-    client: genai.Client,
+    client: AsyncOpenAI,
     target: _AvatarTarget,
     config: Config,
 ) -> str:
@@ -158,19 +156,22 @@ async def _generate_prompt(
         system_prompt = config.get_prompt("AVATAR_AGENT_SYSTEM_PROMPT")
         user_prompt = f"Agent name: {target.entity_name}\nRole: {target.role}\nType: {target.entity_type}"
 
-    response = await client.aio.models.generate_content(
+    response = await client.responses.create(
         model=_PROMPT_MODEL,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            max_output_tokens=_PROMPT_MAX_OUTPUT_TOKENS,
-        ),
+        input=user_prompt,
+        instructions=system_prompt,
+        max_output_tokens=_PROMPT_MAX_OUTPUT_TOKENS,
+        reasoning={"effort": "none"},
+        store=False,
     )
-    if not response.text:
-        msg = f"Gemini returned no text prompt for {target.entity_type}/{target.entity_name}"
+    if response.status != "completed":
+        msg = f"OpenAI returned an unfinished text prompt for {target.entity_type}/{target.entity_name}: {response.status}"
+        raise ValueError(msg)
+    visual_elements = response.output_text.strip()
+    if not visual_elements:
+        msg = f"OpenAI returned no text prompt for {target.entity_type}/{target.entity_name}"
         raise ValueError(msg)
 
-    visual_elements = response.text.strip()
     base_style = (
         config.get_prompt("AVATAR_ROOM_STYLE")
         if target.entity_type in {"rooms", "spaces"}
@@ -202,8 +203,7 @@ def _extract_image_bytes(response: ImagesResponse) -> bytes | None:
 
 
 async def _generate_avatar(
-    prompt_client: genai.Client,
-    image_client: AsyncOpenAI,
+    client: AsyncOpenAI,
     target: _AvatarTarget,
     runtime_paths: constants.RuntimePaths,
     config: Config,
@@ -226,8 +226,8 @@ async def _generate_avatar(
 
     image_bytes: bytes | None = None
     for attempt in range(1, _MAX_IMAGE_ATTEMPTS + 1):
-        prompt = await _generate_prompt(prompt_client, target, config)
-        response = await image_client.images.generate(
+        prompt = await _generate_prompt(client, target, config)
+        response = await client.images.generate(
             model=_IMAGE_MODEL,
             prompt=prompt,
             size="1024x1024",
@@ -496,19 +496,9 @@ async def _generate_missing_avatars(
         console.print("\n[dim]⊘ All managed avatars already exist; skipping generation[/dim]")
         return True
 
-    google_api_key = get_secret_from_env("GOOGLE_API_KEY", runtime_paths=runtime_paths)
     openai_api_key = get_secret_from_env("OPENAI_API_KEY", runtime_paths=runtime_paths)
-    missing_keys = [
-        key_name
-        for key_name, key_value in (
-            ("GOOGLE_API_KEY", google_api_key),
-            ("OPENAI_API_KEY", openai_api_key),
-        )
-        if not key_value
-    ]
-    if missing_keys:
-        for key_name in missing_keys:
-            console.print(f"[red]Error: {key_name} or {key_name}_FILE environment variable not set[/red]")
+    if not openai_api_key:
+        console.print("[red]Error: OPENAI_API_KEY or OPENAI_API_KEY_FILE environment variable not set[/red]")
         console.print("Please set it in your .env file, secrets mount, or environment")
         return False
 
@@ -516,10 +506,8 @@ async def _generate_missing_avatars(
     _print_avatar_generation_plan(selected_targets)
 
     async with AsyncExitStack() as client_stack:
-        image_client = AsyncOpenAI(api_key=openai_api_key)
-        client_stack.push_async_callback(image_client.close)
-        prompt_client = genai.Client(api_key=google_api_key)
-        client_stack.push_async_callback(prompt_client.aio.aclose)
+        client = AsyncOpenAI(api_key=openai_api_key)
+        client_stack.push_async_callback(client.close)
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -529,8 +517,7 @@ async def _generate_missing_avatars(
             results = await asyncio.gather(
                 *(
                     _generate_avatar(
-                        prompt_client,
-                        image_client,
+                        client,
                         target,
                         runtime_paths,
                         config,

@@ -508,8 +508,8 @@ In a source checkout, generated files are written under `./avatars/`.
 In containerized deployments, generated overrides are written under the persistent MindRoom storage path.
 Existing managed files are skipped by default.
 Use `--force` to overwrite them after changing avatar prompts or styles.
-Generation requires `GOOGLE_API_KEY` for Gemini prompt creation and `OPENAI_API_KEY` for PNG rendering with `gpt-image-2.5-sunburst`.
-Both credentials support their `_FILE` variants for file-based secrets.
+Generation uses `gpt-5.6-luna` for prompt creation and `gpt-image-2.5-sunburst` for PNG rendering.
+Both stages use `OPENAI_API_KEY` or the file-based `OPENAI_API_KEY_FILE` credential.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
