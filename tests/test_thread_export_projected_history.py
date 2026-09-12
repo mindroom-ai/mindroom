@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, Mock
 
 import nio
 import pytest
+from nio.crypto.attachments import encrypt_attachment
 
 from mindroom.config.main import Config
 from mindroom.event_journal import DepartureSource, EventClass, EventKind
@@ -492,13 +493,35 @@ async def test_a_long_text_sidecar_is_fetched_once_and_then_stays_local(
     assert homeserver.history_calls == 0
 
 
-async def test_legacy_file_edit_exports_the_entire_sidecar(router: PrincipalStore) -> None:
+@pytest.mark.parametrize("encrypted", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+async def test_legacy_file_edit_exports_the_entire_sidecar(
+    router: PrincipalStore,
+    encrypted: bool,
+    nested: bool,
+) -> None:
     """A malformed old fallback must not lose its valid full replacement text."""
-    homeserver = FakeHomeserver(sidecars={SIDECAR_URL: json.dumps({"msgtype": "m.text", "body": SIDECAR_TEXT})})
+    payload = json.dumps({"msgtype": "m.text", "body": SIDECAR_TEXT})
+    homeserver = FakeHomeserver(sidecars={SIDECAR_URL: payload})
+    inner_url = "mxc://example.org/inner"
+    if nested:
+        homeserver.sidecars[inner_url] = payload
+        payload = json.dumps(
+            {
+                "msgtype": "m.file",
+                "body": "* nested preview",
+                "m.new_content": {"msgtype": "m.file", "body": "nested preview", **sidecar_content(), "url": inner_url},
+            },
+        )
+        homeserver.sidecars[SIDECAR_URL] = payload
     original = raw("$file", "old preview", ts=200, thread_id=ROOT)
     edited = raw("$edit", "new preview", ts=300, replaces="$file")
     edited["content"]["msgtype"] = "m.file"
     edited["content"]["m.new_content"].update(msgtype="m.file", **sidecar_content())
+    encrypted_payload, descriptor = encrypt_attachment(payload.encode())
+    if encrypted:
+        replacement = edited["content"]["m.new_content"]
+        replacement["file"] = {**descriptor, "url": replacement.pop("url")}
     serve_thread(homeserver, raw(ROOT, "root", ts=100), [original, edited])
     homeserver.relations["$file"] = [edited]
 
@@ -510,6 +533,14 @@ async def test_legacy_file_edit_exports_the_entire_sidecar(router: PrincipalStor
     client.room_get_event.side_effect = homeserver.room_get_event
     client.room_get_event_relations = Mock(side_effect=relations)
     client.download.side_effect = homeserver.download
+    if encrypted:
+
+        async def download(mxc: str) -> nio.DownloadResponse:
+            if mxc == SIDECAR_URL:
+                return nio.DownloadResponse(encrypted_payload, "application/octet-stream", None)
+            return await homeserver.download(mxc)
+
+        client.download.side_effect = download
     reader = export_conversation_reader(client=client, config=Config(), store=router, self_sender=ROUTER)
     messages = await export(reader)
     assert bodies(messages) == ["root", SIDECAR_TEXT]

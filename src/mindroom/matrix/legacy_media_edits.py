@@ -1,16 +1,16 @@
-"""Read historical file replacements whose fallback omitted its media URL."""
+"""Read historical file replacements whose fallback omitted its media descriptor."""
 
 from __future__ import annotations
 
 import nio
 
-# Legacy format: m.file replacement events with a URL only inside m.new_content.
+# Legacy format: m.file replacement events with media descriptors only inside m.new_content.
 # Last legacy release: v2026.8.87; replacement: v2026.8.88 writes valid outer media fallbacks.
-# Handling: Supply the validated replacement URL only for parsing; preserve the original source for projection.
+# Handling: Supply validated replacement media only for parsing; preserve the original source for projection.
 # Coverage: tests/test_legacy_media_edits.py::test_legacy_file_edit_is_readable_without_changing_source.
 
 
-def readable_legacy_file_edit(event: nio.BaseEvent) -> nio.RoomMessageFile | None:
+def readable_legacy_file_edit(event: nio.BaseEvent) -> nio.RoomMessageFile | nio.RoomEncryptedFile | None:
     """Restore only a valid file replacement, never an arbitrary malformed event."""
     if not isinstance(event, nio.BadEvent):
         return None
@@ -36,10 +36,11 @@ def readable_legacy_file_edit(event: nio.BaseEvent) -> nio.RoomMessageFile | Non
     ):
         return None
     parsed_replacement = nio.Event.parse_event({**source, "content": replacement})
-    if not isinstance(parsed_replacement, nio.RoomMessageFile):
+    if not isinstance(parsed_replacement, (nio.RoomMessageFile, nio.RoomEncryptedFile)):
         return None
-    parsed = nio.Event.parse_event({**source, "content": {**content, "url": parsed_replacement.url}})
-    if not isinstance(parsed, nio.RoomMessageFile):
+    media_key = "file" if isinstance(parsed_replacement, nio.RoomEncryptedFile) else "url"
+    parsed = nio.Event.parse_event({**source, "content": {**content, media_key: replacement[media_key]}})
+    if not isinstance(parsed, (nio.RoomMessageFile, nio.RoomEncryptedFile)):
         return None
     parsed.source = source
     return parsed

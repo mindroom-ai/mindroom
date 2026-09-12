@@ -25,8 +25,11 @@ Strict hydration never records an unreadable walk as a permanently spent export 
 Missing keys or malformed events produce an explicit unreadability error; a later export can retry after the history becomes readable.
 Export policy rank 30 replaces rank 20 so previously ambiguous incomplete export markers receive a fresh attempt without changing or deleting stored messages.
 Already-complete histories stay warm, and genuinely exhausted safety ceilings still prevent repeating the same maximum-cost walk.
-The narrow compatibility adapter in `matrix/legacy_media_edits.py` validates historical file replacements that omitted the URL from their outer fallback.
+The narrow compatibility adapter in `matrix/legacy_media_edits.py` validates historical file replacements that omitted the URL or encrypted-file descriptor from their outer fallback.
 It preserves the authored source and full sidecar contents and applies only to historical reads, not actionable ingress.
+Canonical content resolution follows nested v2 sidecars, including encrypted files, while retaining the original event relation.
+Cycles and chains exceeding eight downloads remain explicitly unresolved rather than being exported as complete.
+The live historical Kimi event required two sidecars (27,944 and 195,001 bytes); the second contains the complete content and tool traces.
 The writer already produces valid file-edit fallbacks.
 Unavailable encryption keys still prevent a complete export; this change does not fabricate missing plaintext.
 

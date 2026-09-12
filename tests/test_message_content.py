@@ -26,7 +26,7 @@ from mindroom.matrix.message_content import (
     extract_edit_body,
     resolve_event_source_content,
 )
-from mindroom.matrix.sidecar_content import sidecar_mxc_url
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, sidecar_mxc_url
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.visible_body import (
     strip_matrix_rich_reply_fallback,
@@ -69,6 +69,66 @@ def _make_message_event(
 def _make_client() -> AsyncMock:
     """Return one AsyncClient-shaped test mock with a local agent user ID."""
     return make_matrix_client_mock(user_id="@mindroom_general:localhost")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["complete", "cycle", "missing", "invalid"])
+async def test_sidecar_chain_preserves_full_content_and_event_relation(ending: str) -> None:
+    """Nested historical sidecars resolve fully or retain explicit unreadability."""
+    metadata = {"version": 2, "encoding": "matrix_event_content_json"}
+    first = {"msgtype": "m.file", "body": "preview", "url": "mxc://server/first", "io.mindroom.long_text": metadata}
+    second = {**first, "url": "mxc://server/second"}
+    relation = {"rel_type": "m.replace", "event_id": "$actual"}
+    source = {"content": {**first, "m.relates_to": relation}}
+    terminal = {
+        "msgtype": "m.text",
+        "body": "complete body",
+        "io.mindroom.tool_trace": {"full": "tool output"},
+        "m.relates_to": {"rel_type": "m.thread", "event_id": "$forged"},
+    }
+    client = _make_client()
+    final_response = nio.DownloadResponse(
+        json.dumps(terminal if ending == "complete" else first).encode(),
+        "application/json",
+        None,
+    )
+    if ending == "missing":
+        final_response = nio.DownloadError("M_NOT_FOUND")
+    elif ending == "invalid":
+        final_response = nio.DownloadResponse(b"not JSON", "application/json", None)
+    client.download.side_effect = [
+        nio.DownloadResponse(json.dumps({"m.new_content": second}).encode(), "application/json", None),
+        final_response,
+    ]
+
+    resolved = await resolve_event_source_content(source, client)
+
+    assert client.download.await_count == 2
+    assert resolved["content"]["m.relates_to"] == relation
+    if ending == "complete":
+        assert resolved["content"] == {**terminal, "m.relates_to": relation}
+    else:
+        assert holds_unresolved_sidecar(resolved["content"])
+
+
+@pytest.mark.asyncio
+async def test_sidecar_chain_has_a_bounded_download_budget() -> None:
+    """Unique sidecar URLs cannot cause an unbounded walk."""
+
+    def preview(index: int) -> dict:
+        return {
+            "body": "preview",
+            "url": f"mxc://server/{index}",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+        }
+
+    client = _make_client()
+    client.download.side_effect = [
+        nio.DownloadResponse(json.dumps(preview(index)).encode(), "application/json", None) for index in range(1, 10)
+    ]
+    resolved = await resolve_event_source_content({"content": preview(0)}, client)
+    assert client.download.await_count == 8
+    assert holds_unresolved_sidecar(resolved["content"])
 
 
 class TestResolvedMessageExtraction:
