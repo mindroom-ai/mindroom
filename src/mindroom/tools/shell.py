@@ -98,7 +98,7 @@ def _normalize_shell_command_line(command: str) -> list[str]:
     stripped = command.strip()
     if not stripped:
         raise ValueError(_SHELL_ARGS_ERROR)
-    return ["bash", "-lc", command]
+    return ["bash", "-c", command]
 
 
 def _looks_like_shell_command_line(command: str) -> bool:
@@ -392,6 +392,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             the timeout is exceeded the process keeps running in the background
             and a handle string is returned that can be polled with
             ``check_shell_command`` or stopped with ``kill_shell_command``.
+
+            Command strings use non-login Bash with the prepared execution environment.
+            Use explicit ``["bash", "-lc", command]`` only when login startup is needed.
 
             Args:
                 args: The command to run as a shell command string or a list of argv strings.

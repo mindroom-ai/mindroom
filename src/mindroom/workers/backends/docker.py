@@ -382,6 +382,7 @@ def check_docker_workers_absent_for_storage_upgrade(
 class _DockerLaunchConfig:
     image_reference: str
     launch_config_hash: str
+    image_resolved: bool
 
 
 class DockerWorkerBackend:
@@ -533,6 +534,7 @@ class DockerWorkerBackend:
                 paths,
                 private_agent_names=spec.private_agent_names,
                 state_scope_worker_key=spec.state_scope_worker_key,
+                launch_config=launch_config,
             )
             lifecycle_state = prepare_worker_ensure_lifecycle(
                 read_lifecycle_state(metadata),
@@ -833,6 +835,7 @@ class DockerWorkerBackend:
         *,
         private_agent_names: frozenset[str] | None,
         state_scope_worker_key: str | None,
+        launch_config: _DockerLaunchConfig,
     ) -> bool:
         container = self._read_container(metadata.container_name)
         if metadata.status == "failed":
@@ -845,6 +848,7 @@ class DockerWorkerBackend:
             paths,
             private_agent_names=private_agent_names,
             state_scope_worker_key=state_scope_worker_key,
+            launch_config=launch_config,
         ):
             return True
         return not self._container_is_running(container)
@@ -857,8 +861,9 @@ class DockerWorkerBackend:
         *,
         private_agent_names: frozenset[str] | None,
         state_scope_worker_key: str | None,
+        launch_config: _DockerLaunchConfig,
     ) -> bool:
-        compatible_launch_config_hashes = self._compatible_launch_config_hashes(container)
+        compatible_launch_config_hashes = self._compatible_launch_config_hashes(container, launch_config)
         if metadata.launch_config_hash not in compatible_launch_config_hashes:
             return False
         if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
@@ -908,6 +913,7 @@ class DockerWorkerBackend:
             paths,
             private_agent_names=private_agent_names,
             state_scope_worker_key=state_scope_worker_key,
+            launch_config=launch_config,
         ):
             self._remove_container(container)
             container = None
@@ -1295,6 +1301,7 @@ class DockerWorkerBackend:
         return _DockerLaunchConfig(
             image_reference=image_identity if image_resolved else self.config.image,
             launch_config_hash=self._compute_launch_config_hash(image_identity=image_identity),
+            image_resolved=image_resolved,
         )
 
     def _container_launch_config_hash(self, container: _DockerContainer | None) -> str | None:
@@ -1329,18 +1336,19 @@ class DockerWorkerBackend:
             return config_image
         return None
 
-    def _compatible_launch_config_hashes(self, container: _DockerContainer | None) -> set[str]:
-        current_image_identity, image_resolved = _docker_image_identity_state(
-            self.config.image,
-            client=self._client,
-            docker_errors=self._docker_errors,
-        )
-        compatible_hashes = {self._compute_launch_config_hash(image_identity=current_image_identity)}
+    def _compatible_launch_config_hashes(
+        self,
+        container: _DockerContainer | None,
+        launch_config: _DockerLaunchConfig,
+    ) -> set[str]:
+        # One ensure uses one image snapshot; the next call resolves the tag again.
+        current_image_identity = launch_config.image_reference
+        compatible_hashes = {launch_config.launch_config_hash}
         container_image_identity = self._container_image_identity(container)
         if container_image_identity is None:
             return compatible_hashes
 
-        if not image_resolved:
+        if not launch_config.image_resolved:
             compatible_hashes.add(self._compute_launch_config_hash(image_identity=container_image_identity))
             return compatible_hashes
 

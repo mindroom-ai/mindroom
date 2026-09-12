@@ -236,8 +236,10 @@ class _FakeImagesApi:
         self.by_name: dict[str, _FakeImage] = {}
         self.pulls: list[str] = []
         self.pull_image_id: str | None = None
+        self.gets: list[str] = []
 
     def get(self, name: str) -> _FakeImage:
+        self.gets.append(name)
         image = self.by_name.get(name)
         if image is None:
             raise _FakeNotFoundError(name)
@@ -2591,6 +2593,27 @@ def test_docker_worker_ready_failure_surfaces_container_logs(
     assert "OPENAI_API_KEY=***redacted***" in message
     assert "... [truncated]" in message
     assert len(message) < 4300
+
+
+def test_warm_ensure_resolves_image_once_and_detects_next_call_tag_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Avoid repeated daemon lookups without caching image identity across calls."""
+    backend, client, _ = _backend(monkeypatch, tmp_path)
+    spec = WorkerSpec(_TEST_UNSCOPED_WORKER_KEY)
+    backend.ensure_worker(spec)
+    original = client.containers.created_containers[-1]
+    client.images.gets.clear()
+
+    backend.ensure_worker(spec)
+
+    assert client.containers.by_name[original.name] is original
+    assert client.images.gets == [backend.config.image]
+    client.images.by_name[backend.config.image] = _FakeImage("sha256:image-v2")
+    backend.ensure_worker(spec)
+    assert original.removed == 1
+    assert client.containers.created_containers[-1].attrs["Image"] == "sha256:image-v2"
 
 
 def test_docker_worker_health_accepts_matching_protocol() -> None:
