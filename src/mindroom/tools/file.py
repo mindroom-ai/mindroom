@@ -248,7 +248,7 @@ class _MindRoomFileTools(AgnoFileTools):
 @register_tool_with_metadata(
     name="file",
     display_name="File Tools",
-    description="Local file operations including read, write, list, and search",
+    description="Read, write, list, and search files in the agent workspace",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

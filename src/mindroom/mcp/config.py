@@ -110,6 +110,8 @@ class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = Field(default=True, description="Whether the server is active")
+    display_name: str | None = Field(default=None, description="Human-readable tool name for the dashboard and catalog")
+    summary: str | None = Field(default=None, description="Short capability summary for the dashboard and tool catalog")
     icon: str | None = Field(default=None, description="Optional dashboard icon name, such as SiConfluence or Calendar")
     description: str | None = Field(
         default=None,
@@ -135,7 +137,7 @@ class MCPServerConfig(BaseModel):
     max_concurrent_calls: int = Field(default=1, ge=1, description="Maximum concurrent calls")
     auto_reconnect: bool = Field(default=True, description="Whether to reconnect automatically")
 
-    @field_validator("description", "icon")
+    @field_validator("display_name", "summary", "description", "icon")
     @classmethod
     def normalize_display_metadata(cls, value: str | None) -> str | None:
         """Trim optional display metadata and collapse blank values to None."""

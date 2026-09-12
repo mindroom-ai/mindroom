@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="thread_summary",
     display_name="Thread Summary",
-    description="Set or update Matrix thread summaries with room/thread context defaults",
+    description="Write or update a summary of a conversation thread",
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

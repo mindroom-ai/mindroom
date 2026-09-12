@@ -20,10 +20,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="browser",
     display_name="Browser",
-    description=(
-        "OpenClaw-style browser control (status/start/stop/profiles/tabs/open/focus/close/"
-        "snapshot/screenshot/navigate/console/pdf/upload/dialog/act/help/actions)"
-    ),
+    description="Browse websites, fill in forms, and capture screenshots",
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

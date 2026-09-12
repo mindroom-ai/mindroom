@@ -128,6 +128,46 @@ def test_catalog_lists_tools_without_browser_authentication(portal: dict[str, An
     assert tools["matrix_message"]["requires_room_context"] is True
 
 
+@pytest.mark.parametrize("with_oauth", [False, True])
+def test_catalog_uses_mcp_display_metadata_without_exposing_model_instructions(
+    portal: dict[str, Any],
+    with_oauth: bool,
+) -> None:
+    """Tool copy and connection summaries stay separate from OAuth labels and model instructions."""
+    server: dict[str, Any] = {
+        "transport": "streamable-http",
+        "url": "https://mcp.example.test/mcp",
+        "display_name": "  Team Wiki  ",
+        "summary": "  Search and edit team documentation  ",
+    }
+    if with_oauth:
+        server["description"] = "Model-only instructions for handling connection errors"
+        server["auth"] = {
+            "type": "oauth",
+            "display_name": "Wiki sign-in",
+            "discovery": "manual",
+            "authorization_url": "https://auth.example.test/authorize",
+            "token_url": "https://auth.example.test/token",
+        }
+    portal["payload"]["mcp_servers"] = {"wiki": server}
+    portal["payload"]["agents"]["personal"]["tools"] = ["mcp_wiki"]
+    _publish_config(main.app, portal["paths"], portal["payload"])
+    _use_runtime_auth_settings(main.app)
+
+    response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+
+    assert response.status_code == 200, response.text
+    agent = response.json()["agents"][0]
+    assert agent["tools"][0]["display_name"] == "Team Wiki"
+    assert agent["tools"][0]["description"] == "Search and edit team documentation"
+    assert "Model-only" not in response.text
+    if with_oauth:
+        assert agent["services"][0]["display_name"] == "Wiki sign-in"
+        assert agent["services"][0]["description"] == "Search and edit team documentation"
+    else:
+        assert agent["services"] == []
+
+
 @pytest.mark.parametrize("agent_name", ["personal", "research"])
 @pytest.mark.parametrize(
     ("content_type", "body", "expected"),

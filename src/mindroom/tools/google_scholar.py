@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="google_scholar",
     display_name="Google Scholar",
-    description="Search academic publications on Google Scholar",
+    description="Find academic papers and publications on Google Scholar",
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="github",
     display_name="GitHub",
-    description="Repository and issue management",
+    description="Browse code and manage GitHub repositories, issues, and pull requests",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,

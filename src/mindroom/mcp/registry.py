@@ -125,7 +125,7 @@ def validate_mcp_agent_overrides(tool_name: str, overrides: dict[str, object]) -
 
 def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetadata:
     tool_name = mcp_tool_name(server_id)
-    transport_label = server_config.transport.replace("-", " ")
+    provider_name = (server_config.auth.display_name or "").strip() if server_config.auth is not None else None
     is_oauth = server_config.auth is not None
     manager = require_mcp_server_manager()
     catalog = None
@@ -143,8 +143,8 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
         function_names = tuple(tool.function_name for tool in catalog.tools) if catalog is not None else ()
     return ToolMetadata(
         name=tool_name,
-        display_name=f"MCP {server_id.replace('_', ' ').title()}",
-        description=f"MCP server '{server_id}' tools over {transport_label}.",
+        display_name=server_config.display_name or provider_name or f"MCP {server_id.replace('_', ' ').title()}",
+        description=server_config.summary or "Tools provided by this MCP server",
         icon=server_config.icon,
         category=ToolCategory.DEVELOPMENT,
         status=ToolStatus.REQUIRES_CONFIG if is_oauth else ToolStatus.AVAILABLE,
