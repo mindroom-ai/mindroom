@@ -127,6 +127,9 @@ class HookMatrixAdmin(Protocol):
     async def resolve_alias(self, alias: str) -> str | None:
         """Resolve one room alias into a room ID when it exists."""
 
+    async def get_joined_rooms(self) -> list[str] | None:
+        """Return the bound account's joined rooms, or ``None`` when unavailable."""
+
     async def create_room(
         self,
         *,

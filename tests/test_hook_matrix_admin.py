@@ -128,6 +128,22 @@ async def test_hook_context_delegates_latest_agent_message_snapshot_reads(tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("available", [True, False])
+async def test_hook_matrix_admin_reads_bound_account_joined_rooms(tmp_path: Path, available: bool) -> None:
+    """Plugins can distinguish current memberships from an unavailable snapshot."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_rooms.return_value = (
+        nio.JoinedRoomsResponse(rooms=["!existing:localhost"])
+        if available
+        else nio.JoinedRoomsError("unavailable", status_code="M_UNKNOWN")
+    )
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    assert await admin.get_joined_rooms() == (["!existing:localhost"] if available else None)
+
+
+@pytest.mark.asyncio
 async def test_build_hook_matrix_admin_resolve_alias_returns_room_id(tmp_path: Path) -> None:
     """Alias resolution should return the resolved room ID on success."""
     module = _matrix_admin_module()

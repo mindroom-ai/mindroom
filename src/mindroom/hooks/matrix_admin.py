@@ -9,7 +9,13 @@ from urllib.parse import quote
 
 import nio
 
-from mindroom.matrix.client_room_admin import add_room_to_space, create_room, get_room_members, invite_to_room
+from mindroom.matrix.client_room_admin import (
+    add_room_to_space,
+    create_room,
+    get_joined_rooms,
+    get_room_members,
+    invite_to_room,
+)
 from mindroom.matrix.identity import managed_account_key, managed_account_user_id
 from mindroom.matrix.invited_rooms_store import (
     invited_room_entity_names,
@@ -95,6 +101,10 @@ class _BoundHookMatrixAdmin:
     async def get_room_members(self, room_id: str) -> set[str] | None:
         """Return the current joined members for one room, or ``None`` when the fetch fails."""
         return await get_room_members(self.client, room_id)
+
+    async def get_joined_rooms(self) -> list[str] | None:
+        """Return the bound account's joined rooms, or ``None`` when unavailable."""
+        return await get_joined_rooms(self.client)
 
     async def get_profile_avatar(self, user_id: str) -> str | None:
         """Return one user's Matrix avatar content URI, or ``None`` when unavailable."""
