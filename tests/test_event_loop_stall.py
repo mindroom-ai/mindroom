@@ -34,21 +34,21 @@ class _LoopClock:
 
     def __init__(self) -> None:
         self.now = 0.0
-        self.scheduled: list[tuple[float, Callable[[float], None], float]] = []
+        self.scheduled: list[tuple[float, Callable[..., None], tuple[float, ...]]] = []
 
     def time(self) -> float:
         return self.now
 
-    def call_at(self, when: float, callback: Callable[[float], None], scheduled_loop_time: float) -> object:
-        self.scheduled.append((when, callback, scheduled_loop_time))
+    def call_at(self, when: float, callback: Callable[..., None], *args: float) -> object:
+        self.scheduled.append((when, callback, args))
         return object()
 
     def next_scheduled_time(self) -> float:
         return self.scheduled[0][0]
 
     def run_next(self) -> None:
-        _, callback, scheduled_loop_time = self.scheduled.pop(0)
-        callback(scheduled_loop_time)
+        _, callback, args = self.scheduled.pop(0)
+        callback(*args)
 
 
 class _FakeFrame:
@@ -176,9 +176,8 @@ def test_scheduler_lag_summary_timestamps_the_worst_sample_and_resets(monkeypatc
     loop = _LoopClock()
     detector._loop = loop
     detector._scheduler_lag_window_started_at = 0.0
+    monkeypatch.setattr(event_loop_stall.time, "time", lambda: 1_700_000_000.0 + loop.now)
     detector._schedule_heartbeat(1.0)
-    wall_times = iter((1_700_000_000.0, 1_700_000_002.0, 1_700_000_003.0, 1_700_000_065.0))
-    monkeypatch.setattr(event_loop_stall.time, "time", lambda: next(wall_times))
 
     with capture_logs() as logs:
         for lag_seconds in (0.25, 0.6, 0.01):
@@ -190,11 +189,31 @@ def test_scheduler_lag_summary_timestamps_the_worst_sample_and_resets(monkeypatc
         detector._report_scheduler_lag(120.0)
 
     assert logs[0]["max_ms"] == 600.0
-    assert logs[0]["max_lag_scheduled_at"] == "2023-11-14T22:13:21.400+00:00"
-    assert logs[0]["max_lag_observed_at"] == "2023-11-14T22:13:22.000+00:00"
+    assert logs[0]["max_lag_scheduled_at"] == "2023-11-14T22:13:21.270+00:00"
+    assert logs[0]["max_lag_observed_at"] == "2023-11-14T22:13:21.870+00:00"
     assert logs[1]["max_ms"] == 10.0
-    assert logs[1]["max_lag_scheduled_at"] == "2023-11-14T22:14:24.990+00:00"
-    assert logs[1]["max_lag_observed_at"] == "2023-11-14T22:14:25.000+00:00"
+    assert logs[1]["max_lag_scheduled_at"] == "2023-11-14T22:13:21.920+00:00"
+    assert logs[1]["max_lag_observed_at"] == "2023-11-14T22:13:21.930+00:00"
+
+
+def test_scheduler_lag_preserves_scheduled_time_across_clock_adjustment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wall-clock jump while overdue must not rewrite the original scheduled time."""
+    detector = _detector()
+    loop = _LoopClock()
+    detector._loop = loop
+    wall_clock = SimpleNamespace(now=1_700_000_000.0)
+    monkeypatch.setattr(event_loop_stall.time, "time", lambda: wall_clock.now)
+    detector._schedule_heartbeat(1.0)
+    loop.now = 1.4
+    wall_clock.now = 1_700_003_601.4
+
+    with capture_logs() as logs:
+        loop.run_next()
+        detector._report_scheduler_lag(60.0)
+
+    assert logs[0]["max_ms"] == 400.0
+    assert logs[0]["max_lag_scheduled_at"] == "2023-11-14T22:13:21.000+00:00"
+    assert logs[0]["max_lag_observed_at"] == "2023-11-14T23:13:21.400+00:00"
 
 
 def test_separate_stalls_share_a_stack_capture_budget(monkeypatch: pytest.MonkeyPatch) -> None:
