@@ -1215,10 +1215,10 @@ class PrincipalStore:
             ),
         )
 
-    async def prepare_approval_grant_revocations(self) -> tuple[str, ...]:
-        """Enqueue durable revoked state after its originating approval edit."""
+    async def maintain_approval_grants(self) -> tuple[str, ...]:
+        """Retire spent payloads and enqueue revocations after their approval edits."""
         return await self._backend.write(
-            lambda transaction: approval_grants.prepare_revocations(transaction, self._principal_id),
+            lambda transaction: approval_grants.maintain(transaction, self._principal_id),
         )
 
     async def revoke_approval_grant(
@@ -1229,7 +1229,7 @@ class PrincipalStore:
         sender_id: str,
         grant_id: str,
     ) -> str | None:
-        """Durably revoke and reserve the separate acknowledgement delivery."""
+        """Record durable revocation debt for ordered acknowledgement delivery."""
         return await self._backend.write(
             lambda transaction: approval_grants.revoke(
                 transaction,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import MagicMock
 
 import nio
@@ -536,6 +536,153 @@ async def test_two_store_reservation_and_grant_race_cannot_strand_pending_call(
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["approved", "denied"])
+async def test_grant_maintenance_removes_unused_retired_card_scope(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    status: Literal["approved", "denied"],
+) -> None:
+    """Ordinary decisions must not leave grant-specific scope records behind."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "ordinary")
+        await manager.handle_card_response(
+            room_id="!room:test",
+            sender_id="@human:test",
+            card_event_id=card,
+            status=status,
+            reason=None,
+            authorize_responder=lambda _agent: True,
+        )
+        await manager.recover_cards_on_startup()
+        scopes = await journal.backend.read(
+            lambda transaction: transaction.fetchall(
+                "SELECT delivery_id FROM approval_grant_cards WHERE principal_id = ?",
+                ("router@shared",),
+            ),
+        )
+        assert not scopes
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["expiry", "router@shared", "agent@code"])
+async def test_grant_maintenance_releases_inactive_payload_but_keeps_identity(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: str,
+) -> None:
+    """Expired or departed grants retain audit identity without retaining tool arguments."""
+    monkeypatch.setattr("time.time_ns", lambda: 2_000_000_000_000_000_000)
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    owner = journal.principal("router@shared")
+    try:
+        card = await _card(journal, manager, "first")
+        await _approve(manager, card)
+        grant = await owner.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        assert grant is not None
+        await manager.recover_cards_on_startup()
+        assert '"command": "first"' in await _grant_payload(journal, grant.grant_id)
+        if terminal == "expiry":
+            monkeypatch.setattr("time.time_ns", lambda: 2_000_000_600_000_000_000)
+        else:
+            await admit_room_membership(journal.principal(terminal), "!room:test", "leave")
+        await manager.recover_cards_on_startup()
+        assert await _grant_payload(journal, grant.grant_id) == ""
+        assert await owner.approval_grant_for_card(room_id="!room:test", card_event_id=card) == grant
+        assert (
+            await owner.revoke_approval_grant(
+                room_id="!room:test",
+                card_event_id=card,
+                sender_id="@human:test",
+                grant_id=grant.grant_id,
+            )
+            is None
+        )
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_grant_maintenance_preserves_revocation_debt_until_acknowledged(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expiry cannot discard a pending stop acknowledgement; replay cannot recreate retired payloads."""
+    monkeypatch.setattr("time.time_ns", lambda: 2_000_000_000_000_000_000)
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    owner = journal.principal("router@shared")
+    fail_revocation = True
+    delivered = []
+
+    async def send(delivery: MatrixDelivery) -> str:
+        if fail_revocation and delivery.delivery_id.startswith("approval-grant-revoked:"):
+            msg = "Matrix temporarily unavailable"
+            raise TimeoutError(msg)
+        delivered.append(delivery)
+        return "$" + delivery.delivery_id
+
+    manager.send_delivery = send
+    try:
+        card = await _card(journal, manager, "first")
+        await _approve(manager, card)
+        grant = await owner.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        assert grant is not None
+        delivery_id = await owner.revoke_approval_grant(
+            room_id="!room:test",
+            card_event_id=card,
+            sender_id="@human:test",
+            grant_id=grant.grant_id,
+        )
+        assert delivery_id is not None
+        monkeypatch.setattr("time.time_ns", lambda: 2_000_000_600_000_000_000)
+        await manager.recover_cards_on_startup()
+        assert await _grant_payload(journal, grant.grant_id)
+        pending = await owner.load_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+        assert pending is not None
+        assert pending.acknowledged_event_id is None
+        fail_revocation = False
+        await manager.recover_cards_on_startup()
+        await manager.recover_cards_on_startup()
+        assert await _grant_payload(journal, grant.grant_id) == ""
+        assert await owner.load_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL) is None
+        sent_count = len(delivered)
+        assert (
+            await owner.revoke_approval_grant(
+                room_id="!room:test",
+                card_event_id=card,
+                sender_id="@human:test",
+                grant_id=grant.grant_id,
+            )
+            == delivery_id
+        )
+        await manager.recover_cards_on_startup()
+        assert len(delivered) == sent_count
+        retained = await owner.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        assert retained is not None
+        assert retained.revoked_at_ns is not None
+    finally:
+        await manager.shutdown()
+
+
+async def _grant_payload(journal: EventJournalStore, grant_id: str) -> str:
+    row = await journal.backend.read(
+        lambda transaction: transaction.fetchone(
+            "SELECT resolution_json FROM approval_grants WHERE principal_id = ? AND grant_id = ?",
+            ("router@shared", grant_id),
+        ),
+    )
+    assert row is not None
+    return str(row["resolution_json"])
 
 
 async def _card(

@@ -502,7 +502,7 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         card_event_id: str,
     ) -> ApprovalGrant | None: ...
 
-    async def prepare_approval_grant_revocations(self) -> tuple[str, ...]: ...  # noqa: D102
+    async def maintain_approval_grants(self) -> tuple[str, ...]: ...  # noqa: D102
 
     async def revoke_approval_grant(  # noqa: D102
         self,

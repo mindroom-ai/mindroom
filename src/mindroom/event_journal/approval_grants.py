@@ -311,7 +311,7 @@ def revoke(
     sender_id: str,
     grant_id: str,
 ) -> str | None:
-    """Revoke durably and enqueue a distinct acknowledgement without rewriting FINAL."""
+    """Record revocation debt without rewriting the original FINAL delivery."""
     lock(transaction, principal_id)
     row = transaction.fetchone(
         "SELECT * FROM approval_grants WHERE principal_id = ? AND grant_id = ? AND room_id = ? AND card_event_id = ?",
@@ -323,7 +323,10 @@ def revoke(
     delivery_id = "approval-grant-revoked:" + grant_id
     if grant.revoked_at_ns is not None:
         return delivery_id
-    grant = replace(grant, revoked_at_ns=time.time_ns())
+    now = time.time_ns()
+    if grant.expires_at_ns <= now:
+        return None
+    grant = replace(grant, revoked_at_ns=now)
     transaction.execute(
         "UPDATE approval_grants SET revoked_at_ns = ? WHERE principal_id = ? AND grant_id = ?",
         (grant.revoked_at_ns, principal_id, grant_id),
@@ -331,16 +334,34 @@ def revoke(
     return delivery_id
 
 
-def prepare_revocations(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
-    """Publish revocation acknowledgements only after the original FINAL is settled.
+def maintain(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
+    """Release spent grant payloads and prepare newly deliverable revocations.
 
-    The revoked grant itself is durable delivery debt while an acceptance edit
-    remains unacknowledged. This prevents a delayed acceptance from overwriting
-    the later revoked state, including when recovery runs in another process.
+    Grant identity and applied-call audit facts survive payload retirement.
+    Revoked grants retain acknowledgement debt past expiry until delivery is
+    acknowledged, or membership ends. The original FINAL must settle first so
+    a delayed acceptance cannot overwrite the later revoked state.
     """
+    lock(transaction, principal_id)
+    transaction.execute(
+        """
+        DELETE FROM approval_grant_cards
+        WHERE principal_id = ? AND grant_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = approval_grant_cards.principal_id
+                AND cards.delivery_id = approval_grant_cards.delivery_id
+          )
+        """,
+        (principal_id,),
+    )
     rows = transaction.fetchall(
         """
-        SELECT grants.* FROM approval_grants AS grants
+        SELECT grants.*, original.delivery_id AS original_id,
+               original.acknowledged_event_id AS original_event_id,
+               acknowledgement.delivery_id AS revocation_id,
+               acknowledgement.acknowledged_event_id AS revocation_event_id
+        FROM approval_grants AS grants
         LEFT JOIN matrix_delivery_outbox AS original
           ON original.principal_id = grants.principal_id
          AND original.delivery_id = grants.original_delivery_id AND original.stage = 'final'
@@ -348,17 +369,30 @@ def prepare_revocations(transaction: Transaction, principal_id: str) -> tuple[st
           ON acknowledgement.principal_id = grants.principal_id
          AND acknowledgement.delivery_id = 'approval-grant-revoked:' || grants.grant_id
          AND acknowledgement.stage = 'final'
-        WHERE grants.principal_id = ? AND grants.revoked_at_ns IS NOT NULL
-          AND (original.delivery_id IS NULL OR original.acknowledged_event_id IS NOT NULL)
-          AND acknowledgement.delivery_id IS NULL
+        WHERE grants.principal_id = ? AND grants.resolution_json <> ''
         ORDER BY grants.grant_id
         """,
         (principal_id,),
     )
     deliveries = []
+    now = time.time_ns()
     for row in rows:
         grant = _grant(row)
-        if not _current(transaction, principal_id, row):
+        if (
+            not _current(transaction, principal_id, row)
+            or (grant.revoked_at_ns is None and grant.expires_at_ns <= now)
+            or row["revocation_event_id"] is not None
+        ):
+            transaction.execute(
+                "UPDATE approval_grants SET resolution_json = '' WHERE principal_id = ? AND grant_id = ?",
+                (principal_id, grant.grant_id),
+            )
+            continue
+        if (
+            grant.revoked_at_ns is None
+            or (row["original_id"] is not None and row["original_event_id"] is None)
+            or row["revocation_id"] is not None
+        ):
             continue
         delivery_id = "approval-grant-revoked:" + grant.grant_id
         content = json.loads(str(row["resolution_json"]))
@@ -376,4 +410,17 @@ def prepare_revocations(transaction: Transaction, principal_id: str) -> tuple[st
             edits_event_id=grant.card_event_id,
         )
         deliveries.append(delivery_id)
+    transaction.execute(
+        """
+        DELETE FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND stage = 'final' AND acknowledged_event_id IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM approval_grants AS grants
+              WHERE grants.principal_id = matrix_delivery_outbox.principal_id
+                AND 'approval-grant-revoked:' || grants.grant_id = matrix_delivery_outbox.delivery_id
+                AND grants.resolution_json = ''
+          )
+        """,
+        (principal_id,),
+    )
     return tuple(deliveries)

@@ -901,11 +901,11 @@ class _ApprovalManager:
             return await self._expire_stored(room_id, stored)
         return None
 
-    async def _flush_ready_revocations(self) -> set[tuple[str, DeliveryStage]]:
-        """Flush newly unblocked acknowledgements and preserve retryable failures."""
+    async def _maintain_grants(self) -> set[tuple[str, DeliveryStage]]:
+        """Retire spent payloads and flush newly unblocked acknowledgements."""
         assert self.cards is not None
         failed: set[tuple[str, DeliveryStage]] = set()
-        for delivery_id in await self.cards.prepare_approval_grant_revocations():
+        for delivery_id in await self.cards.maintain_approval_grants():
             try:
                 acknowledged = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
             except Exception:
@@ -922,7 +922,7 @@ class _ApprovalManager:
         outcome = await self._worker().recover()
         transport_failures = set(outcome.failed_deliveries)
         failed = outcome.failed - len(transport_failures)
-        transport_failures.update(await self._flush_ready_revocations())
+        transport_failures.update(await self._maintain_grants())
         scanned = 0
         retired = 0
         for room_id in await self.cards.pending_approval_room_ids():
