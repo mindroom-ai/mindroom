@@ -8,6 +8,7 @@ DM rooms are preserved and not cleaned up.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import nio
@@ -205,16 +206,25 @@ async def cleanup_all_orphaned_bots(
     logger.info("orphaned_bot_cleanup_started", room_count=len(joined_rooms))
     persisted_invited_rooms_by_bot = _load_all_persisted_invited_rooms(config, runtime_paths)
 
-    for room_id in joined_rooms:
-        room_kicked = await _cleanup_orphaned_bots_in_room(
-            client,
-            room_id,
-            config,
-            runtime_paths,
-            persisted_invited_rooms_by_bot,
-        )
-        if room_kicked:
-            kicked_bots[room_id] = room_kicked
+    # Only independent rooms overlap. Each room still kicks other orphans
+    # before leaving itself, and cancellation drains all workers before return.
+    pending_rooms = iter(joined_rooms)
+
+    async def clean_rooms() -> None:
+        for room_id in pending_rooms:
+            room_kicked = await _cleanup_orphaned_bots_in_room(
+                client,
+                room_id,
+                config,
+                runtime_paths,
+                persisted_invited_rooms_by_bot,
+            )
+            if room_kicked:
+                kicked_bots[room_id] = room_kicked
+
+    async with asyncio.TaskGroup() as workers:
+        for _ in range(min(4, len(joined_rooms))):
+            workers.create_task(clean_rooms())
 
     # Summary
     total_kicked = sum(len(bots) for bots in kicked_bots.values())

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path  # noqa: TC003
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -38,6 +39,46 @@ def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
 @pytest.mark.asyncio
 class TestDMPreservationDuringCleanup:
     """Test that DM rooms are preserved during various cleanup operations."""
+
+    async def test_cleanup_rooms_overlap_with_bounded_concurrency(self, tmp_path: Path) -> None:
+        """Independent rooms overlap without unbounded work or unfinished cleanup."""
+        config = _config_with_runtime_paths(tmp_path)
+        started: list[str] = []
+        ready = asyncio.Event()
+        release = asyncio.Event()
+        active = 0
+        peak = 0
+
+        async def clean(_client: object, room_id: str, *_args: object) -> list[str]:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            started.append(room_id)
+            if len(started) == 4:
+                ready.set()
+            try:
+                await release.wait()
+                return ["@old:server"]
+            finally:
+                active -= 1
+
+        rooms = [f"!room{i}:server" for i in range(12)]
+        with (
+            patch("mindroom.matrix.room_cleanup.get_joined_rooms", AsyncMock(return_value=rooms)),
+            patch("mindroom.matrix.room_cleanup._cleanup_orphaned_bots_in_room", clean),
+        ):
+            task = asyncio.create_task(cleanup_all_orphaned_bots(AsyncMock(), config, runtime_paths_for(config)))
+            try:
+                async with asyncio.timeout(1):
+                    await ready.wait()
+                assert peak == active == 4
+            finally:
+                release.set()
+                result = await task
+        assert set(started) == set(rooms)
+        assert peak == 4
+        assert active == 0
+        assert result == {room: ["@old:server"] for room in rooms}
 
     async def test_agent_cleanup_preserves_dm_rooms(self, tmp_path: Path) -> None:
         """Test that AgentBot.leave_rooms() preserves DM rooms when DMs are enabled."""

@@ -200,7 +200,6 @@ def _configured_function_surface(
     loaded_tools: _LoadedToolNames | None,
 ) -> tuple[set[str], dict[str, tuple[EffectiveToolConfig, ...]]]:
     """Return one agent's provider-visible local functions and MCP assignments."""
-    ensure_tool_registry_loaded(context.runtime_paths, context.config)
     local_tool_configs, mcp_tool_configs = _partition_tool_configs(
         context,
         _configured_tool_configs(context, agent_name, loaded_tools=loaded_tools),
@@ -300,6 +299,7 @@ def function_collision_reports(
     candidate_catalog: MCPServerCatalog | None = None,
 ) -> tuple[MCPFunctionCollisionReport, ...]:
     """Project all active surfaces and return their collision reports."""
+    ensure_tool_registry_loaded(context.runtime_paths, context.config)
     credential_surface = candidate_state.oauth_credential_scope if candidate_state is not None else None
     credential_surfaces = {
         scoped.credential_surface
@@ -368,6 +368,7 @@ def function_collision_messages(
         for state in active_states
     ):
         return []
+    ensure_tool_registry_loaded(context.runtime_paths, context.config)
     configured_surface = _configured_function_surface(context, agent_name, loaded_tools=loaded_tools)
     snapshots = tuple(
         _agent_function_surface_snapshot(

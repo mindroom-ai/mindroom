@@ -297,7 +297,9 @@ class HydrationPolicy(IntEnum):
     """
 
     PROMPT = 10
-    EXPORT = 20
+    # Rank20 also spent the allowance on unreadable history. A new rank gives
+    # those ambiguous incomplete rows one revalidation; complete rows stay warm.
+    EXPORT = 30
 
 
 @dataclass(frozen=True, slots=True)

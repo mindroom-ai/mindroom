@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, Mock
 
 import nio
 import pytest
@@ -489,6 +490,37 @@ async def test_a_long_text_sidecar_is_fetched_once_and_then_stays_local(
 
     assert bodies(warm) == ["root", SIDECAR_TEXT]
     assert homeserver.history_calls == 0
+
+
+async def test_legacy_file_edit_exports_the_entire_sidecar(router: PrincipalStore) -> None:
+    """A malformed old fallback must not lose its valid full replacement text."""
+    homeserver = FakeHomeserver(sidecars={SIDECAR_URL: json.dumps({"msgtype": "m.text", "body": SIDECAR_TEXT})})
+    original = raw("$file", "old preview", ts=200, thread_id=ROOT)
+    edited = raw("$edit", "new preview", ts=300, replaces="$file")
+    edited["content"]["msgtype"] = "m.file"
+    edited["content"]["m.new_content"].update(msgtype="m.file", **sidecar_content())
+    serve_thread(homeserver, raw(ROOT, "root", ts=100), [original, edited])
+    homeserver.relations["$file"] = [edited]
+
+    async def relations(*, event_id: str, **_kwargs: object) -> AsyncIterator[nio.BaseEvent]:
+        for source in reversed(homeserver.relations.get(event_id, [])):
+            yield nio.Event.parse_event(source)
+
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_get_event.side_effect = homeserver.room_get_event
+    client.room_get_event_relations = Mock(side_effect=relations)
+    client.download.side_effect = homeserver.download
+    reader = export_conversation_reader(client=client, config=Config(), store=router, self_sender=ROUTER)
+    messages = await export(reader)
+    assert bodies(messages) == ["root", SIDECAR_TEXT]
+    assert await router.conversation_is_complete(room_id=ROOM, thread_id=ROOT)
+    client.room_get_event.reset_mock()
+    client.room_get_event_relations.reset_mock()
+    client.download.reset_mock()
+    assert bodies(await export(reader)) == ["root", SIDECAR_TEXT]
+    client.room_get_event.assert_not_awaited()
+    client.room_get_event_relations.assert_not_called()
+    client.download.assert_not_awaited()
 
 
 async def test_an_unreadable_sidecar_fails_the_thread_instead_of_exporting_the_preview(

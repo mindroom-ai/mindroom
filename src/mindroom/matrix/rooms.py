@@ -223,6 +223,8 @@ async def _ensure_room_exists(
     room_name: str | None = None,
     power_users: list[str] | None = None,
     admin_user_ids: Sequence[str] = (),
+    *,
+    room_locks: dict[str, asyncio.Lock],
 ) -> str | None:
     """Ensure a room exists, creating it if necessary.
 
@@ -235,6 +237,7 @@ async def _ensure_room_exists(
         power_users: List of user IDs to grant power levels to
         room_policy: Resolved membership room policy
         admin_user_ids: Concrete Matrix user IDs granted room admin power (100)
+        room_locks: Pass-local locks serializing aliases that resolve to the same room
 
     Returns:
         Room ID if room exists or was created, None on failure
@@ -270,16 +273,17 @@ async def _ensure_room_exists(
             joined_room = joined_room_ids is not None and room_id in joined_room_ids
 
         if joined_room:
-            await _reconcile_joined_existing_room(
-                client,
-                room_key,
-                room_id,
-                config,
-                runtime_paths,
-                explicit_room_name=explicit_room_name,
-                room_policy=room_policy,
-                admin_user_ids=admin_user_ids,
-            )
+            async with room_locks.setdefault(room_id, asyncio.Lock()):
+                await _reconcile_joined_existing_room(
+                    client,
+                    room_key,
+                    room_id,
+                    config,
+                    runtime_paths,
+                    explicit_room_name=explicit_room_name,
+                    room_policy=room_policy,
+                    admin_user_ids=admin_user_ids,
+                )
         else:
             logger.warning(
                 "Managed room exists but service account is not joined; skipping existing-room reconciliation",
@@ -365,42 +369,42 @@ async def ensure_all_rooms_exist(
     # Get all configured rooms
     all_rooms = config.get_all_configured_rooms()
 
-    for room_key in all_rooms:
-        # Skip if this is a room ID (starts with !)
-        if room_key.startswith("!"):
-            # This is a room ID, not a room key/alias - skip it
-            continue
+    pending_rooms = iter(room_key for room_key in all_rooms if not room_key.startswith("!"))
+    room_locks: dict[str, asyncio.Lock] = {}
 
-        # Get power users for this room
-        power_users = managed_entity_power_user_ids_for_room(room_key, config, runtime_paths)
-        room_policy = resolve_room_policy(config, room_key)
-        admin_user_ids = _room_admin_user_ids(room_policy)
+    async def reconcile_rooms() -> None:
+        for room_key in pending_rooms:
+            power_users = managed_entity_power_user_ids_for_room(room_key, config, runtime_paths)
+            room_policy = resolve_room_policy(config, room_key)
+            admin_user_ids = _room_admin_user_ids(room_policy)
+            room_config = config.rooms.get(room_key)
+            room_name = (room_config.display_name or _room_key_to_name(room_key)) if room_config is not None else None
+            try:
+                room_id = await _ensure_room_exists(
+                    client=client,
+                    room_key=room_key,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    room_name=room_name,
+                    power_users=power_users,
+                    room_policy=room_policy,
+                    admin_user_ids=admin_user_ids,
+                    room_locks=room_locks,
+                )
+            except RuntimeError:
+                logger.exception(
+                    "Failed to ensure managed room; continuing with remaining rooms",
+                    room_key=room_key,
+                )
+                continue
+            if room_id:
+                room_ids[room_key] = room_id
 
-        # Ensure room exists
-        room_config = config.rooms.get(room_key)
-        room_name = None
-        if room_config is not None:
-            room_name = room_config.display_name or _room_key_to_name(room_key)
-        try:
-            room_id = await _ensure_room_exists(
-                client=client,
-                room_key=room_key,
-                config=config,
-                runtime_paths=runtime_paths,
-                room_name=room_name,
-                power_users=power_users,
-                room_policy=room_policy,
-                admin_user_ids=admin_user_ids,
-            )
-        except RuntimeError:
-            logger.exception(
-                "Failed to ensure managed room; continuing with remaining rooms",
-                room_key=room_key,
-            )
-            continue
-
-        if room_id:
-            room_ids[room_key] = room_id
+    # Bound network fanout, retaining sequential policy mutations in each room.
+    # TaskGroup drains/cancels sibling workers before config reload can proceed.
+    async with asyncio.TaskGroup() as workers:
+        for _ in range(min(4, len(all_rooms))):
+            workers.create_task(reconcile_rooms())
 
     return room_ids
 

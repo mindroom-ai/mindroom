@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
-from unittest.mock import ANY, AsyncMock
+from unittest.mock import ANY, AsyncMock, Mock
 
 import nio
 import pytest
@@ -250,3 +251,69 @@ async def test_ensure_all_rooms_passes_resolved_policy(
 
     assert result == {"lobby": "!lobby:example.com"}
     assert captured_policies == [resolve_room_policy(config, "lobby")]
+
+
+@pytest.mark.asyncio
+async def test_managed_room_reconciliation_has_bounded_overlap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """All configured rooms are attempted with at most four requests in flight."""
+    rooms = [f"room{i}" for i in range(12)]
+    config = membership_config(tmp_path, agent_rooms=rooms)
+    active = 0
+    peak = 0
+    ready = asyncio.Event()
+    release = asyncio.Event()
+
+    async def ensure_room(*, room_key: str, **_kwargs: object) -> str:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if active == 4:
+            ready.set()
+        try:
+            await release.wait()
+            return f"!{room_key}:example.com"
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(matrix_rooms, "_ensure_room_exists", ensure_room)
+    task = asyncio.create_task(matrix_rooms.ensure_all_rooms_exist(AsyncMock(), config, runtime_paths_for(config)))
+    try:
+        async with asyncio.timeout(1):
+            await ready.wait()
+        assert active == peak == 4
+    finally:
+        release.set()
+        result = await task
+    assert result == {key: f"!{key}:example.com" for key in rooms}
+    assert active == 0
+    assert peak == 4
+
+
+@pytest.mark.asyncio
+async def test_aliases_of_same_room_do_not_reconcile_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Alias duplication must not interleave policy updates to one physical room."""
+    config = membership_config(tmp_path, agent_rooms=["first", "second"])
+    client = AsyncMock()
+    client.homeserver = "https://example.com"
+    client.rooms = {"!same:example.com": Mock()}
+    client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse("#alias:example.com", "!same:example.com", [])
+    active = 0
+    peak = 0
+
+    async def reconcile(*_args: object, **_kwargs: object) -> None:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(matrix_rooms, "_add_room", Mock())
+    monkeypatch.setattr(matrix_rooms, "_reconcile_joined_existing_room", reconcile)
+    result = await matrix_rooms.ensure_all_rooms_exist(client, config, runtime_paths_for(config))
+    assert result == {"first": "!same:example.com", "second": "!same:example.com"}
+    assert peak == 1

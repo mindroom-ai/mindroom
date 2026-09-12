@@ -295,7 +295,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
     runtime_paths = runtime_paths_for(config)
 
     class FakeKnowledge:
-        def search(self, *, query: str, max_results: int) -> list[object]:
+        async def asearch(self, *, query: str, max_results: int) -> list[object]:
             assert query == "semantic memory"
             assert max_results == 5
             return [
@@ -353,7 +353,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
 
 
 class _FakeSemanticTimingKnowledge:
-    def search(self, *, query: str, max_results: int) -> list[object]:
+    async def asearch(self, *, query: str, max_results: int) -> list[object]:
         assert query == "semantic memory"
         assert max_results == 5
         return [
