@@ -85,7 +85,7 @@ class MindRoomLlamaCpp(ChatToolArgumentsCompat, LlamaCpp):
 
 
 class _IncompleteResponsesStreamError(ModelProviderError):
-    """A Responses stream ended before successful completion."""
+    """A Responses stream cannot safely reuse accumulated output in a retry."""
 
 
 @dataclass
@@ -164,6 +164,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
     ) -> Iterator[ModelResponse]:
         """Require a successful terminal event for each provider invocation."""
         completed = False
+        yielded = False
         stream = super().invoke_stream(
             messages,
             assistant_message,
@@ -175,9 +176,15 @@ class MindRoomOpenAIResponses(OpenAIResponses):
         )
         try:
             for chunk in stream:
+                yielded = True
                 # The parser publishes response_id only on response.completed.
                 completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
                 yield chunk
+        except ModelProviderError as error:
+            if not yielded:
+                raise
+            msg = "OpenAI Responses stream failed after yielding output"
+            raise _IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
         finally:
             # Agno returns a generator, annotated only as Iterator.
             cast("Generator[ModelResponse, None, None]", stream).close()
@@ -201,6 +208,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
     ) -> AsyncIterator[ModelResponse]:
         """Require a successful terminal event for each async provider invocation."""
         completed = False
+        yielded = False
         stream = super().ainvoke_stream(
             messages,
             assistant_message,
@@ -212,8 +220,14 @@ class MindRoomOpenAIResponses(OpenAIResponses):
         )
         try:
             async for chunk in stream:
+                yielded = True
                 completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
                 yield chunk
+        except ModelProviderError as error:
+            if not yielded:
+                raise
+            msg = "OpenAI Responses stream failed after yielding output"
+            raise _IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
         finally:
             # Finalize Agno's async generator when the consumer stops at a yield.
             await cast("AsyncGenerator[ModelResponse, None]", stream).aclose()

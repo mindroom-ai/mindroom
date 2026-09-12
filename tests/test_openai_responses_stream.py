@@ -24,7 +24,7 @@ from openai import AsyncOpenAI, OpenAI
 from mindroom.openai_models import MindRoomOpenAIResponses
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
     from agno.models.response import ModelResponse
@@ -80,6 +80,20 @@ def _tool_stream() -> str:
         + _event("response.output_item.done", output_index=0, item=call)
         + _event("response.completed", response=_response("resp_tools", "completed", [call]))
     )
+
+
+class _InterruptedStream(httpx.SyncByteStream, httpx.AsyncByteStream):
+    def __init__(self, data: str) -> None:
+        self.data = data.encode()
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield self.data
+        msg = "Connection dropped"
+        raise httpx.ReadError(msg)
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self:
+            yield chunk
 
 
 @asynccontextmanager
@@ -274,11 +288,34 @@ async def test_agent_records_truncated_followup_as_error_after_completed_tool(tm
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
 @pytest.mark.parametrize(
-    "stream",
-    [_created() + _text(), _tool_stream().split("event: response.completed")[0]],
-    ids=["partial-text", "partial-tool"],
+    ("stream", "disconnect"),
+    [
+        (_created() + _text(), False),
+        (_created() + _text(), True),
+        (_tool_stream().split("event: response.completed")[0], False),
+        (_tool_stream().split("event: response.completed")[0], True),
+        (
+            _created("resp_answer")
+            + _text()
+            + _event("response.completed", response=_response("resp_answer", "completed")),
+            True,
+        ),
+    ],
+    ids=[
+        "partial-text-eof",
+        "partial-text-transport-error",
+        "partial-tool-eof",
+        "partial-tool-transport-error",
+        "completed-transport-error",
+    ],
 )
-async def test_agent_does_not_retry_incomplete_stream(tmp_path: Path, stream: str, *, sync: bool) -> None:
+async def test_agent_does_not_retry_incomplete_stream(
+    tmp_path: Path,
+    stream: str,
+    *,
+    sync: bool,
+    disconnect: bool,
+) -> None:
     """Retries must not combine partial output with a successful response or execute its tools."""
     executed_tools: list[str] = []
 
@@ -293,7 +330,12 @@ async def test_agent_does_not_retry_incomplete_stream(tmp_path: Path, stream: st
         + _event("response.completed", response=_response("resp_no_tools", "completed"))
     )
     db = SqliteDb(db_file=str(tmp_path / "sessions.db"))
-    async with _model(stream, completed, completed) as model:
+    first_response = (
+        httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_InterruptedStream(stream))
+        if disconnect
+        else stream
+    )
+    async with _model(first_response, completed, completed) as model:
         model.retries = 1
         model.delay_between_retries = 0
         agent = Agent(id="status_agent", model=model, db=db, tools=[get_status], add_history_to_context=True)
@@ -321,10 +363,14 @@ async def test_agent_does_not_retry_incomplete_stream(tmp_path: Path, stream: st
 
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
-@pytest.mark.parametrize("status_code", [429, 503])
-async def test_agent_still_retries_transient_provider_errors(status_code: int, *, sync: bool) -> None:
+@pytest.mark.parametrize("status_code", [429, 503, None], ids=["429", "503", "transport-error"])
+async def test_agent_still_retries_transient_provider_errors(status_code: int | None, *, sync: bool) -> None:
     """The incomplete-stream guard must preserve ordinary provider retries before any output."""
-    failed = httpx.Response(status_code, json={"error": {"message": "Temporarily unavailable", "type": "server_error"}})
+    failed = (
+        httpx.Response(status_code, json={"error": {"message": "Temporarily unavailable", "type": "server_error"}})
+        if status_code is not None
+        else httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_InterruptedStream(""))
+    )
     completed = (
         _created("resp_answer") + _text() + _event("response.completed", response=_response("resp_answer", "completed"))
     )
