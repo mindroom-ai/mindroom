@@ -207,7 +207,7 @@ def resolve_card(
     card_event_id: str | None,
     requested_status: Literal["approved", "denied", "expired"],
     reason: str | None,
-    resolution: Mapping[str, Any] | None,
+    metadata: approval_card_state.ApprovalDecisionMetadata | None,
     delivery_id: str | None = None,
 ) -> RecordedApprovalDecision:
     """Resolve one typed approval target through the shared card lifecycle."""
@@ -233,7 +233,7 @@ def resolve_card(
             delivery_id=delivery_id,
             requested_status=requested_status,
             reason=reason,
-            resolution=resolution,
+            metadata=metadata,
         )
     return _resolve_continuation(
         transaction,
@@ -242,7 +242,7 @@ def resolve_card(
         delivery_id=delivery_id,
         requested_status=requested_status,
         reason=reason,
-        resolution=resolution,
+        metadata=metadata,
     )
 
 
@@ -253,7 +253,7 @@ def _resolve_continuation(
     card_event_id: str | None,
     requested_status: Literal["approved", "denied", "expired"],
     reason: str | None,
-    resolution: Mapping[str, Any] | None,
+    metadata: approval_card_state.ApprovalDecisionMetadata | None,
     delivery_id: str | None = None,
 ) -> RecordedApprovalDecision:
     """Commit one current-format card and exact-call decision atomically."""
@@ -331,7 +331,7 @@ def _resolve_continuation(
         return RecordedApprovalDecision(resolution=None, recorded=False)
     failure_reason = cast("str | None", continuation["failure_reason"])
     expired = time.time_ns() >= int(call["expires_at_ns"])
-    if resolution is None and not expired:
+    if metadata is None and not expired:
         return RecordedApprovalDecision(resolution=None, recorded=False)
     decision, decision_reason = _effective_continuation_decision(
         requested_status=requested_status,
@@ -343,7 +343,7 @@ def _resolve_continuation(
     )
     stored_resolution = approval_card_state.stored_resolution(
         card,
-        resolution=resolution,
+        metadata=metadata,
         requested_status=requested_status,
         decision=decision,
         reason=decision_reason,
@@ -634,13 +634,12 @@ def fail_continuations_for_departed_card_owner(
         delivery_id = str(row["delivery_id"])
         if row["background_run_id"] is not None:
             try:
-                content = approval_card_state.decode_object_payload(
+                approval_card_state.decode_object_payload(
                     row["payload_json"],
                     description="background approval payload",
                 )
             except (json.JSONDecodeError, TypeError):
                 continue
-            resolution = approval_card_state.terminal_content(content, status="denied", reason=reason)
             background_approvals.resolve(
                 transaction,
                 card_principal_id,
@@ -648,7 +647,7 @@ def fail_continuations_for_departed_card_owner(
                 delivery_id=delivery_id,
                 requested_status="denied",
                 reason=reason,
-                resolution=resolution,
+                metadata=None,
             )
             if not bool(row["attempted"]):
                 _delete_unattempted_card_delivery(transaction, card_principal_id, delivery_id)

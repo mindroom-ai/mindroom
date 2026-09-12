@@ -275,6 +275,8 @@ One-shot-only approvals omit this optional scope and remain individually reviewa
 The same operation descriptor supplies the private configuration-bound grant identity and the public review metadata.
 `response_event_id` associates approval history with the response that paused; clients must not infer this association from tool names or argument similarity.
 Approved calls retain immutable `approval_provenance`: `kind: once`, or `kind: timed_grant` with grant ID, originating card, granting user, decision time, duration, and fixed expiry.
+`event_journal/approval_card_state.py` projects terminal content from the frozen original and the actual transaction decision; runtime callers provide authenticated actor/time metadata instead of rebuilding request evidence.
+Terminal edits omit inline full arguments, automatic originals retain their complete evidence, and revocation updates only the live grant on the frozen decision.
 Only the originating grant card carries mutable `auto_approval` controls; revocation and expiry do not change the historical authorization of covered calls.
 Clients render compact history from the original event plus its latest same-sender terminal edit, retaining complete argument evidence from the original inline `full_arguments` or its encrypted/plain Matrix attachment.
 Timed cards offload large complete arguments before reservation so subsequent decision metadata does not overflow the event envelope.

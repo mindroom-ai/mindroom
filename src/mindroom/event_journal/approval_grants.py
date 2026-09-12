@@ -145,33 +145,28 @@ def _decide(
     row: Row,
     grant: ApprovalGrant,
     provenance: Mapping[str, Any],
-    resolution: Mapping[str, Any] | None = None,
+    metadata: approval_card_state.ApprovalDecisionMetadata | None = None,
+    reason: str | None = None,
 ) -> RecordedApprovalDecision:
     from . import approvals  # noqa: PLC0415 - grant reservation and exact-call decisions share a transaction
 
-    content = approval_card_state.decode_object_payload(row["payload_json"], description="approval card")
-    offered = (
-        dict(resolution)
-        if resolution is not None
-        else {
-            **content,
-            "status": "approved",
-            "body": f"Approved: {content.get('tool_name', '')}",
-            "resolved_by": grant.requester_id,
-            "resolved_at": approval_timestamp(time.time_ns()),
-        }
+    decision = replace(
+        metadata
+        or approval_card_state.ApprovalDecisionMetadata(
+            resolved_by=grant.requester_id,
+            resolved_at=approval_timestamp(time.time_ns()),
+        ),
+        auto_approval=grant.wire() if metadata is not None else None,
+        provenance=provenance,
     )
-    if resolution is not None:
-        offered["auto_approval"] = grant.wire()
-    offered["approval_provenance"] = dict(provenance)
     result = approvals.resolve_card(
         transaction,
         principal_id,
         card_event_id=None if row["acknowledged_event_id"] is None else str(row["acknowledged_event_id"]),
         delivery_id=str(row["delivery_id"]),
         requested_status="approved",
-        reason=None,
-        resolution=offered,
+        reason=reason,
+        metadata=decision,
     )
     if result.recorded and result.resolution is not None and result.resolution["status"] == "approved":
         transaction.execute(
@@ -237,24 +232,25 @@ def apply_active(transaction: Transaction, principal_id: str, *, card: ApprovalC
         grant_row["resolution_json"],
         description="grant resolution",
     )
-    receipt = {
-        **card.payload,
-        "status": "approved",
-        "approvable": False,
-        "body": f"Auto-approved: {card.payload['tool_name']}",
-        "resolved_by": str(grant_row["requester_id"]),
-        "resolved_at": approval_timestamp(now),
-        "approval_provenance": grant_resolution.get("approval_provenance")
-        or {
-            "kind": "timed_grant",
-            "grant_id": str(grant_row["grant_id"]),
-            "grant_card_event_id": str(grant_row["card_event_id"]),
-            "granted_by": str(grant_row["requester_id"]),
-            "granted_at": grant_resolution.get("resolved_at"),
-            "expires_at": approval_timestamp(int(grant_row["expires_at_ns"])),
-        },
-    }
-    receipt.pop("auto_approve_options", None)
+    receipt = approval_card_state.terminal_content(
+        card.payload,
+        status="approved",
+        reason=None,
+        metadata=approval_card_state.ApprovalDecisionMetadata(
+            resolved_by=str(grant_row["requester_id"]),
+            resolved_at=approval_timestamp(now),
+            provenance=grant_resolution.get("approval_provenance")
+            or {
+                "kind": "timed_grant",
+                "grant_id": str(grant_row["grant_id"]),
+                "grant_card_event_id": str(grant_row["card_event_id"]),
+                "granted_by": str(grant_row["requester_id"]),
+                "granted_at": grant_resolution.get("resolved_at"),
+                "expires_at": approval_timestamp(int(grant_row["expires_at_ns"])),
+            },
+        ),
+        publication="receipt",
+    )
     outbox.enqueue(
         transaction,
         principal_id,
@@ -278,7 +274,8 @@ def create(
     card_event_id: str,
     sender_id: str,
     seconds: int,
-    resolution: Mapping[str, Any],
+    metadata: approval_card_state.ApprovalDecisionMetadata,
+    reason: str | None = None,
     current_binding: str | None = None,
 ) -> tuple[RecordedApprovalDecision, ...]:
     """Accept a grant and all eligible pending calls in one commit."""
@@ -319,7 +316,7 @@ def create(
         "duration_seconds": seconds,
         "expires_at": approval_timestamp(grant.expires_at_ns),
     }
-    first = _decide(transaction, principal_id, row, grant, provenance, resolution)
+    first = _decide(transaction, principal_id, row, grant, provenance, metadata, reason)
     if not first.recorded or first.resolution is None or first.resolution["status"] != "approved":
         return (first,)
     transaction.execute(

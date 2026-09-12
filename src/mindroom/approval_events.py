@@ -26,7 +26,6 @@ class PendingApproval:
     requester_id: str
     approver_user_id: str
     tool_name: str
-    arguments_preview: dict[str, Any]
     arguments_preview_truncated: bool
     timeout_seconds: int
     created_at_ms: int
@@ -66,10 +65,6 @@ class PendingApproval:
             msg = "Approval card event has an invalid status."
             raise ValueError(msg)
 
-        arguments = content.get("arguments")
-        if not isinstance(arguments, dict):
-            arguments = {"value": arguments}
-
         requested_at = _content_str(content, "requested_at")
         expires_at = _content_str(content, "expires_at")
         created_at_ms = _created_at_ms(event, requested_at)
@@ -86,7 +81,6 @@ class PendingApproval:
             requester_id=requester_id,
             approver_user_id=approver_user_id,
             tool_name=tool_name,
-            arguments_preview=cast("dict[str, Any]", arguments),
             arguments_preview_truncated=bool(content.get("arguments_truncated")),
             timeout_seconds=timeout_seconds,
             created_at_ms=created_at_ms,

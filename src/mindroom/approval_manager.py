@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from mindroom.approval_events import PendingApproval, PendingApprovalStatus, parse_approval_datetime
 from mindroom.event_journal import (
     ApprovalCardReservation,
+    ApprovalDecisionMetadata,
     BackgroundApprovalDecision,
     DeliveryStage,
     MatrixDelivery,
@@ -651,19 +652,13 @@ class _ApprovalManager:
         """Commit the grant batch and wake every newly executable continuation."""
         if status != "approved" or self.cards is None:
             return ApprovalActionResult(consumed=True, resolved=False, card_event_id=pending.card_event_id)
-        offered = self._resolved_event_content(
-            pending,
-            status="approved",
-            reason=reason,
-            resolved_by=sender_id,
-            resolved_at=_utcnow(),
-        )
         decisions = await self.cards.create_approval_grant(
             room_id=pending.room_id,
             card_event_id=pending.card_event_id,
             sender_id=sender_id,
             seconds=seconds,
-            resolution=offered,
+            metadata=ApprovalDecisionMetadata(resolved_by=sender_id, resolved_at=_utcnow().isoformat()),
+            reason=reason,
             current_binding=current_binding,
         )
         for decision in decisions:
@@ -767,18 +762,11 @@ class _ApprovalManager:
     ) -> bool:
         if self.cards is None:
             return False
-        offered = self._resolved_event_content(
-            pending,
-            status=status,
-            reason=reason,
-            resolved_by=resolved_by,
-            resolved_at=_utcnow(),
-        )
         recorded = await self.cards.resolve_continuation_approval_card(
             card_event_id=pending.card_event_id,
             requested_status=status,
             reason=reason,
-            resolution=offered,
+            metadata=ApprovalDecisionMetadata(resolved_by=resolved_by, resolved_at=_utcnow().isoformat()),
         )
         if recorded.resolution is None:
             return False
@@ -1071,41 +1059,6 @@ class _ApprovalManager:
             else:
                 content["full_arguments"] = full_arguments
         return content
-
-    @staticmethod
-    def _resolved_event_content(
-        pending: PendingApproval,
-        *,
-        status: _ApprovalStatus,
-        reason: str | None,
-        resolved_by: str | None,
-        resolved_at: datetime,
-    ) -> dict[str, Any]:
-        content = dict(pending.arguments_preview)
-        result: dict[str, Any] = {
-            "msgtype": _EVENT_TYPE,
-            "body": _ApprovalManager._event_body(pending.tool_name, status),
-            "tool_name": pending.tool_name,
-            "arguments": content,
-            "status": status,
-            "approval_id": pending.approval_id,
-            "approver_user_id": pending.approver_user_id,
-            "requester_id": pending.requester_id,
-            "requested_at": pending.requested_at,
-            "expires_at": pending.expires_at,
-            "thread_id": pending.thread_id,
-            "resolved_at": resolved_at.isoformat(),
-            "resolved_by": resolved_by,
-        }
-        if pending.agent_name is not None:
-            result["agent_name"] = pending.agent_name
-        if pending.arguments_preview_truncated:
-            result["arguments_truncated"] = True
-        if reason:
-            result["resolution_reason"] = reason
-        if status == "approved":
-            result["approval_provenance"] = {"kind": "once"}
-        return result
 
     @staticmethod
     def _event_body(tool_name: str, status: PendingApprovalStatus) -> str:

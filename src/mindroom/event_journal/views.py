@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from typing import Any, Literal
+    from typing import Literal
 
     from mindroom.history_recovery import (
         HistoryRecoveryOutcome,
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     )
     from mindroom.tool_approval_grants import ApprovalGrant
 
-    from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
+    from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
     from .approvals import (
         StoredApprovalCard,
         UnreadableApprovalCard,
@@ -481,7 +481,7 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         card_event_id: str,
         requested_status: Literal["approved", "denied", "expired"],
         reason: str | None,
-        resolution: Mapping[str, Any],
+        metadata: ApprovalDecisionMetadata,
     ) -> RecordedApprovalDecision: ...
 
     async def create_approval_grant(  # noqa: D102
@@ -491,7 +491,8 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         card_event_id: str,
         sender_id: str,
         seconds: int,
-        resolution: Mapping[str, Any],
+        metadata: ApprovalDecisionMetadata,
+        reason: str | None = None,
         current_binding: str | None = None,
     ) -> tuple[RecordedApprovalDecision, ...]: ...
 

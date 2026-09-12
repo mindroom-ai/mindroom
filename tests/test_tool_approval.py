@@ -893,7 +893,6 @@ async def test_live_resolution_logs_room_context_when_terminal_flush_is_deferred
 
     try:
         with (
-            patch.object(manager, "_resolved_event_content", return_value={"status": "denied"}),
             patch.object(manager, "_worker", return_value=worker),
             patch("mindroom.approval_manager.logger.warning") as warning,
         ):

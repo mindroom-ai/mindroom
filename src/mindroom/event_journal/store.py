@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import batched
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from mindroom.history_recovery import (
@@ -34,6 +34,7 @@ from . import (
 )
 from .approval_card_state import (  # noqa: TC001 - part of this module's runtime return types
     ApprovalCardReservation,
+    ApprovalDecisionMetadata,
     RecordedApprovalDecision,
 )
 from .approval_continuations import (  # noqa: TC001 - runtime return and input types
@@ -1166,7 +1167,7 @@ class PrincipalStore:
         card_event_id: str,
         requested_status: Literal["approved", "denied", "expired"],
         reason: str | None,
-        resolution: Mapping[str, Any],
+        metadata: ApprovalDecisionMetadata,
     ) -> RecordedApprovalDecision:
         """Atomically record one native card and its exact-call decision."""
         return await self._backend.write(
@@ -1176,7 +1177,7 @@ class PrincipalStore:
                 card_event_id=card_event_id,
                 requested_status=requested_status,
                 reason=reason,
-                resolution=resolution,
+                metadata=metadata,
             ),
         )
 
@@ -1187,7 +1188,8 @@ class PrincipalStore:
         card_event_id: str,
         sender_id: str,
         seconds: int,
-        resolution: Mapping[str, Any],
+        metadata: ApprovalDecisionMetadata,
+        reason: str | None = None,
         current_binding: str | None = None,
     ) -> tuple[RecordedApprovalDecision, ...]:
         """Commit the originating decision, fixed grant, and matching pending decisions."""
@@ -1199,7 +1201,8 @@ class PrincipalStore:
                 card_event_id=card_event_id,
                 sender_id=sender_id,
                 seconds=seconds,
-                resolution=resolution,
+                metadata=metadata,
+                reason=reason,
                 current_binding=current_binding,
             ),
         )
@@ -1254,7 +1257,7 @@ class PrincipalStore:
                 card_event_id=None,
                 requested_status="expired",
                 reason=None,
-                resolution=None,
+                metadata=None,
                 delivery_id=delivery_id,
             ),
         )

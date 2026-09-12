@@ -111,7 +111,7 @@ def resolve(
     *,
     requested_status: Literal["approved", "denied", "expired"],
     reason: str | None,
-    resolution: Mapping[str, object] | None,
+    metadata: approval_card_state.ApprovalDecisionMetadata | None,
     card_event_id: str | None = None,
     delivery_id: str | None = None,
 ) -> RecordedApprovalDecision:
@@ -171,7 +171,7 @@ def resolve(
         decision_status = requested_status
     stored = approval_card_state.stored_resolution(
         row,
-        resolution=resolution,
+        metadata=metadata,
         requested_status=requested_status,
         decision=decision_status,
         reason=decision_reason,
@@ -224,7 +224,7 @@ def resolve_call(
         delivery_id=None if card_event_id is not None else str(row["delivery_id"]),
         requested_status=requested_status,
         reason=reason,
-        resolution=None,
+        metadata=None,
     )
 
 

@@ -21,6 +21,7 @@ from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalContinuation,
+    ApprovalDecisionMetadata,
     DeliveryStage,
     EventClass,
     EventJournalStore,
@@ -597,7 +598,7 @@ async def test_terminal_calls_win_over_grants(
                 card_event_id=second,
                 requested_status=terminal,
                 reason="human declined",
-                resolution={"status": terminal},
+                metadata=ApprovalDecisionMetadata(),
             )
         await _approve(manager, first)
         continuation = await responder.approval_continuation("second")
