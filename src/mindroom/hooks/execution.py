@@ -212,7 +212,7 @@ async def _invoke_hook(hook: RegisteredHook, context: _HookExecutionContext) -> 
             result = await hook.callback(context)
     except asyncio.CancelledError:
         raise
-    except (Exception, SystemExit):
+    except (Exception, SystemExit) as error:
         duration_ms = elapsed_ms_since(started_at, ndigits=2)
         context.logger.exception(
             "Hook execution failed",
@@ -220,6 +220,9 @@ async def _invoke_hook(hook: RegisteredHook, context: _HookExecutionContext) -> 
             duration_ms=duration_ms,
             timeout_ms=_effective_timeout_ms(hook),
         )
+        if hook.required:
+            msg = f"Required startup hook {hook.plugin_name}:{hook.hook_name} failed"
+            raise RuntimeError(msg) from error
         return _HookInvocationResult(succeeded=False)
 
     duration_ms = elapsed_ms_since(started_at, ndigits=2)

@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
@@ -2524,6 +2525,7 @@ def test_homeassistant_connect_rejects_draft_execution_scope_override(
     api_key_client: TestClient,
 ) -> None:
     """Home Assistant connect must reject draft-only execution-scope overrides."""
+    api_key_client.headers["Origin"] = "http://testserver"
     config = _config_with_worker_scope("user")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
@@ -2604,6 +2606,7 @@ def test_spotify_connect_uses_pending_oauth_state(
 
 def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: TestClient) -> None:
     """Spotify connect must reject draft-only execution-scope overrides."""
+    api_key_client.headers["Origin"] = "http://testserver"
     config = _config_with_worker_scope("user")
 
     main.initialize_api_app(
@@ -3809,13 +3812,59 @@ def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(
     assert "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER" in response.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({}, 403),
+        ({"Origin": "null"}, 403),
+        ({"Origin": "https://other.example.org"}, 403),
+        ({"Origin": "http://testserver", "Sec-Fetch-Site": "cross-site"}, 403),
+        ({"Origin": "http://testserver"}, 200),
+        ({"Authorization": "Bearer "}, 403),
+        ({"Authorization": "Basic test-key"}, 403),
+        ({"Authorization": "Bearer test-key"}, 200),
+    ],
+)
+def test_cookie_mutations_require_browser_origin(
+    api_key_client: TestClient,
+    headers: dict[str, str],
+    expected: int,
+) -> None:
+    """Only a validated bearer credential can bypass the browser mutation guard."""
+    api_key_client.cookies.set("mindroom_api_key", "test-key")
+    response = api_key_client.post("/api/config/load", headers=headers)
+    assert response.status_code == expected, response.text
+
+
+@pytest.mark.parametrize(
+    ("public_url", "origin", "expected"),
+    [
+        ("https://public.example.org/dashboard", "https://public.example.org", 200),
+        ("https://public.example.org", "http://testserver", 403),
+        ("missing-scheme", "://", 403),
+    ],
+)
+def test_cookie_mutations_use_configured_public_origin(
+    api_key_client: TestClient,
+    public_url: str,
+    origin: str,
+    expected: int,
+) -> None:
+    """A configured origin overrides the request host and must fail closed when invalid."""
+    state = main._app_context(api_key_client.app)
+    state.auth_state = replace(state.auth_state, settings=replace(state.auth_state.settings, public_url=public_url))
+    api_key_client.cookies.set("mindroom_api_key", "test-key")
+    response = api_key_client.post("/api/config/load", headers={"Origin": origin})
+    assert response.status_code == expected, response.text
+
+
 def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClient) -> None:
     """A valid standalone auth session cookie should work without bearer headers."""
     response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert response.status_code == 200
     assert response.cookies.get("mindroom_api_key") == "test-key"
 
-    response = api_key_client.post("/api/config/load")
+    response = api_key_client.post("/api/config/load", headers={"Origin": "http://testserver"})
     assert response.status_code == 200
 
 
@@ -4797,6 +4846,7 @@ def test_trusted_upstream_strict_jwt_derives_matrix_from_verified_email_without_
     token = _trusted_upstream_jwt(private_key, email="alice@example.com", user_id="user_123")
     env = _trusted_upstream_strict_jwt_env(tmp_path)
     env.pop("MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER")
+    env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"] = "example.com"
     env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE"] = "@{localpart}:example.org"
     api_app = _trusted_auth_test_app(_runtime_paths(tmp_path, process_env=env))
 
@@ -5003,7 +5053,22 @@ def test_trusted_upstream_auth_prefers_matrix_header_over_email_template(tmp_pat
     assert response.json()["matrix_user_id"] == "@alice:example.org"
 
 
-def test_trusted_upstream_auth_derives_matrix_user_id_from_email_localpart(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("email_domain", "email", "expected"),
+    [
+        ("example.com", "alice@example.com", 200),
+        ("example.com", "alice@EXAMPLE.COM", 200),
+        ("example.com", "alice@another.example.com", 401),
+        ("example.com", "alice@other.example", 401),
+        ("", "alice@example.com", 500),
+    ],
+)
+def test_trusted_upstream_auth_derives_matrix_user_id_from_email_localpart(
+    tmp_path: Path,
+    email_domain: str,
+    email: str,
+    expected: int,
+) -> None:
     """Trusted email-only deployments may derive the Matrix identity from a template."""
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -5012,6 +5077,7 @@ def test_trusted_upstream_auth_derives_matrix_user_id_from_email_localpart(tmp_p
             "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN": email_domain,
         },
     )
     api_app = _trusted_auth_test_app(runtime_paths)
@@ -5021,12 +5087,13 @@ def test_trusted_upstream_auth_derives_matrix_user_id_from_email_localpart(tmp_p
             "/whoami",
             headers={
                 "X-Trusted-User": "alice",
-                "X-Trusted-Email": "alice@example.com",
+                "X-Trusted-Email": email,
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["matrix_user_id"] == "@alice:example.org"
+    assert response.status_code == expected, response.text
+    if expected == 200:
+        assert response.json()["matrix_user_id"] == "@alice:example.org"
 
 
 def test_trusted_upstream_auth_email_template_requires_email_header_config(tmp_path: Path) -> None:
@@ -5084,7 +5151,7 @@ def test_trusted_upstream_auth_email_template_requires_exactly_one_localpart_pla
 
     assert response.status_code == 500
     assert response.json()["detail"] == (
-        "Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder"
+        "Trusted upstream email mapping requires a valid template and MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"
     )
 
 
@@ -5110,8 +5177,10 @@ def test_trusted_upstream_auth_rejects_invalid_derived_matrix_user_id(tmp_path: 
             },
         )
 
-    assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid trusted upstream Matrix user id"
+    assert response.status_code == 500
+    assert response.json()["detail"] == (
+        "Trusted upstream email mapping requires a valid template and MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"
+    )
 
 
 @pytest.mark.parametrize("matrix_user_id", ["@Alice:example.org", "@:example.org"])
@@ -5262,7 +5331,7 @@ def test_supabase_cookie_auth_allows_access(
     _set_platform_auth(valid_tokens={valid_cookie_token})
     test_client.cookies.set("mindroom_jwt", valid_cookie_token)
 
-    response = test_client.post("/api/config/load")
+    response = test_client.post("/api/config/load", headers={"Origin": "http://testserver"})
     assert response.status_code == 200
 
 

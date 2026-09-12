@@ -9,7 +9,13 @@ from urllib.parse import quote
 
 import nio
 
-from mindroom.matrix.client_room_admin import add_room_to_space, create_room, get_room_members, invite_to_room
+from mindroom.matrix.client_room_admin import (
+    add_room_to_space,
+    create_room,
+    get_joined_rooms,
+    get_room_members,
+    invite_to_room,
+)
 from mindroom.matrix.identity import managed_account_key, managed_account_user_id
 from mindroom.matrix.invited_rooms_store import (
     invited_room_entity_names,
@@ -58,7 +64,7 @@ class _BoundHookMatrixAdmin:
             power_users=power_user_ids,
         )
         if room_id is not None:
-            self._persist_created_room_for_creator(room_id)
+            self.retain_room(room_id)
         return room_id
 
     async def invite_user(self, room_id: str, user_id: str) -> bool:
@@ -95,6 +101,10 @@ class _BoundHookMatrixAdmin:
     async def get_room_members(self, room_id: str) -> set[str] | None:
         """Return the current joined members for one room, or ``None`` when the fetch fails."""
         return await get_room_members(self.client, room_id)
+
+    async def get_joined_rooms(self) -> list[str] | None:
+        """Return the bound account's joined rooms, or ``None`` when unavailable."""
+        return await get_joined_rooms(self.client)
 
     async def get_profile_avatar(self, user_id: str) -> str | None:
         """Return one user's Matrix avatar content URI, or ``None`` when unavailable."""
@@ -141,12 +151,11 @@ class _BoundHookMatrixAdmin:
         )
         return isinstance(response, nio.RoomPutStateResponse)
 
-    def _persist_created_room_for_creator(self, room_id: str) -> None:
-        """Record a room the bound managed entity created so cleanup preserves it.
+    def retain_room(self, room_id: str) -> None:
+        """Retain a plugin-owned room for the bound managed entity across cleanup.
 
-        The creator is never invited into its own room, so the invite-accept
-        lifecycle that records invited rooms never fires for it. Persist here so
-        ``leave_unconfigured_rooms`` keeps plugin-created rooms across restarts.
+        Plugins reconciling existing rooms can restore this local ownership
+        record without creating a room or changing Matrix membership.
         """
         if self.config is None:
             return

@@ -23,6 +23,7 @@ def trusted_upstream_headers(
 ) -> dict[str, str]:
     """Return trusted-upstream auth headers for API tests."""
     return {
+        "Origin": "http://testserver",
         "X-Trusted-User": user_id,
         "X-Trusted-Email": email,
         "X-Trusted-Matrix-User": matrix_user_id,

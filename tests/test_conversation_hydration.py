@@ -1892,6 +1892,32 @@ class TestEncryptedRelations:
         assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
+    async def test_strict_unreadable_history_retries_after_keys_arrive(self, alice: PrincipalStore) -> None:
+        """Missing keys must not permanently spend the export walk's allowance."""
+        client = self._thread_of_encrypted_replies(readable=False)
+        strict = hydrator(alice, client, **EXPORT_CALLER)
+        with pytest.raises(RuntimeError, match="unreadable events remain"):
+            await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
+        client.room_keys = self._thread_of_encrypted_replies(readable=True).room_keys
+        await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
+        assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_legacy_incomplete_export_is_revalidated(self, alice: PrincipalStore) -> None:
+        """Rank20 did not distinguish missing keys from exhausted allowance."""
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id="$root",
+            events=(),
+            complete=False,
+            attempted_policy_rank=20,
+            expected_membership_epoch=0,
+        )
+        client = self._thread_of_encrypted_replies(readable=True)
+        await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id="$root")
+        assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
     async def test_a_refresh_does_not_reinstall_a_body_whose_edits_it_could_not_read(
         self,
         alice: PrincipalStore,

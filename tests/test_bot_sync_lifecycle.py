@@ -19,9 +19,10 @@ import pytest
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, current_task_is_process_shutdown
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind
-from mindroom.hooks import EVENT_AGENT_STARTED
+from mindroom.hooks import EVENT_AGENT_STARTED, HookRegistry, hook
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from tests.journal_helpers import admit_dispatch_event
 from tests.threading_helpers import (
@@ -148,6 +149,61 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         assert bot.running is False
         assert bot.client is None
         assert bot._ingestion_session is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["lookup", "write", "timeout", "system_exit"])
+    async def test_required_startup_hook_failure_stops_before_room_reconciliation(
+        self,
+        bot: AgentBot,
+        failure: str,
+    ) -> None:
+        """Failed room ownership initialization must close startup before cleanup."""
+        later_hook = AsyncMock()
+
+        @hook(EVENT_AGENT_STARTED, priority=10, timeout_ms=5, required=True)
+        async def retain_rooms(_ctx: object) -> None:
+            if failure == "timeout":
+                await asyncio.sleep(60)
+            if failure == "system_exit":
+                raise SystemExit(1)
+            msg = f"retention {failure} failed"
+            raise OSError(msg)
+
+        @hook(EVENT_AGENT_STARTED, priority=20)
+        async def backfill(_ctx: object) -> None:
+            await later_hook()
+
+        bot.hook_registry = HookRegistry.from_plugins(
+            [
+                SimpleNamespace(
+                    name="room-owner",
+                    discovered_hooks=(retain_rooms, backfill),
+                    plugin_order=0,
+                    entry_config=PluginEntryConfig(path="./plugins/room-owner"),
+                ),
+            ],
+        )
+        client = _make_client_mock(user_id="@mindroom_general:localhost")
+        session = AsyncMock()
+        with (
+            patch.object(bot, "ensure_user_account", AsyncMock()),
+            patch(
+                "mindroom.bot.login_agent_owned_session",
+                AsyncMock(return_value=SimpleNamespace(client=client, session=session)),
+            ),
+            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+            pytest.raises(RuntimeError, match="Required startup hook") as error,
+        ):
+            await bot.start()
+
+        expected_cause = {"timeout": TimeoutError, "system_exit": SystemExit}.get(failure, OSError)
+        assert isinstance(error.value.__cause__, expected_cause)
+        later_hook.assert_not_awaited()
+        client.close.assert_awaited_once()
+        session.close.assert_awaited_once()
+        assert bot.client is None
+        assert not bot.running
 
     @pytest.mark.asyncio
     async def test_approval_recovery_retains_owned_store_until_final_send_finishes(self, bot: AgentBot) -> None:

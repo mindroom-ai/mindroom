@@ -1148,7 +1148,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_NAMESPACE` | Installation namespace for Matrix identity isolation (4–32 lowercase alphanumeric chars) | _(none)_ |
 | `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling; it does **not** change the API server bind port, which uses `mindroom run --api-port`. | `8765` |
 | `MINDROOM_API_KEY` | API key for authenticating dashboard/API requests (`mindroom config init` auto-generates one; unset = open access) | _(none)_ |
-| `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the dashboard API with credentials | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
+| `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173` |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for the homeserver to return a valid `/_matrix/client/versions` response at startup (`0` = wait indefinitely); MindRoom polls at a fixed interval until success or the deadline | _(wait indefinitely)_ |
@@ -1717,6 +1717,8 @@ prompts:
 
 `mindroom avatars generate` only creates missing local avatar files by default.
 Run `mindroom avatars generate --force` to overwrite existing managed workspace avatar files after changing prompts or styles.
+Generation uses `gpt-6-astra` for prompt creation and `gpt-image-2.5-sunburst` for 1024x1024 high-quality PNG rendering.
+Both stages require only `OPENAI_API_KEY` or the file-based `OPENAI_API_KEY_FILE` credential.
 `mindroom avatars sync` only fills missing Matrix avatars by default.
 Run `mindroom avatars sync --force` to replace existing Matrix room or root-space avatars.
 
@@ -3754,7 +3756,8 @@ save_file("temporary notes\n", "scratch/notes.txt")
 
 `shell` exposes `run_shell_command()`, `check_shell_command()`, and `kill_shell_command()`.
 `run_shell_command()` accepts either a natural shell command string or a list of argv strings.
-Plain command strings and single-item argv lists that look shell-like run through `bash -lc`.
+Plain command strings and single-item argv lists that look shell-like run through `bash -c`, using the prepared execution environment without sourcing login profiles on every call.
+Pass `["bash", "-lc", "command"]` explicitly when login-shell initialization is needed.
 Explicit multi-item argv lists run directly without shell parsing.
 If the command exits within `timeout`, the tool returns the last `tail` lines of stdout, or stderr on non-zero exit.
 Shell output is also capped to the most recent 51200 bytes, with a truncation notice when older output is dropped.
@@ -12987,7 +12990,9 @@ The hook system has four execution modes, determined by the event, not by indivi
 
 Hooks run serially.
 Each hook sees the context as read-only (except designated mutable fields like `suppress`).
-Failures lose only that hook's side effects; the next hook still runs.
+Ordinary observer failures are isolated and the next hook still runs; completed external side effects are not rolled back.
+An `agent:started` hook can declare `required=True` when startup must not proceed without its initialization.
+Failure or timeout in a required startup hook aborts that bot's startup before its room reconciliation, using the existing startup failure handling.
 
 ```python
 from mindroom.hooks import hook
@@ -13167,6 +13172,7 @@ async def enrich_weather(ctx):
 | `name` | `str` | function name | Hook identifier (unique within a plugin) |
 | `priority` | `int` | `100` | Execution order; lower values run first |
 | `timeout_ms` | `int \| None` | per-event default | Override the event's default timeout |
+| `required` | `bool` | `False` | For `agent:started` only: abort bot startup if this hook fails or times out |
 | `agents` | `Iterable[str] \| None` | `None` (all) | Only fire for these agent names |
 | `rooms` | `Iterable[str] \| None` | `None` (all) | Only fire for these room IDs |
 
@@ -13409,6 +13415,8 @@ If you are writing internal code or tests and already have an explicit `HookRegi
 
 Every hook invocation runs inside an `asyncio.timeout()` with structured error logging.
 Ordinary `Exception` and `SystemExit` failures are logged and isolated so later hooks can continue.
+Required startup hooks instead raise a `RuntimeError` with the original failure as its cause, stopping subsequent startup hooks and the bot's room reconciliation.
+Use a short, separate required hook for ownership or other necessary initialization; keep optional backfill, welcomes, and enrichment in ordinary hooks.
 Cancellation follows the caller and event policy, and external side effects completed before a failure cannot be rolled back.
 
 Failure semantics are mode-aware:
@@ -13420,7 +13428,7 @@ Failure semantics are mode-aware:
 
 ### No quarantine, no cooldown
 
-A hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](https://docs.mindroom.chat/plugins/#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
+An ordinary hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](https://docs.mindroom.chat/plugins/#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
 
 ### No automatic retries
 
@@ -13510,13 +13518,17 @@ Transport exceptions from the underlying Matrix client propagate to the hook.
 Provides a narrow Matrix admin facade when MindRoom has a router-backed admin client available for the current hook context.
 This facade is part of the supported hook contract and is intentionally not the raw Matrix client.
 It is `None` when no admin-capable client is bound.
-The available methods are `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `force_join_user(room_id, user_id)`, `kick_user(room_id, user_id, reason=None)`, `get_room_members(room_id)`, `get_profile_avatar(user_id)`, `get_room_state_event(room_id, event_type, state_key)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
+The available methods are `get_joined_rooms()`, `retain_room(room_id)`, `resolve_alias(alias)`, `create_room(name=..., alias_localpart=..., topic=..., power_user_ids=...)`, `invite_user(room_id, user_id)`, `force_join_user(room_id, user_id)`, `kick_user(room_id, user_id, reason=None)`, `get_room_members(room_id)`, `get_profile_avatar(user_id)`, `get_room_state_event(room_id, event_type, state_key)`, `add_room_to_space(space_room_id, room_id)`, and `put_room_state(room_id, event_type, state_key, content)`.
 Membership mutation methods return a boolean success result and surface transport exceptions consistently with the other admin operations.
 `get_room_members` returns `None` when the membership fetch fails, so callers can distinguish an unreadable room from a genuinely empty one.
+`get_joined_rooms()` returns the bound account's joined room IDs, or `None` when the request fails; plugins can use one lookup to verify membership across their recorded rooms.
 `get_profile_avatar` returns the user's Matrix avatar content URI, or `None` when no avatar is available or Matrix returns an error response.
 `get_room_state_event` returns `(True, content)` for a successful object response, `(True, None)` when Matrix confirms the event is missing, and `(False, None)` for other Matrix errors or malformed non-object content.
-Transport exceptions from both read methods propagate to the caller.
+Transport exceptions from read methods propagate to the caller.
 Rooms created via `create_room` are retained for the creating bot across room cleanup and restarts, the same way rooms it is invited to are kept.
+When reconciling an existing plugin-owned room, call the synchronous `retain_room(room_id)` after verifying the bound bot is still a member.
+It restores the same local retention record used by the bot's membership lifecycle, changes no Matrix membership, and raises `OSError` if persistence fails.
+Retention applies only to managed entities with invite acceptance enabled; it does not override disabled invitation policy.
 
 ### Transport objects
 
@@ -13791,7 +13803,9 @@ An authenticated requester may manage their own isolated OAuth connection for a 
 Responder access and room membership never grant OAuth-management access.
 Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
-That token is a bearer capability for the exact provider, Matrix requester, worker target, and credential connection generation, so its authorize and callback requests do not require a dashboard login.
+The token binds the exact provider, Matrix requester, worker target, and credential connection generation.
+Requester-scoped credentials require the browser to authenticate as that requester at authorization and callback, using the same identity check as requester-scoped resets.
+Shared-scope credentials permit delegation through the short-lived token without a dashboard login.
 MindRoom rechecks the requester's current agent credential-management permission at authorization and callback, and rejects a link if its credential generation changed after issuance.
 Shared-scope reset links use the same capability model for configured credential managers: the GET is non-mutating, the confirmation POST consumes the reset capability before deleting the scoped credential, and reconnection continues through a fresh single-use connect capability.
 Requester-scoped reset links still require the original authenticated browser user.
@@ -17394,10 +17408,12 @@ This provenance remains attached across recovery, restart, and decryption indepe
 `matrix/durable_ingestion.py` converts one trusted Nio batch and atomically commits its receipt, ordered membership effects, semantic events, and conversation projection in the MindRoom journal before acknowledging that batch to Nio.
 An admission failure leaves the batch unsettled for retry, and replay after a committed admission returns the original receipt without duplicating semantic work.
 Typing, presence and read receipts are excluded from durable admission.
-MindRoom requires `mindroom-nio[e2e]==1.0.4`, and `uv.lock` pins the same published release.
+MindRoom requires `mindroom-nio[e2e]==1.0.6`, and `uv.lock` pins the same published release.
 Nio 1.0.2 avoids rereading queued payloads for byte accounting on SQLite 3.43 and newer, preserving exact accounting on older drivers.
 Nio 1.0.3 returns typed membership errors for refused durable joined-member queries and preserves Matrix error codes after retry exhaustion.
 Nio 1.0.4 avoids repeated pending-queue size scans during durable sync preparation while preserving queue limits and rollback.
+Nio 1.0.5 moves durable sync response decoding and captured-input replay off the event loop while preserving durable capture and membership ordering.
+Nio 1.0.6 uses unfiltered incremental Classic sync for local joins proven fresh at the current cursor, while retaining full-state recovery for stale evidence or incomplete room baselines.
 It retains the encrypted-attachment and null room-avatar parsing fixes that prevent those event shapes from blocking history hydration.
 Admission is fail-closed at every provenance, not only for recovery, because an event the journal never accepted is one no later process would see again.
 Silent schedules use the custom `io.mindroom.scheduled.trigger` timeline event so clients do not render the task body as a room message.
@@ -17508,7 +17524,10 @@ After a device change, standalone deliveries that reply outside a journal turn r
 
 On startup, MindRoom detects orphaned bot memberships left over from a previous configuration.
 When an agent is removed from `config.yaml`, its Matrix bot account may still be a member of rooms it previously joined.
-The cleanup process leaves those rooms safely without ejecting currently configured entities from their required rooms.
+The global sweep removes only persisted bot identities that no longer belong to a configured router, agent, or team.
+Current entities reconcile their own configured and retained rooms after startup hooks and invitation handling, so the early global sweep cannot remove them before that reconciliation.
+An entity that cannot start keeps its memberships until its own lifecycle recovers.
+Unreadable or invalid retention files stop membership initialization instead of being treated as empty ownership records.
 This runs automatically — no manual intervention is needed.
 
 ## Identity Management
@@ -17639,10 +17658,10 @@ main() entry
 │ ─────────────────│
 │ 1. try_start()   │
 │    each bot      │
-│ 2. Setup rooms   │
-│    & memberships │
-│ 3. Create sync   │
+│ 2. Create sync   │
 │    tasks         │
+│ 3. Background    │
+│    room setup    │
 └────────┬─────────┘
          │
          ▼
@@ -17669,9 +17688,18 @@ main() entry
 **Key details:**
 
 - **Entity order**: Router first, then agents, then teams
-- **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents, teams, and users, then bots join
+- **Room setup** (`_setup_rooms_and_memberships`): Resolve/create rooms and the root Space, join the router, reconcile managed policy once, then invite and join the remaining identities
 - **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; `matrix_sync.mode: classic` uses Classic `/v3/sync`, while `sliding` uses MSC4186 Simplified Sliding Sync on a homeserver advertising `org.matrix.simplified_msc3575`
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
+
+Room administration uses a fresh, pass-local full-state snapshot for each policy reconciliation instead of separate name, topic, power-level, encryption, and join-rule reads.
+Satisfied power-level policy uses the snapshot fast path; a required power-level write rereads current grants so intervening administrator changes are preserved.
+Root Space child links share one fresh Space snapshot rather than fetching every child separately.
+Managed-room invitations reuse joined and invited memberships from those snapshots; internal-user and configured-user invitations share one roster.
+The internal user logs in once and joins only rooms absent from its fresh joined-room inventory, falling back to idempotent join attempts if that inventory is unavailable.
+Alias resolution and directory visibility still require fresh reads, and the authoritative reply-membership refresh remains a separate startup barrier.
+No configuration hash or persisted state cache suppresses remote drift checks on the next startup or relevant config update.
+The duplicate full pass is removed, including its incidental retry of failed operations; transport retries remain with nio and returned administrative failures are retried on the next setup attempt.
 
 ## Session Storage Recovery
 
@@ -18924,6 +18952,7 @@ MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER=X-MindRoom-User-Id
 MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER=X-MindRoom-User-Email
 MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER=X-MindRoom-Matrix-User-Id
 MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE='@{localpart}:example.org'
+MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN=example.com
 ```
 
 `MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER` is required when trusted upstream auth is enabled.
@@ -18935,7 +18964,10 @@ When present, the email value is stored in `request.scope["auth_user"]["email"]`
 For private `user` and `user_agent` OAuth flows, the trusted identity must resolve to the requester identity used by Matrix-backed tool execution.
 Prefer `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` when your access layer can supply a real Matrix ID.
 When the access layer only supplies email, set `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` to derive the Matrix ID from the trusted email localpart.
-For example, the template `@{localpart}:example.org` maps `alice@example.com` to `@alice:example.org`.
+Set `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` to the single allowed email domain before upgrading a deployment that derives Matrix identities from email.
+Missing domain configuration fails closed; emails from any other domain, including subdomains, are rejected.
+Domain comparison is case-insensitive.
+For example, with email domain `example.com`, the template `@{localpart}:example.org` maps `alice@example.com` to `@alice:example.org`.
 The template must contain exactly one `{localpart}` placeholder.
 Derived Matrix IDs must pass MindRoom's Matrix user ID parser.
 
@@ -19043,6 +19075,7 @@ trustedUpstreamAuth:
   emailHeader: X-MindRoom-User-Email
   matrixUserIdHeader: X-MindRoom-Matrix-User-Id
   emailToMatrixUserIdTemplate: "@{localpart}:example.org"
+  emailDomain: example.com
   requireJwt: "true"
   jwtHeader: X-Trusted-Jwt
   jwksUrl: https://gateway.example.com/.well-known/jwks.json
@@ -19056,6 +19089,7 @@ trustedUpstreamAuth:
 The chart renders these values as the `MINDROOM_TRUSTED_UPSTREAM_*` runtime environment variables.
 The instance chart fails rendering when `trustedUpstreamAuth.emailToMatrixUserIdTemplate` is set without `trustedUpstreamAuth.emailHeader`.
 The instance chart also fails rendering when `trustedUpstreamAuth.requireJwt` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, or `jwtIssuer`.
+Both charts require `emailDomain` when an email template is configured.
 The template value must contain exactly one `{localpart}` placeholder.
 When using the platform provisioner, configure the platform chart with matching provisioner values:
 
@@ -19067,6 +19101,7 @@ provisioner:
     emailHeader: X-MindRoom-User-Email
     matrixUserIdHeader: X-MindRoom-Matrix-User-Id
     emailToMatrixUserIdTemplate: "@{localpart}:example.org"
+    emailDomain: example.com
     requireJwt: "true"
     jwtHeader: X-Trusted-Jwt
     jwksUrl: https://gateway.example.com/.well-known/jwks.json
@@ -19092,6 +19127,19 @@ If the configured trusted user ID header is missing, MindRoom returns `401`.
 If strict JWT mode is enabled and the configured JWT header is missing or invalid, MindRoom returns `401`.
 If a trusted browser identity does not map to the Matrix requester stored in an OAuth connect token, MindRoom returns `403`.
 Existing Supabase platform auth and standalone API-key auth remain available when trusted upstream auth is not enabled.
+
+## Browser mutation protection
+
+Requests that use trusted upstream browser authentication or dashboard cookies must send an `Origin` matching `MINDROOM_PUBLIC_URL` for POST, PUT, PATCH, and DELETE operations.
+If no public URL is configured, MindRoom uses the request origin.
+Requests marked `Sec-Fetch-Site: cross-site` are rejected even when the Origin matches.
+A successfully validated API bearer token does not require these browser headers.
+Adding a bearer header to a request authenticated by trusted upstream identity does not bypass this protection.
+The dashboard CORS allowlist controls which origins may read credentialed responses; it does not authorize cross-origin cookie or trusted-upstream mutations.
+Host the dashboard under the app's public origin, or use its development proxy, which authenticates API calls with a bearer token.
+
+Conversation-issued OAuth links for requester-scoped credentials require the intended requester to authenticate before starting authorization and again at the callback.
+Shared-agent credential links retain their short-lived, single-use delegation behavior.
 
 # MCP Gateway
 
@@ -20556,12 +20604,13 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
   --set trustedUpstreamAuth.userIdHeader=X-MindRoom-User-Id \
   --set trustedUpstreamAuth.emailHeader=X-MindRoom-User-Email \
   --set trustedUpstreamAuth.matrixUserIdHeader=X-MindRoom-Matrix-User-Id \
-  --set trustedUpstreamAuth.emailToMatrixUserIdTemplate='@{localpart}:example.org'
+  --set trustedUpstreamAuth.emailToMatrixUserIdTemplate='@{localpart}:example.org' \
+  --set trustedUpstreamAuth.emailDomain=example.com
 ```
 
 When using the provisioner, configure the platform chart with `provisioner.trustedUpstreamAuth.enabled="true"` and the matching `provisioner.trustedUpstreamAuth.*Header` values.
-If your access layer cannot supply a Matrix ID header, configure `provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate` with the same template.
-The email-to-Matrix template must contain exactly one `{localpart}` placeholder and requires the matching `emailHeader` value in both the instance and platform chart configuration.
+If your access layer cannot supply a Matrix ID header, configure `provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate` with the same template and `provisioner.trustedUpstreamAuth.emailDomain` with the allowed email domain.
+The email-to-Matrix template must contain exactly one `{localpart}` placeholder and requires the matching `emailHeader` and `emailDomain` values in both the instance and platform chart configuration.
 
 ## Runtime-Only Deployment
 
@@ -21375,6 +21424,8 @@ In a source checkout, generated files are written under `./avatars/`.
 In containerized deployments, generated overrides are written under the persistent MindRoom storage path.
 Existing managed files are skipped by default.
 Use `--force` to overwrite them after changing avatar prompts or styles.
+Generation uses `gpt-6-astra` for prompt creation and `gpt-image-2.5-sunburst` for PNG rendering.
+Both stages use `OPENAI_API_KEY` or the file-based `OPENAI_API_KEY_FILE` credential.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

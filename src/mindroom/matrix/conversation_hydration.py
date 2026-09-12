@@ -62,6 +62,7 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.projection import is_newer_revision
 from mindroom.logging_config import get_logger
+from mindroom.matrix.legacy_media_edits import readable_legacy_file_edit
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.matrix.transport_progress import is_transport_progress_revision
@@ -188,7 +189,7 @@ def _readable_event(client: nio.AsyncClient, event: nio.BaseEvent) -> nio.Event 
     event was dropped unread, and none of them can do anything about why.
     """
     if not isinstance(event, nio.Event):
-        return None
+        return readable_legacy_file_edit(event)
     if not isinstance(event, nio.MegolmEvent):
         return event
     if client.olm is None:
@@ -200,7 +201,7 @@ def _readable_event(client: nio.AsyncClient, event: nio.BaseEvent) -> nio.Event 
     # A payload that decrypted into something malformed comes back as a
     # `BadEvent`, which nio deliberately does not make an `Event`. Unreadable is
     # the honest answer for it as well.
-    return decrypted if isinstance(decrypted, nio.Event) else None
+    return decrypted if isinstance(decrypted, nio.Event) else readable_legacy_file_edit(decrypted)
 
 
 def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -> ProjectedEvent | None:
@@ -619,6 +620,9 @@ class ConversationHydrator:
         walk = (
             await self._fetch_thread(room_id, thread_id) if thread_id is not None else await self._fetch_room(room_id)
         )
+        if self.require_complete and walk.unreadable:
+            msg = f"Could not prove complete readable history for {room_id!r}/{thread_id!r}: unreadable events remain"
+            raise _HydrationError(msg)
         installed = await self.store.install_hydrated_conversation(
             room_id=room_id,
             thread_id=thread_id,

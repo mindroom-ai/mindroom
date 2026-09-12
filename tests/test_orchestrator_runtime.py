@@ -2069,12 +2069,12 @@ class TestMultiAgentOrchestrator:
 
         assert bot.rooms == ["!room1:localhost"]
         mock_ensure_user_in_rooms.assert_not_awaited()
-        assert bot.ensure_rooms.await_count == 2
+        assert bot.ensure_rooms.await_count == 1
         mock_refresh_agent_reply_memberships.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_setup_rooms_and_memberships_retries_invites_after_router_joins(self, tmp_path: Path) -> None:
-        """Invite-only existing rooms should get a second invitation/join pass after router joins."""
+    async def test_setup_rooms_and_memberships_invites_and_joins_once(self, tmp_path: Path) -> None:
+        """Order router membership first instead of replaying invitations and joins."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -2113,16 +2113,16 @@ class TestMultiAgentOrchestrator:
         assert router_bot.rooms == ["!room1:localhost"]
         assert general_bot.rooms == ["!room1:localhost"]
         assert router_bot.ensure_rooms.await_count == 1
-        assert general_bot.ensure_rooms.await_count == 2
-        assert mock_invitations.await_count == 2
-        assert mock_ensure_user_in_rooms.await_count == 2
+        assert general_bot.ensure_rooms.await_count == 1
+        assert mock_invitations.await_count == 1
+        assert mock_ensure_user_in_rooms.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_setup_rooms_and_memberships_reruns_room_reconciliation_after_router_joins(
+    async def test_setup_rooms_and_memberships_reconciles_once_after_router_joins(
         self,
         tmp_path: Path,
     ) -> None:
-        """Startup should rerun room reconciliation after the router joins existing rooms."""
+        """Private rooms are reconciled once, after the router can administer them."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -2140,8 +2140,9 @@ class TestMultiAgentOrchestrator:
         router_joined = False
         reconciliation_join_states: list[bool] = []
 
-        async def record_room_reconciliation() -> None:
+        async def record_room_reconciliation(_room_ids: dict[str, str]) -> dict:
             reconciliation_join_states.append(router_joined)
+            return {}
 
         async def router_join_rooms() -> None:
             nonlocal router_joined
@@ -2158,7 +2159,16 @@ class TestMultiAgentOrchestrator:
         general_bot.ensure_rooms = AsyncMock()
 
         with (
-            patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock(side_effect=record_room_reconciliation)),
+            patch.object(
+                orchestrator,
+                "_ensure_rooms_exist",
+                new=AsyncMock(return_value={"lobby": "!room1:localhost"}),
+            ),
+            patch.object(
+                orchestrator,
+                "_reconcile_managed_rooms",
+                new=AsyncMock(side_effect=record_room_reconciliation),
+            ),
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
             patch("mindroom.orchestrator.get_rooms_for_entity", return_value=["lobby"]),
             patch("mindroom.orchestrator.resolve_room_aliases", return_value=["!room1:localhost"]),
@@ -2167,9 +2177,9 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator._setup_rooms_and_memberships([router_bot, general_bot])
 
-        assert reconciliation_join_states == [False, True]
+        assert reconciliation_join_states == [True]
         assert router_bot.ensure_rooms.await_count == 1
-        assert general_bot.ensure_rooms.await_count == 2
+        assert general_bot.ensure_rooms.await_count == 1
 
     @pytest.mark.asyncio
     async def test_reconcile_post_update_rooms_runs_for_room_metadata_changes(

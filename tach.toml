@@ -166,6 +166,7 @@ visibility = [
     "mindroom.matrix.journal_ingress",
     "mindroom.matrix._owned_session",
     "mindroom.matrix.relation_lookup",
+    "mindroom.matrix.stale_stream_cleanup",
     "mindroom.matrix.transport_progress",
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
@@ -1810,6 +1811,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.rooms"
 depends_on = [
+    "mindroom.matrix.room_reconciliation",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_room_admin",
@@ -1904,6 +1906,7 @@ path = "mindroom.orchestrator"
 depends_on = [
     "mindroom.approval_manager",
     "mindroom.approval_recovery",
+    "mindroom.matrix.room_reconciliation",
     "mindroom.config_reload",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.knowledge.status",
@@ -2353,6 +2356,7 @@ visibility = [
 [[modules]]
 path = "mindroom.topic_generator"
 depends_on = [
+    "mindroom.matrix.room_reconciliation",
     "mindroom.ai_runtime",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
@@ -2526,8 +2530,19 @@ depends_on = []
 visibility = ["mindroom.custom_tools.matrix_voice_message"]
 
 [[modules]]
+path = "mindroom.matrix.room_reconciliation"
+depends_on = ["mindroom.logging_config"]
+visibility = [
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.rooms",
+    "mindroom.orchestrator",
+    "mindroom.topic_generator",
+]
+
+[[modules]]
 path = "mindroom.matrix.client_room_admin"
 depends_on = [
+    "mindroom.matrix.room_reconciliation",
     "mindroom.thread_tags",
 ]
 visibility = [
@@ -3041,6 +3056,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.stale_stream_cleanup"
 depends_on = [
+    "mindroom.event_journal",
     "mindroom.matrix.room_history_reads",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -3049,7 +3065,6 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
-    "mindroom.matrix.thread_projection",
     "mindroom.matrix.visible_body",
     "mindroom.streaming",
 ]
@@ -4729,6 +4744,7 @@ expose = [
     "extract_visible_edit_body",
     "extract_visible_message",
     "fetch_latest_visible_body",
+    "fetch_latest_visible_message",
     "is_visible_room_message",
     "message_preview",
     "room_message_fallback_body",

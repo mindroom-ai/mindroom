@@ -1049,6 +1049,16 @@ class PrincipalStore:
             ),
         )
 
+    async def recovery_initial_deliveries(
+        self,
+        *,
+        after: tuple[int, str] | None = None,
+    ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
+        """Page exact acknowledged INITIALs still lacking FINAL delivery ownership."""
+        return await self._backend.read(
+            lambda transaction: outbox.recovery_initials(transaction, self._principal_id, after=after),
+        )
+
     async def retire_deleted_initial(self, *, delivery_id: str) -> None:
         """Fence an INITIAL whose visible cleanup and record detachment finished."""
         await self._backend.write(

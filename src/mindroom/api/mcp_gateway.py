@@ -22,7 +22,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
-from mindroom.api.auth import require_connections_user
+from mindroom.api.auth import require_connections_user, require_same_origin
 from mindroom.api.config_lifecycle import app_state, rebind_current_request_snapshot, require_api_state
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
@@ -567,8 +567,12 @@ async def _consent(request: Request) -> Response:
         raise HTTPException(403, "Agent access is required", headers=CONNECTIONS_HEADERS)
     try:
         if request.method == "POST":
-            if request.headers.get("origin") != runtime.origin or request.headers.get("sec-fetch-site") == "cross-site":
-                raise HTTPException(403, "Same-origin consent required", headers=CONNECTIONS_HEADERS)
+            require_same_origin(
+                request,
+                runtime.origin,
+                detail="Same-origin consent required",
+                headers=CONNECTIONS_HEADERS,
+            )
             _require_form_content_type(request)
             fields = _form(await read_gateway_body(request))
             if set(fields) != {"state", "csrf_token", "decision"} or fields["decision"] not in {"allow", "deny"}:

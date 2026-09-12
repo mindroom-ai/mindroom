@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 from typing import TYPE_CHECKING
 
@@ -57,6 +58,39 @@ def _run_payload(payload: str) -> tuple[int, str, str]:
 
 sys.exit(serve_template(sys.argv[1], _run_payload))
 '''
+
+
+def test_runtime_template_preloads_schema_types_without_starting_threads() -> None:
+    """Fork children must inherit expensive schema imports, not live background threads."""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+import threading
+from mindroom.api import sandbox_runner
+from agno.utils.schema import identity_injected_types
+
+def ready(socket_path, handler):
+    before = set(sys.modules)
+    identity_injected_types()
+    print(json.dumps({"new_modules": sorted(set(sys.modules) - before), "threads": threading.active_count()}))
+    return 0
+
+sandbox_runner.sandbox_forkserver.serve_template = ready
+sys.argv = ["runner", "--sandbox-forkserver-template", "unused-test-socket"]
+sandbox_runner._run_forkserver_template()
+""",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    result = json.loads(completed.stdout)
+    assert result == {"new_modules": [], "threads": 1}
 
 
 @pytest.fixture

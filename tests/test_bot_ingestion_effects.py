@@ -11,6 +11,7 @@ import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.event_journal import AdmissionFacts, IngestionBatchAdmission, RoomMembershipPosition
+from tests.conftest import install_call_manager_mock
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_bot_ready_hook import (
     _CONSUMER_GENERATION,
@@ -202,9 +203,10 @@ async def test_queued_own_departure_cannot_undo_authoritative_rejoin(tmp_path: P
 async def test_authoritative_join_requests_call_reconciliation_after_frame_publication(tmp_path: Path) -> None:
     """A state-only rejoin must discover calls after Nio publishes current room state."""
     bot = _agent_bot(tmp_path)
+    room_id = "!rejoined:localhost"
     admission = _validated_reported_membership_admission(
         bot,
-        "!rejoined:localhost",
+        room_id,
         previous_membership="leave",
         membership="join",
         previous_epoch=1,
@@ -213,8 +215,54 @@ async def test_authoritative_join_requests_call_reconciliation_after_frame_publi
     principal.ingestion_membership_position = AsyncMock(return_value=RoomMembershipPosition("join", 1))
     manager = MagicMock()
     manager.on_sync_room_membership = AsyncMock()
-    bot._call_manager = manager
-    bot._calls_reconcile_pending = False
-    with patch.object(bot, "journal_principal", return_value=principal):
+    manager.reconcile_joined_rooms = AsyncMock()
+    install_call_manager_mock(bot, manager)
+    with (
+        patch.object(bot, "journal_principal", return_value=principal),
+        patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock()),
+    ):
         await bot._after_ingestion_admission(admission, AdmissionFacts(True, False), None)
-    assert bot._calls_reconcile_pending
+        await _complete_frame(bot)
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    manager.reconcile_joined_rooms.assert_awaited_once_with(frozenset({room_id}))
+
+
+@pytest.mark.asyncio
+async def test_call_room_updates_are_preserved_while_reconciliation_is_running(tmp_path: Path) -> None:
+    """A later frame must retain new room work while an earlier scoped pass awaits."""
+    bot = _agent_bot(tmp_path)
+    first_room_id = "!first-call:localhost"
+    second_room_id = "!second-call:localhost"
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+    reconciled_scopes: list[frozenset[str] | None] = []
+
+    async def reconcile(room_ids: frozenset[str] | None = None) -> None:
+        reconciled_scopes.append(room_ids)
+        if len(reconciled_scopes) == 1:
+            first_started.set()
+            await release_first.wait()
+        else:
+            second_started.set()
+
+    manager = MagicMock()
+    manager.reconcile_joined_rooms = AsyncMock(side_effect=reconcile)
+    install_call_manager_mock(bot, manager)
+
+    with patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock()):
+        try:
+            await bot._post_join_room_setup(first_room_id)
+            await bot._post_join_room_setup(first_room_id)
+            await _complete_frame(bot)
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+
+            await bot._post_join_room_setup(second_room_id)
+            await _complete_frame(bot, 1)
+            await asyncio.wait_for(second_started.wait(), timeout=1)
+        finally:
+            release_first.set()
+            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert reconciled_scopes == [frozenset({first_room_id}), frozenset({second_room_id})]

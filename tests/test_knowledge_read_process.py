@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import subprocess
 import sys
 import time
@@ -84,13 +85,51 @@ def test_probe_does_not_open_native_client_in_parent(
     processes = capture_read_processes
     try:
         assert chroma_collection_exists(tmp_path, "published") is True
-        assert len(processes) == 1
-        assert processes[0].poll() is not None, "Completed reads must release the child and its native memory"
+        assert processes == [], "Existence checks must not boot a native search worker"
     finally:
         for process in processes:
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=5)
+
+
+def test_collection_probe_is_fresh_and_scoped(published_index: Path) -> None:
+    """An identically named collection in another database is not our publication."""
+    assert chroma_collection_exists(published_index, "published")
+    with sqlite3.connect(published_index / "chroma.sqlite3") as connection:
+        connection.execute("UPDATE databases SET name = 'another_database'")
+    assert not chroma_collection_exists(published_index, "published")
+    with sqlite3.connect(published_index / "chroma.sqlite3") as connection:
+        connection.execute("UPDATE databases SET name = 'default_database', tenant_id = 'another_tenant'")
+    assert not chroma_collection_exists(published_index, "published")
+
+
+def test_collection_probe_does_not_create_missing_database(tmp_path: Path) -> None:
+    """An absent publication remains absent without creating a directory or database."""
+    missing = tmp_path / "missing"
+    assert not chroma_collection_exists(missing, "published")
+    assert not missing.exists()
+
+
+def test_collection_probe_rejects_corrupt_metadata(tmp_path: Path) -> None:
+    """A broken database is unavailable, not a falsely empty collection."""
+    (tmp_path / "chroma.sqlite3").write_bytes(b"not a SQLite database")
+    with pytest.raises(RuntimeError, match="Knowledge collection metadata unavailable"):
+        chroma_collection_exists(tmp_path, "published")
+
+
+def test_collection_probe_reports_locked_metadata(published_index: Path) -> None:
+    """A lock is bounded and reported, never mistaken for a missing collection."""
+    connection = sqlite3.connect(published_index / "chroma.sqlite3")
+    try:
+        connection.execute("BEGIN EXCLUSIVE")
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="Knowledge collection metadata unavailable"):
+            chroma_collection_exists(published_index, "published")
+        assert time.monotonic() - started < 1
+    finally:
+        connection.close()
+    assert chroma_collection_exists(published_index, "published")
 
 
 @pytest.mark.asyncio

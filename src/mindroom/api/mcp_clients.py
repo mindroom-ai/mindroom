@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from mindroom.api.auth import require_connections_user
+from mindroom.api.auth import require_connections_user, require_same_origin
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS
 from mindroom.api.mcp_identity import resolve_gateway_browser_owner
 from mindroom.mcp_gateway.server import read_gateway_body
@@ -51,8 +51,7 @@ async def _list_clients(request: Request, runtime: _ClientRuntime, owner: Gatewa
 
 
 async def _revoke_clients(request: Request, runtime: _ClientRuntime, owner: GatewayOwner) -> JSONResponse:
-    if request.headers.get("origin") != runtime.origin or request.headers.get("sec-fetch-site") == "cross-site":
-        raise HTTPException(403, "Client changes require a same-origin request")
+    require_same_origin(request, runtime.origin, detail="Client changes require a same-origin request")
     if request.query_params:
         raise HTTPException(400, "Client target overrides are not accepted")
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":

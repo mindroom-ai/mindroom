@@ -121,8 +121,6 @@ def test_current_google_and_openrouter_specialist_models() -> None:
     """Google media and OpenRouter specialist presets should use current IDs."""
     openrouter_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["openrouter"])
 
-    assert model_defaults.GOOGLE_AVATAR_PROMPT == "gemini-3.5-flash-lite"
-    assert model_defaults.GOOGLE_AVATAR_IMAGE == "gemini-3.1-flash-image"
     assert model_defaults.GOOGLE_IMAGE == "gemini-3.1-flash-image"
     assert model_defaults.GOOGLE_VEO == "veo-3.1-generate-001"
     assert model_defaults.GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
@@ -158,6 +156,8 @@ def test_current_google_and_openrouter_specialist_models() -> None:
 def test_current_generation_media_models() -> None:
     """Built-in media tools should use the current provider model IDs."""
     assert model_defaults.OPENAI_TRANSCRIPTION == "gpt-transcribe"
+    assert model_defaults.OPENAI_AVATAR_IMAGE == "gpt-image-2.5-sunburst"
+    assert model_defaults.OPENAI_AVATAR_PROMPT == "gpt-6-astra"
     assert model_defaults.OPENAI_IMAGE == "gpt-image-2.5-sunburst"
     assert model_defaults.GROQ_TTS == "canopylabs/orpheus-v1-english"
 

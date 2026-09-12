@@ -115,10 +115,20 @@ class HookMessageSender(Protocol):
 
 
 class HookMatrixAdmin(Protocol):
-    """Async Matrix admin protocol exposed to hook contexts."""
+    """Matrix administration and local room retention exposed to hook contexts."""
+
+    def retain_room(self, room_id: str) -> None:
+        """Persist a plugin-owned room for the bound invite-accepting entity.
+
+        This synchronous local operation changes no Matrix membership and raises
+        ``OSError`` if retention cannot be persisted.
+        """
 
     async def resolve_alias(self, alias: str) -> str | None:
         """Resolve one room alias into a room ID when it exists."""
+
+    async def get_joined_rooms(self) -> list[str] | None:
+        """Return the bound account's joined rooms, or ``None`` when unavailable."""
 
     async def create_room(
         self,
@@ -213,6 +223,7 @@ class RegisteredHook:
     source_lineno: int
     agents: tuple[str, ...] | None
     rooms: tuple[str, ...] | None
+    required: bool = False
 
 
 def default_timeout_ms_for_event(event_name: str) -> int:

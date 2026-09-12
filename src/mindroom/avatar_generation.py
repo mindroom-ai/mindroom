@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Literal
 
-from google import genai
-from google.genai import types
+from openai import AsyncOpenAI
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -22,25 +24,25 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import room_has_avatar, set_room_avatar_from_file
 from mindroom.matrix.state import MatrixState, get_room_id, matrix_state_for_runtime
 from mindroom.matrix.users import create_agent_http_client
-from mindroom.model_defaults import GOOGLE_AVATAR_IMAGE, GOOGLE_AVATAR_PROMPT
+from mindroom.model_defaults import OPENAI_AVATAR_IMAGE, OPENAI_AVATAR_PROMPT
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
+    from openai.types.images_response import ImagesResponse
 
     from mindroom import constants
 
 
 logger = get_logger(__name__)
 
-_PROMPT_MODEL = GOOGLE_AVATAR_PROMPT
-_IMAGE_MODEL = GOOGLE_AVATAR_IMAGE
+_PROMPT_MODEL = OPENAI_AVATAR_PROMPT
+_IMAGE_MODEL = OPENAI_AVATAR_IMAGE
 _ROOT_SPACE_AVATAR_NAME = "root_space"
-# Team prompts include per-member breakdowns; a low cap truncates them
-# mid-sentence and the mangled prompt makes the image model answer with
-# text instead of an image.
-_PROMPT_MAX_OUTPUT_TOKENS = 400
+# Responses counts reasoning and visible text against this budget. Leave room
+# for low-effort reasoning plus team prompts with per-member breakdowns.
+_PROMPT_MAX_OUTPUT_TOKENS = 8192
 # The image model occasionally returns no image for a valid prompt, so retry
 # the complete prompt and image-generation request.
 _MAX_IMAGE_ATTEMPTS = 3
@@ -135,7 +137,7 @@ def _missing_avatar_targets(
 
 
 async def _generate_prompt(
-    client: genai.Client,
+    client: AsyncOpenAI,
     target: _AvatarTarget,
     config: Config,
 ) -> str:
@@ -153,19 +155,22 @@ async def _generate_prompt(
         system_prompt = config.get_prompt("AVATAR_AGENT_SYSTEM_PROMPT")
         user_prompt = f"Agent name: {target.entity_name}\nRole: {target.role}\nType: {target.entity_type}"
 
-    response = await client.aio.models.generate_content(
+    response = await client.responses.create(
         model=_PROMPT_MODEL,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            max_output_tokens=_PROMPT_MAX_OUTPUT_TOKENS,
-        ),
+        input=user_prompt,
+        instructions=system_prompt,
+        max_output_tokens=_PROMPT_MAX_OUTPUT_TOKENS,
+        reasoning={"effort": "low"},
+        store=False,
     )
-    if not response.text:
-        msg = f"Gemini returned no text prompt for {target.entity_type}/{target.entity_name}"
+    if response.status != "completed":
+        msg = f"OpenAI returned an unfinished text prompt for {target.entity_type}/{target.entity_name}: {response.status}"
+        raise ValueError(msg)
+    visual_elements = response.output_text.strip()
+    if not visual_elements:
+        msg = f"OpenAI returned no text prompt for {target.entity_type}/{target.entity_name}"
         raise ValueError(msg)
 
-    visual_elements = response.text.strip()
     base_style = (
         config.get_prompt("AVATAR_ROOM_STYLE")
         if target.entity_type in {"rooms", "spaces"}
@@ -183,26 +188,21 @@ async def _generate_prompt(
     return final_prompt
 
 
-def _no_image_diagnostic(response: types.GenerateContentResponse) -> str:
-    """Summarize a no-image response for logs without dumping the payload."""
-    finish_reasons = [
-        str(candidate.finish_reason) for candidate in response.candidates or [] if candidate.finish_reason
-    ]
-    texts = [text for part in response.parts or [] if isinstance(text := getattr(part, "text", None), str)]
-    snippet = " ".join(texts).strip()[:200]
-    return f"finish_reasons={finish_reasons or None} text={snippet!r}"
-
-
-def _extract_image_bytes(response: types.GenerateContentResponse) -> bytes | None:
-    """Return the first generated image bytes from a Gemini response."""
-    for part in response.parts or []:
-        if part.inline_data and part.inline_data.data:
-            return part.inline_data.data
+def _extract_image_bytes(response: ImagesResponse) -> bytes | None:
+    """Decode the first base64 image in an OpenAI image response."""
+    for image in response.data or []:
+        if not image.b64_json:
+            continue
+        try:
+            return base64.b64decode(image.b64_json, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            msg = "OpenAI returned invalid base64 image data"
+            raise ValueError(msg) from exc
     return None
 
 
 async def _generate_avatar(
-    client: genai.Client,
+    client: AsyncOpenAI,
     target: _AvatarTarget,
     runtime_paths: constants.RuntimePaths,
     config: Config,
@@ -226,16 +226,12 @@ async def _generate_avatar(
     image_bytes: bytes | None = None
     for attempt in range(1, _MAX_IMAGE_ATTEMPTS + 1):
         prompt = await _generate_prompt(client, target, config)
-        response = await client.aio.models.generate_content(
+        response = await client.images.generate(
             model=_IMAGE_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"],
-                image_config=types.ImageConfig(
-                    aspect_ratio="1:1",
-                    image_size="1K",
-                ),
-            ),
+            prompt=prompt,
+            size="1024x1024",
+            quality="high",
+            output_format="png",
         )
         image_bytes = _extract_image_bytes(response)
         if image_bytes:
@@ -246,7 +242,6 @@ async def _generate_avatar(
             entity_name=target.entity_name,
             attempt=attempt,
             max_attempts=_MAX_IMAGE_ATTEMPTS,
-            response_diagnostic=_no_image_diagnostic(response),
         )
         if attempt < _MAX_IMAGE_ATTEMPTS:
             console.print(
@@ -500,17 +495,18 @@ async def _generate_missing_avatars(
         console.print("\n[dim]⊘ All managed avatars already exist; skipping generation[/dim]")
         return True
 
-    api_key = get_secret_from_env("GOOGLE_API_KEY", runtime_paths=runtime_paths)
-    if not api_key:
-        console.print("[red]Error: GOOGLE_API_KEY or GOOGLE_API_KEY_FILE environment variable not set[/red]")
+    openai_api_key = get_secret_from_env("OPENAI_API_KEY", runtime_paths=runtime_paths)
+    if not openai_api_key:
+        console.print("[red]Error: OPENAI_API_KEY or OPENAI_API_KEY_FILE environment variable not set[/red]")
         console.print("Please set it in your .env file, secrets mount, or environment")
         return False
 
-    client = genai.Client(api_key=api_key)
     targets = _build_avatar_generation_targets(config, selected_targets)
     _print_avatar_generation_plan(selected_targets)
 
-    try:
+    async with AsyncExitStack() as client_stack:
+        client = AsyncOpenAI(api_key=openai_api_key)
+        client_stack.push_async_callback(client.close)
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -531,8 +527,6 @@ async def _generate_missing_avatars(
                 return_exceptions=True,
             )
             progress.update(task_id, completed=True)
-    finally:
-        await client.aio.aclose()
 
     failed_targets: list[tuple[_AvatarTarget, Exception]] = []
     for target, result in zip(targets, results, strict=True):

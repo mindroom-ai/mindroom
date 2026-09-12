@@ -18,6 +18,8 @@ from fastapi.testclient import TestClient
 from mindroom.api import config_lifecycle, main, oauth
 from mindroom.matrix.state import MatrixState
 from mindroom.oauth import registry as oauth_registry
+from mindroom.oauth import service as oauth_service
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.api.test_api import (
     _trusted_upstream_jwks,
     _trusted_upstream_jwt,
@@ -315,6 +317,38 @@ def test_personal_mutations_reject_cleartext_public_origin(
         json={},
     )
     assert response.status_code == 403
+
+
+def test_private_conversation_link_requires_its_signed_requester(portal: dict[str, Any]) -> None:
+    """A non-admin can redeem their own link, and other browsers cannot spend its token or state."""
+    client, headers = portal["client"], portal["headers"]
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="personal",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    target = resolve_worker_target("user_agent", "personal", execution_identity=identity)
+    link = oauth_service.oauth_connect_url(portal["provider"], portal["paths"], worker_target=target)
+    for user in ("bob", "admin"):
+        assert client.get(link, headers=headers[user], follow_redirects=False).status_code == 403
+    assert client.get(link, follow_redirects=False).status_code == 401
+    response = client.get(link, headers=headers["alice"], follow_redirects=False)
+    assert response.status_code == 307, response.text
+    state = parse_qs(urlparse(response.headers["location"]).query)["state"][0]
+    params = {"code": "test-code", "state": state}
+    for user in ("bob", "admin"):
+        response = client.get("/api/oauth/google_drive/callback", params=params, headers=headers[user])
+        assert response.status_code == 403
+    response = client.get("/api/oauth/google_drive/callback", params=params, headers=headers["alice"])
+    assert response.status_code == 200, response.text
+    status_url = "/api/connections/agents/personal/google_drive/status"
+    assert client.get(status_url, headers=headers["alice"]).json()["connected"] is True
+    assert client.get(status_url, headers=headers["bob"]).json()["connected"] is False
+    assert client.get(link, headers=headers["alice"], follow_redirects=False).status_code == 400
 
 
 def test_two_users_complete_and_disconnect_only_their_own_credentials(portal: dict[str, Any]) -> None:

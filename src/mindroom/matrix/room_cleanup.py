@@ -8,20 +8,15 @@ DM rooms are preserved and not cleaned up.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.entity_resolution import configured_bot_user_ids_for_room, entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.invited_rooms_store import (
-    invited_room_entity_names,
-    invited_rooms_path,
-    load_invited_rooms,
-    should_persist_invited_rooms,
-)
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
@@ -45,31 +40,11 @@ def _get_all_known_bot_user_ids(config: Config, runtime_paths: RuntimePaths) -> 
     }
 
 
-def _load_all_persisted_invited_rooms(
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> dict[str, set[str]]:
-    """Load persisted invited rooms for invite-accepting entities, keyed by bot Matrix user ID."""
-    invited_rooms_by_bot: dict[str, set[str]] = {}
-    config_ids = entity_identity_registry(config, runtime_paths).current_ids
-
-    for entity_name in invited_room_entity_names(config):
-        if not should_persist_invited_rooms(config, entity_name):
-            continue
-
-        rooms = load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, entity_name))
-        if rooms:
-            invited_rooms_by_bot[config_ids[entity_name].full_id] = rooms
-
-    return invited_rooms_by_bot
-
-
 async def _cleanup_orphaned_bots_in_room(
     client: nio.AsyncClient,
     room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    persisted_invited_rooms_by_bot: dict[str, set[str]] | None = None,
 ) -> list[str]:
     """Remove orphaned bots from a single room.
 
@@ -80,14 +55,12 @@ async def _cleanup_orphaned_bots_in_room(
         room_id: The room to check
         config: Current configuration
         runtime_paths: Explicit runtime context for Matrix state and identity resolution
-        persisted_invited_rooms_by_bot: Preloaded persisted invited rooms keyed by bot Matrix user ID
 
     Returns:
         List of bot Matrix user IDs that were removed from the room
 
     """
-    # Never evict bots from the root space — the router is the creator/admin
-    # and no agents are explicitly configured for it, so every bot looks orphaned.
+    # Root-space membership is managed separately from ordinary room cleanup.
     state = matrix_state_for_runtime(runtime_paths)
     if state.space_room_id and room_id == state.space_room_id:
         logger.debug("orphaned_bot_cleanup_skipped_root_space", room_id=room_id)
@@ -104,12 +77,8 @@ async def _cleanup_orphaned_bots_in_room(
         logger.warning("orphaned_bot_cleanup_members_unavailable", room_id=room_id)
         return []
 
-    # Get configured bots for this room
-    configured_bot_ids = configured_bot_user_ids_for_room(config, room_id, runtime_paths)
     known_bot_user_ids = _get_all_known_bot_user_ids(config, runtime_paths)
     registry = entity_identity_registry(config, runtime_paths)
-    if persisted_invited_rooms_by_bot is None:
-        persisted_invited_rooms_by_bot = _load_all_persisted_invited_rooms(config, runtime_paths)
 
     removed_bots = []
 
@@ -118,25 +87,14 @@ async def _cleanup_orphaned_bots_in_room(
     for user_id in sorted(member_ids, key=lambda member_id: member_id == client.user_id):
         matrix_id = MatrixID.parse(user_id)
         agent_name = registry.current_entity_name_for_user_id(user_id)
-        is_configured_current_bot = agent_name is not None and user_id in configured_bot_ids
-
-        # Check if this is a mindroom bot and shouldn't be in this room
-        if user_id in known_bot_user_ids and not is_configured_current_bot:
-            if room_id in persisted_invited_rooms_by_bot.get(user_id, set()):
-                logger.debug(
-                    "orphaned_bot_cleanup_preserved_persisted_invited_room",
-                    agent=matrix_id.username,
-                    user_id=user_id,
-                    room_id=room_id,
-                )
-                continue
-
+        # Current bots reconcile their own memberships after startup hooks and
+        # pending invitations. This earlier sweep only owns retired identities.
+        if user_id in known_bot_user_ids and agent_name is None:
             logger.info(
                 "orphaned_bot_found",
                 agent=matrix_id.username,
                 user_id=user_id,
                 room_id=room_id,
-                configured_bots=sorted(configured_bot_ids),
             )
 
             if await _remove_orphaned_bot(client, room_id, matrix_id):
@@ -185,10 +143,12 @@ async def cleanup_all_orphaned_bots(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> dict[str, list[str]]:
-    """Remove all orphaned bots from all rooms the client has access to.
+    """Remove retired bot identities from all rooms the client has access to.
 
     This should be called by a user or bot with admin/moderator permissions
     in the rooms that need cleaning.
+    Configured entities manage their own memberships, even if startup has not
+    completed or their invited-room retention records have not been restored.
 
     Returns:
         Dictionary mapping room IDs to lists of removed bot Matrix user IDs
@@ -203,18 +163,25 @@ async def cleanup_all_orphaned_bots(
         return kicked_bots
 
     logger.info("orphaned_bot_cleanup_started", room_count=len(joined_rooms))
-    persisted_invited_rooms_by_bot = _load_all_persisted_invited_rooms(config, runtime_paths)
 
-    for room_id in joined_rooms:
-        room_kicked = await _cleanup_orphaned_bots_in_room(
-            client,
-            room_id,
-            config,
-            runtime_paths,
-            persisted_invited_rooms_by_bot,
-        )
-        if room_kicked:
-            kicked_bots[room_id] = room_kicked
+    # Only independent rooms overlap. Each room still kicks other orphans
+    # before leaving itself, and cancellation drains all workers before return.
+    pending_rooms = iter(joined_rooms)
+
+    async def clean_rooms() -> None:
+        for room_id in pending_rooms:
+            room_kicked = await _cleanup_orphaned_bots_in_room(
+                client,
+                room_id,
+                config,
+                runtime_paths,
+            )
+            if room_kicked:
+                kicked_bots[room_id] = room_kicked
+
+    async with asyncio.TaskGroup() as workers:
+        for _ in range(min(4, len(joined_rooms))):
+            workers.create_task(clean_rooms())
 
     # Summary
     total_kicked = sum(len(bots) for bots in kicked_bots.values())

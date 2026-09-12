@@ -17,7 +17,9 @@ An authenticated requester may manage their own isolated OAuth connection for a 
 Responder access and room membership never grant OAuth-management access.
 Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
-That token is a bearer capability for the exact provider, Matrix requester, worker target, and credential connection generation, so its authorize and callback requests do not require a dashboard login.
+The token binds the exact provider, Matrix requester, worker target, and credential connection generation.
+Requester-scoped credentials require the browser to authenticate as that requester at authorization and callback, using the same identity check as requester-scoped resets.
+Shared-scope credentials permit delegation through the short-lived token without a dashboard login.
 MindRoom rechecks the requester's current agent credential-management permission at authorization and callback, and rejects a link if its credential generation changed after issuance.
 Shared-scope reset links use the same capability model for configured credential managers: the GET is non-mutating, the confirmation POST consumes the reset capability before deleting the scoped credential, and reconnection continues through a fresh single-use connect capability.
 Requester-scoped reset links still require the original authenticated browser user.

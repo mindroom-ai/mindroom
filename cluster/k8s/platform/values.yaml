@@ -75,6 +75,7 @@ provisioner:
     emailHeader: ""
     matrixUserIdHeader: ""
     emailToMatrixUserIdTemplate: ""
+    emailDomain: ""
     requireJwt: "false"
     jwtHeader: ""
     jwksUrl: ""

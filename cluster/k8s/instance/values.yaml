@@ -91,6 +91,7 @@ trustedUpstreamAuth:
   emailHeader: ""
   matrixUserIdHeader: ""
   emailToMatrixUserIdTemplate: ""
+  emailDomain: ""
   requireJwt: "false"
   jwtHeader: ""
   jwksUrl: ""

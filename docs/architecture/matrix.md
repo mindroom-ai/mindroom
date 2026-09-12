@@ -98,10 +98,12 @@ This provenance remains attached across recovery, restart, and decryption indepe
 `matrix/durable_ingestion.py` converts one trusted Nio batch and atomically commits its receipt, ordered membership effects, semantic events, and conversation projection in the MindRoom journal before acknowledging that batch to Nio.
 An admission failure leaves the batch unsettled for retry, and replay after a committed admission returns the original receipt without duplicating semantic work.
 Typing, presence and read receipts are excluded from durable admission.
-MindRoom requires `mindroom-nio[e2e]==1.0.4`, and `uv.lock` pins the same published release.
+MindRoom requires `mindroom-nio[e2e]==1.0.6`, and `uv.lock` pins the same published release.
 Nio 1.0.2 avoids rereading queued payloads for byte accounting on SQLite 3.43 and newer, preserving exact accounting on older drivers.
 Nio 1.0.3 returns typed membership errors for refused durable joined-member queries and preserves Matrix error codes after retry exhaustion.
 Nio 1.0.4 avoids repeated pending-queue size scans during durable sync preparation while preserving queue limits and rollback.
+Nio 1.0.5 moves durable sync response decoding and captured-input replay off the event loop while preserving durable capture and membership ordering.
+Nio 1.0.6 uses unfiltered incremental Classic sync for local joins proven fresh at the current cursor, while retaining full-state recovery for stale evidence or incomplete room baselines.
 It retains the encrypted-attachment and null room-avatar parsing fixes that prevent those event shapes from blocking history hydration.
 Admission is fail-closed at every provenance, not only for recovery, because an event the journal never accepted is one no later process would see again.
 Silent schedules use the custom `io.mindroom.scheduled.trigger` timeline event so clients do not render the task body as a room message.
@@ -212,7 +214,10 @@ After a device change, standalone deliveries that reply outside a journal turn r
 
 On startup, MindRoom detects orphaned bot memberships left over from a previous configuration.
 When an agent is removed from `config.yaml`, its Matrix bot account may still be a member of rooms it previously joined.
-The cleanup process leaves those rooms safely without ejecting currently configured entities from their required rooms.
+The global sweep removes only persisted bot identities that no longer belong to a configured router, agent, or team.
+Current entities reconcile their own configured and retained rooms after startup hooks and invitation handling, so the early global sweep cannot remove them before that reconciliation.
+An entity that cannot start keeps its memberships until its own lifecycle recovers.
+Unreadable or invalid retention files stop membership initialization instead of being treated as empty ownership records.
 This runs automatically — no manual intervention is needed.
 
 ## Identity Management

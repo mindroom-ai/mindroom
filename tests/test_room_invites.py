@@ -2844,8 +2844,17 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
     assert left_room_ids == ["!old-room:localhost"]
 
 
-def test_load_invited_rooms_returns_empty_set_for_invalid_utf8(tmp_path: Path) -> None:
-    """Invalid UTF-8 in the persisted invite file should be ignored."""
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        (b"\x80", "codec can't decode"),
+        (b"{", "Expecting property name"),
+        (b"{}", "Invalid invited-room retention file"),
+        (b'["!kept:localhost", null]', "Invalid invited-room retention file"),
+    ],
+)
+def test_corrupt_retention_stops_lifecycle_initialization(tmp_path: Path, contents: bytes, message: str) -> None:
+    """Unreadable ownership records must never become an empty desired-room set."""
     agent_user = AgentMatrixUser(
         agent_name="agent1",
         user_id="@mindroom_agent1:localhost",
@@ -2866,13 +2875,12 @@ def test_load_invited_rooms_returns_empty_set_for_invalid_utf8(tmp_path: Path) -
     )
     invited_rooms_path = _invited_rooms_path(config, "agent1")
     invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
-    invited_rooms_path.write_bytes(b"\x80")
-    bot = make_test_agent_bot(
-        agent_user=agent_user,
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-
-    assert bot._room_lifecycle._load_invited_rooms() == set()
-    assert bot._room_lifecycle.invited_rooms == set()
+    invited_rooms_path.write_bytes(contents)
+    with pytest.raises(ValueError, match=message):
+        make_test_agent_bot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+    assert invited_rooms_path.read_bytes() == contents

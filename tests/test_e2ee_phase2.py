@@ -160,7 +160,7 @@ def _bound_config(tmp_path: Path, **config_data: object) -> Config:
 
 
 class TestManagedRoomEncryptionReconcile:
-    """The reconcile wiring in _ensure_room_exists must honor the encryption config."""
+    """Post-join managed policy reconciliation must honor the encryption config."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("encrypt_managed_rooms", "expected_calls"), [(True, 1), (False, 0)])
@@ -206,9 +206,22 @@ class TestManagedRoomEncryptionReconcile:
         )
 
         assert room_id == "!lobby:example.com"
+        mock_client.user_id = "@router:example.com"
+        mock_client.room_get_state.return_value = nio.RoomGetStateResponse(
+            [
+                {"type": "m.room.member", "state_key": mock_client.user_id, "content": {"membership": "join"}},
+            ],
+            room_id,
+        )
+        snapshots = await matrix_rooms.reconcile_managed_rooms(
+            mock_client,
+            config,
+            runtime_paths_for(config),
+            {"lobby": room_id},
+        )
         assert enable_encryption.await_count == expected_calls
         if expected_calls:
-            enable_encryption.assert_awaited_once_with(mock_client, "!lobby:example.com")
+            enable_encryption.assert_awaited_once_with(mock_client, room_id, snapshot=snapshots[room_id])
 
     @pytest.mark.asyncio
     async def test_new_room_created_encrypted_when_configured(

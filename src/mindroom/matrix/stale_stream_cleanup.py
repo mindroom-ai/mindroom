@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from collections.abc import Set as AbstractSet
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -37,19 +38,16 @@ from mindroom.entity_resolution import (
     current_internal_sender_ids,
     entity_identity_registry,
 )
+from mindroom.event_journal.models import UnreadableMatrixDelivery
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.client_room_admin import get_joined_rooms
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, resolve_latest_visible_messages
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, fetch_latest_visible_message
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
 from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
-from mindroom.matrix.thread_projection import (
-    ordered_event_ids_from_scanned_event_sources,
-    resolve_thread_ids_for_event_infos,
-)
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
@@ -62,12 +60,12 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal.store import PrincipalStore
 
 logger = get_logger(__name__)
 
 type _ResponseRecoveryScope = Callable[[str, str, str], AbstractAsyncContextManager[bool]]
 
-_ROOM_HISTORY_PAGE_SIZE = 100
 # Startup cleanup receives a pre-sync cutoff and ignores messages at or after
 # that timestamp, so post-sync cleanup cannot clobber streams created by this
 # process. The remaining race is another concurrently running instance cleaning
@@ -82,7 +80,6 @@ _RATE_LIMIT_DELAY_SECONDS = 0.15
 _RECOVERY_ROOM_CONCURRENCY = 8
 _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
 _MAX_REQUESTER_RESOLUTION_DEPTH = 10
-_MAX_EXTRA_INTERRUPTED_HISTORY_PAGES = 10
 _INTERRUPTED_PARTIAL_TEXT_LIMIT = 280
 _TERMINAL_STREAM_STATUSES = frozenset(
     {STREAM_STATUS_CANCELLED, STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED},
@@ -123,15 +120,6 @@ class _MessageState:
     stream_status: str | None = None
     requester_user_id: str | None = None
     bot_user_id: str | None = None
-    stop_reaction_event_ids_by_sender: dict[str, set[str]] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class _ScannedRoomMessageStates:
-    """Cleanup state plus already-sent auto-resume targets in one room."""
-
-    message_states: dict[str, _MessageState]
-    auto_resume_target_event_ids: set[str]
 
 
 @dataclass(frozen=True)
@@ -141,15 +129,6 @@ class _CleanupScanPolicy:
     startup_cutoff_ms: int | None
     collect_terminal_interrupted_for_resume: bool
     terminal_interrupted_only: bool
-    max_extra_old_pages: int
-
-
-@dataclass(frozen=True)
-class _JoinedRoomState:
-    """Actor rooms to scan plus the independent resume identity membership."""
-
-    room_actors: dict[str, dict[str, nio.AsyncClient]]
-    resume_room_ids: frozenset[str] | None
 
 
 def _cleanup_scan_policy(
@@ -164,7 +143,6 @@ def _cleanup_scan_policy(
         startup_cutoff_ms=startup_cutoff_ms,
         collect_terminal_interrupted_for_resume=collect_terminal_interrupted_for_resume,
         terminal_interrupted_only=terminal_interrupted_only,
-        max_extra_old_pages=(_MAX_EXTRA_INTERRUPTED_HISTORY_PAGES if collect_terminal_interrupted_for_resume else 0),
     )
 
 
@@ -218,9 +196,34 @@ def _requester_resolution_message(
     )
 
 
+async def _recovery_room_targets(
+    principals: dict[str, PrincipalStore],
+    target_room_ids: set[str] | None,
+) -> tuple[dict[str, dict[str, tuple[str, str | None]]], set[str]]:
+    """Page durable candidates without waiting on individual response locks."""
+    room_targets: dict[str, dict[str, tuple[str, str | None]]] = {}
+    failed_room_ids: set[str] = set()
+    for bot_user_id, principal in principals.items():
+        cursor: tuple[int, str] | None = None
+        while batch := await principal.recovery_initial_deliveries(after=cursor):
+            cursor = (batch[-1].created_at_ns, batch[-1].delivery_id)
+            for delivery in batch:
+                if target_room_ids is not None and delivery.room_id not in target_room_ids:
+                    continue
+                if isinstance(delivery, UnreadableMatrixDelivery):
+                    logger.warning("Unreadable startup recovery delivery", delivery_id=delivery.delivery_id)
+                    failed_room_ids.add(delivery.room_id)
+                    continue
+                event_id = delivery.acknowledged_event_id
+                assert event_id is not None
+                room_targets.setdefault(delivery.room_id, {})[event_id] = (bot_user_id, delivery.thread_id)
+    return room_targets, failed_room_ids
+
+
 async def recover_stale_streaming_messages(
     actors: dict[str, nio.AsyncClient],
     *,
+    principals: dict[str, PrincipalStore],
     resume_client: nio.AsyncClient | None,
     response_recovery_scope: _ResponseRecoveryScope,
     config: Config,
@@ -230,128 +233,113 @@ async def recover_stale_streaming_messages(
     target_room_ids: set[str] | None = None,
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
 ) -> _StaleStreamRecoveryResult:
-    """Recover stale streams through one concurrent Matrix-history path."""
-    joined_room_state = await _joined_room_actors(actors, resume_client=resume_client)
-    room_actors = {
-        room_id: joined_actors
-        for room_id, joined_actors in joined_room_state.room_actors.items()
-        if room_id not in scanned_room_ids and (target_room_ids is None or room_id in target_room_ids)
+    """Recover exact owned INITIALs; an empty outbox needs no Matrix history."""
+    agent_names = {
+        user_id: name
+        for user_id in actors
+        if (name := _agent_name_for_bot_user_id(user_id, config, runtime_paths)) is not None
     }
-    scanned_room_ids.update(room_actors)
-    if not room_actors:
+    room_targets, failed_room_ids = await _recovery_room_targets(
+        {user_id: principal for user_id, principal in principals.items() if user_id in agent_names},
+        target_room_ids,
+    )
+    # This set reports completed replacement rooms; it is not a discovery cache.
+    # A late INITIAL ACK in an already visited room must be visible on the next pass.
+    scanned_room_ids.update(target_room_ids or ())
+    scanned_room_ids.difference_update(failed_room_ids)
+    if not room_targets:
         return _StaleStreamRecoveryResult(room_count=0, cleaned_count=0, resumed_count=0)
 
+    resume_room_ids = await _resume_membership(
+        resume_client if config.defaults.auto_resume_after_restart else None,
+    )
     semaphore = asyncio.Semaphore(max(1, room_concurrency))
-    all_bot_user_ids = set(actors)
-    resume_user_id = resume_client.user_id if resume_client is not None else None
 
     async def recover_room(
         room_id: str,
-        joined_actors: dict[str, nio.AsyncClient],
+        targets: dict[str, tuple[str, str | None]],
     ) -> tuple[int, list[_InterruptedThread]]:
-        scan_client = joined_actors.get(resume_user_id) if isinstance(resume_user_id, str) else None
-        if scan_client is None:
-            scan_client = joined_actors[min(joined_actors)]
         async with semaphore:
-            try:
-                cleaned_count, interrupted_threads = await _cleanup_stale_streaming_room(
-                    scan_client,
-                    room_id=room_id,
-                    actors=joined_actors,
-                    bot_user_ids=all_bot_user_ids,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    startup_cutoff_ms=startup_cutoff_ms,
-                    terminal_interrupted_only=target_room_ids is not None,
-                    response_recovery_scope=response_recovery_scope,
-                )
-            except Exception:
+            cleaned = 0
+            interrupted: list[_InterruptedThread] = []
+            failed = room_id in failed_room_ids
+            prior_edit_succeeded_by_bot: set[str] = set()
+            for event_id, (bot_user_id, thread_id) in targets.items():
+                try:
+                    async with response_recovery_scope(agent_names[bot_user_id], room_id, event_id) as permitted:
+                        if not permitted:
+                            continue
+                    count, threads = await _cleanup_stale_streaming_room(
+                        actors[bot_user_id],
+                        room_id=room_id,
+                        actors={bot_user_id: actors[bot_user_id]},
+                        target_thread_ids={event_id: thread_id},
+                        prior_edit_succeeded_by_bot=prior_edit_succeeded_by_bot,
+                        bot_user_ids=set(actors),
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        startup_cutoff_ms=startup_cutoff_ms,
+                        terminal_interrupted_only=target_room_ids is not None,
+                        response_recovery_scope=response_recovery_scope,
+                    )
+                    cleaned += count
+                    interrupted.extend(threads)
+                except Exception:
+                    failed = True
+                    logger.warning(
+                        "Failed exact startup response recovery",
+                        room_id=room_id,
+                        event_id=event_id,
+                        exc_info=True,
+                    )
+            if failed:
                 scanned_room_ids.discard(room_id)
-                logger.warning("Failed stale stream recovery for room", room_id=room_id, exc_info=True)
-                return 0, []
             else:
-                interrupted_threads = _auto_resume_threads_for_room(
-                    room_id,
-                    interrupted_threads,
-                    auto_resume_enabled=config.defaults.auto_resume_after_restart,
-                    resume_client=resume_client,
-                    resume_room_ids=joined_room_state.resume_room_ids,
-                    scanned_room_ids=scanned_room_ids,
-                )
-                return cleaned_count, interrupted_threads
+                scanned_room_ids.add(room_id)
+            return cleaned, _auto_resume_threads_for_room(
+                room_id,
+                interrupted,
+                auto_resume_enabled=config.defaults.auto_resume_after_restart,
+                resume_client=resume_client,
+                resume_room_ids=resume_room_ids,
+                scanned_room_ids=scanned_room_ids,
+            )
 
     tasks = [
-        asyncio.create_task(recover_room(room_id, joined_actors), name=f"stale_stream_recovery:{room_id}")
-        for room_id, joined_actors in room_actors.items()
+        asyncio.create_task(recover_room(room_id, targets), name=f"response_recovery:{room_id}")
+        for room_id, targets in room_targets.items()
     ]
-    cleaned_count = 0
-    resumed_count = 0
+    cleaned_count = resumed_count = 0
     try:
         for completed in asyncio.as_completed(tasks):
-            room_cleaned_count, interrupted_threads = await completed
-            cleaned_count += room_cleaned_count
-            if resume_client is None or not config.defaults.auto_resume_after_restart or not interrupted_threads:
-                continue
-            resumed_count += await _auto_resume_interrupted_threads(
-                resume_client,
-                interrupted_threads,
-                response_recovery_scope=response_recovery_scope,
-                config=config,
-                runtime_paths=runtime_paths,
-                delay_before_first=resumed_count > 0,
-            )
+            cleaned, interrupted = await completed
+            cleaned_count += cleaned
+            if resume_client is not None and config.defaults.auto_resume_after_restart and interrupted:
+                resumed_count += await _auto_resume_interrupted_threads(
+                    resume_client,
+                    interrupted,
+                    response_recovery_scope=response_recovery_scope,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    delay_before_first=resumed_count > 0,
+                )
     finally:
         for task in tasks:
-            if not task.done():
-                task.cancel()
+            task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-
-    return _StaleStreamRecoveryResult(
-        room_count=len(room_actors),
-        cleaned_count=cleaned_count,
-        resumed_count=resumed_count,
-    )
+    return _StaleStreamRecoveryResult(len(room_targets), cleaned_count, resumed_count)
 
 
-async def _joined_room_actors(
-    actors: dict[str, nio.AsyncClient],
-    *,
-    resume_client: nio.AsyncClient | None,
-) -> _JoinedRoomState:
-    """Discover actor scan rooms and resume membership without widening scans."""
-
-    async def joined_rooms_for_actor(
-        bot_user_id: str,
-        client: nio.AsyncClient,
-    ) -> tuple[str, nio.AsyncClient, list[str] | None]:
-        try:
-            joined_rooms = await get_joined_rooms(client)
-        except Exception:
-            logger.warning(
-                "Failed to list joined rooms during stale stream recovery",
-                bot_user_id=bot_user_id,
-                exc_info=True,
-            )
-            joined_rooms = None
-        return bot_user_id, client, joined_rooms
-
-    membership_clients = dict(actors)
-    resume_user_id = resume_client.user_id if resume_client is not None else None
-    if isinstance(resume_user_id, str) and resume_client is not None:
-        membership_clients[resume_user_id] = resume_client
-    joined_room_results = await asyncio.gather(
-        *(joined_rooms_for_actor(bot_user_id, client) for bot_user_id, client in membership_clients.items()),
-    )
-    room_actors: dict[str, dict[str, nio.AsyncClient]] = {}
-    resume_room_ids: frozenset[str] | None = None
-    for bot_user_id, client, joined_room_ids in joined_room_results:
-        if bot_user_id == resume_user_id and joined_room_ids is not None:
-            resume_room_ids = frozenset(joined_room_ids)
-        if bot_user_id not in actors:
-            continue
-        for room_id in joined_room_ids or []:
-            room_actors.setdefault(room_id, {})[bot_user_id] = client
-    return _JoinedRoomState(room_actors=room_actors, resume_room_ids=resume_room_ids)
+async def _resume_membership(client: nio.AsyncClient | None) -> frozenset[str] | None:
+    """Keep a resume-identity outage from preventing owned response cleanup."""
+    if client is None:
+        return None
+    try:
+        joined = await get_joined_rooms(client)
+        return frozenset(joined) if joined is not None else None
+    except Exception:
+        logger.warning("Failed to read startup resume membership; retaining recovery", exc_info=True)
+        return None
 
 
 async def _auto_resume_interrupted_threads(
@@ -460,6 +448,11 @@ async def _interrupted_target_remains_latest_human_work(
             history,
             target_event_id=interrupted_thread.target_event_id,
         )
+        if later_messages and interrupted_thread.target_event_id in _auto_resume_target_event_ids(
+            later_messages,
+            bot_user_ids=current_internal_sender_ids(config, runtime_paths),
+        ):
+            return False
         remains_latest = _later_thread_activity_is_internal(
             later_messages,
             config=config,
@@ -547,14 +540,16 @@ async def _cleanup_stale_streaming_room(
     *,
     room_id: str,
     actors: dict[str, nio.AsyncClient],
+    target_thread_ids: dict[str, str | None],
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
     response_recovery_scope: _ResponseRecoveryScope,
+    prior_edit_succeeded_by_bot: set[str] | None = None,
 ) -> tuple[int, list[_InterruptedThread]]:
-    """Scan one room once and let each bot account repair its own messages."""
+    """Resolve owned targets and let each bot account repair its own messages."""
     if not actors:
         return 0, []
     current_time_ms = int(time.time() * 1000)
@@ -563,9 +558,10 @@ async def _cleanup_stale_streaming_room(
         startup_cutoff_ms=startup_cutoff_ms,
         terminal_interrupted_only=terminal_interrupted_only,
     )
-    scanned_state = await _scan_room_message_states(
+    message_states = await _load_recovery_message_states(
         scan_client,
         room_id=room_id,
+        target_thread_ids=target_thread_ids,
         cleanup_bot_user_ids=set(actors),
         bot_user_ids=bot_user_ids,
         config=config,
@@ -573,12 +569,12 @@ async def _cleanup_stale_streaming_room(
         now_ms=current_time_ms,
         scan_policy=scan_policy,
     )
-    message_states = scanned_state.message_states
     if not message_states:
         return 0, []
 
     cleaned_count = 0
-    prior_edit_succeeded_by_bot: set[str] = set()
+    if prior_edit_succeeded_by_bot is None:
+        prior_edit_succeeded_by_bot = set()
     interrupted_threads: list[_InterruptedThread] = []
     candidate_items = sorted(
         ((k, v) for k, v in message_states.items() if v.latest_body is not None),
@@ -603,7 +599,6 @@ async def _cleanup_stale_streaming_room(
                 room_id=room_id,
                 target_event_id=target_event_id,
                 state=state,
-                auto_resume_target_event_ids=scanned_state.auto_resume_target_event_ids,
                 bot_user_ids=bot_user_ids,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -627,7 +622,6 @@ async def _process_stale_room_candidate(
     room_id: str,
     target_event_id: str,
     state: _MessageState,
-    auto_resume_target_event_ids: set[str],
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
@@ -638,13 +632,7 @@ async def _process_stale_room_candidate(
     """Repair or classify one bot-owned candidate from a shared room scan."""
     assert state.latest_body is not None
     agent_name = _agent_name_for_bot_user_id(bot_user_id, config, runtime_paths)
-    if agent_name is None or _should_skip_for_startup_cleanup_window(
-        state,
-        now_ms=current_time_ms,
-        scan_policy=scan_policy,
-    ):
-        return False, None
-    if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
+    if agent_name is None or not _needs_recovery(state, now_ms=current_time_ms, scan_policy=scan_policy):
         return False, None
     if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
@@ -658,14 +646,11 @@ async def _process_stale_room_candidate(
             agent_name=agent_name,
             prior_edit_succeeded=prior_edit_succeeded,
         )
-    if not (_has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)):
-        return False, None
     return await _handle_interrupted_message(
         client,
         room_id=room_id,
         target_event_id=target_event_id,
         state=state,
-        auto_resume_target_event_ids=auto_resume_target_event_ids,
         can_auto_resume=_has_resumable_interrupted_note(state),
         bot_user_ids=bot_user_ids,
         config=config,
@@ -675,13 +660,29 @@ async def _process_stale_room_candidate(
     )
 
 
+def _needs_recovery(state: _MessageState, *, now_ms: int, scan_policy: _CleanupScanPolicy) -> bool:
+    """Select work before resolving requester chains, using the execution policy."""
+    if state.latest_body is None or _should_skip_for_startup_cleanup_window(
+        state,
+        now_ms=now_ms,
+        scan_policy=scan_policy,
+    ):
+        return False
+    if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
+        return False
+    return (
+        _is_cleanup_candidate(state)
+        or _has_restart_interrupted_note(state.latest_body)
+        or _has_resumable_interrupted_note(state)
+    )
+
+
 async def _handle_interrupted_message(
     client: nio.AsyncClient,
     *,
     room_id: str,
     target_event_id: str,
     state: _MessageState,
-    auto_resume_target_event_ids: set[str],
     can_auto_resume: bool,
     bot_user_ids: set[str],
     config: Config,
@@ -691,7 +692,7 @@ async def _handle_interrupted_message(
 ) -> tuple[bool, _InterruptedThread | None]:
     """Handle an interrupted response or restart marker seen during startup cleanup."""
     interrupted = None
-    if can_auto_resume and target_event_id not in auto_resume_target_event_ids:
+    if can_auto_resume:
         interrupted = _interrupted_thread_from_terminal_state(
             room_id=room_id,
             target_event_id=target_event_id,
@@ -711,7 +712,6 @@ async def _handle_interrupted_message(
         client,
         room_id=room_id,
         target_event_id=target_event_id,
-        history_reaction_event_ids=_self_stop_reaction_event_ids(state),
         bot_user_ids=bot_user_ids,
     )
     return repaired, interrupted
@@ -794,7 +794,6 @@ async def _cleanup_one_stale_message(
         client,
         room_id=room_id,
         target_event_id=target_event_id,
-        history_reaction_event_ids=_self_stop_reaction_event_ids(state),
         bot_user_ids=bot_user_ids,
     )
     return True, interrupted
@@ -836,71 +835,63 @@ async def _cleanup_candidate_message(
         return False, None
 
 
-async def _scan_room_message_states(
+async def _load_recovery_message_states(
     client: nio.AsyncClient,
     *,
     room_id: str,
+    target_thread_ids: dict[str, str | None],
     cleanup_bot_user_ids: set[str],
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
     now_ms: int,
     scan_policy: _CleanupScanPolicy,
-) -> _ScannedRoomMessageStates:
-    """Scan room history and return latest state by original event ID."""
-    message_states, message_events = await _collect_room_history_events(
-        client,
-        room_id=room_id,
-        cleanup_bot_user_ids=cleanup_bot_user_ids,
-        now_ms=now_ms,
-        scan_policy=scan_policy,
-    )
-
-    trusted_sender_ids = _cleanup_trusted_sender_ids(
-        bot_user_ids=bot_user_ids,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    bot_message_events = [event for event in message_events if event.sender in cleanup_bot_user_ids]
-    resolved_messages = await resolve_latest_visible_messages(
-        bot_message_events,
-        client,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    bot_resolved_messages = {
-        event_id: message for event_id, message in resolved_messages.items() if message.sender in cleanup_bot_user_ids
+) -> dict[str, _MessageState]:
+    """Resolve only exact outbox targets, including their newest replacements."""
+    trusted = _cleanup_trusted_sender_ids(bot_user_ids=bot_user_ids, config=config, runtime_paths=runtime_paths)
+    messages: dict[str, ResolvedVisibleMessage] = {}
+    states: dict[str, _MessageState] = {}
+    for event_id, thread_id in target_thread_ids.items():
+        message = await fetch_latest_visible_message(
+            client,
+            room_id=room_id,
+            event_id=event_id,
+            trusted_sender_ids=trusted,
+        )
+        if message is None or message.sender not in cleanup_bot_user_ids:
+            msg = f"Cannot resolve owned recovery response {event_id}"
+            raise RuntimeError(msg)
+        messages[event_id] = message
+        _merge_resolved_message_state(
+            states,
+            target_event_id=event_id,
+            message=message,
+            bot_user_id=message.sender,
+            requester_user_id=None,
+            fallback_thread_id=thread_id,
+        )
+    candidates = {
+        event_id for event_id, state in states.items() if _needs_recovery(state, now_ms=now_ms, scan_policy=scan_policy)
     }
-    scanned_message_data_by_event_id = await _scanned_message_data_by_event_id(message_events)
-    auto_resume_target_event_ids = _auto_resume_target_event_ids(
-        scanned_message_data_by_event_id.values(),
-        bot_user_ids=bot_user_ids | set(trusted_sender_ids),
-    )
-    requester_ids_by_event_id = await _derive_requester_ids_for_bot_messages(
+    requesters = await _derive_requester_ids_for_bot_messages(
         client,
-        resolved_messages=bot_resolved_messages,
-        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
+        messages,
+        messages,
+        target_event_ids=candidates,
         room_id=room_id,
         bot_user_ids=cleanup_bot_user_ids,
         config=config,
         runtime_paths=runtime_paths,
     )
-    _merge_bot_resolved_message_states(
-        message_states,
-        bot_resolved_messages,
-        bot_user_ids=cleanup_bot_user_ids,
-        requester_ids_by_event_id=requester_ids_by_event_id,
-        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
-    )
-    return _ScannedRoomMessageStates(
-        message_states=message_states,
-        auto_resume_target_event_ids=auto_resume_target_event_ids,
-    )
+    for event_id, requester in requesters.items():
+        states[event_id].requester_user_id = requester
+    return states
 
 
 def _auto_resume_target_event_ids(
     messages: Iterable[ResolvedVisibleMessage],
     *,
-    bot_user_ids: set[str],
+    bot_user_ids: AbstractSet[str],
 ) -> set[str]:
     """Return interrupted event IDs that already have a queued auto-resume relay."""
     target_event_ids: set[str] = set()
@@ -911,96 +902,6 @@ def _auto_resume_target_event_ids(
         if reply_to_event_id is not None:
             target_event_ids.add(reply_to_event_id)
     return target_event_ids
-
-
-async def _collect_room_history_events(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    cleanup_bot_user_ids: set[str],
-    now_ms: int,
-    scan_policy: _CleanupScanPolicy,
-) -> tuple[dict[str, _MessageState], list[nio.RoomMessageText | nio.RoomMessageNotice]]:
-    """Return visible room-message events plus tracked stop reactions."""
-    message_states: dict[str, _MessageState] = {}
-    message_events: list[nio.RoomMessageText | nio.RoomMessageNotice] = []
-    from_token: str | None = None
-    lookback_pages_scanned = 0
-
-    while True:
-        response = await client.room_messages(
-            room_id,
-            start=from_token,
-            limit=_ROOM_HISTORY_PAGE_SIZE,
-            direction=nio.MessageDirection.back,
-        )
-        if not isinstance(response, nio.RoomMessagesResponse):
-            logger.warning(
-                "Failed to fetch room history during stale stream cleanup",
-                room_id=room_id,
-                error=str(response),
-            )
-            return {}, []
-
-        if not response.chunk:
-            break
-
-        for event in response.chunk:
-            try:
-                if isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
-                    message_events.append(event)
-                elif isinstance(event, nio.Event):
-                    _record_stop_reaction(
-                        message_states,
-                        event=event,
-                        bot_user_ids=cleanup_bot_user_ids,
-                    )
-            except Exception as exc:
-                event_id = event.event_id if isinstance(event, nio.Event) else None
-                logger.warning(
-                    "Failed to inspect room event during stale stream cleanup",
-                    room_id=room_id,
-                    event_id=event_id,
-                    error=str(exc),
-                )
-
-        if not response.end:
-            break
-        lookback_pages_scanned, stop_scan = _lookback_scan_state(
-            response.chunk,
-            now_ms=now_ms,
-            scan_policy=scan_policy,
-            lookback_pages_scanned=lookback_pages_scanned,
-        )
-        if stop_scan:
-            break
-        from_token = response.end
-
-    return message_states, message_events
-
-
-def _merge_bot_resolved_message_states(
-    message_states: dict[str, _MessageState],
-    resolved_messages: dict[str, ResolvedVisibleMessage],
-    *,
-    bot_user_ids: set[str],
-    requester_ids_by_event_id: dict[str, str],
-    scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
-) -> None:
-    """Merge resolved bot-authored messages into cleanup state."""
-    for target_event_id, message in resolved_messages.items():
-        if message.sender not in bot_user_ids:
-            continue
-        requester_user_id = requester_ids_by_event_id.get(target_event_id)
-        scanned_message = scanned_message_data_by_event_id.get(target_event_id)
-        _merge_resolved_message_state(
-            message_states,
-            target_event_id=target_event_id,
-            message=message,
-            bot_user_id=message.sender,
-            requester_user_id=requester_user_id,
-            fallback_thread_id=scanned_message.thread_id if scanned_message is not None else None,
-        )
 
 
 def _merge_resolved_message_state(
@@ -1030,44 +931,6 @@ def _merge_resolved_message_state(
     state.bot_user_id = bot_user_id
 
 
-async def _scanned_message_data_by_event_id(
-    message_events: list[nio.RoomMessageText | nio.RoomMessageNotice],
-) -> dict[str, ResolvedVisibleMessage]:
-    """Return raw scanned room-history messages keyed by exact event ID."""
-    event_infos = {
-        event.event_id: EventInfo.from_event(event.source)
-        for event in message_events
-        if isinstance(event.event_id, str)
-    }
-    ordered_event_ids = ordered_event_ids_from_scanned_event_sources(
-        [event.source for event in message_events],
-    )
-    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
-        "",
-        event_infos=event_infos,
-        ordered_event_ids=ordered_event_ids,
-    )
-
-    message_data_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    for event in message_events:
-        event_id = event.event_id
-        sender = event.sender
-        if not isinstance(event_id, str) or not isinstance(sender, str):
-            continue
-
-        raw_content = _as_string_keyed_dict(event.source.get("content")) or {}
-        event_info = EventInfo.from_event(event.source)
-        message_data_by_event_id[event_id] = _requester_resolution_message(
-            event_id=event_id,
-            sender=sender,
-            content=raw_content,
-            body=event.body,
-            timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-            thread_id=resolved_thread_ids.get(event_id) or event_info.thread_id,
-        )
-    return message_data_by_event_id
-
-
 def _scanned_message_requires_exact_requester_fetch(message_data: ResolvedVisibleMessage) -> bool:
     """Return whether requester resolution must fetch the exact event for this scanned message."""
     if "m.new_content" not in message_data.content:
@@ -1080,6 +943,7 @@ async def _derive_requester_ids_for_bot_messages(
     resolved_messages: dict[str, ResolvedVisibleMessage],
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
     *,
+    target_event_ids: set[str],
     room_id: str,
     bot_user_ids: set[str],
     config: Config,
@@ -1097,7 +961,7 @@ async def _derive_requester_ids_for_bot_messages(
         ),
     )
     sorted_messages = sorted(
-        resolved_messages.items(),
+        ((event_id, message) for event_id, message in resolved_messages.items() if event_id in target_event_ids),
         key=lambda item: (item[1].timestamp, item[0]),
     )
 
@@ -1418,19 +1282,6 @@ async def _fetch_message_data_for_event_id(
     return message_data
 
 
-def _as_string_keyed_dict(value: object) -> dict[str, object] | None:
-    """Normalize one arbitrary JSON-like object into a string-keyed dict."""
-    if not isinstance(value, dict):
-        return None
-
-    normalized: dict[str, object] = {}
-    for key, item in value.items():
-        if not isinstance(key, str):
-            return None
-        normalized[key] = item
-    return normalized
-
-
 def _is_internal_sender(
     sender_id: str,
     config: Config,
@@ -1463,44 +1314,6 @@ def _effective_requester_for_message(
     content = message_data.content
     event_source = {"content": content}
     return get_effective_sender_id_for_reply_permissions(sender, event_source, config, runtime_paths)
-
-
-def _record_stop_reaction(
-    message_states: dict[str, _MessageState],
-    *,
-    event: nio.Event,
-    bot_user_ids: set[str],
-) -> None:
-    """Track self-authored stop reactions by their target message ID."""
-    event_sender = event.sender
-    if event_sender not in bot_user_ids:
-        return
-
-    event_source = event.source
-    if not isinstance(event_source, dict):
-        return
-
-    event_info = EventInfo.from_event(event_source)
-    if not event_info.is_reaction or event_info.reaction_key not in _STOP_REACTION_KEYS:
-        return
-
-    target_event_id = event_info.reaction_target_event_id
-    reaction_event_id = event.event_id
-    if not isinstance(target_event_id, str) or not isinstance(reaction_event_id, str):
-        return
-
-    reaction_ids_by_sender = message_states.setdefault(
-        target_event_id,
-        _MessageState(),
-    ).stop_reaction_event_ids_by_sender
-    reaction_ids_by_sender.setdefault(event_sender, set()).add(reaction_event_id)
-
-
-def _self_stop_reaction_event_ids(state: _MessageState) -> set[str]:
-    """Return stop reactions authored by the bot that owns the target message."""
-    if state.bot_user_id is None:
-        return set()
-    return state.stop_reaction_event_ids_by_sender.get(state.bot_user_id, set())
 
 
 async def _edit_stale_message(
@@ -1593,11 +1406,10 @@ async def _redact_stop_reactions(
     *,
     room_id: str,
     target_event_id: str,
-    history_reaction_event_ids: Iterable[str],
     bot_user_ids: set[str],
 ) -> None:
     """Best-effort removal of stale bot-authored stop reactions."""
-    reaction_event_ids = set(history_reaction_event_ids)
+    reaction_event_ids: set[str] = set()
     try:
         reaction_event_ids.update(
             await _get_stop_reaction_event_ids_from_relations(
@@ -1609,7 +1421,7 @@ async def _redact_stop_reactions(
         )
     except Exception as exc:
         logger.warning(
-            "Failed to fetch stop reactions from relations API, falling back to history scan",
+            "Failed to fetch exact stop reactions; leaving them for recovery retry",
             room_id=room_id,
             event_id=target_event_id,
             error=str(exc),
@@ -1815,31 +1627,6 @@ def _is_older_than_cleanup_window(timestamp_ms: int, *, now_ms: int | None = Non
     """Return whether a timestamp is older than the restart cleanup lookback window."""
     current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
     return current_time_ms - timestamp_ms > _STALE_STREAM_LOOKBACK_MS
-
-
-def _chunk_reaches_cleanup_lookback_limit(events: list[object], *, now_ms: int) -> bool:
-    """Return whether this history page crosses the cleanup lookback window."""
-    return any(
-        _is_older_than_cleanup_window(event.server_timestamp, now_ms=now_ms)
-        for event in events
-        if isinstance(event, nio.Event) and isinstance(event.server_timestamp, int)
-    )
-
-
-def _lookback_scan_state(
-    events: list[object],
-    *,
-    now_ms: int,
-    scan_policy: _CleanupScanPolicy,
-    lookback_pages_scanned: int,
-) -> tuple[int, bool]:
-    """Return updated old-page count and whether history pagination should stop."""
-    if not _chunk_reaches_cleanup_lookback_limit(events, now_ms=now_ms):
-        return lookback_pages_scanned, False
-    if not scan_policy.collect_terminal_interrupted_for_resume:
-        return lookback_pages_scanned, True
-    updated_count = lookback_pages_scanned + 1
-    return updated_count, updated_count >= scan_policy.max_extra_old_pages
 
 
 def _build_auto_resume_content(

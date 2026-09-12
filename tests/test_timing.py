@@ -442,6 +442,8 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
             "thread_refresh_ready": 13.0,
             "response_runtime_start": 14.0,
             "response_runtime_ready": 15.0,
+            "knowledge_access_start": 15.0,
+            "knowledge_access_ready": 15.5,
             "ai_prepare_start": 15.5,
             "memory_prepare_start": 15.6,
             "agent_build_start": 15.6,
@@ -492,6 +494,7 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert summary["diag_thread_refresh_ms"] == 500.0
     assert summary["diag_lock_wait_ms"] == 2000.0
     assert summary["diag_runtime_prepare_ms"] == 1000.0
+    assert summary["diag_knowledge_access_ms"] == 500.0
     assert summary["diag_llm_prepare_ms"] == 1500.0
     assert summary["diag_prompt_branch_join_ms"] == 400.0
     assert summary["diag_memory_prepare_ms"] == 200.0

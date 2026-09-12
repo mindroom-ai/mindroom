@@ -14,7 +14,11 @@ from urllib.parse import urlsplit
 import jwt
 from fastapi import HTTPException
 
-from mindroom.matrix.identity import try_parse_historical_matrix_user_id
+from mindroom.matrix.identity import (
+    matrix_user_id_from_email,
+    try_parse_historical_matrix_user_id,
+    validate_email_to_matrix_mapping,
+)
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -90,16 +94,7 @@ class ExternalAuthSettings:
             _text(self.matrix_user_id_claim)
         if template is not None:
             _text(template)
-            if (
-                template.count("{localpart}") != 1
-                or "{" in template.replace("{localpart}", "")
-                or "}" in template.replace("{localpart}", "")
-                or try_parse_historical_matrix_user_id(template.replace("{localpart}", "example")) is None
-                or self.email_domain is None
-                or re.fullmatch(r"[A-Za-z0-9.-]+", self.email_domain) is None
-            ):
-                msg = "External email mapping requires a valid template and explicit email domain"
-                raise ValueError(msg)
+            validate_email_to_matrix_mapping(template, self.email_domain)
         elif self.email_domain is not None:
             msg = "External email domain requires an email template"
             raise ValueError(msg)
@@ -219,7 +214,7 @@ class ExternalAuth:
             localpart, domain = email.split("@")
             if not localpart or not domain:
                 raise jwt.InvalidTokenError
-            matrix_id = self._matrix_identity(claims, localpart, domain)
+            matrix_id = self._matrix_identity(claims, email)
         except (jwt.PyJWTError, ValueError, TypeError, OverflowError, RecursionError) as error:
             raise HTTPException(status_code=401, detail="Invalid external MCP credential") from error
         scope = claims.get("scope", "")
@@ -233,16 +228,15 @@ class ExternalAuth:
             hashlib.sha256(token.encode()).hexdigest(),
         )
 
-    def _matrix_identity(self, claims: dict[str, Any], localpart: str, domain: str) -> str:
+    def _matrix_identity(self, claims: dict[str, Any], email: str) -> str:
         if self.settings.matrix_user_id_claim is not None:
             value = _text(claims.get(self.settings.matrix_user_id_claim))
         else:
-            if (
-                domain.lower() != (self.settings.email_domain or "").lower()
-                or not self.settings.email_to_matrix_user_id_template
-            ):
-                raise jwt.InvalidTokenError
-            value = self.settings.email_to_matrix_user_id_template.replace("{localpart}", localpart)
+            return matrix_user_id_from_email(
+                email,
+                _text(self.settings.email_to_matrix_user_id_template),
+                self.settings.email_domain,
+            )
         matrix_id = try_parse_historical_matrix_user_id(value)
         if matrix_id is None:
             raise jwt.InvalidTokenError
