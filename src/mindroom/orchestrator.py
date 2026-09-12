@@ -18,6 +18,8 @@ from mindroom import constants
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_changed
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
+from mindroom.approval_manager import initialize_approval_store
+from mindroom.approval_recovery import ApprovalRecovery
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
@@ -479,9 +481,10 @@ class _MultiAgentOrchestrator:
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
-            runtime_paths=self.runtime_paths,
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
-            cards_provider=self._approval_cards,
+        )
+        self._approval_recovery = ApprovalRecovery(
+            deliver_unavailable_notice=self._approval_transport.deliver_unavailable_notice,
             journal_provider=self._shared_journal_store,
             entity_configured=lambda name: (
                 self.config is not None and (name in self.config.agents or name in self.config.teams)
@@ -500,7 +503,7 @@ class _MultiAgentOrchestrator:
             ),
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
-            mark_runtime_support_ready=lambda: self._approval_transport.mark_startup_runtime_support_ready(),
+            mark_runtime_support_ready=lambda: self._approval_recovery.mark_startup_runtime_support_ready(),
         )
 
     @property
@@ -685,7 +688,19 @@ class _MultiAgentOrchestrator:
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
-        self._approval_transport.bind_approval_runtime()
+        transport = self._approval_transport
+        initialize_approval_store(
+            self.runtime_paths,
+            prepare_event=transport.prepare_approval_event,
+            send_delivery=transport.send_approval_delivery,
+            resolve_delivery=transport.resolve_approval_delivery,
+            resolve_action_delivery=transport.resolve_approval_action_delivery,
+            cards=self._approval_cards(),
+            transport_sender=transport.transport_sender_id,
+            sending_device=transport.transport_device_id,
+            continuation_ready=transport.wake_continuation_sources,
+            recovery=self._approval_recovery,
+        )
 
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -902,7 +917,7 @@ class _MultiAgentOrchestrator:
                     start_status = await self._try_start_bot_once(entity_name, bot)
                 if start_status is None:
                     self._permanently_failed_entities.add(entity_name)
-                    await self._approval_transport.reconcile_unavailable_entities({entity_name})
+                    await self._approval_recovery.reconcile_unavailable_entities({entity_name})
                     return
                 if start_status:
                     self._permanently_failed_entities.discard(entity_name)
@@ -1544,7 +1559,8 @@ class _MultiAgentOrchestrator:
         """Handle bot-ready notifications through the public runtime protocol."""
         if bot.agent_name == ROUTER_AGENT_NAME:
             self._router_reply_memberships_live_sync_ready.set()
-        await self._approval_transport.handle_bot_ready(bot)
+        if bot.agent_name == ROUTER_AGENT_NAME and bot.running and bot.client is not None:
+            await self._approval_recovery.mark_router_ready()
         self._schedule_ready_turn_dispatch_recovery()
 
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
@@ -1611,7 +1627,7 @@ class _MultiAgentOrchestrator:
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
         self._runtime_ready_event.clear()
         self._router_reply_memberships_live_sync_ready.clear()
-        self._approval_transport.reset_startup_cleanup_gate()
+        self._approval_recovery.reset_startup_cleanup_gate()
         phase_started = log_startup_phase_started("wait_for_matrix_homeserver")
         await wait_for_matrix_homeserver(runtime_paths=self.runtime_paths)
         log_startup_phase_finished("wait_for_matrix_homeserver", phase_started)
@@ -1818,7 +1834,7 @@ class _MultiAgentOrchestrator:
         # A frozen successful FINAL must be recovered while the original
         # sender and its lifecycle collaborators still exist. Router fallback
         # may settle only continuations that never acquired FINAL ownership.
-        await self._approval_transport.reconcile_unavailable_entities(removed_entities)
+        await self._approval_recovery.reconcile_unavailable_entities(removed_entities)
 
         for entity_name in removed_entities:
             bot = self.agent_bots.get(entity_name)
@@ -1896,7 +1912,7 @@ class _MultiAgentOrchestrator:
             self.agent_bots.pop(entity_name, None)
 
         await self._remove_deleted_entities(plan.removed_entities)
-        await self._approval_transport.reconcile_unavailable_entities(
+        await self._approval_recovery.reconcile_unavailable_entities(
             set(start_results.permanently_failed_entities),
         )
         self._schedule_ready_turn_dispatch_recovery()
@@ -1963,7 +1979,7 @@ class _MultiAgentOrchestrator:
             for entity_name in start_results.retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)
             if start_results.permanently_failed_entities:
-                await self._approval_transport.reconcile_unavailable_entities(
+                await self._approval_recovery.reconcile_unavailable_entities(
                     start_results.permanently_failed_entities,
                 )
                 logger.warning(
@@ -2019,7 +2035,7 @@ class _MultiAgentOrchestrator:
             start_watcher=self.running,
             previous_config=current_config,
         )
-        await self._approval_transport.mark_startup_runtime_support_ready()
+        await self._approval_recovery.mark_startup_runtime_support_ready()
         self._external_trigger_runtime.bind_if_ready(new_config, self.agent_bots)
         await self._emit_config_reloaded(
             new_config=new_config,
@@ -2411,7 +2427,6 @@ class _MultiAgentOrchestrator:
             await _run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:
             logger.exception("Background script runtime shutdown failed")
-        await _run_shutdown_step("approval_transport", self._approval_transport.close())
         await _run_shutdown_step("approval_runtime", shutdown_approval_runtime())
         await _run_shutdown_step("config_reload", self.config_reload.cancel())
         owner = self._mcp_catalog_change_task_owner

@@ -262,10 +262,13 @@ def _mock_runtime_orchestrator() -> MagicMock:
 
 
 @contextmanager
-def _mock_approval_recovery(**kwargs: object) -> Iterator[AsyncMock]:
+def _mock_approval_recovery(orchestrator: _MultiAgentOrchestrator, **kwargs: object) -> Iterator[AsyncMock]:
     recovery = AsyncMock(**kwargs)
     manager = MagicMock(recover_cards_on_startup=recovery)
-    with patch("mindroom.approval_transport.approval_manager.get_approval_store", return_value=manager):
+    with (
+        patch.object(orchestrator._approval_recovery, "manager", manager),
+        patch("mindroom.orchestrator.initialize_approval_store", return_value=manager),
+    ):
         yield recovery
 
 
@@ -366,7 +369,7 @@ async def test_entity_removal_recovers_original_final_before_bot_cleanup(tmp_pat
     bot.leave_rooms = AsyncMock(side_effect=cleanup)
     bot.stop = AsyncMock(side_effect=lambda **_kwargs: order.append("stop"))
     orchestrator.agent_bots["removed"] = bot
-    orchestrator._approval_transport.reconcile_unavailable_entities = AsyncMock(
+    orchestrator._approval_recovery.reconcile_unavailable_entities = AsyncMock(
         side_effect=lambda _names: order.append("recover"),
     )
 
@@ -398,7 +401,7 @@ async def test_entity_removal_keeps_bot_registered_until_cleanup_succeeds(
     bot.leave_rooms = AsyncMock()
     bot.stop = AsyncMock(side_effect=RuntimeError("cleanup failed"))
     orchestrator.agent_bots["removed"] = bot
-    orchestrator._approval_transport.reconcile_unavailable_entities = AsyncMock()
+    orchestrator._approval_recovery.reconcile_unavailable_entities = AsyncMock()
 
     with pytest.raises(RuntimeError, match="cleanup failed"):
         await orchestrator._remove_deleted_entities({"removed"})
@@ -2605,6 +2608,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
             _mock_approval_recovery(
+                orchestrator,
                 side_effect=_recover_approval_cards_on_startup,
             ) as recover_approval_cards_on_startup,
             patch.object(orchestrator, "_sync_runtime_support_services", side_effect=_sync_runtime_support_services),
@@ -2639,13 +2643,13 @@ class TestMultiAgentOrchestrator:
         bot.running = True
         bot.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
 
-        with _mock_approval_recovery() as recover_approval_cards_on_startup:
+        with _mock_approval_recovery(orchestrator) as recover_approval_cards_on_startup:
             await orchestrator.handle_bot_ready(bot)
 
         recover_approval_cards_on_startup.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_approval_transport_waits_for_runtime_support_before_startup_recovery(
+    async def test_approval_recovery_waits_for_runtime_support_before_startup_recovery(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2662,18 +2666,19 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {"router": bot}
 
         with _mock_approval_recovery(
+            orchestrator,
             return_value=_ApprovalStartupSweep(discarded=1, failed=0),
         ) as recover_approval_cards_on_startup:
-            orchestrator._approval_transport.reset_startup_cleanup_gate()
+            orchestrator._approval_recovery.reset_startup_cleanup_gate()
             await orchestrator.handle_bot_ready(bot)
             recover_approval_cards_on_startup.assert_not_awaited()
 
-            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+            await orchestrator._approval_recovery.mark_startup_runtime_support_ready()
 
         recover_approval_cards_on_startup.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_approval_transport_waits_for_router_ready_before_startup_recovery(
+    async def test_approval_recovery_waits_for_router_ready_before_startup_recovery(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2690,10 +2695,11 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {"router": bot}
 
         with _mock_approval_recovery(
+            orchestrator,
             return_value=_ApprovalStartupSweep(discarded=1, failed=0),
         ) as recover_approval_cards_on_startup:
-            orchestrator._approval_transport.reset_startup_cleanup_gate()
-            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+            orchestrator._approval_recovery.reset_startup_cleanup_gate()
+            await orchestrator._approval_recovery.mark_startup_runtime_support_ready()
             recover_approval_cards_on_startup.assert_not_awaited()
 
             await orchestrator.handle_bot_ready(bot)
@@ -2701,7 +2707,7 @@ class TestMultiAgentOrchestrator:
         recover_approval_cards_on_startup.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_approval_transport_concurrent_startup_gates_discard_once(
+    async def test_approval_recovery_concurrent_startup_gates_discard_once(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2718,18 +2724,19 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {"router": bot}
 
         with _mock_approval_recovery(
+            orchestrator,
             return_value=_ApprovalStartupSweep(discarded=1, failed=0),
         ) as recover_approval_cards_on_startup:
-            orchestrator._approval_transport.reset_startup_cleanup_gate()
+            orchestrator._approval_recovery.reset_startup_cleanup_gate()
             await asyncio.gather(
                 orchestrator.handle_bot_ready(bot),
-                orchestrator._approval_transport.mark_startup_runtime_support_ready(),
+                orchestrator._approval_recovery.mark_startup_runtime_support_ready(),
             )
 
         recover_approval_cards_on_startup.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_approval_transport_reset_allows_fresh_startup_recovery(
+    async def test_approval_recovery_reset_allows_fresh_startup_recovery(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2746,14 +2753,15 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {"router": bot}
 
         with _mock_approval_recovery(
+            orchestrator,
             return_value=_ApprovalStartupSweep(discarded=1, failed=0),
         ) as recover_approval_cards_on_startup:
-            orchestrator._approval_transport.reset_startup_cleanup_gate()
+            orchestrator._approval_recovery.reset_startup_cleanup_gate()
             await orchestrator.handle_bot_ready(bot)
-            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+            await orchestrator._approval_recovery.mark_startup_runtime_support_ready()
 
-            orchestrator._approval_transport.reset_startup_cleanup_gate()
-            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+            orchestrator._approval_recovery.reset_startup_cleanup_gate()
+            await orchestrator._approval_recovery.mark_startup_runtime_support_ready()
             await orchestrator.handle_bot_ready(bot)
 
         assert recover_approval_cards_on_startup.await_count == 2
@@ -2786,20 +2794,20 @@ class TestMultiAgentOrchestrator:
             _ApprovalStartupSweep(discarded=1, failed=0),
         ]
         with (
-            patch("mindroom.approval_transport._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
-            _mock_approval_recovery(side_effect=sweeps) as recover_approval_cards_on_startup,
+            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
+            _mock_approval_recovery(orchestrator, side_effect=sweeps) as recover_approval_cards_on_startup,
         ):
-            orchestrator._approval_transport.reset_startup_cleanup_gate()
-            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+            orchestrator._approval_recovery.reset_startup_cleanup_gate()
+            await orchestrator._approval_recovery.mark_startup_runtime_support_ready()
             await orchestrator.handle_bot_ready(bot)
             assert recover_approval_cards_on_startup.await_count == 1
 
             await _await_until(lambda: recover_approval_cards_on_startup.await_count == 2)
 
             # The second pass settled everything, so nothing schedules a third.
-            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+            await orchestrator._approval_recovery.mark_startup_runtime_support_ready()
 
-        await orchestrator._approval_transport.close()
+        await orchestrator._approval_recovery.close()
         assert recover_approval_cards_on_startup.await_count == 2
 
     @pytest.mark.asyncio
@@ -2824,19 +2832,20 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {"router": bot}
 
         with (
-            patch("mindroom.approval_transport._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
-            patch("mindroom.approval_transport._STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION", 3),
+            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.0),
+            patch("mindroom.approval_recovery._STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION", 3),
             _mock_approval_recovery(
+                orchestrator,
                 return_value=_ApprovalStartupSweep(discarded=0, failed=1),
             ) as recover_approval_cards_on_startup,
             capture_logs() as logs,
         ):
-            orchestrator._approval_transport.reset_startup_cleanup_gate()
-            await orchestrator._approval_transport.mark_startup_runtime_support_ready()
+            orchestrator._approval_recovery.reset_startup_cleanup_gate()
+            await orchestrator._approval_recovery.mark_startup_runtime_support_ready()
             await orchestrator.handle_bot_ready(bot)
 
             await _await_until(lambda: recover_approval_cards_on_startup.await_count >= 4)
-            await orchestrator._approval_transport.close()
+            await orchestrator._approval_recovery.close()
 
         incomplete = [entry for entry in logs if entry["event"] == "tool_approval_startup_recovery_incomplete"]
         assert [entry["log_level"] for entry in incomplete[:4]] == ["warning", "warning", "error", "error"]
@@ -2885,22 +2894,22 @@ class TestMultiAgentOrchestrator:
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
         orchestrator.agent_bots = {"router": bot}
 
-        transport = orchestrator._approval_transport
+        recovery = orchestrator._approval_recovery
         # The wait each attempt was scheduled with, read as the sweep runs.
         # Reading the runtime's own countdown is what tells a backoff that
         # grows apart from one that is recomputed from the same start forever.
         waits: list[float] = []
 
         async def _never_finishes() -> _ApprovalStartupSweep:
-            waits.append(transport._startup_cleanup_retry_delay)
+            waits.append(recovery._startup_cleanup_retry_delay)
             return _ApprovalStartupSweep(discarded=0, failed=1)
 
         with (
-            patch("mindroom.approval_transport._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
-            _mock_approval_recovery(side_effect=_never_finishes) as recover_approval_cards_on_startup,
+            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
+            _mock_approval_recovery(orchestrator, side_effect=_never_finishes) as recover_approval_cards_on_startup,
         ):
-            transport.reset_startup_cleanup_gate()
-            await transport.mark_startup_runtime_support_ready()
+            recovery.reset_startup_cleanup_gate()
+            await recovery.mark_startup_runtime_support_ready()
             await orchestrator.handle_bot_ready(bot)
 
             # The first pass came from the startup gates; everything after it
@@ -2910,9 +2919,9 @@ class TestMultiAgentOrchestrator:
             waiting = _retry_tasks()
             assert len(waiting) == 1
             if stop_retrying == "cancel":
-                await transport.close()
+                await recovery.close()
             else:
-                transport.reset_startup_cleanup_gate()
+                recovery.reset_startup_cleanup_gate()
             await _await_until(waiting[0].done)
             # Cancelled rather than left to expire, and nothing armed behind
             # it: a chain that re-arms itself must still be stoppable at one
@@ -2950,7 +2959,7 @@ class TestMultiAgentOrchestrator:
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
         orchestrator.agent_bots = {"router": bot}
 
-        transport = orchestrator._approval_transport
+        recovery = orchestrator._approval_recovery
         sweeps_started = 0
         retry_is_sweeping = asyncio.Event()
         never_finishes = asyncio.Event()
@@ -2966,11 +2975,11 @@ class TestMultiAgentOrchestrator:
             return _ApprovalStartupSweep(discarded=0, failed=1)
 
         with (
-            patch("mindroom.approval_transport._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
-            _mock_approval_recovery(side_effect=_sweep),
+            patch("mindroom.approval_recovery._STARTUP_CLEANUP_INITIAL_RETRY_SECONDS", 0.001),
+            _mock_approval_recovery(orchestrator, side_effect=_sweep),
         ):
-            transport.reset_startup_cleanup_gate()
-            await transport.mark_startup_runtime_support_ready()
+            recovery.reset_startup_cleanup_gate()
+            await recovery.mark_startup_runtime_support_ready()
             await orchestrator.handle_bot_ready(bot)
 
             # Wait until the retry has woken and is inside the sweep, not
@@ -2980,7 +2989,7 @@ class TestMultiAgentOrchestrator:
             await _await_until(retry_is_sweeping.is_set)
             assert sweeps_started == 2
 
-            await transport.close()
+            await recovery.close()
 
         assert waiting[0].cancelled()
         assert not _retry_tasks()
@@ -3009,21 +3018,21 @@ class TestMultiAgentOrchestrator:
         bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
         orchestrator.agent_bots = {"router": bot}
 
-        transport = orchestrator._approval_transport
+        recovery = orchestrator._approval_recovery
         sweeps = [
             _ApprovalStartupSweep(discarded=0, failed=1),
             _ApprovalStartupSweep(discarded=1, failed=0),
         ]
         # The default delay, deliberately: the retry has to still be waiting
         # when the second gate arrives, or it is not the case under test.
-        with _mock_approval_recovery(side_effect=sweeps) as recover_approval_cards_on_startup:
-            transport.reset_startup_cleanup_gate()
-            await transport.mark_startup_runtime_support_ready()
+        with _mock_approval_recovery(orchestrator, side_effect=sweeps) as recover_approval_cards_on_startup:
+            recovery.reset_startup_cleanup_gate()
+            await recovery.mark_startup_runtime_support_ready()
             await orchestrator.handle_bot_ready(bot)
             waiting = _retry_tasks()
             assert len(waiting) == 1
 
-            await transport.mark_startup_runtime_support_ready()
+            await recovery.mark_startup_runtime_support_ready()
             await _await_until(waiting[0].done)
             # Cancelled, not merely finished. A task left to wake on its own
             # ends the same way from the outside and is exactly the orphan
@@ -3364,7 +3373,7 @@ class TestMultiAgentOrchestrator:
         router_bot.recover_pending_turn_journal_events.assert_awaited_once_with()
 
         responder_bot.first_sync_complete = True
-        with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
+        with patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()):
             await orchestrator.handle_bot_ready(responder_bot)
         assert await wait_for_background_tasks(
             timeout=1,
@@ -3519,7 +3528,7 @@ class TestMultiAgentOrchestrator:
         router_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=recover_turns)
         orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
 
-        with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
+        with patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()):
             ready_task = asyncio.create_task(orchestrator.handle_bot_ready(router_bot))
             try:
                 await recovery_started.wait()
@@ -3668,7 +3677,7 @@ class TestMultiAgentOrchestrator:
 
         team_bot.recover_pending_turn_journal_events.assert_not_awaited()
         member_bot.first_sync_complete = True
-        with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
+        with patch.object(orchestrator._approval_recovery, "mark_router_ready", new=AsyncMock()):
             await orchestrator.handle_bot_ready(member_bot)
         assert await wait_for_background_tasks(
             timeout=1,
@@ -3786,9 +3795,6 @@ class TestMultiAgentOrchestrator:
         async def _shutdown_approvals() -> None:
             calls.append("approvals")
 
-        async def _close_approval_transport() -> None:
-            calls.append("transport")
-
         async def _stop_mcp_manager() -> None:
             calls.append("mcp")
             msg = "mcp shutdown failed"
@@ -3812,12 +3818,6 @@ class TestMultiAgentOrchestrator:
                 "mindroom.orchestrator.shutdown_approval_runtime",
                 new=AsyncMock(side_effect=_shutdown_approvals),
             ) as mock_shutdown_approvals,
-            patch.object(
-                orchestrator._approval_transport,
-                "close",
-                new=AsyncMock(side_effect=_close_approval_transport),
-                create=True,
-            ),
             patch.object(orchestrator.config_reload, "cancel", new=AsyncMock()),
             patch.object(orchestrator, "_stop_memory_auto_flush_worker", new=AsyncMock()),
             patch.object(orchestrator._knowledge_source_watcher, "shutdown", new=AsyncMock()),
@@ -3827,7 +3827,7 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator.stop()
 
-        assert calls == ["scripts", "transport", "approvals", "mcp"]
+        assert calls == ["scripts", "approvals", "mcp"]
         mock_shutdown_approvals.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -3869,11 +3869,9 @@ class TestMultiAgentOrchestrator:
                 "shutdown",
                 new=AsyncMock(side_effect=record_hook_state),
             ),
-            patch.object(
-                orchestrator._approval_transport,
-                "close",
+            patch(
+                "mindroom.orchestrator.shutdown_approval_runtime",
                 new=AsyncMock(side_effect=RuntimeError("stop boundary")),
-                create=True,
             ),
             patch(
                 "mindroom.orchestrator.set_scheduling_hook_registry",

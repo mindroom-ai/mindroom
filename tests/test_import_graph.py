@@ -318,6 +318,7 @@ print(json.dumps({
         "card_state_exports": [
             "TIMEOUT_REASON",
             "ApprovalCardReservation",
+            "ApprovalDecisionMetadata",
             "RecordedApprovalDecision",
             "decode_object_payload",
             "decode_resolution",

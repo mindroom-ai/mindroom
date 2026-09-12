@@ -9,7 +9,12 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from mindroom.tool_approval_grants import ApprovalGrant, approval_timestamp, valid_auto_approve_seconds
+from mindroom.tool_approval_grants import (
+    ApprovalGrant,
+    ApprovalGrantRevocation,
+    approval_timestamp,
+    valid_auto_approve_seconds,
+)
 
 from . import approval_card_state, outbox
 from .models import DeliveryStage
@@ -49,27 +54,35 @@ def reserve_identity(
     continuation: ApprovalContinuation,
     card: ApprovalCardReservation,
     membership_epoch: int,
-) -> None:
+) -> ApprovalCardReservation:
     """Persist eligible card scope independently of its eventual retirement."""
     if card.grant_operation is None or not continuation.thread_id:
-        return
+        return card
     call = next(call for call in continuation.calls if call.tool_call_id == card.tool_call_id)
     responder_epoch = _epoch(transaction, continuation_principal_id, continuation.room_id)
     if responder_epoch is None:
-        return
+        payload = dict(card.payload)
+        payload.pop("approval_scope", None)
+        payload.pop("auto_approve_options", None)
+        return replace(card, payload=payload, grant_operation=None)
     scope = json.dumps(
         [
             continuation.room_id,
             continuation.thread_id,
             continuation.requester_id,
             call.invoking_agent,
-            card.grant_operation,
+            card.grant_operation.key,
             membership_epoch,
             continuation_principal_id,
             responder_epoch,
         ],
         separators=(",", ":"),
     )
+    scope_id = hashlib.sha256(scope.encode()).hexdigest()
+    scope_wire = card.grant_operation.scope_wire(scope_id, continuation.entity_name, call.invoking_agent)
+    if card.payload.get("approval_scope") != {**scope_wire, "id": "0" * 64}:
+        msg = "Prepared approval scope does not match its continuation"
+        raise ValueError(msg)
     transaction.execute(
         """
         INSERT INTO approval_grant_cards (
@@ -81,13 +94,13 @@ def reserve_identity(
         (
             principal_id,
             card.delivery_id,
-            hashlib.sha256(scope.encode()).hexdigest(),
+            scope_id,
             continuation.room_id,
             continuation.thread_id,
             continuation.requester_id,
             continuation.entity_name,
             call.invoking_agent,
-            card.grant_operation,
+            card.grant_operation.key,
             continuation_principal_id,
             responder_epoch,
             membership_epoch,
@@ -96,6 +109,7 @@ def reserve_identity(
             card.tool_call_id,
         ),
     )
+    return replace(card, payload={**card.payload, "approval_scope": scope_wire})
 
 
 def _current(transaction: Transaction, principal_id: str, row: Row) -> bool:
@@ -135,32 +149,29 @@ def _decide(
     principal_id: str,
     row: Row,
     grant: ApprovalGrant,
-    resolution: Mapping[str, Any] | None = None,
+    provenance: Mapping[str, Any],
+    metadata: approval_card_state.ApprovalDecisionMetadata | None = None,
+    reason: str | None = None,
 ) -> RecordedApprovalDecision:
     from . import approvals  # noqa: PLC0415 - grant reservation and exact-call decisions share a transaction
 
-    content = approval_card_state.decode_object_payload(row["payload_json"], description="approval card")
-    offered = (
-        dict(resolution)
-        if resolution is not None
-        else {
-            **content,
-            "status": "approved",
-            "body": f"Approved: {content.get('tool_name', '')}",
-            "resolved_by": grant.requester_id,
-            "resolved_at": approval_timestamp(time.time_ns()),
-        }
+    decision = replace(
+        metadata
+        or approval_card_state.ApprovalDecisionMetadata(
+            resolved_by=grant.requester_id,
+            resolved_at=approval_timestamp(time.time_ns()),
+        ),
+        auto_approval=grant.wire() if metadata is not None else None,
+        provenance=provenance,
     )
-    if resolution is not None:
-        offered["auto_approval"] = grant.wire()
     result = approvals.resolve_card(
         transaction,
         principal_id,
         card_event_id=None if row["acknowledged_event_id"] is None else str(row["acknowledged_event_id"]),
         delivery_id=str(row["delivery_id"]),
         requested_status="approved",
-        reason=None,
-        resolution=offered,
+        reason=reason,
+        metadata=decision,
     )
     if result.recorded and result.resolution is not None and result.resolution["status"] == "approved":
         transaction.execute(
@@ -181,8 +192,9 @@ _CARD_SELECT = """
 """
 
 
-def apply_active(transaction: Transaction, principal_id: str, *, delivery_id: str) -> bool:
-    """Approve a newly reserved call without publishing a redundant Matrix card."""
+def apply_active(transaction: Transaction, principal_id: str, *, card: ApprovalCardReservation) -> bool:
+    """Approve a new call and atomically reserve its terminal-only receipt."""
+    delivery_id = card.delivery_id
     row = transaction.fetchone(
         "SELECT * FROM approval_grant_cards WHERE principal_id = ? AND delivery_id = ?",
         (principal_id, delivery_id),
@@ -221,6 +233,41 @@ def apply_active(transaction: Transaction, principal_id: str, *, delivery_id: st
         "UPDATE approval_grant_cards SET grant_id = ? WHERE principal_id = ? AND delivery_id = ?",
         (grant_row["grant_id"], principal_id, delivery_id),
     )
+    grant_resolution = approval_card_state.decode_object_payload(
+        grant_row["resolution_json"],
+        description="grant resolution",
+    )
+    receipt = approval_card_state.terminal_content(
+        card.payload,
+        status="approved",
+        reason=None,
+        metadata=approval_card_state.ApprovalDecisionMetadata(
+            resolved_by=str(grant_row["requester_id"]),
+            resolved_at=approval_timestamp(now),
+            provenance=grant_resolution.get("approval_provenance")
+            or {
+                "kind": "timed_grant",
+                "grant_id": str(grant_row["grant_id"]),
+                "grant_card_event_id": str(grant_row["card_event_id"]),
+                "granted_by": str(grant_row["requester_id"]),
+                "granted_at": grant_resolution.get("resolved_at"),
+                "expires_at": approval_timestamp(int(grant_row["expires_at_ns"])),
+            },
+        ),
+        publication="receipt",
+    )
+    outbox.enqueue(
+        transaction,
+        principal_id,
+        delivery_id=delivery_id,
+        stage=DeliveryStage.INITIAL,
+        event_type=card.event_type,
+        room_id=str(row["room_id"]),
+        thread_id=str(row["thread_id"]),
+        membership_epoch=int(row["membership_epoch"]),
+        payload=receipt,
+        edits_event_id=None,
+    )
     return True
 
 
@@ -232,7 +279,8 @@ def create(
     card_event_id: str,
     sender_id: str,
     seconds: int,
-    resolution: Mapping[str, Any],
+    metadata: approval_card_state.ApprovalDecisionMetadata,
+    reason: str | None = None,
     current_binding: str | None = None,
 ) -> tuple[RecordedApprovalDecision, ...]:
     """Accept a grant and all eligible pending calls in one commit."""
@@ -264,7 +312,16 @@ def create(
         expires_at_ns=now + seconds * 1_000_000_000,
         revoked_at_ns=None,
     )
-    first = _decide(transaction, principal_id, row, grant, resolution)
+    provenance = {
+        "kind": "timed_grant",
+        "grant_id": grant.grant_id,
+        "grant_card_event_id": card_event_id,
+        "granted_by": sender_id,
+        "granted_at": approval_timestamp(now),
+        "duration_seconds": seconds,
+        "expires_at": approval_timestamp(grant.expires_at_ns),
+    }
+    first = _decide(transaction, principal_id, row, grant, provenance, metadata, reason)
     if not first.recorded or first.resolution is None or first.resolution["status"] != "approved":
         return (first,)
     transaction.execute(
@@ -299,7 +356,7 @@ def create(
         + " WHERE scope.principal_id = ? AND scope.scope_key = ? AND final.delivery_id IS NULL ORDER BY scope.delivery_id",
         (principal_id, row["scope_key"]),
     )
-    return (first, *(_decide(transaction, principal_id, candidate, grant) for candidate in candidates))
+    return (first, *(_decide(transaction, principal_id, candidate, grant, provenance) for candidate in candidates))
 
 
 def revoke(
@@ -310,7 +367,7 @@ def revoke(
     card_event_id: str,
     sender_id: str,
     grant_id: str,
-) -> str | None:
+) -> ApprovalGrantRevocation | None:
     """Record revocation debt without rewriting the original FINAL delivery."""
     lock(transaction, principal_id)
     row = transaction.fetchone(
@@ -320,9 +377,9 @@ def revoke(
     if row is None or row["requester_id"] != sender_id or not _current(transaction, principal_id, row):
         return None
     grant = _grant(row)
-    delivery_id = "approval-grant-revoked:" + grant_id
+    revocation = ApprovalGrantRevocation(str(row["original_delivery_id"]), "approval-grant-revoked:" + grant_id)
     if grant.revoked_at_ns is not None:
-        return delivery_id
+        return revocation
     now = time.time_ns()
     if grant.expires_at_ns <= now:
         return None
@@ -331,10 +388,54 @@ def revoke(
         "UPDATE approval_grants SET revoked_at_ns = ? WHERE principal_id = ? AND grant_id = ?",
         (grant.revoked_at_ns, principal_id, grant_id),
     )
-    return delivery_id
+    return revocation
 
 
-def maintain(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
+def _retire_receipts(transaction: Transaction, principal_id: str) -> None:
+    """Release acknowledged terminal originals while retaining their action identity."""
+    transaction.execute(
+        """
+        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
+        SELECT initial.principal_id, initial.room_id, initial.acknowledged_event_id
+        FROM matrix_delivery_outbox AS initial
+        JOIN approval_grant_cards AS audit
+          ON audit.principal_id = initial.principal_id AND audit.delivery_id = initial.delivery_id
+        WHERE initial.principal_id = ? AND initial.stage = 'initial'
+          AND initial.acknowledged_event_id IS NOT NULL AND audit.grant_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = initial.principal_id AND cards.delivery_id = initial.delivery_id
+          )
+        ON CONFLICT (principal_id, card_event_id) DO NOTHING
+        """,
+        (principal_id,),
+    )
+    transaction.execute(
+        """
+        DELETE FROM matrix_delivery_outbox
+        WHERE principal_id = ? AND stage = 'initial'
+          AND EXISTS (
+              SELECT 1 FROM approval_grant_cards AS audit
+              WHERE audit.principal_id = matrix_delivery_outbox.principal_id
+                AND audit.delivery_id = matrix_delivery_outbox.delivery_id AND audit.grant_id IS NOT NULL
+          )
+          AND EXISTS (
+              SELECT 1 FROM approval_action_tombstones AS terminal
+              WHERE terminal.principal_id = matrix_delivery_outbox.principal_id
+                AND terminal.room_id = matrix_delivery_outbox.room_id
+                AND terminal.card_event_id = matrix_delivery_outbox.acknowledged_event_id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = matrix_delivery_outbox.principal_id
+                AND cards.delivery_id = matrix_delivery_outbox.delivery_id
+          )
+        """,
+        (principal_id,),
+    )
+
+
+def maintain(transaction: Transaction, principal_id: str, *, grant_id: str | None = None) -> tuple[str, ...]:
     """Release spent grant payloads and prepare newly deliverable revocations.
 
     Grant identity and applied-call audit facts survive payload retirement.
@@ -343,18 +444,20 @@ def maintain(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
     a delayed acceptance cannot overwrite the later revoked state.
     """
     lock(transaction, principal_id)
-    transaction.execute(
-        """
-        DELETE FROM approval_grant_cards
-        WHERE principal_id = ? AND grant_id IS NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_cards AS cards
-              WHERE cards.principal_id = approval_grant_cards.principal_id
-                AND cards.delivery_id = approval_grant_cards.delivery_id
-          )
-        """,
-        (principal_id,),
-    )
+    if grant_id is None:
+        _retire_receipts(transaction, principal_id)
+        transaction.execute(
+            """
+            DELETE FROM approval_grant_cards
+            WHERE principal_id = ? AND grant_id IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM approval_cards AS cards
+                  WHERE cards.principal_id = approval_grant_cards.principal_id
+                    AND cards.delivery_id = approval_grant_cards.delivery_id
+              )
+            """,
+            (principal_id,),
+        )
     rows = transaction.fetchall(
         """
         SELECT grants.*, original.delivery_id AS original_id,
@@ -370,9 +473,10 @@ def maintain(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
          AND acknowledgement.delivery_id = 'approval-grant-revoked:' || grants.grant_id
          AND acknowledgement.stage = 'final'
         WHERE grants.principal_id = ? AND grants.resolution_json <> ''
+          AND (? OR grants.grant_id = ?)
         ORDER BY grants.grant_id
         """,
-        (principal_id,),
+        (principal_id, grant_id is None, grant_id),
     )
     deliveries = []
     now = time.time_ns()
@@ -388,13 +492,12 @@ def maintain(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
                 (principal_id, grant.grant_id),
             )
             continue
-        if (
-            grant.revoked_at_ns is None
-            or (row["original_id"] is not None and row["original_event_id"] is None)
-            or row["revocation_id"] is not None
-        ):
+        if grant.revoked_at_ns is None or (row["original_id"] is not None and row["original_event_id"] is None):
             continue
         delivery_id = "approval-grant-revoked:" + grant.grant_id
+        if row["revocation_id"] is not None:
+            deliveries.append(delivery_id)
+            continue
         content = json.loads(str(row["resolution_json"]))
         content["auto_approval"] = grant.wire()
         outbox.enqueue(
@@ -410,17 +513,18 @@ def maintain(transaction: Transaction, principal_id: str) -> tuple[str, ...]:
             edits_event_id=grant.card_event_id,
         )
         deliveries.append(delivery_id)
-    transaction.execute(
-        """
-        DELETE FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND stage = 'final' AND acknowledged_event_id IS NOT NULL
-          AND EXISTS (
-              SELECT 1 FROM approval_grants AS grants
-              WHERE grants.principal_id = matrix_delivery_outbox.principal_id
-                AND 'approval-grant-revoked:' || grants.grant_id = matrix_delivery_outbox.delivery_id
-                AND grants.resolution_json = ''
-          )
-        """,
-        (principal_id,),
-    )
+    if grant_id is None:
+        transaction.execute(
+            """
+            DELETE FROM matrix_delivery_outbox
+            WHERE principal_id = ? AND stage = 'final' AND acknowledged_event_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM approval_grants AS grants
+                  WHERE grants.principal_id = matrix_delivery_outbox.principal_id
+                    AND 'approval-grant-revoked:' || grants.grant_id = matrix_delivery_outbox.delivery_id
+                    AND grants.resolution_json = ''
+              )
+            """,
+            (principal_id,),
+        )
     return tuple(deliveries)

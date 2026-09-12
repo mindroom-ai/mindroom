@@ -20,15 +20,15 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from typing import Any, Literal
+    from typing import Literal
 
     from mindroom.history_recovery import (
         HistoryRecoveryOutcome,
         RoomHistoryRecovery,
     )
-    from mindroom.tool_approval_grants import ApprovalGrant
+    from mindroom.tool_approval_grants import ApprovalGrant, ApprovalGrantRevocation
 
-    from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
+    from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
     from .approvals import (
         StoredApprovalCard,
         UnreadableApprovalCard,
@@ -481,7 +481,7 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         card_event_id: str,
         requested_status: Literal["approved", "denied", "expired"],
         reason: str | None,
-        resolution: Mapping[str, Any],
+        metadata: ApprovalDecisionMetadata,
     ) -> RecordedApprovalDecision: ...
 
     async def create_approval_grant(  # noqa: D102
@@ -491,7 +491,8 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         card_event_id: str,
         sender_id: str,
         seconds: int,
-        resolution: Mapping[str, Any],
+        metadata: ApprovalDecisionMetadata,
+        reason: str | None = None,
         current_binding: str | None = None,
     ) -> tuple[RecordedApprovalDecision, ...]: ...
 
@@ -502,7 +503,7 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         card_event_id: str,
     ) -> ApprovalGrant | None: ...
 
-    async def maintain_approval_grants(self) -> tuple[str, ...]: ...  # noqa: D102
+    async def maintain_approval_grants(self, *, grant_id: str | None = None) -> tuple[str, ...]: ...  # noqa: D102
 
     async def revoke_approval_grant(  # noqa: D102
         self,
@@ -511,7 +512,7 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         card_event_id: str,
         sender_id: str,
         grant_id: str,
-    ) -> str | None: ...
+    ) -> ApprovalGrantRevocation | None: ...
 
     async def expire_unacknowledged_approval_card(  # noqa: D102
         self,
@@ -520,6 +521,14 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
     ) -> RecordedApprovalDecision: ...
 
     async def retire_approval_card(self, *, delivery_id: str, card_event_id: str) -> bool: ...  # noqa: D102
+    async def remember_terminal_approval_alias(  # noqa: D102
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+        delivery_id: str,
+    ) -> None: ...
+
     async def is_terminal_approval_card(self, *, room_id: str, card_event_id: str) -> bool: ...  # noqa: D102
     async def pending_approval_card(self, *, room_id: str, card_event_id: str) -> StoredApprovalCard | None: ...  # noqa: D102
 

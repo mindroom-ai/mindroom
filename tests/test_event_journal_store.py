@@ -38,6 +38,7 @@ from mindroom.event_journal import (
     ApprovalCardReservation,
     ApprovalContinuation,
     ApprovalDecision,
+    ApprovalDecisionMetadata,
     ConversationCursor,
     DeliveryAcknowledgement,
     DeliveryStage,
@@ -6251,6 +6252,7 @@ class TestApprovalContinuations:
                         "continuation_generation": 0,
                         "tool_call_id": tool_call_id,
                         "status": "pending",
+                        "tool_name": "shell",
                     },
                 ),
             ),
@@ -6319,7 +6321,7 @@ class TestApprovalContinuations:
             card_event_id="$background-approval",
             requested_status="approved",
             reason=None,
-            resolution={"status": "approved", "resolved_by": ALICE},
+            metadata=ApprovalDecisionMetadata(resolved_by=ALICE),
         )
 
         assert recorded.recorded is True
@@ -7119,7 +7121,7 @@ class TestApprovalContinuations:
                 card_event_id="$approval",
                 requested_status="approved",
                 reason=None,
-                resolution={"status": "approved", "body": "Approved: shell"},
+                metadata=ApprovalDecisionMetadata(),
             ),
         )
         try:
@@ -7191,7 +7193,7 @@ class TestApprovalContinuations:
                 card_event_id="$approval",
                 requested_status="approved",
                 reason=None,
-                resolution={"status": "approved", "body": "Approved: shell"},
+                metadata=ApprovalDecisionMetadata(),
             ),
         )
         try:
@@ -7327,11 +7329,23 @@ class TestApprovalContinuations:
             card_event_id="$approval",
             requested_status="approved",
             reason="Looks safe.",
-            resolution={"status": "approved", "resolution_reason": "Looks safe."},
+            metadata=ApprovalDecisionMetadata(),
         )
 
         assert recorded.recorded is True
-        assert recorded.resolution == {"status": "approved", "resolution_reason": "Looks safe."}
+        assert recorded.resolution == {
+            "approval_id": "approval-card-1",
+            "tool_name": "shell",
+            "approvable": False,
+            "resolved_by": None,
+            "body": "Approved: shell",
+            "approval_provenance": {"kind": "once"},
+            "status": "approved",
+            "resolution_reason": "Looks safe.",
+            "continuation_id": "approval-1",
+            "continuation_generation": 0,
+            "tool_call_id": "call-1",
+        }
         assert recorded.continuation_ready is True
         assert recorded.source_event_ids == ("$source-1", "$source-2")
         continuation = await alice.approval_continuation_for_source("$source-1")
@@ -7348,8 +7362,17 @@ class TestApprovalContinuations:
         assert terminal.event_type == "io.mindroom.tool_approval"
         assert terminal.edits_event_id == "$approval"
         assert terminal.payload == {
+            "approval_id": "approval-card-1",
+            "tool_name": "shell",
+            "approvable": False,
+            "resolved_by": None,
+            "body": "Approved: shell",
+            "approval_provenance": {"kind": "once"},
             "status": "approved",
             "resolution_reason": "Looks safe.",
+            "continuation_id": "approval-1",
+            "continuation_generation": 0,
+            "tool_call_id": "call-1",
             "io.mindroom.delivery_id": {
                 "principal": "agent@alice",
                 "delivery_id": "approval-card-1",
@@ -7372,7 +7395,7 @@ class TestApprovalContinuations:
             card_event_id="$approval",
             requested_status="denied",
             reason="Unsafe.",
-            resolution={"status": "denied", "resolution_reason": "Unsafe."},
+            metadata=ApprovalDecisionMetadata(),
         )
 
         assert (
@@ -7431,15 +7454,21 @@ class TestApprovalContinuations:
             card_event_id="$approval",
             requested_status="approved",
             reason=None,
-            resolution={"status": "approved", "body": "Approved: shell", "resolved_by": ALICE},
+            metadata=ApprovalDecisionMetadata(resolved_by=ALICE),
         )
 
         assert recorded.recorded is True
         assert recorded.resolution == {
+            "approval_id": "approval-card-1",
+            "tool_name": "shell",
+            "approvable": False,
             "status": "expired",
             "body": "Expired: shell",
             "resolution_reason": "Tool approval request timed out.",
             "resolved_by": None,
+            "continuation_id": "approval-1",
+            "continuation_generation": 0,
+            "tool_call_id": "call-1",
         }
         continuation = await alice.approval_continuation_for_source("$source-1")
         assert continuation is not None
@@ -7461,15 +7490,21 @@ class TestApprovalContinuations:
             card_event_id="$approval",
             requested_status="denied",
             reason="Unsafe.",
-            resolution={"status": "denied", "body": "Denied: shell", "resolved_by": ALICE},
+            metadata=ApprovalDecisionMetadata(resolved_by=ALICE),
         )
 
         assert recorded.recorded is True
         assert recorded.resolution == {
+            "approval_id": "approval-card-1",
+            "tool_name": "shell",
+            "approvable": False,
             "status": "expired",
             "body": "Expired: shell",
             "resolution_reason": "Tool approval request timed out.",
             "resolved_by": None,
+            "continuation_id": "approval-1",
+            "continuation_generation": 0,
+            "tool_call_id": "call-1",
         }
 
     async def test_unacknowledged_card_deadline_expires_without_abandoning_unknown_send(
@@ -7569,16 +7604,22 @@ class TestApprovalContinuations:
             card_event_id="$approval",
             requested_status="approved",
             reason=None,
-            resolution={"status": "approved", "body": "Approved: shell", "resolved_by": ALICE},
+            metadata=ApprovalDecisionMetadata(resolved_by=ALICE),
         )
 
         assert recorded.recorded is True
         assert recorded.continuation_ready is False
         assert recorded.resolution == {
+            "approval_id": "approval-card-1",
+            "tool_name": "shell",
+            "approvable": False,
             "status": "denied",
             "body": "Denied: shell",
             "resolution_reason": "Approval publication failed safely.",
             "resolved_by": None,
+            "continuation_id": "approval-1",
+            "continuation_generation": 0,
+            "tool_call_id": "call-1",
         }
         continuation = await alice.approval_continuation_for_source("$source-1")
         assert continuation is not None
@@ -7597,18 +7638,29 @@ class TestApprovalContinuations:
             card_event_id="$approval",
             requested_status="approved",
             reason=None,
-            resolution={"status": "approved"},
+            metadata=ApprovalDecisionMetadata(),
         )
 
         duplicate = await alice.resolve_continuation_approval_card(
             card_event_id="$approval",
             requested_status="denied",
             reason="Changed my mind.",
-            resolution={"status": "denied", "resolution_reason": "Changed my mind."},
+            metadata=ApprovalDecisionMetadata(),
         )
 
         assert duplicate.recorded is False
-        assert duplicate.resolution == {"status": "approved"}
+        assert duplicate.resolution == {
+            "approval_id": "approval-card-1",
+            "tool_name": "shell",
+            "approvable": False,
+            "resolved_by": None,
+            "body": "Approved: shell",
+            "approval_provenance": {"kind": "once"},
+            "status": "approved",
+            "continuation_id": "approval-1",
+            "continuation_generation": 0,
+            "tool_call_id": "call-1",
+        }
 
     async def test_finish_requires_acknowledged_final_before_releasing_sources(
         self,
@@ -8097,7 +8149,7 @@ class TestApprovalContinuations:
             card_event_id="$approval",
             requested_status="denied",
             reason="Unsafe.",
-            resolution={"status": "denied", "resolution_reason": "Unsafe."},
+            metadata=ApprovalDecisionMetadata(),
         )
         assert await router.claim_matrix_delivery(
             delivery_id="approval-card-1",
@@ -8360,7 +8412,7 @@ class TestApprovalContinuations:
             card_event_id="$approval",
             requested_status="denied",
             reason="Unsafe.",
-            resolution={"status": "denied", "resolution_reason": "Unsafe."},
+            metadata=ApprovalDecisionMetadata(),
         )
         assert await alice.claim_matrix_delivery(
             delivery_id="approval-card-1",
@@ -8394,7 +8446,7 @@ class TestApprovalContinuations:
             card_event_id="$approval",
             requested_status="denied",
             reason="Unsafe.",
-            resolution={"status": "denied", "resolution_reason": "Unsafe."},
+            metadata=ApprovalDecisionMetadata(),
         )
         assert recorded.recorded is True
         assert await router.claim_matrix_delivery(
@@ -8432,7 +8484,18 @@ class TestApprovalContinuations:
 
         stored = await router.pending_approval_card(room_id=ROOM, card_event_id="$approval")
         assert stored is not None
-        assert stored.resolution == {"status": "denied", "resolution_reason": "Unsafe."}
+        assert stored.resolution == {
+            "approval_id": "approval-card-1",
+            "tool_name": "shell",
+            "approvable": False,
+            "resolved_by": None,
+            "body": "Denied: shell",
+            "status": "denied",
+            "resolution_reason": "Unsafe.",
+            "continuation_id": "approval-1",
+            "continuation_generation": 0,
+            "tool_call_id": "call-1",
+        }
         initial = await router.load_matrix_delivery(
             delivery_id="approval-card-1",
             stage=DeliveryStage.INITIAL,

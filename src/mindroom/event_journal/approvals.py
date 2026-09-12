@@ -148,7 +148,7 @@ def reserve_deliveries(
     ):
         return False
     for card in cards:
-        approval_grants.reserve_identity(
+        scoped_card = approval_grants.reserve_identity(
             transaction,
             card_principal_id,
             continuation_principal_id,
@@ -156,7 +156,7 @@ def reserve_deliveries(
             card,
             membership_epoch,
         )
-        if approval_grants.apply_active(transaction, card_principal_id, delivery_id=card.delivery_id):
+        if approval_grants.apply_active(transaction, card_principal_id, card=scoped_card):
             continue
         approval_card_state.reserve_delivery(
             transaction,
@@ -165,7 +165,7 @@ def reserve_deliveries(
             thread_id=continuation.thread_id,
             membership_epoch=membership_epoch,
             identity=(continuation_id, expected_generation, card.tool_call_id),
-            card=card,
+            card=scoped_card,
         )
     return (
         approval_continuations.activate(
@@ -207,7 +207,7 @@ def resolve_card(
     card_event_id: str | None,
     requested_status: Literal["approved", "denied", "expired"],
     reason: str | None,
-    resolution: Mapping[str, Any] | None,
+    metadata: approval_card_state.ApprovalDecisionMetadata | None,
     delivery_id: str | None = None,
 ) -> RecordedApprovalDecision:
     """Resolve one typed approval target through the shared card lifecycle."""
@@ -233,7 +233,7 @@ def resolve_card(
             delivery_id=delivery_id,
             requested_status=requested_status,
             reason=reason,
-            resolution=resolution,
+            metadata=metadata,
         )
     return _resolve_continuation(
         transaction,
@@ -242,7 +242,7 @@ def resolve_card(
         delivery_id=delivery_id,
         requested_status=requested_status,
         reason=reason,
-        resolution=resolution,
+        metadata=metadata,
     )
 
 
@@ -253,7 +253,7 @@ def _resolve_continuation(
     card_event_id: str | None,
     requested_status: Literal["approved", "denied", "expired"],
     reason: str | None,
-    resolution: Mapping[str, Any] | None,
+    metadata: approval_card_state.ApprovalDecisionMetadata | None,
     delivery_id: str | None = None,
 ) -> RecordedApprovalDecision:
     """Commit one current-format card and exact-call decision atomically."""
@@ -299,7 +299,12 @@ def _resolve_continuation(
     )
     existing = approval_card_state.decode_resolution(None if settled is None else cast("str", settled["payload_json"]))
     if existing is not None:
-        return RecordedApprovalDecision(resolution=existing, recorded=False)
+        return RecordedApprovalDecision(
+            resolution=existing,
+            recorded=False,
+            delivery_id=str(card["delivery_id"]),
+            card_event_id=card_event_id,
+        )
     generation = int(generation_value)
     continuation = transaction.fetchone(
         """
@@ -331,7 +336,7 @@ def _resolve_continuation(
         return RecordedApprovalDecision(resolution=None, recorded=False)
     failure_reason = cast("str | None", continuation["failure_reason"])
     expired = time.time_ns() >= int(call["expires_at_ns"])
-    if resolution is None and not expired:
+    if metadata is None and not expired:
         return RecordedApprovalDecision(resolution=None, recorded=False)
     decision, decision_reason = _effective_continuation_decision(
         requested_status=requested_status,
@@ -343,7 +348,7 @@ def _resolve_continuation(
     )
     stored_resolution = approval_card_state.stored_resolution(
         card,
-        resolution=resolution,
+        metadata=metadata,
         requested_status=requested_status,
         decision=decision,
         reason=decision_reason,
@@ -399,6 +404,8 @@ def _resolve_continuation(
     return RecordedApprovalDecision(
         resolution=stored_resolution,
         recorded=True,
+        delivery_id=str(card["delivery_id"]),
+        card_event_id=card_event_id,
         continuation_ready=state is not None and state["state"] == "ready",
         continuation_entity_name=entity_name,
         continuation_room_id=str(card["room_id"]),
@@ -634,13 +641,12 @@ def fail_continuations_for_departed_card_owner(
         delivery_id = str(row["delivery_id"])
         if row["background_run_id"] is not None:
             try:
-                content = approval_card_state.decode_object_payload(
+                approval_card_state.decode_object_payload(
                     row["payload_json"],
                     description="background approval payload",
                 )
             except (json.JSONDecodeError, TypeError):
                 continue
-            resolution = approval_card_state.terminal_content(content, status="denied", reason=reason)
             background_approvals.resolve(
                 transaction,
                 card_principal_id,
@@ -648,7 +654,7 @@ def fail_continuations_for_departed_card_owner(
                 delivery_id=delivery_id,
                 requested_status="denied",
                 reason=reason,
-                resolution=resolution,
+                metadata=None,
             )
             if not bool(row["attempted"]):
                 _delete_unattempted_card_delivery(transaction, card_principal_id, delivery_id)
@@ -801,6 +807,31 @@ def retire(
     return True
 
 
+def remember_terminal_alias(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    card_event_id: str,
+    delivery_id: str,
+) -> None:
+    """Remember a transport-verified alias only when retained grant audit proves it terminal."""
+    transaction.execute(
+        """
+        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
+        SELECT audit.principal_id, audit.room_id, ? FROM approval_grant_cards AS audit
+        WHERE audit.principal_id = ? AND audit.room_id = ? AND audit.delivery_id = ?
+          AND audit.grant_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = audit.principal_id AND cards.delivery_id = audit.delivery_id
+          )
+        ON CONFLICT (principal_id, card_event_id) DO NOTHING
+        """,
+        (card_event_id, principal_id, room_id, delivery_id),
+    )
+
+
 def is_terminal_card(
     transaction: Transaction,
     principal_id: str,
@@ -808,13 +839,25 @@ def is_terminal_card(
     room_id: str,
     card_event_id: str,
 ) -> bool:
-    """Return whether a delivered terminal approval owns this Matrix event."""
+    """Recognize terminal approvals before and after their payloads are retired."""
     row = transaction.fetchone(
         """
         SELECT 1 AS present FROM approval_action_tombstones
         WHERE principal_id = ? AND room_id = ? AND card_event_id = ?
+        UNION ALL
+        SELECT 1 AS present FROM matrix_delivery_outbox AS initial
+        JOIN approval_grant_cards AS audit
+          ON audit.principal_id = initial.principal_id AND audit.delivery_id = initial.delivery_id
+        WHERE initial.principal_id = ? AND initial.room_id = ?
+          AND initial.acknowledged_event_id = ? AND initial.stage = 'initial'
+          AND audit.grant_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = initial.principal_id AND cards.delivery_id = initial.delivery_id
+          )
+        LIMIT 1
         """,
-        (principal_id, room_id, card_event_id),
+        (principal_id, room_id, card_event_id, principal_id, room_id, card_event_id),
     )
     return row is not None
 

@@ -16,12 +16,14 @@ from pydantic import ValidationError
 from mindroom import approval_transport
 from mindroom.approval_events import PendingApproval, parse_approval_datetime
 from mindroom.approval_manager import (
-    _ApprovalManager,
+    ApprovalManager,
+    _ApprovalStartupSweep,
     _build_event_arguments_preview,
     _build_full_event_arguments,
     get_approval_store,
     initialize_approval_store,
 )
+from mindroom.approval_recovery import ApprovalRecovery
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
@@ -134,7 +136,7 @@ async def test_decided_card_action_is_consumed_before_transport_or_approver_vali
         await manager.shutdown()
 
     assert result.consumed is True
-    assert result.resolved is False
+
     before_consume.assert_awaited_once_with()
     cards.is_terminal_approval_card.assert_not_awaited()
 
@@ -181,7 +183,7 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
         return_value=DeliveryAcknowledgement(settled_event_id="$approval", bound=True),
     )
     resolve_action = AsyncMock(return_value="approval-card-1")
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         send_delivery=AsyncMock(),
         resolve_delivery=AsyncMock(return_value=None),
@@ -205,7 +207,7 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
         await manager.shutdown()
 
     assert result.consumed is True
-    assert result.resolved is False
+
     resolve_action.assert_awaited_once_with("!room:localhost", "$approval")
     cards.acknowledge_matrix_delivery.assert_awaited_once_with(
         delivery_id="approval-card-1",
@@ -217,7 +219,7 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
 
 
 @pytest.mark.asyncio
-async def test_changed_device_recovery_finds_the_exact_terminal_approval_edit(tmp_path: Path) -> None:
+async def test_changed_device_recovery_finds_the_exact_terminal_approval_edit() -> None:
     """A sent-before-crash approval edit is adopted instead of retained forever."""
     claimed = MatrixDelivery(
         delivery_id="approval-card-1",
@@ -272,12 +274,8 @@ async def test_changed_device_recovery_finds_the_exact_terminal_approval_edit(tm
         approval_room_ids=frozenset({claimed.room_id}),
     )
     transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: None,
-        journal_provider=lambda: None,
     )
-
     recovered = await transport.resolve_approval_delivery(claimed)
 
     assert recovered == "$approval-edit"
@@ -285,7 +283,7 @@ async def test_changed_device_recovery_finds_the_exact_terminal_approval_edit(tm
 
 
 @pytest.mark.asyncio
-async def test_action_delivery_resolver_reads_the_exact_router_card(tmp_path: Path) -> None:
+async def test_action_delivery_resolver_reads_the_exact_router_card() -> None:
     event = MagicMock(
         event_id="$approval",
         sender="@mindroom_router:localhost",
@@ -309,9 +307,7 @@ async def test_action_delivery_resolver_reads_the_exact_router_card(tmp_path: Pa
         approval_room_ids=frozenset({"!room:localhost"}),
     )
     transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: None,
     )
 
     assert await transport.resolve_approval_action_delivery("!room:localhost", "$approval") == "approval-card-1"
@@ -319,7 +315,7 @@ async def test_action_delivery_resolver_reads_the_exact_router_card(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_action_delivery_resolver_ignores_a_room_the_router_does_not_serve(tmp_path: Path) -> None:
+async def test_action_delivery_resolver_ignores_a_room_the_router_does_not_serve() -> None:
     client = MagicMock(
         user_id="@mindroom_router:localhost",
         room_get_event=AsyncMock(),
@@ -331,9 +327,7 @@ async def test_action_delivery_resolver_ignores_a_room_the_router_does_not_serve
         approval_room_ids=frozenset(),
     )
     transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: None,
     )
 
     assert await transport.resolve_approval_action_delivery("!direct:localhost", "$ordinary-reply") is None
@@ -341,7 +335,7 @@ async def test_action_delivery_resolver_ignores_a_room_the_router_does_not_serve
 
 
 @pytest.mark.asyncio
-async def test_action_delivery_resolver_retries_an_unreadable_exact_card(tmp_path: Path) -> None:
+async def test_action_delivery_resolver_retries_an_unreadable_exact_card() -> None:
     client = MagicMock(
         user_id="@mindroom_router:localhost",
         room_get_event=AsyncMock(return_value=nio.RoomGetEventError("not found")),
@@ -353,9 +347,7 @@ async def test_action_delivery_resolver_retries_an_unreadable_exact_card(tmp_pat
         approval_room_ids=frozenset({"!room:localhost"}),
     )
     transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: None,
     )
 
     with pytest.raises(approval_transport.ToolApprovalTransportError, match="could not verify"):
@@ -370,12 +362,8 @@ async def test_legacy_action_without_router_transport_is_ignored(tmp_path: Path)
     cards.is_terminal_approval_card = AsyncMock(return_value=False)
     cards.resolve_continuation_approval_card = AsyncMock()
     cards.acknowledge_matrix_delivery = AsyncMock()
-    transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
-        bot_provider=lambda _name: None,
-        cards_provider=lambda: cards,
-    )
-    manager = _ApprovalManager(
+    transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: None)
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         cards=cards,
         resolve_action_delivery=transport.resolve_approval_action_delivery,
@@ -397,7 +385,7 @@ async def test_legacy_action_without_router_transport_is_ignored(tmp_path: Path)
         await manager.shutdown()
 
     assert result.consumed is True
-    assert result.resolved is False
+
     before_consume.assert_awaited_once_with()
     cards.resolve_continuation_approval_card.assert_not_awaited()
     cards.acknowledge_matrix_delivery.assert_not_awaited()
@@ -425,11 +413,9 @@ async def test_legacy_action_retries_while_router_transport_is_starting(tmp_path
         approval_room_ids=frozenset({"!room:localhost"}),
     )
     transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: cards,
     )
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         cards=cards,
         resolve_action_delivery=transport.resolve_approval_action_delivery,
@@ -481,11 +467,9 @@ async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, erro
         approval_room_ids=frozenset({"!room:localhost"}),
     )
     transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: cards,
     )
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         cards=cards,
         resolve_action_delivery=transport.resolve_approval_action_delivery,
@@ -507,7 +491,7 @@ async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, erro
         await manager.shutdown()
 
     assert result.consumed is True
-    assert result.resolved is False
+
     before_consume.assert_awaited_once_with()
     cards.resolve_continuation_approval_card.assert_not_awaited()
     cards.acknowledge_matrix_delivery.assert_not_awaited()
@@ -543,11 +527,9 @@ async def test_legacy_action_retries_a_transient_transport_failure(tmp_path: Pat
         approval_room_ids=frozenset({"!room:localhost"}),
     )
     transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: cards,
     )
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         cards=cards,
         resolve_action_delivery=transport.resolve_approval_action_delivery,
@@ -624,7 +606,7 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
     )
     assert await responder.create_approval_continuation(continuation) == continuation
     requested_at = datetime.now(UTC)
-    card_content = _ApprovalManager._pending_event_content(
+    card_content = ApprovalManager._pending_event_content(
         approval_id=card_delivery_id,
         tool_name="shell",
         arguments={"command": "true"},
@@ -635,7 +617,6 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
         approver_user_id="@approver:localhost",
         requested_at=requested_at,
         expires_at=requested_at + timedelta(days=1),
-        status="pending",
     )
     card_content.update(
         continuation_id=approval_id,
@@ -672,7 +653,7 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
 
     cards = MagicMock(wraps=router)
     cards.principal_id = router.principal_id
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         send_delivery=send,
         cards=cards,
@@ -692,7 +673,7 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
         )
 
         assert result.consumed is True
-        assert result.resolved is True
+
         authorize_responder.assert_called_once_with("origin-team")
         assert sent == [DeliveryStage.FINAL]
         decided = await responder.approval_continuation(approval_id)
@@ -705,16 +686,12 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_continuation_decision_wakes_its_owning_bot_sources(tmp_path: Path) -> None:
+async def test_continuation_decision_wakes_its_owning_bot_sources() -> None:
     """Router-owned card decisions wake the entity journal that owns the paused run."""
     owner = MagicMock(running=True)
-    transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
-        bot_provider=lambda name: owner if name == "code" else None,
-        cards_provider=lambda: None,
-    )
+    transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda name: owner if name == "code" else None)
 
-    await transport._wake_continuation_sources("code", "!room:example.org", ("$source-1", "$source-2"))
+    await transport.wake_continuation_sources("code", "!room:example.org", ("$source-1", "$source-2"))
 
     owner.retry_approval_sources.assert_called_once_with("!room:example.org", ("$source-1", "$source-2"))
 
@@ -742,7 +719,7 @@ async def test_startup_recovery_skips_a_malformed_expiry_without_starving_later_
             ),
         ),
     )
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         send_delivery=AsyncMock(),
         cards=cards,
@@ -773,7 +750,7 @@ async def test_startup_recovery_logs_a_deferred_terminal_flush(tmp_path: Path) -
         card={},
         resolution={"status": "denied"},
     )
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         cards=MagicMock(),
         send_delivery=AsyncMock(),
@@ -815,7 +792,7 @@ async def test_startup_recovery_counts_an_unreadable_card_as_failed_debt(tmp_pat
             ),
         ),
     )
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         cards=cards,
         send_delivery=AsyncMock(),
@@ -854,7 +831,7 @@ async def test_startup_recovery_drops_a_transport_failure_settled_by_the_same_pa
             failed_deliveries=frozenset({(delivery_id, DeliveryStage.FINAL)}),
         ),
     )
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         cards=cards,
         send_delivery=AsyncMock(),
@@ -882,7 +859,7 @@ async def test_live_resolution_logs_room_context_when_terminal_flush_is_deferred
     cards.resolve_continuation_approval_card = AsyncMock(
         return_value=MagicMock(resolution={"status": "denied"}, recorded=False, continuation_ready=False),
     )
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         cards=cards,
         send_delivery=AsyncMock(),
@@ -893,7 +870,6 @@ async def test_live_resolution_logs_room_context_when_terminal_flush_is_deferred
 
     try:
         with (
-            patch.object(manager, "_resolved_event_content", return_value={"status": "denied"}),
             patch.object(manager, "_worker", return_value=worker),
             patch("mindroom.approval_manager.logger.warning") as warning,
         ):
@@ -928,7 +904,7 @@ async def test_deadline_sweep_expires_an_unacknowledged_card_and_wakes_its_conti
     cards = MagicMock()
     cards.expire_unacknowledged_approval_card = AsyncMock(return_value=recorded)
     wake = AsyncMock()
-    manager = _ApprovalManager(
+    manager = ApprovalManager(
         test_runtime_paths(tmp_path),
         cards=cards,
         continuation_ready=wake,
@@ -946,7 +922,7 @@ async def test_deadline_sweep_expires_an_unacknowledged_card_and_wakes_its_conti
 
 
 @pytest.mark.asyncio
-async def test_transient_removed_owner_cleanup_rearms_startup_retry(tmp_path: Path) -> None:
+async def test_transient_removed_owner_cleanup_rearms_startup_retry() -> None:
     """A failed card edit cannot abandon a removed entity's fenced journal work."""
     continuation = MagicMock(
         approval_id="approval-removed",
@@ -972,31 +948,31 @@ async def test_transient_removed_owner_cleanup_rearms_startup_retry(tmp_path: Pa
         approval_continuations_for_entities=AsyncMock(return_value=(("agent@removed", continuation),)),
     )
     journal.principal.return_value = principal
-    transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
-        bot_provider=lambda _name: None,
-        cards_provider=lambda: None,
+    transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: None)
+    recovery = ApprovalRecovery(
+        deliver_unavailable_notice=transport.deliver_unavailable_notice,
         journal_provider=lambda: journal,
         entity_configured=lambda name: name != "removed",
     )
-    transport._startup_cleanup_done = True
+    recovery._startup_cleanup_done = True
 
     with (
-        patch(
-            "mindroom.approval_transport.approval_manager.get_approval_store",
-            return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=False)),
+        patch.object(
+            recovery,
+            "manager",
+            new=MagicMock(expire_continuation_cards=AsyncMock(return_value=False)),
         ),
-        patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
+        patch.object(recovery, "_schedule_startup_cleanup_retry") as schedule_retry,
     ):
-        await transport.reconcile_unavailable_entities({"removed"})
+        await recovery.reconcile_unavailable_entities({"removed"})
 
-    assert transport._startup_cleanup_done is False
+    assert recovery._startup_cleanup_done is False
     schedule_retry.assert_called_once_with()
     principal.discard_unavailable_approval_continuation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_startup_unavailable_owner_cleanup_walks_cursor_pages(tmp_path: Path) -> None:
+async def test_startup_unavailable_owner_cleanup_walks_cursor_pages() -> None:
     """Startup cleanup cannot stop after one bounded continuation-owner page."""
     continuations = [MagicMock(approval_id=f"approval-{index}", entity_name="removed") for index in range(3)]
     journal = MagicMock(
@@ -1007,19 +983,18 @@ async def test_startup_unavailable_owner_cleanup_walks_cursor_pages(tmp_path: Pa
             ),
         ),
     )
-    transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
-        bot_provider=lambda _name: None,
-        cards_provider=lambda: None,
+    transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: None)
+    recovery = ApprovalRecovery(
+        deliver_unavailable_notice=transport.deliver_unavailable_notice,
         journal_provider=lambda: journal,
         entity_configured=lambda name: name != "removed",
     )
 
     with (
-        patch.object(approval_transport, "_UNAVAILABLE_OWNER_SCAN_LIMIT", 2),
-        patch.object(transport, "_discard_unavailable", new=AsyncMock(return_value=True)) as discard,
+        patch("mindroom.approval_recovery._UNAVAILABLE_OWNER_SCAN_LIMIT", 2),
+        patch.object(recovery, "_discard_unavailable", new=AsyncMock(return_value=True)) as discard,
     ):
-        assert await transport._reconcile_unavailable_owner_pages(None)
+        assert await recovery._reconcile_unavailable_owner_pages(None)
 
     assert journal.approval_continuations.await_args_list == [
         call(limit=2, after=None),
@@ -1033,39 +1008,39 @@ async def test_startup_unavailable_owner_cleanup_walks_cursor_pages(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_startup_unavailable_cleanup_scans_owners_while_card_recovery_remains_retryable(tmp_path: Path) -> None:
+async def test_startup_unavailable_cleanup_scans_owners_while_card_recovery_remains_retryable() -> None:
     """One stuck card does not prevent cleanup from settling unrelated continuations."""
-    transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
-        bot_provider=lambda _name: None,
-        cards_provider=lambda: None,
+    transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: None)
+    recovery = ApprovalRecovery(
+        deliver_unavailable_notice=transport.deliver_unavailable_notice,
         journal_provider=lambda: None,
     )
-    transport._startup_router_ready_for_cleanup = True
-    transport._startup_runtime_support_ready_for_cleanup = True
+    recovery.manager = MagicMock()
+    recovery._startup_router_ready_for_cleanup = True
+    recovery._startup_runtime_support_ready_for_cleanup = True
 
     with (
         patch.object(
-            transport,
+            recovery,
             "_recover_approval_cards_on_startup",
             new=AsyncMock(return_value=False),
         ),
         patch.object(
-            transport,
+            recovery,
             "_reconcile_unavailable_owner_pages",
             new=AsyncMock(return_value=True),
         ) as reconcile,
-        patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
+        patch.object(recovery, "_schedule_startup_cleanup_retry") as schedule_retry,
     ):
-        await transport._run_startup_cleanup_if_ready()
+        await recovery._run_startup_cleanup_if_ready()
 
     reconcile.assert_awaited_once_with(None)
     schedule_retry.assert_called_once_with()
-    assert transport._startup_cleanup_done is False
+    assert recovery._startup_cleanup_done is False
 
 
 @pytest.mark.asyncio
-async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sources(tmp_path: Path) -> None:
+async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sources() -> None:
     """A removed entity's waiting response must not be the last visible lifecycle state."""
     continuation = MagicMock(
         approval_id="approval-removed",
@@ -1146,18 +1121,20 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         approval_store=notice_store,
     )
     transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: notice_store,
+    )
+    recovery = ApprovalRecovery(
+        deliver_unavailable_notice=transport.deliver_unavailable_notice,
         journal_provider=lambda: journal,
         entity_configured=lambda name: name != "removed",
     )
 
-    with patch(
-        "mindroom.approval_transport.approval_manager.get_approval_store",
-        return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
+    with patch.object(
+        recovery,
+        "manager",
+        new=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
     ):
-        await transport.reconcile_unavailable_entities({"removed"})
+        await recovery.reconcile_unavailable_entities({"removed"})
 
     content = client.room_send.await_args.kwargs["content"]
     assert content["m.relates_to"]["m.in_reply_to"] == {"event_id": "$waiting"}
@@ -1169,8 +1146,13 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
     )
 
 
+@pytest.mark.parametrize("with_result", [True, False], ids=["success", "without-result"])
 @pytest.mark.asyncio
-async def test_removed_owner_cleanup_recovers_frozen_success_through_original_owner(tmp_path: Path) -> None:
+async def test_removed_owner_cleanup_recovers_any_frozen_final_through_original_owner(
+    tmp_path: Path,
+    *,
+    with_result: bool,
+) -> None:
     """Unavailable cleanup must recover and finalize FINAL debt through its original principal."""
     journal = EventJournalStore.open_sqlite(tmp_path / "approval-frozen-success.db")
     principal = journal.principal("agent@removed")
@@ -1212,10 +1194,13 @@ async def test_removed_owner_cleanup_recovers_frozen_success_through_original_ow
         payload={
             "msgtype": "m.text",
             "body": "finished",
-            DURABLE_FINAL_OUTCOME_KEY: {"terminal_status": "completed"},
+            **({DURABLE_FINAL_OUTCOME_KEY: {"terminal_status": "completed"}} if with_result else {}),
         },
     )
-    assert await principal.claim_matrix_delivery(delivery_id=source_event_id, stage=DeliveryStage.FINAL) is not None
+    final = await principal.claim_matrix_delivery(delivery_id=source_event_id, stage=DeliveryStage.FINAL)
+    assert final is not None
+    # Even a FINAL without a completed-run result belongs to the original owner.
+    assert (final.result is not None) is with_result
 
     recovered: list[tuple[str, str]] = []
 
@@ -1229,10 +1214,9 @@ async def test_removed_owner_cleanup_recovers_frozen_success_through_original_ow
         )
         return await principal.finish_approval_continuation(observed.approval_id)
 
-    transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
-        bot_provider=lambda _name: None,
-        cards_provider=lambda: None,
+    transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: None)
+    recovery = ApprovalRecovery(
+        deliver_unavailable_notice=transport.deliver_unavailable_notice,
         journal_provider=lambda: journal,
         entity_configured=lambda name: name != "removed",
         recover_unavailable_final=recover_final,
@@ -1240,11 +1224,12 @@ async def test_removed_owner_cleanup_recovers_frozen_success_through_original_ow
 
     try:
         expire_cards = AsyncMock()
-        with patch(
-            "mindroom.approval_transport.approval_manager.get_approval_store",
-            return_value=MagicMock(expire_continuation_cards=expire_cards),
+        with patch.object(
+            recovery,
+            "manager",
+            new=MagicMock(expire_continuation_cards=expire_cards),
         ):
-            assert await transport._discard_unavailable(
+            assert await recovery._discard_unavailable(
                 "agent@removed",
                 continuation,
                 "Requesting agent 'removed' is no longer available.",
@@ -1367,19 +1352,21 @@ async def test_removed_owner_cleanup_recovers_notice_after_matrix_device_change(
         approval_store=notice_store,
     )
     transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: None,
+    )
+    recovery = ApprovalRecovery(
+        deliver_unavailable_notice=transport.deliver_unavailable_notice,
         journal_provider=lambda: journal,
         entity_configured=lambda name: name != "removed",
     )
 
     try:
-        with patch(
-            "mindroom.approval_transport.approval_manager.get_approval_store",
-            return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
+        with patch.object(
+            recovery,
+            "manager",
+            new=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
         ):
-            assert await transport._discard_unavailable("agent@removed", continuation, reason)
+            assert await recovery._discard_unavailable("agent@removed", continuation, reason)
 
         if accepted_before_crash:
             client.room_send.assert_not_awaited()
@@ -1480,19 +1467,21 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
         approval_store=notice_store,
     )
     transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: None,
+    )
+    recovery = ApprovalRecovery(
+        deliver_unavailable_notice=transport.deliver_unavailable_notice,
         journal_provider=lambda: journal,
         entity_configured=lambda name: name != "removed",
     )
 
     try:
-        with patch(
-            "mindroom.approval_transport.approval_manager.get_approval_store",
-            return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
+        with patch.object(
+            recovery,
+            "manager",
+            new=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
         ):
-            assert await transport._discard_unavailable("agent@removed", continuation, reason)
+            assert await recovery._discard_unavailable("agent@removed", continuation, reason)
 
         current_delivery_id = f"approval-unavailable:{approval_id}:1"
         current = await notice_store.load_matrix_delivery(
@@ -1579,23 +1568,25 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         approval_store=notice_store,
     )
     transport = approval_transport.ApprovalMatrixTransport(
-        runtime_paths=test_runtime_paths(tmp_path),
         bot_provider=lambda name: router if name == "router" else None,
-        cards_provider=lambda: None,
+    )
+    recovery = ApprovalRecovery(
+        deliver_unavailable_notice=transport.deliver_unavailable_notice,
         journal_provider=lambda: journal,
         entity_configured=lambda name: name != "removed",
     )
-    transport._startup_cleanup_done = True
+    recovery._startup_cleanup_done = True
 
     try:
         with (
-            patch(
-                "mindroom.approval_transport.approval_manager.get_approval_store",
-                return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
+            patch.object(
+                recovery,
+                "manager",
+                new=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
             ),
-            patch.object(transport, "_schedule_startup_cleanup_retry") as schedule_retry,
+            patch.object(recovery, "_schedule_startup_cleanup_retry") as schedule_retry,
         ):
-            await transport.reconcile_unavailable_entities({"removed"})
+            await recovery.reconcile_unavailable_entities({"removed"})
 
         schedule_retry.assert_called_once_with()
         assert await principal.approval_continuation(approval_id) == continuation
@@ -1730,7 +1721,7 @@ def test_approval_arguments_preview_marks_sanitizer_truncation() -> None:
     assert preview["__truncated__"] == "5 more items"
     assert truncated is True
 
-    card = _ApprovalManager._pending_event_content(
+    card = ApprovalManager._pending_event_content(
         approval_id="approval-1",
         tool_name="read_file",
         arguments=preview,
@@ -1741,7 +1732,6 @@ def test_approval_arguments_preview_marks_sanitizer_truncation() -> None:
         approver_user_id="@user:localhost",
         requested_at=datetime.now(UTC),
         expires_at=datetime.now(UTC) + timedelta(minutes=5),
-        status="pending",
     )
 
     assert card["arguments_truncated"] is True
@@ -2076,3 +2066,33 @@ def test_get_approval_store_returns_initialized_store(tmp_path: Path) -> None:
     store = initialize_approval_store(runtime_paths)
 
     assert get_approval_store() is store
+
+
+@pytest.mark.asyncio
+async def test_manager_owns_recovery_across_bootstrap_rebind_and_shutdown(tmp_path: Path) -> None:
+    """Early readiness survives binding, and shutdown cancels the same recovery task."""
+    recovery = ApprovalRecovery(deliver_unavailable_notice=AsyncMock())
+    await recovery.mark_router_ready()
+    await recovery.mark_startup_runtime_support_ready()
+    assert not recovery._startup_cleanup_done
+    assert recovery._startup_cleanup_retry is None
+    manager = ApprovalManager(test_runtime_paths(tmp_path), recovery=recovery)
+    try:
+        manager._configure_transport(send_delivery=AsyncMock())
+        assert manager.recovery is recovery
+        assert recovery.manager is manager
+        with patch.object(
+            manager,
+            "recover_cards_on_startup",
+            new=AsyncMock(return_value=_ApprovalStartupSweep(discarded=0, failed=1)),
+        ) as recover:
+            await recovery.mark_startup_runtime_support_ready()
+        recover.assert_awaited_once()
+        task = recovery._startup_cleanup_retry
+        assert task is not None
+        assert not task.done()
+        await manager.shutdown()
+        assert task.cancelled()
+        assert recovery._startup_cleanup_retry is None
+    finally:
+        await manager.shutdown()

@@ -111,7 +111,7 @@ def resolve(
     *,
     requested_status: Literal["approved", "denied", "expired"],
     reason: str | None,
-    resolution: Mapping[str, object] | None,
+    metadata: approval_card_state.ApprovalDecisionMetadata | None,
     card_event_id: str | None = None,
     delivery_id: str | None = None,
 ) -> RecordedApprovalDecision:
@@ -160,6 +160,8 @@ def resolve(
         return approval_card_state.RecordedApprovalDecision(
             resolution=approval_card_state.decode_resolution(cast("str | None", row["resolution_json"])),
             recorded=False,
+            delivery_id=str(row["delivery_id"]),
+            card_event_id=card_event_id,
         )
     expired = time.time_ns() >= int(row["expires_at_ns"])
     decision_status: Literal["approved", "denied", "expired"]
@@ -171,7 +173,7 @@ def resolve(
         decision_status = requested_status
     stored = approval_card_state.stored_resolution(
         row,
-        resolution=resolution,
+        metadata=metadata,
         requested_status=requested_status,
         decision=decision_status,
         reason=decision_reason,
@@ -189,7 +191,12 @@ def resolve(
         msg = f"Background approval call {row['call_id']!r} changed during its exact-call decision"
         raise RuntimeError(msg)
     approval_card_state.enqueue_resolution(transaction, principal_id, row, stored)
-    return approval_card_state.RecordedApprovalDecision(resolution=stored, recorded=True)
+    return approval_card_state.RecordedApprovalDecision(
+        resolution=stored,
+        recorded=True,
+        delivery_id=str(row["delivery_id"]),
+        card_event_id=card_event_id,
+    )
 
 
 def resolve_call(
@@ -224,7 +231,7 @@ def resolve_call(
         delivery_id=None if card_event_id is not None else str(row["delivery_id"]),
         requested_status=requested_status,
         reason=reason,
-        resolution=None,
+        metadata=None,
     )
 
 

@@ -106,7 +106,7 @@ class MatrixDeliveryWorker:
     send: SendDelivery
     observe_delivered: _ObserveDelivered | None = None
     event_type: str = "m.room.message"
-    resend_after_reconciliation_miss: bool = True
+    resend_after_reconciliation_miss: bool | Callable[[MatrixDelivery], bool] = True
     # The device this process is logged in as, recorded on every claim. A
     # Matrix transaction ID is idempotent within one device and meaningless
     # across a change of one, so the row has to remember which device's
@@ -421,7 +421,12 @@ class MatrixDeliveryWorker:
             # inconclusive bounded scan. Its terminal edit is different: the
             # exact decision is already durable, so replaying the identical
             # replacement preserves cleanup liveness without another action.
-            if not self.resend_after_reconciliation_miss and claimed.edits_event_id is None:
+            may_resend = (
+                self.resend_after_reconciliation_miss(claimed)
+                if callable(self.resend_after_reconciliation_miss)
+                else self.resend_after_reconciliation_miss
+            )
+            if not may_resend and claimed.edits_event_id is None:
                 return _FlushOutcome(event_id=None, retry_required=True)
         # Only now, with a send actually about to happen. Writing this at claim
         # time instead loses the fact that a lookup is still owed: a room scan

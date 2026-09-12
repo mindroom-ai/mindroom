@@ -394,7 +394,7 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
         patch("mindroom.api.config_lifecycle._publish_runtime_config_into_app", return_value=True),
         patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
+        patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
         patch.object(orchestrator.agent_reply_memberships, "invalidate") as mock_invalidate_memberships,
@@ -454,7 +454,7 @@ async def test_trigger_support_only_reload_publishes_api_config_before_binding_r
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
         patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
+        patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
     ):
         await orchestrator._apply_config_update_plan(current_config, plan, ())
@@ -808,7 +808,7 @@ async def test_removed_entity_reconciles_live_approval_continuations(tmp_path: P
         patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
         patch.object(orchestrator, "_remove_deleted_entities", new=AsyncMock()) as remove_deleted,
         patch.object(
-            orchestrator._approval_transport,
+            orchestrator._approval_recovery,
             "reconcile_unavailable_entities",
             new=AsyncMock(),
         ) as reconcile,
@@ -1216,7 +1216,7 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
         patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
         patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
+        patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as mock_bind_runtime,
     ):
@@ -1320,7 +1320,7 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
         patch.object(orchestrator, "_reconcile_post_update_rooms", side_effect=reconcile_rooms),
         patch.object(orchestrator, "_sync_runtime_support_services", side_effect=sync_support_services),
-        patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
+        patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready", side_effect=bind_runtime),
     ):
@@ -1357,7 +1357,7 @@ async def test_router_removal_unbinds_external_trigger_runtime_before_cleanup(tm
     with (
         patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
         patch.object(
-            orchestrator._approval_transport,
+            orchestrator._approval_recovery,
             "reconcile_unavailable_entities",
             side_effect=reconcile_before_cleanup,
         ),
@@ -1475,7 +1475,7 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         ),
         patch.object(orchestrator, "_reconcile_post_update_rooms", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator._approval_transport, "mark_startup_runtime_support_ready", new=AsyncMock()),
+        patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
     ):

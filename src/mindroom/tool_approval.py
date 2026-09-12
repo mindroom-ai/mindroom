@@ -225,10 +225,10 @@ async def handle_matrix_approval_action(
     """Resolve a durable continuation card anchored to its Matrix event."""
     manager = approval_manager.get_approval_store()
     if manager is None:
-        return ApprovalActionResult(consumed=False, resolved=False)
+        return ApprovalActionResult(consumed=False)
     sanitized_reason = action.reason.strip() if isinstance(action.reason, str) and action.reason.strip() else None
     if action.card_event_id is None:
-        return ApprovalActionResult(consumed=False, resolved=False)
+        return ApprovalActionResult(consumed=False)
     if (
         action.action == "revoke_auto_approval"
         and action.grant_id is not None
@@ -244,7 +244,7 @@ async def handle_matrix_approval_action(
             before_consume=before_consume,
         )
     if action.status is None or action.action is not None or action.grant_id is not None:
-        return ApprovalActionResult(consumed=False, resolved=False)
+        return ApprovalActionResult(consumed=False)
     return await manager.handle_card_response(
         room_id=action.room_id,
         sender_id=action.sender_id,

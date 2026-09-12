@@ -14,7 +14,7 @@ from mindroom.history_recovery import (
 )
 from mindroom.interactive_models import InteractiveSelection
 
-from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
+from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
 from .approval_continuations import (
     ApprovalCall,
     ApprovalContinuation,
@@ -86,6 +86,7 @@ __all__ = [
     "ApprovalCardReservation",
     "ApprovalContinuation",
     "ApprovalDecision",
+    "ApprovalDecisionMetadata",
     "ApprovalDeliveryView",
     "ApprovalMemoryTurn",
     "BackgroundApprovalDecision",

@@ -27,6 +27,7 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
+    ApprovalDecisionMetadata,
     EventClass,
     EventKind,
     PendingPage,
@@ -2470,7 +2471,7 @@ class TestRoomRetryBackoff:
                 card_event_id="$approval",
                 requested_status="approved",
                 reason=None,
-                resolution={"status": "approved"},
+                metadata=ApprovalDecisionMetadata(),
             )
             assert recorded.continuation_ready
             assert recorded.continuation_room_id == ROOM

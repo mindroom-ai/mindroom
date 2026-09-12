@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.tool_approval_grants import ApprovalOperation
+
     from .backend import Row, Transaction
 
 from . import outbox
@@ -18,6 +20,7 @@ from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
 __all__ = [
     "TIMEOUT_REASON",
     "ApprovalCardReservation",
+    "ApprovalDecisionMetadata",
     "RecordedApprovalDecision",
     "decode_object_payload",
     "decode_resolution",
@@ -31,6 +34,16 @@ TIMEOUT_REASON = "Tool approval request timed out."
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalDecisionMetadata:
+    """Authenticated decision facts; original request evidence belongs to the journal."""
+
+    resolved_by: str | None = None
+    resolved_at: str | None = None
+    provenance: Mapping[str, Any] | None = None
+    auto_approval: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalCardReservation:
     """One exact-call approval card and its frozen Matrix payload."""
 
@@ -38,7 +51,7 @@ class ApprovalCardReservation:
     tool_call_id: str
     event_type: str
     payload: Mapping[str, object]
-    grant_operation: str | None = None
+    grant_operation: ApprovalOperation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +66,8 @@ class RecordedApprovalDecision:
     # Whether this call is what committed the decision it offered. False both
     # when there was no row to write and when the row refused the write.
     recorded: bool
+    delivery_id: str | None = None
+    card_event_id: str | None = None
     continuation_ready: bool = False
     continuation_entity_name: str | None = None
     continuation_room_id: str | None = None
@@ -106,63 +121,19 @@ def reserve_delivery(
 def stored_resolution(
     row: Row,
     *,
-    resolution: Mapping[str, Any] | None,
+    metadata: ApprovalDecisionMetadata | None,
     requested_status: Literal["approved", "denied", "expired"],
     decision: Literal["approved", "denied", "expired"],
     reason: str | None,
     description: str,
 ) -> dict[str, Any]:
-    """Build one terminal payload for either durable approval target."""
-    if resolution is None:
-        if decision == "approved":
-            msg = "An approved card requires its authenticated terminal payload."
-            raise ValueError(msg)
-        return terminal_content(
-            decode_object_payload(row["payload_json"], description=description),
-            status=decision,
-            reason=reason or TIMEOUT_REASON,
-        )
-    return _resolved_content(
-        resolution,
-        requested_status=requested_status,
-        decision=decision,
+    """Project the actual journal decision from its frozen original request."""
+    return terminal_content(
+        decode_object_payload(row["payload_json"], description=description),
+        status=decision,
         reason=reason,
+        metadata=metadata if decision == requested_status else None,
     )
-
-
-def _compact_terminal_content(content: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep previews while dropping pending review data that Matrix edits would duplicate."""
-    pending_fields = {
-        "full_arguments",
-        "full_arguments_file",
-        "full_arguments_url",
-        "full_arguments_info",
-        "auto_approve_options",
-    }
-    return {key: value for key, value in content.items() if key not in pending_fields}
-
-
-def _resolved_content(
-    resolution: Mapping[str, Any],
-    *,
-    requested_status: Literal["approved", "denied", "expired"],
-    decision: Literal["approved", "denied", "expired"],
-    reason: str | None,
-) -> dict[str, Any]:
-    """Rewrite visible content when a durable fence overrides an approval."""
-    stored = _compact_terminal_content(resolution)
-    if decision == requested_status:
-        return stored
-    stored["status"] = decision
-    if decision != "approved":
-        stored.pop("auto_approval", None)
-    stored["resolution_reason"] = reason
-    stored["resolved_by"] = None
-    body = stored.get("body")
-    requested_prefix = f"{requested_status.title()}:"
-    if isinstance(body, str) and body.startswith(requested_prefix):
-        stored["body"] = f"{decision.title()}:{body.removeprefix(requested_prefix)}"
-    return stored
 
 
 def enqueue_resolution(
@@ -190,19 +161,31 @@ def enqueue_resolution(
 def terminal_content(
     content: Mapping[str, Any],
     *,
-    status: Literal["denied", "expired"],
-    reason: str,
+    status: Literal["approved", "denied", "expired"],
+    reason: str | None,
+    metadata: ApprovalDecisionMetadata | None = None,
+    publication: Literal["edit", "receipt"] = "edit",
 ) -> dict[str, Any]:
-    """Build the fail-closed terminal form of a shared approval card."""
-    resolution = {
-        **_compact_terminal_content(content),
-        "status": status,
-        "approvable": False,
-        "resolution_reason": reason,
-        "resolved_by": None,
-    }
+    """Pure terminal projection; automatic originals retain complete argument evidence."""
+    if status == "approved" and metadata is None:
+        msg = "An approved card requires its authenticated decision metadata."
+        raise ValueError(msg)
+    excluded = {"auto_approve_options", "auto_approval", "approval_provenance", "resolved_at", "resolution_reason"}
+    if publication == "edit":
+        excluded.add("full_arguments")
+    resolution = {key: value for key, value in content.items() if key not in excluded}
+    resolution.update(status=status, approvable=False, resolved_by=None if metadata is None else metadata.resolved_by)
+    if metadata is not None and metadata.resolved_at is not None:
+        resolution["resolved_at"] = metadata.resolved_at
+    if reason is not None:
+        resolution["resolution_reason"] = reason
+    if status == "approved" and metadata is not None:
+        resolution["approval_provenance"] = dict(metadata.provenance or {"kind": "once"})
+        if publication == "edit" and metadata.auto_approval is not None:
+            resolution["auto_approval"] = dict(metadata.auto_approval)
     tool_name = resolution.get("tool_name")
-    resolution["body"] = f"{status.title()}: {tool_name}" if isinstance(tool_name, str) else f"Approval {status}"
+    label = "Auto-approved" if publication == "receipt" and status == "approved" else status.title()
+    resolution["body"] = f"{label}: {tool_name}" if isinstance(tool_name, str) else f"Approval {status}"
     return resolution
 
 
