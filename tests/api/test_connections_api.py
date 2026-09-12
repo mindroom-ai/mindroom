@@ -129,11 +129,21 @@ def test_catalog_lists_tools_without_browser_authentication(portal: dict[str, An
 
 
 @pytest.mark.parametrize("agent_name", ["personal", "research"])
-@pytest.mark.parametrize(("content_type", "expected"), [("image/png", 200), ("image/svg+xml", 404)])
+@pytest.mark.parametrize(
+    ("content_type", "body", "expected"),
+    [
+        ("image/png", b"thumbnail", 200),
+        ("image/svg+xml", b"thumbnail", 404),
+        ("image/png", b"", 404),
+        ("image/png", b"x" * (1024 * 1024 + 1), 404),
+    ],
+    ids=["raster", "svg", "empty", "oversized"],
+)
 def test_avatar_serves_current_matrix_thumbnail(
     shared_portal: dict[str, Any],
     agent_name: str,
     content_type: str,
+    body: bytes,
     expected: int,
 ) -> None:
     """Visible private and management-only shared agents use their saved Matrix identity."""
@@ -148,7 +158,7 @@ def test_avatar_serves_current_matrix_thumbnail(
         matrix.get(
             "http://localhost:8008/_matrix/client/v1/media/thumbnail/example.org/current-avatar"
             "?width=96&height=96&method=scale&allow_remote=true",
-            body=b"thumbnail",
+            body=body,
             content_type=content_type,
         )
         response = shared_portal["client"].get(

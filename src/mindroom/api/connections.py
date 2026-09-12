@@ -255,6 +255,7 @@ async def avatar(agent_name: str, user: _ConnectionUserContext) -> Response:
             if (
                 not isinstance(thumbnail, nio.ThumbnailResponse)
                 or not isinstance(thumbnail.body, bytes)
+                or not 0 < len(thumbnail.body) <= 1024 * 1024
                 or thumbnail.content_type not in {"image/png", "image/jpeg", "image/gif", "image/webp"}
             ):
                 raise HTTPException(404, "Avatar is not available", headers=CONNECTIONS_HEADERS)
