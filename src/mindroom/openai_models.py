@@ -84,6 +84,10 @@ class MindRoomLlamaCpp(ChatToolArgumentsCompat, LlamaCpp):
     """llama.cpp server model that can replay tool calls from other providers."""
 
 
+class _IncompleteResponsesStreamError(ModelProviderError):
+    """A Responses stream ended before successful completion."""
+
+
 @dataclass
 class MindRoomOpenAIResponses(OpenAIResponses):
     """OpenAI Responses model that preserves completed response and tool-search state."""
@@ -144,6 +148,10 @@ class MindRoomOpenAIResponses(OpenAIResponses):
         record_tool_search_items(model_response, response.output)
         return model_response
 
+    def _is_retryable_error(self, error: ModelProviderError) -> bool:
+        """Do not retry incomplete streams with Agno's retained partial text and tool calls."""
+        return not isinstance(error, _IncompleteResponsesStreamError) and super()._is_retryable_error(error)
+
     def invoke_stream(
         self,
         messages: list[Message],
@@ -175,7 +183,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
             cast("Generator[ModelResponse, None, None]", stream).close()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
-            raise ModelProviderError(
+            raise _IncompleteResponsesStreamError(
                 msg,
                 model_name=self.name,
                 model_id=self.id,
@@ -211,7 +219,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
             await cast("AsyncGenerator[ModelResponse, None]", stream).aclose()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
-            raise ModelProviderError(
+            raise _IncompleteResponsesStreamError(
                 msg,
                 model_name=self.name,
                 model_id=self.id,

@@ -83,15 +83,22 @@ def _tool_stream() -> str:
 
 
 @asynccontextmanager
-async def _model(*streams: str, store: bool = True) -> AsyncIterator[MindRoomOpenAIResponses]:
+async def _model(*streams: str | httpx.Response, store: bool = True) -> AsyncIterator[MindRoomOpenAIResponses]:
     remaining = iter(streams)
 
     def respond(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=next(remaining))
+        response = next(remaining)
+        if isinstance(response, httpx.Response):
+            return response
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=response)
 
     transport = httpx.MockTransport(respond)
-    with OpenAI(api_key="test-key", http_client=httpx.Client(transport=transport)) as client:
-        async with AsyncOpenAI(api_key="test-key", http_client=httpx.AsyncClient(transport=transport)) as async_client:
+    with OpenAI(api_key="test-key", max_retries=0, http_client=httpx.Client(transport=transport)) as client:
+        async with AsyncOpenAI(
+            api_key="test-key",
+            max_retries=0,
+            http_client=httpx.AsyncClient(transport=transport),
+        ) as async_client:
             yield MindRoomOpenAIResponses(id="gpt-6-astra", client=client, async_client=async_client, store=store)
 
 
@@ -263,3 +270,72 @@ async def test_agent_records_truncated_followup_as_error_after_completed_tool(tm
         assert [(tool.tool_name, tool.result) for tool in run.tools] == [("get_status", "ready")]
         history = [*session.get_messages(agent_id="status_agent"), Message(role="user", content="Follow up")]
         assert "previous_response_id" not in model.get_request_params(messages=history)
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "stream",
+    [_created() + _text(), _tool_stream().split("event: response.completed")[0]],
+    ids=["partial-text", "partial-tool"],
+)
+async def test_agent_does_not_retry_incomplete_stream(tmp_path: Path, stream: str, *, sync: bool) -> None:
+    """Retries must not combine partial output with a successful response or execute its tools."""
+    executed_tools: list[str] = []
+
+    def get_status() -> str:
+        """Return the local status."""
+        executed_tools.append("get_status")
+        return "ready"
+
+    completed = (
+        _created("resp_no_tools")
+        + _text()
+        + _event("response.completed", response=_response("resp_no_tools", "completed"))
+    )
+    db = SqliteDb(db_file=str(tmp_path / "sessions.db"))
+    async with _model(stream, completed, completed) as model:
+        model.retries = 1
+        model.delay_between_retries = 0
+        agent = Agent(id="status_agent", model=model, db=db, tools=[get_status], add_history_to_context=True)
+        if sync:
+            events = list(agent.run("Check status", session_id="status_session", stream=True, stream_events=True))
+        else:
+            events = [
+                event
+                async for event in agent.arun(
+                    "Check status",
+                    session_id="status_session",
+                    stream=True,
+                    stream_events=True,
+                )
+            ]
+
+        assert executed_tools == []
+        assert not any(isinstance(event, RunCompletedEvent) for event in events)
+        assert any(isinstance(event, RunErrorEvent) for event in events)
+        session = db.get_session("status_session", SessionType.AGENT)
+        assert isinstance(session, AgentSession)
+        assert RunStatus(session.runs[-1].status) is RunStatus.error
+        history = [*session.get_messages(agent_id="status_agent"), Message(role="user", content="Follow up")]
+        assert "previous_response_id" not in model.get_request_params(messages=history)
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+@pytest.mark.parametrize("status_code", [429, 503])
+async def test_agent_still_retries_transient_provider_errors(status_code: int, *, sync: bool) -> None:
+    """The incomplete-stream guard must preserve ordinary provider retries before any output."""
+    failed = httpx.Response(status_code, json={"error": {"message": "Temporarily unavailable", "type": "server_error"}})
+    completed = (
+        _created("resp_answer") + _text() + _event("response.completed", response=_response("resp_answer", "completed"))
+    )
+    async with _model(failed, completed) as model:
+        model.retries = 1
+        model.delay_between_retries = 0
+        agent = Agent(model=model)
+        if sync:
+            events = list(agent.run("Check status", stream=True, stream_events=True))
+        else:
+            events = [event async for event in agent.arun("Check status", stream=True, stream_events=True)]
+
+    assert not any(isinstance(event, RunErrorEvent) for event in events)
+    assert [event.content for event in events if isinstance(event, RunCompletedEvent)] == ["Ready"]
