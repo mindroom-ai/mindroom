@@ -31,6 +31,10 @@ class _CheckpointValidationError(ValueError):
     """A persisted cursor cannot safely be used until its storage is repaired."""
 
 
+class RecurringDeliveryHeldError(RuntimeError):
+    """A frozen trigger needs reconciliation before this device can resume it."""
+
+
 class RecurringCheckpointUnavailableError(RuntimeError):
     """The scheduler must refresh time and task state before retrying preparation."""
 
@@ -173,13 +177,14 @@ async def prepare_recurring_delivery(
     occurrence: RecurringOccurrence,
     content: dict[str, Any],
     device_id: str | None,
-) -> None:
-    """Commit the exact trigger before the first network attempt."""
+) -> RecurringOccurrence:
+    """Commit the exact trigger and return the saved state before any network attempt."""
     if not device_id:
         msg = "Recurring delivery requires an authenticated Matrix device"
         raise RuntimeError(msg)
     checkpoint = replace(occurrence.checkpoint, prepared=_PreparedRecurringDelivery(content, device_id))
     await _checkpoint_operation(partial(_save, occurrence.path, checkpoint))
+    return replace(occurrence, checkpoint=checkpoint)
 
 
 def recurring_delivery_content(occurrence: RecurringOccurrence, device_id: str | None) -> dict[str, Any] | None:
@@ -189,12 +194,12 @@ def recurring_delivery_content(occurrence: RecurringOccurrence, device_id: str |
         return None
     if prepared.device_id != device_id:
         msg = "Pending recurring trigger belongs to another Matrix device; delivery needs reconciliation"
-        raise ValueError(msg)
+        raise RecurringDeliveryHeldError(msg)
     return prepared.content
 
 
 async def complete_recurring_occurrence(occurrence: RecurringOccurrence, cron: str, now: datetime) -> None:
-    """Advance only after delivery or an intentional hook suppression."""
+    """Advance after delivery, hook suppression, or a terminal preparation failure."""
     completed_at = max(now, occurrence.checkpoint.next_run_at)
     latest = croniter(cron, completed_at + timedelta(microseconds=1)).get_prev(datetime)
     checkpoint = replace(

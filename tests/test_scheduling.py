@@ -1026,7 +1026,7 @@ async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
         patch(
             "mindroom.scheduling_executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute_mock,
         patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock()),
     ):
@@ -1071,7 +1071,7 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
         patch(
             "mindroom.scheduling_executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute_mock,
     ):
         await _run_once_task(
@@ -1126,7 +1126,7 @@ async def test_run_once_task_retries_transient_state_read_failure() -> None:
         patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock()) as sleep,
         patch(
             "mindroom.scheduling_executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute,
         patch(
             "mindroom.scheduling_executor.send_scheduled_failure_notice",
@@ -1171,7 +1171,7 @@ async def test_run_once_task_marks_completed_after_success() -> None:
         ),
         patch(
             "mindroom.scheduling_executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute_mock,
     ):
         await _run_once_task(
@@ -1217,7 +1217,7 @@ async def test_run_once_task_marks_failed_after_execution_failure() -> None:
         ),
         patch(
             "mindroom.scheduling_executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=False, failure_reason="send failed")),
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="failed", failure_reason="send failed")),
         ) as execute_mock,
     ):
         await _run_once_task(
@@ -1274,7 +1274,7 @@ async def test_run_cron_task_executes_latest_state_workflow(tmp_path: Path) -> N
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
         patch(
             "mindroom.scheduling_executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute_mock,
         patch("mindroom.scheduling.plan_recurring_occurrence", return_value=occurrence),
     ):
@@ -1325,7 +1325,7 @@ async def test_run_cron_task_keeps_pending_state_after_success(tmp_path: Path) -
         ),
         patch(
             "mindroom.scheduling_executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute_mock,
         patch("mindroom.scheduling.plan_recurring_occurrence", return_value=occurrence),
     ):
@@ -1364,7 +1364,7 @@ async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
         patch(
             "mindroom.scheduling_executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(delivered=True)),
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
         ) as execute_mock,
     ):
         await _run_cron_task(

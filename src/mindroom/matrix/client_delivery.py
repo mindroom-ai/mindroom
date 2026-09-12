@@ -451,8 +451,8 @@ async def send_message_outcome(
 ) -> MatrixSendOutcome:
     """Send a message to a Matrix room and return the delivered payload or a typed failure.
 
-    ``content_is_prepared`` is reserved for durable payloads already frozen in
-    the outbox. Those bytes must reach Matrix verbatim so the durable record
+    ``content_is_prepared`` is reserved for payloads already frozen in
+    durable storage. Those bytes must reach Matrix verbatim so the durable record
     remains an exact description of the wire event.
     """
     if not _can_send_to_encrypted_room(client, room_id, operation=operation):
@@ -564,7 +564,6 @@ async def send_message_result(
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
-    content_is_prepared: bool = False,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
     outcome = await send_message_outcome(
@@ -575,7 +574,6 @@ async def send_message_result(
         operation=operation,
         retry_sync_recovery=retry_sync_recovery,
         transaction_id=transaction_id,
-        content_is_prepared=content_is_prepared,
     )
     return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 

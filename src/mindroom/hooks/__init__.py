@@ -44,7 +44,7 @@ from .enrichment import render_enrichment_block, render_system_enrichment_block,
 from .execution import emit, emit_collect, emit_final_response_transform, emit_gate, emit_transform
 from .ingress import HookIngressPolicy, hook_ingress_policy
 from .registry import HookRegistry, HookRegistryPlugin, HookRegistryState
-from .sender import build_hook_message_sender, prepare_matrix_message, send_hook_message, send_matrix_message
+from .sender import build_hook_message_sender, send_hook_message, send_matrix_message
 from .state import build_hook_room_state_putter, build_hook_room_state_querier
 from .types import (
     BUILTIN_EVENT_NAMES,
@@ -165,7 +165,6 @@ __all__ = [
     "is_automation_source_kind",
     "is_voice_event",
     "iter_module_hooks",
-    "prepare_matrix_message",
     "render_enrichment_block",
     "render_system_enrichment_block",
     "render_transient_context",

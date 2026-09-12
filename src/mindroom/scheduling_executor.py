@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import typing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
@@ -23,14 +23,17 @@ from mindroom.hooks import (
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit,
-    prepare_matrix_message,
-    send_matrix_message,
 )
 from mindroom.logging_config import bound_log_context, get_logger
+from mindroom.matrix import client_delivery
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.message_target import MessageTarget
-from mindroom.recurring_schedule import prepare_recurring_delivery, recurring_delivery_content
+from mindroom.recurring_schedule import (
+    RecurringDeliveryHeldError,
+    prepare_recurring_delivery,
+    recurring_delivery_content,
+)
 
 if TYPE_CHECKING:
     import nio
@@ -56,22 +59,19 @@ def set_scheduling_hook_registry(hook_registry: HookRegistry) -> None:
 class ScheduledWorkflowOutcome:
     """Typed result of firing one scheduled workflow."""
 
-    delivered: bool
+    status: Literal["delivered", "suppressed", "failed", "retry", "held"]
     failure_reason: str | None = None
-    retryable: bool = False
 
 
-def _raise_scheduled_workflow_send_error() -> typing.NoReturn:
-    """Raise when a scheduled workflow message cannot be sent."""
-    msg = "Failed to send scheduled workflow message to Matrix"
-    raise RuntimeError(msg)
+class _InvalidScheduledTriggerError(ValueError):
+    """The authored trigger cannot be delivered for this occurrence."""
 
 
 def _validate_scheduled_workflow_message(message_text: str) -> None:
     """Reject an empty trigger body before Matrix accepts it as delivered."""
     if not message_text.strip():
         msg = "Scheduled workflow message is empty after hooks"
-        raise ValueError(msg)
+        raise _InvalidScheduledTriggerError(msg)
 
 
 async def _build_workflow_message_content(
@@ -145,14 +145,14 @@ async def send_scheduled_failure_notice(
         error_message,
         conversation_reader,
     )
-    await send_matrix_message(client, workflow.room_id, error_content)
+    await client_delivery.send_message_outcome(client, workflow.room_id, error_content)
 
 
 async def _notify_scheduled_workflow_failure(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
     target: MessageTarget,
-    error: Exception,
+    error: str,
     conversation_reader: ConversationReader,
 ) -> None:
     """Send the visible failure notice for one scheduled workflow when possible."""
@@ -166,7 +166,7 @@ async def _notify_scheduled_workflow_failure(
         conversation_reader,
     )
     try:
-        await send_matrix_message(client, workflow.room_id, error_content)
+        await client_delivery.send_message_outcome(client, workflow.room_id, error_content)
     except Exception:
         logger.exception("Failed to send scheduled workflow failure message")
 
@@ -237,6 +237,49 @@ async def _prepare_scheduled_trigger(
     return content
 
 
+async def _deliver_scheduled_trigger(
+    client: nio.AsyncClient,
+    workflow: ScheduledWorkflow,
+    content: dict[str, typing.Any],
+    occurrence: RecurringOccurrence | None,
+) -> ScheduledWorkflowOutcome:
+    """Freeze recurring content before sending and classify the typed Matrix result."""
+    assert workflow.room_id is not None
+    if occurrence is not None and occurrence.checkpoint.prepared is None:
+        prepared = await client_delivery.prepare_message_content(client, workflow.room_id, content)
+        if isinstance(prepared, client_delivery.MatrixDeliveryFailure):
+            status = (
+                "failed" if prepared.kind is client_delivery.MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE else "retry"
+            )
+            return ScheduledWorkflowOutcome(status=status, failure_reason=prepared.detail)
+        occurrence = await prepare_recurring_delivery(occurrence, prepared, client.device_id)
+        assert occurrence.checkpoint.prepared is not None
+        content = occurrence.checkpoint.prepared.content
+
+    delivered = await client_delivery.send_message_outcome(
+        client,
+        workflow.room_id,
+        content,
+        message_type=SILENT_SCHEDULE_EVENT_TYPE if workflow.silent else "m.room.message",
+        transaction_id=occurrence.transaction_id if occurrence is not None else None,
+        content_is_prepared=occurrence is not None,
+    )
+    if isinstance(delivered, client_delivery.MatrixDeliveryFailure):
+        # Once frozen, keep the trigger even if a later send rejects its content.
+        return ScheduledWorkflowOutcome(
+            status="retry" if occurrence is not None else "failed",
+            failure_reason=delivered.detail,
+        )
+    logger.info(
+        "Executed scheduled workflow",
+        description=workflow.description,
+        thread_id=MessageTarget.for_scheduled_task(workflow).resolved_thread_id,
+        new_thread=workflow.new_thread,
+        event_id=delivered.event_id,
+    )
+    return ScheduledWorkflowOutcome(status="delivered")
+
+
 async def execute_scheduled_workflow(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
@@ -251,14 +294,13 @@ async def execute_scheduled_workflow(
     """Execute a scheduled workflow by posting its message to the thread."""
     if not workflow.room_id:
         logger.error("Cannot execute workflow without room_id")
-        return ScheduledWorkflowOutcome(delivered=False, failure_reason="missing room_id")
+        return ScheduledWorkflowOutcome(status="failed", failure_reason="missing room_id")
 
     target = MessageTarget.for_scheduled_task(
         workflow,
     )
 
     with bound_log_context(**target.log_context):
-        delivery_prepared = occurrence is not None and occurrence.checkpoint.prepared is not None
         try:
             content = recurring_delivery_content(occurrence, client.device_id) if occurrence is not None else None
             if content is None:
@@ -274,43 +316,32 @@ async def execute_scheduled_workflow(
                     f"{EVENT_SCHEDULE_FIRED}:{occurrence.transaction_id if occurrence is not None else task_id}",
                 )
                 if content is None:
-                    return ScheduledWorkflowOutcome(delivered=False, failure_reason="suppressed by hook")
-                if occurrence is not None:
-                    content = await prepare_matrix_message(client, workflow.room_id, content)
-                    await prepare_recurring_delivery(occurrence, content, client.device_id)
-                    delivery_prepared = True
-            delivery_kwargs: dict[str, typing.Any] = {
-                "message_type": SILENT_SCHEDULE_EVENT_TYPE if workflow.silent else "m.room.message",
-            }
-            if occurrence is not None:
-                delivery_kwargs["transaction_id"] = occurrence.transaction_id
-                delivery_kwargs["content_is_prepared"] = True
-            delivered = await send_matrix_message(
-                client,
-                workflow.room_id,
-                content,
-                **delivery_kwargs,
-            )
-            if delivered is None:
-                _raise_scheduled_workflow_send_error()
-            logger.info(
-                "Executed scheduled workflow",
-                description=workflow.description,
-                thread_id=target.resolved_thread_id,
-                new_thread=workflow.new_thread,
-                event_id=delivered.event_id,
-            )
-        except Exception as e:
+                    return ScheduledWorkflowOutcome(status="suppressed", failure_reason="suppressed by hook")
+            outcome = await _deliver_scheduled_trigger(client, workflow, content, occurrence)
+        except _InvalidScheduledTriggerError as error:
+            outcome = ScheduledWorkflowOutcome(status="failed", failure_reason=str(error))
+        except RecurringDeliveryHeldError as error:
+            outcome = ScheduledWorkflowOutcome(status="held", failure_reason=str(error))
+        except Exception as error:
             logger.exception("Failed to execute scheduled workflow")
-            retryable = occurrence is not None and (delivery_prepared or not isinstance(e, ValueError))
-            if not retryable:
-                await _notify_scheduled_workflow_failure(
-                    client,
-                    workflow,
-                    target,
-                    e,
-                    conversation_reader,
-                )
-            return ScheduledWorkflowOutcome(delivered=False, failure_reason=str(e), retryable=retryable)
-        else:
-            return ScheduledWorkflowOutcome(delivered=True)
+            outcome = ScheduledWorkflowOutcome(
+                status="retry" if occurrence is not None else "failed",
+                failure_reason=str(error),
+            )
+        if outcome.status in {"retry", "held"}:
+            logger.warning(
+                "Recurring delivery remains pending",
+                task_id=task_id,
+                status=outcome.status,
+                reason=outcome.failure_reason,
+            )
+        if outcome.status == "failed":
+            assert outcome.failure_reason is not None
+            await _notify_scheduled_workflow_failure(
+                client,
+                workflow,
+                target,
+                outcome.failure_reason,
+                conversation_reader,
+            )
+        return outcome

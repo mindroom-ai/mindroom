@@ -22,6 +22,7 @@ from mindroom.constants import (
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
+from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import ScheduledWorkflow
 from mindroom.scheduling_executor import (
@@ -120,7 +121,7 @@ async def test_fire_task_with_valid_agent_delivers_in_thread(tmp_path: Path) -> 
     conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -132,7 +133,7 @@ async def test_fire_task_with_valid_agent_delivers_in_thread(tmp_path: Path) -> 
             task_id="task-1",
         )
 
-    assert outcome.delivered is True
+    assert outcome.status == "delivered"
     assert outcome.failure_reason is None
     mock_send.assert_awaited_once()
     assert mock_send.await_args.args[1] == "!room:localhost"
@@ -165,7 +166,7 @@ async def test_schedule_transport_preserves_requester_and_history_metadata(
     workflow = _workflow("Reconcile the queue", history_limit=5, silent=silent)
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -176,7 +177,7 @@ async def test_schedule_transport_preserves_requester_and_history_metadata(
             _conversation_reader(latest_thread_event_id="$latest"),
         )
 
-    assert outcome.delivered is True
+    assert outcome.status == "delivered"
     content = mock_send.await_args.args[2]
     assert content[ORIGINAL_SENDER_KEY] == "@user:localhost"
     assert content[SCHEDULED_HISTORY_LIMIT_KEY] == 5
@@ -194,7 +195,7 @@ async def test_fire_task_with_history_limit_annotates_message_content(tmp_path: 
     conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -206,7 +207,7 @@ async def test_fire_task_with_history_limit_annotates_message_content(tmp_path: 
             task_id="task-1",
         )
 
-    assert outcome.delivered is True
+    assert outcome.status == "delivered"
     content = mock_send.await_args.args[2]
     assert content[SOURCE_KIND_KEY] == SCHEDULED_SOURCE_KIND
     assert content[SCHEDULED_HISTORY_LIMIT_KEY] == history_limit
@@ -221,7 +222,7 @@ async def test_fire_new_thread_task_posts_room_level_message(tmp_path: Path, sta
     conversation_reader = _conversation_reader()
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -232,7 +233,7 @@ async def test_fire_new_thread_task_posts_room_level_message(tmp_path: Path, sta
             conversation_reader,
         )
 
-    assert outcome.delivered is True
+    assert outcome.status == "delivered"
     conversation_reader.latest_thread_event_id.assert_not_awaited()
     content = mock_send.await_args.args[2]
     assert "⏰ [Automated Task]" not in content["body"]
@@ -247,7 +248,7 @@ async def test_silent_new_thread_fire_does_not_claim_a_visible_per_fire_root(tmp
     workflow = _workflow("Reconcile the queue", thread_id=None, new_thread=True, silent=True)
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -258,7 +259,7 @@ async def test_silent_new_thread_fire_does_not_claim_a_visible_per_fire_root(tmp
             _conversation_reader(),
         )
 
-    assert outcome.delivered is True
+    assert outcome.status == "delivered"
     content = mock_send.await_args.args[2]
     assert PER_FIRE_THREAD_ROOT_KEY not in content
     assert mock_send.await_args.kwargs["message_type"] == SILENT_SCHEDULE_EVENT_TYPE
@@ -271,7 +272,7 @@ async def test_fire_room_level_task_without_new_thread_keeps_room_scope(tmp_path
     workflow = _workflow("Check the shared queue", thread_id=None, new_thread=False)
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -282,7 +283,7 @@ async def test_fire_room_level_task_without_new_thread_keeps_room_scope(tmp_path
             _conversation_reader(),
         )
 
-    assert outcome.delivered is True
+    assert outcome.status == "delivered"
     content = mock_send.await_args.args[2]
     assert "m.relates_to" not in content
     assert PER_FIRE_THREAD_ROOT_KEY not in content
@@ -294,7 +295,7 @@ async def test_fire_task_without_room_id_is_typed_failure(tmp_path: Path) -> Non
     config = _config(tmp_path)
     workflow = _workflow("Orphaned task", room_id=None, thread_id=None)
 
-    with patch("mindroom.scheduling_executor.send_matrix_message", new=AsyncMock()) as mock_send:
+    with patch("mindroom.matrix.client_delivery.send_message_outcome", new=AsyncMock()) as mock_send:
         outcome = await execute_scheduled_workflow(
             AsyncMock(),
             workflow,
@@ -303,21 +304,23 @@ async def test_fire_task_without_room_id_is_typed_failure(tmp_path: Path) -> Non
             _conversation_reader(),
         )
 
-    assert outcome.delivered is False
+    assert outcome.status == "failed"
     assert outcome.failure_reason == "missing room_id"
     mock_send.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_delivery_returning_none_yields_failure_and_notice(tmp_path: Path) -> None:
-    """A send that returns no delivered event produces a failure outcome plus a visible notice."""
+async def test_typed_delivery_failure_yields_failure_and_notice(tmp_path: Path) -> None:
+    """A typed Matrix send failure produces a failure outcome plus a visible notice."""
     config = _config(tmp_path)
     workflow = _workflow("Check the queue depth")
     conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
-        new=AsyncMock(side_effect=[None, None]),
+        "mindroom.matrix.client_delivery.send_message_outcome",
+        new=AsyncMock(
+            return_value=MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "Matrix send failed"),
+        ),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
             AsyncMock(),
@@ -327,13 +330,11 @@ async def test_delivery_returning_none_yields_failure_and_notice(tmp_path: Path)
             conversation_reader,
         )
 
-    assert outcome.delivered is False
-    assert outcome.failure_reason == "Failed to send scheduled workflow message to Matrix"
+    assert outcome.status == "failed"
+    assert outcome.failure_reason == "Matrix send failed"
     assert mock_send.await_count == 2
     notice_content = mock_send.await_args_list[1].args[2]
-    assert notice_content["body"] == (
-        "❌ Scheduled task failed: executor test task\nError: Failed to send scheduled workflow message to Matrix"
-    )
+    assert notice_content["body"] == ("❌ Scheduled task failed: executor test task\nError: Matrix send failed")
     assert notice_content["m.relates_to"]["event_id"] == "$thread"
 
 
@@ -344,7 +345,7 @@ async def test_delivery_exception_yields_failure_without_raising(tmp_path: Path)
     workflow = _workflow("Check the queue depth")
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=RuntimeError("boom")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -355,7 +356,7 @@ async def test_delivery_exception_yields_failure_without_raising(tmp_path: Path)
             _conversation_reader(latest_thread_event_id="$latest"),
         )
 
-    assert outcome.delivered is False
+    assert outcome.status == "failed"
     assert outcome.failure_reason == "boom"
     assert mock_send.await_count == 2  # original send plus the (also failing) notice
 
@@ -374,7 +375,7 @@ async def test_hook_emission_fires_with_task_context(tmp_path: Path) -> None:
     set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [rewrite])]))
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -386,7 +387,7 @@ async def test_hook_emission_fires_with_task_context(tmp_path: Path) -> None:
             task_id="task-hooked",
         )
 
-    assert outcome.delivered is True
+    assert outcome.status == "delivered"
     assert seen == [("task-hooked", "$thread")]
     assert "Prepare the agenda (hooked)" in mock_send.await_args.args[2]["body"]
 
@@ -409,7 +410,7 @@ async def test_running_schedule_hook_becomes_inactive_after_registry_replacement
     set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [observe_lifecycle])]))
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ):
         execution = asyncio.create_task(
@@ -426,7 +427,7 @@ async def test_running_schedule_hook_becomes_inactive_after_registry_replacement
         resume_hook.set()
         outcome = await execution
 
-    assert outcome.delivered is True
+    assert outcome.status == "delivered"
     assert active_states == [True, False]
 
 
@@ -442,7 +443,7 @@ async def test_silent_hook_transform_is_sent_as_custom_event(tmp_path: Path) -> 
     set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [rewrite])]))
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -453,7 +454,7 @@ async def test_silent_hook_transform_is_sent_as_custom_event(tmp_path: Path) -> 
             _conversation_reader(latest_thread_event_id="$latest"),
         )
 
-    assert outcome.delivered is True
+    assert outcome.status == "delivered"
     assert "Transformed schedule" in mock_send.await_args.args[2]["body"]
     assert mock_send.await_args.kwargs["message_type"] == SILENT_SCHEDULE_EVENT_TYPE
 
@@ -470,7 +471,7 @@ async def test_empty_hook_transform_fails_before_silent_trigger_transport(tmp_pa
     set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [empty])]))
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$failure")),
     ) as mock_send:
         outcome = await execute_scheduled_workflow(
@@ -481,7 +482,7 @@ async def test_empty_hook_transform_fails_before_silent_trigger_transport(tmp_pa
             _conversation_reader(),
         )
 
-    assert outcome.delivered is False
+    assert outcome.status == "failed"
     assert outcome.failure_reason == "Scheduled workflow message is empty after hooks"
     mock_send.assert_awaited_once()
     assert "message_type" not in mock_send.await_args.kwargs
@@ -499,7 +500,7 @@ async def test_hook_suppression_is_undelivered_outcome(tmp_path: Path) -> None:
     config = _config(tmp_path)
     set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [suppress])]))
 
-    with patch("mindroom.scheduling_executor.send_matrix_message", new=AsyncMock()) as mock_send:
+    with patch("mindroom.matrix.client_delivery.send_message_outcome", new=AsyncMock()) as mock_send:
         outcome = await execute_scheduled_workflow(
             AsyncMock(),
             _workflow("Do not send", silent=True),
@@ -508,7 +509,7 @@ async def test_hook_suppression_is_undelivered_outcome(tmp_path: Path) -> None:
             _conversation_reader(),
         )
 
-    assert outcome.delivered is False
+    assert outcome.status == "suppressed"
     assert outcome.failure_reason == "suppressed by hook"
     mock_send.assert_not_called()
 
@@ -521,7 +522,7 @@ async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
     conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch(
-        "mindroom.scheduling_executor.send_matrix_message",
+        "mindroom.matrix.client_delivery.send_message_outcome",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
     ) as mock_send:
         await send_scheduled_failure_notice(

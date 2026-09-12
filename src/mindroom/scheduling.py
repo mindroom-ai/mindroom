@@ -1119,7 +1119,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     matrix_admin,
                     occurrence=occurrence,
                 )
-                if outcome.retryable:
+                if outcome.status in {"retry", "held"}:
                     await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
                     continue
                 await complete_recurring_occurrence(occurrence, cron_string, datetime.now(UTC))
@@ -1217,7 +1217,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 task_id,
                 matrix_admin,
             )
-            final_status = "completed" if outcome.delivered else "failed"
+            final_status = "completed" if outcome.status == "delivered" else "failed"
 
             try:
                 await _save_one_time_task_status(

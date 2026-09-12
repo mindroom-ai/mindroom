@@ -17,7 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import (
@@ -620,7 +620,7 @@ class TestExecuteScheduledWorkflow:
 
         conversation_reader = _conversation_reader(latest_thread_event_id="$latest456")
         with patch(
-            "mindroom.scheduling_executor.send_matrix_message",
+            "mindroom.matrix.client_delivery.send_message_outcome",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$event123",
@@ -681,7 +681,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch(
-            "mindroom.scheduling_executor.send_matrix_message",
+            "mindroom.matrix.client_delivery.send_message_outcome",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$event456",
@@ -723,7 +723,7 @@ class TestExecuteScheduledWorkflow:
         conversation_reader = _conversation_reader(latest_thread_event_id="$latest456")
 
         with patch(
-            "mindroom.scheduling_executor.send_matrix_message",
+            "mindroom.matrix.client_delivery.send_message_outcome",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$notice123",
@@ -762,7 +762,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch(
-            "mindroom.scheduling_executor.send_matrix_message",
+            "mindroom.matrix.client_delivery.send_message_outcome",
             new=AsyncMock(
                 return_value=DeliveredMatrixEvent(
                     event_id="$event789",
@@ -807,7 +807,7 @@ class TestExecuteScheduledWorkflow:
             ],
         )
 
-        with patch("mindroom.scheduling_executor.send_matrix_message", new=mock_send):
+        with patch("mindroom.matrix.client_delivery.send_message_outcome", new=mock_send):
             # Should not raise, but log error
             await execute_scheduled_workflow(
                 client,
@@ -825,8 +825,8 @@ class TestExecuteScheduledWorkflow:
             error_content = error_call[0][2]
             assert "failed" in error_content["body"].lower()
 
-    async def test_execute_workflow_send_message_returning_none_is_failure(self) -> None:
-        """send_message returning None should trigger failure handling instead of success logging."""
+    async def test_execute_workflow_typed_send_failure_is_reported(self) -> None:
+        """A typed send failure should trigger failure handling instead of success logging."""
         client = AsyncMock()
         config = _runtime_bound_config(Config())
         workflow = ScheduledWorkflow(
@@ -840,10 +840,10 @@ class TestExecuteScheduledWorkflow:
 
         with (
             patch(
-                "mindroom.scheduling_executor.send_matrix_message",
+                "mindroom.matrix.client_delivery.send_message_outcome",
                 new=AsyncMock(
                     side_effect=[
-                        None,
+                        MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "Send failed"),
                         DeliveredMatrixEvent(
                             event_id="$error456",
                             content_sent={"body": "error"},
@@ -879,7 +879,7 @@ class TestExecuteScheduledWorkflow:
             room_id=None,  # No room ID
         )
 
-        with patch("mindroom.scheduling_executor.send_matrix_message", new=AsyncMock()) as mock_send:
+        with patch("mindroom.matrix.client_delivery.send_message_outcome", new=AsyncMock()) as mock_send:
             await execute_scheduled_workflow(
                 client,
                 workflow,

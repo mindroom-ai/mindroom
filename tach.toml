@@ -2509,6 +2509,7 @@ visibility = [
     "mindroom.matrix_rtc.call_manager",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.scheduling",
+    "mindroom.scheduling_executor",
     "mindroom.streaming",
     "mindroom.thread_summary",
 ]
@@ -3562,6 +3563,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.scheduling_executor"
 depends_on = [
+    "mindroom.matrix.client_delivery",
     "mindroom.constants",
     "mindroom.hooks",
     "mindroom.recurring_schedule",
@@ -5111,7 +5113,6 @@ expose = [
     "is_automation_source_kind",
     "is_voice_event",
     "iter_module_hooks",
-    "prepare_matrix_message",
     "render_enrichment_block",
     "render_system_enrichment_block",
     "render_transient_context",
