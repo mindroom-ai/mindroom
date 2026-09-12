@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import nio
 import pytest
-from google.genai import types
+from openai import AsyncOpenAI
+from openai.types.image import Image
+from openai.types.images_response import ImagesResponse
 
 import mindroom.constants as constants_mod
 from mindroom import avatar_generation as generate_avatars
@@ -176,20 +181,25 @@ async def test_room_has_avatar_falls_back_to_state_event_when_cached_avatar_miss
     client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.avatar")
 
 
-def test_extract_image_bytes_returns_first_inline_image() -> None:
-    """Gemini inline image parts should be converted back to raw bytes."""
-    response = types.GenerateContentResponse(
-        candidates=[
-            types.Candidate(
-                content=types.Content(
-                    role="model",
-                    parts=[types.Part(inline_data=types.Blob(data=b"png-bytes", mime_type="image/png"))],
-                ),
-            ),
-        ],
+def test_extract_image_bytes_decodes_openai_response() -> None:
+    """OpenAI base64 image data should be converted back to raw bytes."""
+    response = ImagesResponse(
+        created=1,
+        data=[Image(b64_json=base64.b64encode(b"png-bytes").decode())],
+        output_format="png",
+        quality="high",
+        size="1024x1024",
     )
 
     assert generate_avatars._extract_image_bytes(response) == b"png-bytes"
+
+
+def test_extract_image_bytes_rejects_malformed_base64() -> None:
+    """Malformed provider image data must not be written as a corrupt avatar."""
+    response = ImagesResponse(created=1, data=[Image(b64_json="not valid base64!")])
+
+    with pytest.raises(ValueError, match="invalid base64 image data"):
+        generate_avatars._extract_image_bytes(response)
 
 
 def test_has_missing_managed_avatars_detects_complete_avatar_set(
@@ -309,11 +319,86 @@ def test_has_missing_managed_avatars_treats_bundled_avatars_as_present(
 
 
 @pytest.mark.asyncio
-async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_exist(
+async def test_generation_uses_only_openai_for_prompts_and_images(
     monkeypatch: pytest.MonkeyPatch,
     workspace_avatar_dir: Path,
 ) -> None:
-    """Existing managed avatars should skip generation even without Google credentials."""
+    """An OpenAI key alone must produce an avatar through both real SDK endpoints."""
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append((request.url.path, payload))
+        assert request.headers["authorization"] == "Bearer test-openai-key"
+        if request.url.path == "/v1/responses":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "resp_avatar",
+                    "object": "response",
+                    "created_at": 1,
+                    "status": "completed",
+                    "model": "gpt-6-astra",
+                    "output": [
+                        {
+                            "id": "msg_avatar",
+                            "type": "message",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "clear compass silhouette", "annotations": []}],
+                        },
+                    ],
+                },
+            )
+        assert request.url.path == "/v1/images/generations"
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "data": [{"b64_json": base64.b64encode(b"avatar-bytes").decode()}],
+            },
+        )
+
+    client = AsyncOpenAI(
+        api_key="test-openai-key",
+        base_url="https://api.example.com/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+
+    def make_client(*, api_key: str) -> AsyncOpenAI:
+        assert api_key == "test-openai-key"
+        return client
+
+    monkeypatch.setattr(generate_avatars, "AsyncOpenAI", make_client)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY_FILE", raising=False)
+    try:
+        success = await generate_avatars._generate_missing_avatars(
+            generate_avatars.Config(),
+            _runtime_paths(workspace_avatar_dir.parent),
+            {("agents", "router")},
+        )
+        assert success is True
+        assert (workspace_avatar_dir / "agents/router.png").read_bytes() == b"avatar-bytes"
+        assert [path for path, _ in requests] == ["/v1/responses", "/v1/images/generations"]
+        prompt_request, image_request = [payload for _, payload in requests]
+        assert prompt_request["model"] == "gpt-6-astra"
+        assert prompt_request["reasoning"] == {"effort": "low"}
+        assert prompt_request["store"] is False
+        assert image_request["model"] == "gpt-image-2.5-sunburst"
+        assert image_request["prompt"] == f"{AVATAR_CHARACTER_STYLE}, clear compass silhouette"
+        assert client.is_closed()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_run_avatar_generation_skips_provider_keys_when_all_managed_avatars_exist(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+) -> None:
+    """Existing managed avatars should skip generation without provider credentials."""
     raw_config = {
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
@@ -335,15 +420,17 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
         "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(generate_avatars.genai, "Client", lambda **_kwargs: pytest.fail("generation should be skipped"))
+    monkeypatch.setattr(generate_avatars, "AsyncOpenAI", lambda **_kwargs: pytest.fail("generation should be skipped"))
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY_FILE", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY_FILE", raising=False)
 
     await generate_avatars.run_avatar_generation(_runtime_paths(workspace_avatar_dir.parent))
 
 
 @pytest.mark.asyncio
-async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_are_bundled(
+async def test_run_avatar_generation_skips_provider_keys_when_all_managed_avatars_are_bundled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -386,9 +473,11 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_a
     )
     monkeypatch.setattr(generate_avatars, "workspace_avatar_path", _workspace_path)
     monkeypatch.setattr(generate_avatars, "resolve_avatar_path", _resolve_avatar_path)
-    monkeypatch.setattr(generate_avatars.genai, "Client", lambda **_kwargs: pytest.fail("generation should be skipped"))
+    monkeypatch.setattr(generate_avatars, "AsyncOpenAI", lambda **_kwargs: pytest.fail("generation should be skipped"))
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY_FILE", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY_FILE", raising=False)
 
     for entity_type, entity_name in (("agents", "general"), ("agents", "router"), ("rooms", "lobby")):
         avatar_path = bundled_root / entity_type / f"{entity_name}.png"
@@ -399,6 +488,25 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_a
 
     assert not (workspace_root / "agents" / "general.png").exists()
     assert not (workspace_root / "rooms" / "lobby.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_generation_preflights_openai_key_before_creating_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Missing OpenAI credentials must stop generation before constructing a client."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY_FILE", raising=False)
+    monkeypatch.setattr(generate_avatars, "AsyncOpenAI", lambda **_kwargs: pytest.fail("preflight must happen first"))
+
+    success = await generate_avatars._generate_missing_avatars(
+        generate_avatars.Config(),
+        _runtime_paths(tmp_path),
+        {("agents", "router")},
+    )
+
+    assert success is False
 
 
 @pytest.mark.asyncio
@@ -421,24 +529,22 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
     router_avatar = workspace_avatar_dir / "agents" / "router.png"
     router_avatar.parent.mkdir(parents=True, exist_ok=True)
     router_avatar.write_bytes(b"avatar")
+    image_client = SimpleNamespace(close=AsyncMock())
 
     monkeypatch.setattr(
         generate_avatars,
         "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(
-        generate_avatars.genai,
-        "Client",
-        lambda **_kwargs: SimpleNamespace(aio=SimpleNamespace(aclose=AsyncMock())),
-    )
+    monkeypatch.setattr(generate_avatars, "AsyncOpenAI", lambda **_kwargs: image_client)
     monkeypatch.setattr(generate_avatars, "_generate_prompt", AsyncMock(side_effect=RuntimeError("boom")))
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
 
     with pytest.raises(generate_avatars.AvatarGenerationError, match="Avatar generation failed"):
         await generate_avatars.run_avatar_generation(_runtime_paths(workspace_avatar_dir.parent))
 
     assert not (workspace_avatar_dir / "agents" / "general.png").exists()
+    image_client.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -467,10 +573,12 @@ async def test_run_avatar_generation_accepts_null_optional_sections(
 
 
 @pytest.mark.asyncio
-async def test_generate_prompt_uses_gemini_prompt_model() -> None:
-    """Prompt generation should call the Gemini text model and compose the base style."""
-    generate_content = AsyncMock(return_value=SimpleNamespace(text="teal and copper, visor eyes"))
-    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+async def test_generate_prompt_uses_openai_prompt_model() -> None:
+    """Prompt generation should call the OpenAI text model and compose the base style."""
+    create_response = AsyncMock(
+        return_value=SimpleNamespace(status="completed", output_text="teal and copper, visor eyes"),
+    )
+    client = SimpleNamespace(responses=SimpleNamespace(create=create_response))
     config = generate_avatars.Config()
 
     prompt = await generate_avatars._generate_prompt(
@@ -484,18 +592,55 @@ async def test_generate_prompt_uses_gemini_prompt_model() -> None:
     )
 
     assert prompt == f"{AVATAR_CHARACTER_STYLE}, teal and copper, visor eyes"
-    kwargs = generate_content.await_args.kwargs
+    kwargs = create_response.await_args.kwargs
     assert kwargs["model"] == generate_avatars._PROMPT_MODEL
-    assert kwargs["contents"] == "Agent name: research\nRole: Finds information\nType: agents"
-    assert kwargs["config"].system_instruction == AVATAR_AGENT_SYSTEM_PROMPT
-    assert kwargs["config"].temperature is None
+    assert kwargs["input"] == "Agent name: research\nRole: Finds information\nType: agents"
+    assert kwargs["instructions"] == AVATAR_AGENT_SYSTEM_PROMPT
+    assert kwargs["reasoning"] == {"effort": "low"}
+    assert kwargs["max_output_tokens"] == 8192
+    assert kwargs["store"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "text"),
+    [("incomplete", "unfinished prompt"), ("failed", "partial prompt"), ("completed", ""), ("completed", "  ")],
+)
+async def test_invalid_prompt_preserves_existing_avatar_without_image_request(
+    workspace_avatar_dir: Path,
+    status: str,
+    text: str,
+) -> None:
+    """Incomplete or blank text must never reach the paid renderer or replace an avatar."""
+    avatar_path = workspace_avatar_dir / "agents/general.png"
+    avatar_path.parent.mkdir(parents=True)
+    avatar_path.write_bytes(b"existing-avatar")
+    render = AsyncMock()
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=AsyncMock(return_value=SimpleNamespace(status=status, output_text=text))),
+        images=SimpleNamespace(generate=render),
+    )
+
+    with pytest.raises(ValueError, match="OpenAI"):
+        await generate_avatars._generate_avatar(
+            client,
+            generate_avatars._AvatarTarget(entity_type="agents", entity_name="general", role="Helpful assistant"),
+            _runtime_paths(workspace_avatar_dir.parent),
+            generate_avatars.Config(),
+            force=True,
+        )
+
+    assert avatar_path.read_bytes() == b"existing-avatar"
+    render.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_generate_prompt_uses_room_style_for_spaces() -> None:
     """Space avatars should use the same icon-style prompt path as rooms."""
-    generate_content = AsyncMock(return_value=SimpleNamespace(text="deep blue, doorway outline"))
-    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+    create_response = AsyncMock(
+        return_value=SimpleNamespace(status="completed", output_text="deep blue, doorway outline"),
+    )
+    client = SimpleNamespace(responses=SimpleNamespace(create=create_response))
     config = generate_avatars.Config()
 
     prompt = await generate_avatars._generate_prompt(
@@ -509,32 +654,29 @@ async def test_generate_prompt_uses_room_style_for_spaces() -> None:
     )
 
     assert prompt == f"{AVATAR_ROOM_STYLE}, deep blue, doorway outline"
-    kwargs = generate_content.await_args.kwargs
-    assert kwargs["config"].system_instruction == AVATAR_ROOM_SYSTEM_PROMPT
+    kwargs = create_response.await_args.kwargs
+    assert kwargs["instructions"] == AVATAR_ROOM_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
 async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
-    """The avatar generation module should save Gemini-generated image bytes to the expected avatar file."""
+    """Avatar generation should save OpenAI image bytes using the dedicated request contract."""
     avatar_path = tmp_path / "generated.png"
-    image_response = types.GenerateContentResponse(
-        candidates=[
-            types.Candidate(
-                content=types.Content(
-                    role="model",
-                    parts=[types.Part(inline_data=types.Blob(data=b"avatar-bytes", mime_type="image/png"))],
-                ),
-            ),
-        ],
+    image_response = ImagesResponse(
+        created=1,
+        data=[Image(b64_json=base64.b64encode(b"avatar-bytes").decode())],
+        output_format="png",
+        quality="high",
+        size="1024x1024",
     )
-    generate_content = AsyncMock(return_value=image_response)
-    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+    generate_image = AsyncMock(return_value=image_response)
+    image_client = SimpleNamespace(images=SimpleNamespace(generate=generate_image))
 
     monkeypatch.setattr(generate_avatars, "_get_avatar_path", lambda *_args, **_kwargs: avatar_path)
     monkeypatch.setattr(generate_avatars, "_generate_prompt", AsyncMock(return_value="avatar prompt"))
 
     await generate_avatars._generate_avatar(
-        client,
+        image_client,
         generate_avatars._AvatarTarget(
             entity_type="agents",
             entity_name="general",
@@ -545,10 +687,12 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
     )
 
     assert avatar_path.read_bytes() == b"avatar-bytes"
-    kwargs = generate_content.await_args.kwargs
+    kwargs = generate_image.await_args.kwargs
     assert kwargs["model"] == generate_avatars._IMAGE_MODEL
-    assert kwargs["contents"] == "avatar prompt"
-    assert kwargs["config"].response_modalities == ["IMAGE"]
+    assert kwargs["prompt"] == "avatar prompt"
+    assert kwargs["size"] == "1024x1024"
+    assert kwargs["quality"] == "high"
+    assert kwargs["output_format"] == "png"
 
 
 @pytest.mark.asyncio
@@ -559,15 +703,14 @@ async def test_generate_avatar_skips_existing_file_without_force(
     """Avatar generation should preserve existing workspace files by default."""
     avatar_path = tmp_path / "generated.png"
     avatar_path.write_bytes(b"existing-avatar")
-    generate_content = AsyncMock()
-    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+    generate_image = AsyncMock()
     generate_prompt = AsyncMock()
 
     monkeypatch.setattr(generate_avatars, "_get_avatar_path", lambda *_args, **_kwargs: avatar_path)
     monkeypatch.setattr(generate_avatars, "_generate_prompt", generate_prompt)
 
     await generate_avatars._generate_avatar(
-        client,
+        SimpleNamespace(images=SimpleNamespace(generate=generate_image)),
         generate_avatars._AvatarTarget(
             entity_type="agents",
             entity_name="general",
@@ -579,7 +722,7 @@ async def test_generate_avatar_skips_existing_file_without_force(
 
     assert avatar_path.read_bytes() == b"existing-avatar"
     generate_prompt.assert_not_awaited()
-    generate_content.assert_not_awaited()
+    generate_image.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -590,24 +733,17 @@ async def test_generate_avatar_force_overwrites_existing_file(
     """Forced avatar generation should overwrite an existing workspace file."""
     avatar_path = tmp_path / "generated.png"
     avatar_path.write_bytes(b"existing-avatar")
-    image_response = types.GenerateContentResponse(
-        candidates=[
-            types.Candidate(
-                content=types.Content(
-                    role="model",
-                    parts=[types.Part(inline_data=types.Blob(data=b"new-avatar", mime_type="image/png"))],
-                ),
-            ),
-        ],
+    image_response = ImagesResponse(
+        created=1,
+        data=[Image(b64_json=base64.b64encode(b"new-avatar").decode())],
     )
-    generate_content = AsyncMock(return_value=image_response)
-    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+    generate_image = AsyncMock(return_value=image_response)
 
     monkeypatch.setattr(generate_avatars, "_get_avatar_path", lambda *_args, **_kwargs: avatar_path)
     monkeypatch.setattr(generate_avatars, "_generate_prompt", AsyncMock(return_value="avatar prompt"))
 
     await generate_avatars._generate_avatar(
-        client,
+        SimpleNamespace(images=SimpleNamespace(generate=generate_image)),
         generate_avatars._AvatarTarget(
             entity_type="agents",
             entity_name="general",
@@ -619,7 +755,36 @@ async def test_generate_avatar_force_overwrites_existing_file(
     )
 
     assert avatar_path.read_bytes() == b"new-avatar"
-    generate_content.assert_awaited_once()
+    generate_image.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generate_avatar_preserves_existing_file_when_forced_request_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed forced request should leave the previous avatar intact."""
+    avatar_path = tmp_path / "generated.png"
+    avatar_path.write_bytes(b"existing-avatar")
+    generate_image = AsyncMock(return_value=ImagesResponse(created=1, data=[]))
+
+    monkeypatch.setattr(generate_avatars, "_get_avatar_path", lambda *_args, **_kwargs: avatar_path)
+    monkeypatch.setattr(generate_avatars, "_generate_prompt", AsyncMock(return_value="avatar prompt"))
+
+    with pytest.raises(ValueError, match="No image data found"):
+        await generate_avatars._generate_avatar(
+            SimpleNamespace(images=SimpleNamespace(generate=generate_image)),
+            generate_avatars._AvatarTarget(
+                entity_type="agents",
+                entity_name="general",
+                role="Helpful assistant",
+            ),
+            _runtime_paths(tmp_path),
+            generate_avatars.Config(),
+            force=True,
+        )
+
+    assert avatar_path.read_bytes() == b"existing-avatar"
 
 
 @pytest.mark.asyncio
@@ -651,7 +816,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
     }
 
     async def _generate_avatar(
-        _client: object,
+        _image_client: object,
         target: generate_avatars._AvatarTarget,
         runtime_paths: constants_mod.RuntimePaths,
         _config: generate_avatars.Config,
@@ -666,24 +831,26 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
         avatar_path.write_bytes(b"generated")
 
     generated = AsyncMock(side_effect=_generate_avatar)
-    client = SimpleNamespace(aio=SimpleNamespace(aclose=AsyncMock()))
+    image_client = SimpleNamespace(close=AsyncMock())
 
-    def _make_client(*, api_key: str) -> object:
-        assert api_key == "test-google-key"
-        return client
+    def _make_image_client(*, api_key: str) -> object:
+        assert api_key == "test-openai-key"
+        return image_client
 
     monkeypatch.setattr(
         generate_avatars,
         "_load_validated_config",
         lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(generate_avatars.genai, "Client", _make_client)
+    monkeypatch.setattr(generate_avatars, "AsyncOpenAI", _make_image_client)
     monkeypatch.setattr(generate_avatars, "_generate_avatar", generated)
     workspace_avatar_dir.mkdir(parents=True, exist_ok=True)
-    api_key_file = workspace_avatar_dir / "google-key.txt"
-    api_key_file.write_text("test-google-key", encoding="utf-8")
+    openai_key_file = workspace_avatar_dir / "openai-key.txt"
+    openai_key_file.write_text("test-openai-key", encoding="utf-8")
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    monkeypatch.setenv("GOOGLE_API_KEY_FILE", str(api_key_file))
+    monkeypatch.delenv("GOOGLE_API_KEY_FILE", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY_FILE", str(openai_key_file))
 
     await generate_avatars.run_avatar_generation(_runtime_paths(workspace_avatar_dir.parent))
 
@@ -691,7 +858,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
     assert ("rooms", "lobby") in generated_entities
     assert ("rooms", "war_room") in generated_entities
     assert ("spaces", generate_avatars._ROOT_SPACE_AVATAR_NAME) in generated_entities
-    client.aio.aclose.assert_awaited_once()
+    image_client.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1028,20 +1195,17 @@ async def test_set_room_avatars_in_matrix_wraps_missing_credentials(
         await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(tmp_path))
 
 
-def _image_response(data: bytes) -> SimpleNamespace:
-    return SimpleNamespace(candidates=None, parts=[SimpleNamespace(inline_data=SimpleNamespace(data=data))])
+def _image_response(data: bytes) -> ImagesResponse:
+    return ImagesResponse(created=1, data=[Image(b64_json=base64.b64encode(data).decode())])
 
 
-def _no_image_response() -> SimpleNamespace:
+def _no_image_response() -> ImagesResponse:
+    return ImagesResponse(created=1, data=[])
+
+
+def _client_with_image_responses(responses: list[ImagesResponse]) -> SimpleNamespace:
     return SimpleNamespace(
-        candidates=[SimpleNamespace(finish_reason="STOP")],
-        parts=[SimpleNamespace(inline_data=None, text="cannot draw that")],
-    )
-
-
-def _client_with_image_responses(responses: list[SimpleNamespace]) -> SimpleNamespace:
-    return SimpleNamespace(
-        aio=SimpleNamespace(models=SimpleNamespace(generate_content=AsyncMock(side_effect=responses))),
+        images=SimpleNamespace(generate=AsyncMock(side_effect=responses)),
     )
 
 
@@ -1073,7 +1237,7 @@ async def test_generate_avatar_retries_with_fresh_prompt_when_no_image_returned(
 
     assert (workspace_avatar_dir / "teams" / "incident.png").read_bytes() == b"png-bytes"
     assert prompt_mock.await_count == 2
-    assert client.aio.models.generate_content.await_count == 2
+    assert client.images.generate.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -1105,4 +1269,4 @@ async def test_generate_avatar_raises_after_exhausting_image_attempts(
         )
 
     assert not (workspace_avatar_dir / "agents" / "general.png").exists()
-    assert client.aio.models.generate_content.await_count == generate_avatars._MAX_IMAGE_ATTEMPTS
+    assert client.images.generate.await_count == generate_avatars._MAX_IMAGE_ATTEMPTS

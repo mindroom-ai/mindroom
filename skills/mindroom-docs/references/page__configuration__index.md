@@ -811,6 +811,8 @@ prompts:
 
 `mindroom avatars generate` only creates missing local avatar files by default.
 Run `mindroom avatars generate --force` to overwrite existing managed workspace avatar files after changing prompts or styles.
+Generation uses `gpt-6-astra` for prompt creation and `gpt-image-2.5-sunburst` for 1024x1024 high-quality PNG rendering.
+Both stages require only `OPENAI_API_KEY` or the file-based `OPENAI_API_KEY_FILE` credential.
 `mindroom avatars sync` only fills missing Matrix avatars by default.
 Run `mindroom avatars sync --force` to replace existing Matrix room or root-space avatars.
 
