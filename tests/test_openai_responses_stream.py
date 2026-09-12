@@ -14,6 +14,7 @@ from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.exceptions import ModelProviderError
+from agno.media import Image
 from agno.models.message import Message
 from agno.models.openai import OpenAIResponses
 from agno.run.agent import RunCompletedEvent, RunErrorEvent
@@ -21,7 +22,10 @@ from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from openai import AsyncOpenAI, OpenAI
 
+from mindroom.codex_model import CodexResponses
 from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
+from mindroom.provider_media_fallback import install_provider_media_fallback
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -360,6 +364,52 @@ async def test_agent_does_not_retry_incomplete_stream(
         assert RunStatus(session.runs[-1].status) is RunStatus.error
         history = [*session.get_messages(agent_id="status_agent"), Message(role="user", content="Follow up")]
         assert "previous_response_id" not in model.get_request_params(messages=history)
+
+
+@pytest.mark.parametrize("disconnect", [False, True], ids=["eof", "transport-error"])
+async def test_codex_media_fallback_does_not_retry_incomplete_tool_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    disconnect: bool,
+) -> None:
+    """A blocking Codex call must not execute failed-stream tools through media fallback."""
+    executed_tools: list[str] = []
+
+    def get_status() -> str:
+        """Return the local status."""
+        executed_tools.append("get_status")
+        return "ready"
+
+    partial = _tool_stream().split("event: response.completed")[0]
+    first_response = (
+        httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_InterruptedStream(partial))
+        if disconnect
+        else partial
+    )
+    completed = (
+        _created("resp_no_tools")
+        + _text()
+        + _event("response.completed", response=_response("resp_no_tools", "completed"))
+    )
+    db = SqliteDb(db_file=str(tmp_path / "sessions.db"))
+    async with _model(first_response, completed, completed) as sdk_model:
+        model = CodexResponses(id="gpt-6-astra")
+        monkeypatch.setattr(model, "get_async_client", lambda: sdk_model.async_client)
+        install_provider_media_fallback(model, fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT)
+        agent = Agent(id="status_agent", model=model, db=db, tools=[get_status])
+        result = await agent.arun(
+            "Check status",
+            session_id="status_session",
+            images=[Image(url="https://example.com/image.png")],
+        )
+
+    assert executed_tools == []
+    assert result.status is RunStatus.error
+    session = db.get_session("status_session", SessionType.AGENT)
+    assert isinstance(session, AgentSession)
+    assert RunStatus(session.runs[-1].status) is RunStatus.error
+    assert session.get_messages(agent_id="status_agent") == []
 
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])

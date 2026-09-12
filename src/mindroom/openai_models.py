@@ -13,6 +13,7 @@ from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
 from openai.types.responses import ResponseCompletedEvent, ResponseCreatedEvent, ResponseOutputItemDoneEvent
 
+from mindroom.error_handling import IncompleteResponsesStreamError
 from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
 from mindroom.openai_tool_search import (
     formatted_input_with_tool_search_items,
@@ -84,10 +85,6 @@ class MindRoomLlamaCpp(ChatToolArgumentsCompat, LlamaCpp):
     """llama.cpp server model that can replay tool calls from other providers."""
 
 
-class _IncompleteResponsesStreamError(ModelProviderError):
-    """A Responses stream cannot safely reuse accumulated output in a retry."""
-
-
 @dataclass
 class MindRoomOpenAIResponses(OpenAIResponses):
     """OpenAI Responses model that preserves completed response and tool-search state."""
@@ -148,9 +145,13 @@ class MindRoomOpenAIResponses(OpenAIResponses):
         record_tool_search_items(model_response, response.output)
         return model_response
 
+    # Agno 3.0.9 workaround; upstream completion/response-ID fix:
+    # https://github.com/agno-agi/agno/pull/10135
+    # Remove duplicate completion/ID checks after pinning a release with that fix.
+    # Keep retry protection until Agno also avoids reusing partial stream output.
     def _is_retryable_error(self, error: ModelProviderError) -> bool:
         """Do not retry incomplete streams with Agno's retained partial text and tool calls."""
-        return not isinstance(error, _IncompleteResponsesStreamError) and super()._is_retryable_error(error)
+        return not isinstance(error, IncompleteResponsesStreamError) and super()._is_retryable_error(error)
 
     def invoke_stream(
         self,
@@ -184,13 +185,13 @@ class MindRoomOpenAIResponses(OpenAIResponses):
             if not yielded:
                 raise
             msg = "OpenAI Responses stream failed after yielding output"
-            raise _IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
+            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
         finally:
             # Agno returns a generator, annotated only as Iterator.
             cast("Generator[ModelResponse, None, None]", stream).close()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
-            raise _IncompleteResponsesStreamError(
+            raise IncompleteResponsesStreamError(
                 msg,
                 model_name=self.name,
                 model_id=self.id,
@@ -227,13 +228,13 @@ class MindRoomOpenAIResponses(OpenAIResponses):
             if not yielded:
                 raise
             msg = "OpenAI Responses stream failed after yielding output"
-            raise _IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
+            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
         finally:
             # Finalize Agno's async generator when the consumer stops at a yield.
             await cast("AsyncGenerator[ModelResponse, None]", stream).aclose()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
-            raise _IncompleteResponsesStreamError(
+            raise IncompleteResponsesStreamError(
                 msg,
                 model_name=self.name,
                 model_id=self.id,
