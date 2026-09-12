@@ -223,6 +223,7 @@ class RegisteredHook:
     source_lineno: int
     agents: tuple[str, ...] | None
     rooms: tuple[str, ...] | None
+    required: bool = False
 
 
 def default_timeout_ms_for_event(event_name: str) -> int:

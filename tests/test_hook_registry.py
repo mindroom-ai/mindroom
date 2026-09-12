@@ -5,6 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import HookOverrideConfig, PluginEntryConfig
@@ -82,6 +84,13 @@ def _message_received_context(
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
         ),
     )
+
+
+@pytest.mark.parametrize("event_name", [EVENT_MESSAGE_RECEIVED, "agent:stopped", "custom:test"])
+def test_required_hooks_are_limited_to_startup(event_name: str) -> None:
+    """Required initialization must not change ordinary observer fault isolation."""
+    with pytest.raises(ValueError, match="required hooks are only supported for agent:started"):
+        hook(event_name, required=True)
 
 
 def test_hook_registry_orders_by_priority_plugin_order_and_lineno() -> None:

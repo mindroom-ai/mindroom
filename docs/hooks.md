@@ -53,7 +53,9 @@ The hook system has four execution modes, determined by the event, not by indivi
 
 Hooks run serially.
 Each hook sees the context as read-only (except designated mutable fields like `suppress`).
-Failures lose only that hook's side effects; the next hook still runs.
+Ordinary observer failures are isolated and the next hook still runs; completed external side effects are not rolled back.
+An `agent:started` hook can declare `required=True` when startup must not proceed without its initialization.
+Failure or timeout in a required startup hook aborts that bot's startup before its room reconciliation, using the existing startup failure handling.
 
 ```python
 from mindroom.hooks import hook
@@ -233,6 +235,7 @@ async def enrich_weather(ctx):
 | `name` | `str` | function name | Hook identifier (unique within a plugin) |
 | `priority` | `int` | `100` | Execution order; lower values run first |
 | `timeout_ms` | `int \| None` | per-event default | Override the event's default timeout |
+| `required` | `bool` | `False` | For `agent:started` only: abort bot startup if this hook fails or times out |
 | `agents` | `Iterable[str] \| None` | `None` (all) | Only fire for these agent names |
 | `rooms` | `Iterable[str] \| None` | `None` (all) | Only fire for these room IDs |
 
@@ -475,6 +478,8 @@ If you are writing internal code or tests and already have an explicit `HookRegi
 
 Every hook invocation runs inside an `asyncio.timeout()` with structured error logging.
 Ordinary `Exception` and `SystemExit` failures are logged and isolated so later hooks can continue.
+Required startup hooks instead raise a `RuntimeError` with the original failure as its cause, stopping subsequent startup hooks and the bot's room reconciliation.
+Use a short, separate required hook for ownership or other necessary initialization; keep optional backfill, welcomes, and enrichment in ordinary hooks.
 Cancellation follows the caller and event policy, and external side effects completed before a failure cannot be rolled back.
 
 Failure semantics are mode-aware:
@@ -486,7 +491,7 @@ Failure semantics are mode-aware:
 
 ### No quarantine, no cooldown
 
-A hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](plugins.md#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
+An ordinary hook that raises is logged and skipped for that one event. The next event invokes it again. If it keeps raising, you keep getting logs — fix it (combined with [plugin hot reload](plugins.md#live-development-hot-reload), the next save is live within ~1s) and the next invocation just works. There is no failure threshold, no muting, no cooldown to wait out.
 
 ### No automatic retries
 

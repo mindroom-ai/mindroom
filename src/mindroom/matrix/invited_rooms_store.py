@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from mindroom.constants import ROUTER_AGENT_NAME, safe_replace
@@ -33,7 +33,7 @@ def pending_room_invites_path(storage_root: Path, agent_name: str) -> Path:
 
 
 def load_invited_rooms(path: Path) -> set[str]:
-    """Load persisted invited rooms, failing open on missing or invalid files."""
+    """Load persisted room ownership, rejecting unreadable or invalid state."""
     if not path.exists():
         return set()
 
@@ -41,18 +41,13 @@ def load_invited_rooms(path: Path) -> set[str]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         logger.warning("failed_to_load_invited_rooms", path=str(path), exc_info=True)
-        return set()
+        raise
 
-    if not isinstance(raw, list):
-        logger.warning("invalid_invited_rooms_file", path=str(path))
-        return set()
+    if not isinstance(raw, list) or any(not isinstance(room_id, str) for room_id in raw):
+        msg = f"Invalid invited-room retention file: {path}"
+        raise ValueError(msg)
 
-    room_ids = [room_id for room_id in raw if isinstance(room_id, str)]
-    if len(room_ids) != len(raw):
-        logger.warning("invalid_invited_rooms_file", path=str(path))
-        return set()
-
-    return set(room_ids)
+    return set(cast("list[str]", raw))
 
 
 def save_invited_rooms(path: Path, room_ids: set[str]) -> bool:
