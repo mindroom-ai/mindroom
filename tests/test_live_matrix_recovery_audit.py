@@ -143,6 +143,9 @@ async def _publish_resume(
         *(nio.RoomMessageText.from_dict(event) for event in events.values()),
     )
     client.room_get_event_relations = Mock(side_effect=lambda *_args, **_kwargs: _aiter())
+    client.room_get_event.side_effect = lambda _room_id, event_id: nio.RoomGetEventResponse.from_dict(
+        events[event_id],
+    )
 
     async def send(*_args: object, **kwargs: object) -> nio.RoomSendResponse:
         content = cast("dict[str, Any]", kwargs["content"])
@@ -174,6 +177,7 @@ async def _publish_resume(
             client,
             room_id=ROOM,
             actors={AGENT: client},
+            target_thread_ids={"$interrupted": "$root"},
             bot_user_ids={AGENT, ROUTER},
             config=config,
             runtime_paths=paths,

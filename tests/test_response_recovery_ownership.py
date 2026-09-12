@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -48,11 +48,13 @@ from tests.test_stale_stream_cleanup import (
     ROOM_ID,
     STALE_AGE_MS,
     USER_ID,
+    _aiter,
     _authoritative_history,
     _history_message,
     _make_client,
     _make_config,
     _make_message_event,
+    _room_get_event_response,
     _room_messages_response,
     _thread_reply_relation,
 )
@@ -408,10 +410,10 @@ async def test_startup_snapshot_cannot_overwrite_completed_final(
     captured, release = asyncio.Event(), asyncio.Event()
     editing, release_edit = asyncio.Event(), asyncio.Event()
 
-    async def history(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+    async def history(*_args: object, **_kwargs: object) -> nio.RoomGetEventResponse:
         captured.set()
         await release.wait()
-        return snapshot
+        return _room_get_event_response(snapshot.chunk[0])
 
     async def edit(*_args: object, **kwargs: object) -> nio.RoomSendResponse:
         editing.set()
@@ -432,7 +434,7 @@ async def test_startup_snapshot_cannot_overwrite_completed_final(
             payload={"msgtype": "m.text", "body": "answer", "m.new_content": {"msgtype": "m.text", "body": "answer"}},
         )
 
-    client.room_messages.side_effect = history
+    client.room_get_event.side_effect = history
     client.room_send.side_effect = edit
     with patch.object(cleanup.time, "time", return_value=NOW_MS / 1000):
         scan = asyncio.create_task(
@@ -440,6 +442,7 @@ async def test_startup_snapshot_cannot_overwrite_completed_final(
                 client,
                 room_id=ROOM_ID,
                 actors={BOT_USER_ID: client},
+                target_thread_ids={INITIAL: "$thread"},
                 bot_user_ids={BOT_USER_ID},
                 config=config,
                 runtime_paths=runtime_paths_for(config),
@@ -750,7 +753,10 @@ async def test_orphaned_relay_is_discovered_after_restart_before_it_finishes(
             ),
         ],
     )
-    client.room_messages.side_effect = lambda *_args, **_kwargs: _room_messages_response(*events)
+    client.room_get_event.side_effect = lambda _room, event_id: _room_get_event_response(
+        next(event for event in events if event.event_id == event_id),
+    )
+    client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _aiter())
     accepted = []
 
     async def send(*_args: object, **kwargs: object) -> nio.RoomSendResponse:
@@ -792,11 +798,21 @@ async def test_orphaned_relay_is_discovered_after_restart_before_it_finishes(
             patch.object(
                 cleanup,
                 "fetch_thread_messages_from_source",
-                return_value=_authoritative_history(_history_message(INITIAL, body=events[0].body)),
+                side_effect=lambda *_args, **_kwargs: [
+                    _history_message(
+                        event.event_id,
+                        sender=event.sender,
+                        timestamp=event.server_timestamp,
+                        content=event.source["content"],
+                        body=event.body,
+                    )
+                    for event in sorted(events, key=lambda event: event.server_timestamp)
+                ],
             ),
         ):
             result = await cleanup.recover_stale_streaming_messages(
                 {BOT_USER_ID: client},
+                principals={BOT_USER_ID: principal},
                 resume_client=router,
                 response_recovery_scope=lambda _agent, room, event, gateway=gateway: gateway.response_recovery_scope(
                     room,

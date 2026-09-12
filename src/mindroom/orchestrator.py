@@ -1423,7 +1423,7 @@ class _MultiAgentOrchestrator:
         *,
         target_room_ids: set[str] | None = None,
     ) -> None:
-        """Recover interrupted responses from one concurrent room scan."""
+        """Recover interrupted responses identified by the durable delivery outbox."""
         actors: dict[str, nio.AsyncClient] = {}
         for bot in bots:
             if bot.client is None or not bot.agent_user.user_id:
@@ -1440,6 +1440,9 @@ class _MultiAgentOrchestrator:
 
         result = await recover_stale_streaming_messages(
             actors,
+            principals={
+                bot.agent_user.user_id: bot.journal_principal() for bot in bots if bot.agent_user.user_id in actors
+            },
             resume_client=router_bot.client if router_bot is not None else None,
             response_recovery_scope=response_recovery_scope,
             config=config,
