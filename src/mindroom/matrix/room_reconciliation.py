@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import aiohttp
 import nio
 
 from mindroom.logging_config import get_logger
@@ -30,9 +31,17 @@ class RoomStateSnapshot:
 
 async def read_room_state(client: nio.AsyncClient, room_id: str) -> RoomStateSnapshot | None:
     """Fetch complete state; unreadable state is not an empty room."""
-    response = await client.room_get_state(room_id)
+    try:
+        response = await client.room_get_state(room_id)
+    except (aiohttp.ClientError, TimeoutError, ValueError):
+        logger.warning("room_reconciliation_state_read_failed", room_id=room_id, exc_info=True)
+        return None
     if not isinstance(response, nio.RoomGetStateResponse) or response.room_id != room_id:
         logger.warning("room_reconciliation_state_unavailable", room_id=room_id, error=str(response))
+        return None
+    # Nio validates the state envelope, but not the content field.
+    if any(not isinstance(event.get("content"), dict) for event in response.events):
+        logger.warning("room_reconciliation_state_content_invalid", room_id=room_id)
         return None
     return RoomStateSnapshot(
         room_id,

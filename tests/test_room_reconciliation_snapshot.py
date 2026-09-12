@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import nio
 import pytest
 
@@ -57,6 +58,38 @@ async def test_unavailable_snapshot_is_not_an_empty_room() -> None:
     client.room_get_state.return_value = nio.RoomGetStateError("forbidden", "M_FORBIDDEN", "!room:example.com")
     assert await room_reconciliation.read_room_state(client, "!room:example.com") is None
     client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [None, [], "invalid"])
+async def test_snapshot_rejects_content_not_validated_by_nio(content: object) -> None:
+    """Nio validates the state envelope but leaves content shape unchecked."""
+    client = AsyncMock()
+    room_id = "!room:example.com"
+    client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "event_id": "$state",
+                "sender": "@a:example.com",
+                "type": "m.room.topic",
+                "state_key": "",
+                "origin_server_ts": 1,
+                "content": content,
+            },
+        ],
+        room_id,
+    )
+    assert isinstance(client.room_get_state.return_value, nio.RoomGetStateResponse)
+    assert await room_reconciliation.read_room_state(client, room_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [aiohttp.ClientConnectionError(), TimeoutError(), ValueError("bad JSON")])
+async def test_snapshot_transport_failure_is_unavailable(error: Exception) -> None:
+    """A failed external read cannot abort unrelated room administration."""
+    client = AsyncMock()
+    client.room_get_state.side_effect = error
+    assert await room_reconciliation.read_room_state(client, "!room:example.com") is None
 
 
 @pytest.mark.asyncio
