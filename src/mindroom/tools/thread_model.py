@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="thread_model",
     display_name="Thread Model",
-    description="List configured models or switch which model the current Matrix thread uses",
+    description="Choose which AI model responds in the current conversation thread",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

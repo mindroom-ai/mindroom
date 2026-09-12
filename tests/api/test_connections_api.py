@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
@@ -10,10 +11,12 @@ from urllib.parse import parse_qs, urlparse
 import jwt
 import pytest
 import yaml
+from aioresponses import aioresponses
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from mindroom.api import config_lifecycle, main, oauth
+from mindroom.matrix.state import MatrixState
 from mindroom.oauth import registry as oauth_registry
 from tests.api.test_api import (
     _trusted_upstream_jwks,
@@ -123,6 +126,138 @@ def test_catalog_lists_tools_without_browser_authentication(portal: dict[str, An
     assert tools["calculator"]["requires_room_context"] is False
     assert tools["google_drive"]["provider"] == "google_drive"
     assert tools["matrix_message"]["requires_room_context"] is True
+
+
+@pytest.mark.parametrize(
+    ("with_oauth", "provider_name", "expected_provider_name"),
+    [(False, None, None), (True, "  Wiki sign-in  ", "Wiki sign-in"), (True, "   ", "MCP Wiki")],
+)
+def test_catalog_uses_mcp_display_metadata_without_exposing_model_instructions(
+    portal: dict[str, Any],
+    with_oauth: bool,
+    provider_name: str | None,
+    expected_provider_name: str | None,
+) -> None:
+    """Tool copy and connection summaries stay separate from OAuth labels and model instructions."""
+    server: dict[str, Any] = {
+        "transport": "streamable-http",
+        "url": "https://mcp.example.test/mcp",
+        "display_name": "  Team Wiki  ",
+        "summary": "  Search and edit team documentation  ",
+    }
+    if with_oauth:
+        server["description"] = "Model-only instructions for handling connection errors"
+        server["auth"] = {
+            "type": "oauth",
+            "display_name": provider_name,
+            "discovery": "manual",
+            "authorization_url": "https://auth.example.test/authorize",
+            "token_url": "https://auth.example.test/token",
+        }
+    portal["payload"]["mcp_servers"] = {"wiki": server}
+    portal["payload"]["agents"]["personal"]["tools"] = ["mcp_wiki"]
+    _publish_config(main.app, portal["paths"], portal["payload"])
+    _use_runtime_auth_settings(main.app)
+
+    response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+
+    assert response.status_code == 200, response.text
+    agent = response.json()["agents"][0]
+    assert agent["tools"][0]["display_name"] == "Team Wiki"
+    assert agent["tools"][0]["description"] == "Search and edit team documentation"
+    assert "Model-only" not in response.text
+    if with_oauth:
+        assert agent["services"][0]["display_name"] == expected_provider_name
+        assert agent["services"][0]["description"] == "Search and edit team documentation"
+    else:
+        assert agent["services"] == []
+
+
+@pytest.mark.parametrize("agent_name", ["personal", "research"])
+@pytest.mark.parametrize(
+    ("content_type", "body", "expected"),
+    [
+        ("image/png", b"thumbnail", 200),
+        ("image/svg+xml", b"thumbnail", 404),
+        ("image/png", b"", 404),
+        ("image/png", b"x" * (1024 * 1024 + 1), 404),
+    ],
+    ids=["raster", "svg", "empty", "oversized"],
+)
+def test_avatar_serves_current_matrix_thumbnail(
+    shared_portal: dict[str, Any],
+    agent_name: str,
+    content_type: str,
+    body: bytes,
+    expected: int,
+) -> None:
+    """Visible private and management-only shared agents use their saved Matrix identity."""
+    state = MatrixState()
+    state.add_account(f"agent_{agent_name}", "custom_bot", None, domain="example.org", access_token="avatar-token")  # noqa: S106
+    state.save(runtime_paths=shared_portal["paths"])
+    with aioresponses() as matrix:
+        matrix.get(
+            "http://localhost:8008/_matrix/client/v3/profile/@custom_bot:example.org",
+            payload={"avatar_url": "mxc://example.org/current-avatar"},
+        )
+        matrix.get(
+            "http://localhost:8008/_matrix/client/v1/media/thumbnail/example.org/current-avatar"
+            "?width=96&height=96&method=scale&allow_remote=true",
+            body=body,
+            content_type=content_type,
+        )
+        response = shared_portal["client"].get(
+            f"/api/connections/agents/{agent_name}/avatar",
+            headers=shared_portal["headers"]["alice"],
+        )
+        assert response.status_code == expected, (response.text, list(matrix.requests))
+        assert all(
+            call.kwargs["headers"]["Authorization"] == "Bearer avatar-token"
+            for calls in matrix.requests.values()
+            for call in calls
+        )
+    if expected != 200:
+        return
+    assert response.content == b"thumbnail"
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "no-store" in response.headers["cache-control"]
+    assert "avatar-token" not in str(response.headers)
+
+
+@pytest.mark.parametrize("avatar_url", [None, "https://example.org/picture.png", "mxc://example.org/"])
+def test_avatar_unavailable_for_missing_or_invalid_profile(portal: dict[str, Any], avatar_url: str | None) -> None:
+    """An absent or non-Matrix picture cannot turn the endpoint into an arbitrary URL proxy."""
+    state = MatrixState()
+    state.add_account("agent_personal", "personal", None, domain="example.org", access_token="avatar-token")  # noqa: S106
+    state.save(runtime_paths=portal["paths"])
+    with aioresponses() as matrix:
+        matrix.get(
+            re.compile(r"http://localhost:8008/_matrix/client/v3/profile/.*"),
+            payload={"avatar_url": avatar_url},
+        )
+        response = portal["client"].get("/api/connections/agents/personal/avatar", headers=portal["headers"]["alice"])
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("user", "agent_name", "expected"),
+    [("alice", "support", 404), ("admin", "other_private", 404), (None, "personal", 401)],
+)
+def test_avatar_requires_visible_agent(
+    shared_portal: dict[str, Any],
+    user: str | None,
+    agent_name: str,
+    expected: int,
+) -> None:
+    """Signed-in access alone cannot reveal hidden agents, including to administrators."""
+    with aioresponses() as matrix:
+        response = shared_portal["client"].get(
+            f"/api/connections/agents/{agent_name}/avatar",
+            headers=shared_portal["headers"][user] if user else {},
+        )
+        assert not matrix.requests
+    assert response.status_code == expected
 
 
 @pytest.mark.parametrize("query", ["agent_name=other", "worker_key=other", "user_id=bob", "execution_scope=user"])

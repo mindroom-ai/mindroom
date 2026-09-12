@@ -353,8 +353,8 @@ class _ApprovedEgressTools(Toolkit):
 
 @register_tool_with_metadata(
     name="approved_egress",
-    display_name="Approved Worker Egress",
-    description="Request human-approved temporary worker access to blocked external hostnames",
+    display_name="Network Access Requests",
+    description="Request approval for temporary access to a blocked website or service",
     category=ToolCategory.INTEGRATIONS,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.SPECIAL,

@@ -251,7 +251,7 @@ def _handle_namespace(*, runtime_paths: RuntimePaths, base_dir: Path | None) -> 
 @register_tool_with_metadata(
     name="shell",
     display_name="Shell Commands",
-    description="Execute shell commands and scripts",
+    description="Run terminal commands and scripts in the agent workspace",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

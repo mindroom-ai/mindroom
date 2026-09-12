@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="google_calendar",
     display_name="Google Calendar",
-    description="View and schedule meetings with Google Calendar",
+    description="View calendars and create or update events in Google Calendar",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,

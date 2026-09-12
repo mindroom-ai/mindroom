@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="oauth_connections",
     display_name="OAuth Connections",
-    description="Reset the current requester's OAuth connections for the current agent",
+    description="Get a confirmation link to reset an account connection for this agent",
     category=ToolCategory.INTEGRATIONS,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

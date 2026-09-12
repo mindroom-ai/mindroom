@@ -58,10 +58,6 @@ EXPECTED_SUBAGENT_TOOL_NAMES = {
 TEST_SUMMARY = "test summary"
 TEST_TAG = "test-tag"
 TEST_SUBAGENT_PASSWORD = "pw"  # noqa: S105
-EXPECTED_SUBAGENTS_DESCRIPTION = (
-    "Discover, spawn, and communicate with sub-agent sessions. "
-    "`agents_list` reports per-tool capability flags (delegate-aware)."
-)
 
 
 def _make_agent_config(
@@ -187,7 +183,6 @@ def _stub_spawn_followups(
 def test_subagents_tool_registered_and_instantiates() -> None:
     """Subagents should be present in metadata and constructible from the registry."""
     assert "subagents" in TOOL_METADATA
-    assert TOOL_METADATA["subagents"].description == EXPECTED_SUBAGENTS_DESCRIPTION
     assert isinstance(get_tool_by_name("subagents", resolve_runtime_paths(), worker_target=None), SubAgentsTools)
 
 

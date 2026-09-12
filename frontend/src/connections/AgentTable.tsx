@@ -8,17 +8,12 @@ import {
   getFilteredRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import {
-  ChevronDown,
-  ChevronRight,
-  Search,
-  Users,
-  UserRound,
-} from "lucide-react";
+import { ChevronDown, ChevronRight, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { AgentTools } from "./AgentTools";
+import { AgentAvatar } from "./AgentAvatar";
 import type { AgentConnections } from "./types";
 import type { McpSelectionState } from "./useMcpSelection";
 
@@ -31,7 +26,6 @@ const columns: ColumnDef<AgentTableRow>[] = [
     accessorFn: (agent) => agent.agent_display_name,
     cell: ({ row }) => {
       const agent = row.original;
-      const Icon = agent.is_shared ? Users : UserRound;
       return (
         <button
           type="button"
@@ -52,9 +46,7 @@ const columns: ColumnDef<AgentTableRow>[] = [
               aria-hidden="true"
             />
           )}
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/5 text-primary">
-            <Icon className="h-4 w-4" aria-hidden="true" />
-          </span>
+          <AgentAvatar key={agent.agent_name} agent={agent} />
           <span id={`agent-${agent.agent_name}`} className="font-medium">
             {agent.agent_display_name}
           </span>

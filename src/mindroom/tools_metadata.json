@@ -174,7 +174,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Send, reply, react, read, room-threads, thread-list, and edit Matrix messages with room/thread context defaults",
+      "description": "Read, send, edit, and react to messages in Matrix rooms and threads",
       "display_name": "Matrix Message",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
@@ -198,7 +198,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Inspect Matrix room metadata, members, threads, and state",
+      "description": "View Matrix room details, members, and conversation threads",
       "display_name": "Matrix Room",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
@@ -283,7 +283,7 @@
       "dependencies": [
         "openai"
       ],
-      "description": "Generate speech from text and send it as a Matrix voice message with room/thread context defaults",
+      "description": "Turn text into speech and send it as a Matrix voice message",
       "display_name": "Matrix Voice Message",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
@@ -836,7 +836,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Explicitly resolve or reopen Matrix threads in the current room",
+      "description": "Mark conversation threads as resolved or reopen them",
       "display_name": "Thread Resolution",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
@@ -861,7 +861,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Set or update Matrix thread summaries with room/thread context defaults",
+      "description": "Write or update a summary of a conversation thread",
       "display_name": "Thread Summary",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
@@ -885,7 +885,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Tag, untag, and inspect Matrix threads using shared room-state markers",
+      "description": "Add, remove, and view tags on conversation threads",
       "display_name": "Thread Tags",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
@@ -2191,7 +2191,7 @@
       "consumes_workspace_paths": true,
       "default_execution_target": "worker",
       "dependencies": [],
-      "description": "Advanced code-oriented file operations (precise edits, grep, and discovery). Prefer this over file for coding agents; keep file for backward compatibility.",
+      "description": "Find code, search across files, and make precise edits",
       "display_name": "Coding Tools",
       "docs_url": null,
       "function_names": [
@@ -3298,7 +3298,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Local file operations including read, write, list, and search",
+      "description": "Read, write, list, and search files in the agent workspace",
       "display_name": "File Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/file",
       "function_names": [
@@ -3775,7 +3775,7 @@
       "dependencies": [
         "PyGithub"
       ],
-      "description": "Repository and issue management",
+      "description": "Browse code and manage GitHub repositories, issues, and pull requests",
       "display_name": "GitHub",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/github",
       "function_names": [
@@ -5932,7 +5932,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Run trusted arbitrary Python code with scoped worker filesystem and environment access plus deployment-policy network access",
+      "description": "Run Python scripts in the background, monitor them, or cancel them",
       "display_name": "Background Scripts",
       "docs_url": null,
       "function_names": [
@@ -6067,7 +6067,7 @@
       "consumes_workspace_paths": true,
       "default_execution_target": "worker",
       "dependencies": [],
-      "description": "Execute shell commands and scripts",
+      "description": "Run terminal commands and scripts in the agent workspace",
       "display_name": "Shell Commands",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/shell",
       "function_names": [
@@ -6142,7 +6142,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Discover, spawn, and communicate with sub-agent sessions. `agents_list` reports per-tool capability flags (delegate-aware).",
+      "description": "Delegate tasks to sub-agents and follow up on their work",
       "display_name": "Sub-Agents",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
@@ -6773,7 +6773,7 @@
         "google-auth-oauthlib",
         "google-auth-httplib2"
       ],
-      "description": "Read, search, and manage Gmail emails",
+      "description": "Search, read, send, and organize email in Gmail",
       "display_name": "Gmail",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/gmail",
       "function_names": [
@@ -7227,7 +7227,7 @@
       "dependencies": [
         "httpx"
       ],
-      "description": "Grant yourself UI access to manage this agent's Agent Vault secrets",
+      "description": "Get a link to manage this agent's passwords and API keys in Agent Vault",
       "display_name": "Agent Vault Access",
       "docs_url": null,
       "function_names": [
@@ -7249,8 +7249,8 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Request human-approved temporary worker access to blocked external hostnames",
-      "display_name": "Approved Worker Egress",
+      "description": "Request approval for temporary access to a blocked website or service",
+      "display_name": "Network Access Requests",
       "docs_url": null,
       "function_names": [
         "request_network_access"
@@ -7519,7 +7519,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Reset the current requester's OAuth connections for the current agent",
+      "description": "Get a confirmation link to reset an account connection for this agent",
       "display_name": "OAuth Connections",
       "docs_url": null,
       "function_names": [
@@ -7627,7 +7627,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "List and register context-scoped file attachments",
+      "description": "Find files attached to a conversation and make workspace files available as attachments",
       "display_name": "Attachments",
       "docs_url": null,
       "function_names": [
@@ -7935,7 +7935,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Operate exact locally allowlisted applications through accessibility state over Matrix encryption",
+      "description": "Let the agent interact with desktop apps you explicitly allow",
       "display_name": "Matrix Desktop",
       "docs_url": "https://docs.mindroom.chat/tools/desktop/",
       "function_names": [
@@ -8154,7 +8154,7 @@
         "google-auth-httplib2",
         "google-auth-oauthlib"
       ],
-      "description": "View and schedule meetings with Google Calendar",
+      "description": "View calendars and create or update events in Google Calendar",
       "display_name": "Google Calendar",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/googlecalendar",
       "function_names": [
@@ -8334,7 +8334,7 @@
         "google-auth-httplib2",
         "google-auth-oauthlib"
       ],
-      "description": "Search, read, upload, and organize files in the connected user's Google Drive",
+      "description": "Search, read, upload, and organize files in Google Drive",
       "display_name": "Google Drive",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_drive",
       "function_names": [
@@ -8512,7 +8512,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Explicitly store and search agent memories on demand",
+      "description": "Save, find, and update information the agent remembers",
       "display_name": "Agent Memory",
       "docs_url": null,
       "function_names": [
@@ -8837,7 +8837,7 @@
       "consumes_workspace_paths": true,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Publish authorized report artifacts through revocable public links",
+      "description": "Share reports through public links that you can revoke",
       "display_name": "Report Publishing",
       "docs_url": null,
       "function_names": [
@@ -8862,7 +8862,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Schedule, edit, list, and cancel tasks and reminders",
+      "description": "Schedule tasks and reminders, and manage upcoming runs",
       "display_name": "Scheduler",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
@@ -9073,7 +9073,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "List configured models or switch which model the current Matrix thread uses",
+      "description": "Choose which AI model responds in the current conversation thread",
       "display_name": "Thread Model",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
@@ -9098,7 +9098,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Create and manage per-thread work plans with dependencies",
+      "description": "Track tasks, progress, and dependencies in a conversation thread",
       "display_name": "Todo",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
@@ -10108,7 +10108,7 @@
       "dependencies": [
         "playwright"
       ],
-      "description": "OpenClaw-style browser control (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act/help/actions)",
+      "description": "Browse websites, fill in forms, and capture screenshots",
       "display_name": "Browser",
       "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
       "function_names": [
@@ -11066,7 +11066,7 @@
       "dependencies": [
         "scholarly"
       ],
-      "description": "Search academic publications on Google Scholar",
+      "description": "Find academic papers and publications on Google Scholar",
       "display_name": "Google Scholar",
       "docs_url": "https://github.com/scholarly-python-package/scholarly",
       "function_names": [

@@ -46,6 +46,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
 )
+from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
 
@@ -615,13 +616,13 @@ def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initia
     assert listed["loaded_tools"] == ["shell"]
     assert listed["tools"] == [
         {
-            "description": "Execute shell commands and scripts",
+            "description": TOOL_METADATA["shell"].description,
             "loaded": True,
             "name": "shell",
             "sticky": True,
         },
         {
-            "description": "Sleep utility for introducing delays and pauses in execution",
+            "description": TOOL_METADATA["sleep"].description,
             "loaded": False,
             "name": "sleep",
             "sticky": False,
@@ -1610,7 +1611,7 @@ def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_pat
     )
 
     assert static_before == static_after
-    assert "shell - Execute shell commands" in static_before
+    assert f"shell - {TOOL_METADATA['shell'].description}" in static_before
     assert "becomes callable once it appears in your available tools" in static_before
     assert "same parallel tool-call batch" in static_before
     assert "each member manages its own dynamic tool state" in static_before

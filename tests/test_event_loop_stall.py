@@ -34,21 +34,21 @@ class _LoopClock:
 
     def __init__(self) -> None:
         self.now = 0.0
-        self.scheduled: list[tuple[float, Callable[[float], None], float]] = []
+        self.scheduled: list[tuple[float, Callable[..., None], tuple[float, ...]]] = []
 
     def time(self) -> float:
         return self.now
 
-    def call_at(self, when: float, callback: Callable[[float], None], scheduled_loop_time: float) -> object:
-        self.scheduled.append((when, callback, scheduled_loop_time))
+    def call_at(self, when: float, callback: Callable[..., None], *args: float) -> object:
+        self.scheduled.append((when, callback, args))
         return object()
 
     def next_scheduled_time(self) -> float:
         return self.scheduled[0][0]
 
     def run_next(self) -> None:
-        _, callback, scheduled_loop_time = self.scheduled.pop(0)
-        callback(scheduled_loop_time)
+        _, callback, args = self.scheduled.pop(0)
+        callback(*args)
 
 
 class _FakeFrame:
@@ -168,6 +168,95 @@ def test_scheduler_lag_heartbeat_rearms_from_actual_time_after_stall() -> None:
     loop.now = 1.36
     loop.run_next()
     assert loop.next_scheduled_time() == pytest.approx(1.41)
+
+
+def test_scheduler_lag_summary_timestamps_the_worst_sample_and_resets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The worst delay keeps its own overdue interval, even after smaller samples."""
+    detector = _detector()
+    loop = _LoopClock()
+    detector._loop = loop
+    detector._scheduler_lag_window_started_at = 0.0
+    monkeypatch.setattr(event_loop_stall.time, "time", lambda: 1_700_000_000.0 + loop.now)
+    detector._schedule_heartbeat(1.0)
+
+    with capture_logs() as logs:
+        for lag_seconds in (0.25, 0.6, 0.01):
+            loop.now = loop.next_scheduled_time() + lag_seconds
+            loop.run_next()
+        detector._report_scheduler_lag(60.0)
+        loop.now = loop.next_scheduled_time() + 0.01
+        loop.run_next()
+        detector._report_scheduler_lag(120.0)
+
+    assert logs[0]["max_ms"] == 600.0
+    assert logs[0]["max_lag_scheduled_at"] == "2023-11-14T22:13:21.270+00:00"
+    assert logs[0]["max_lag_observed_at"] == "2023-11-14T22:13:21.870+00:00"
+    assert logs[1]["max_ms"] == 10.0
+    assert logs[1]["max_lag_scheduled_at"] == "2023-11-14T22:13:21.920+00:00"
+    assert logs[1]["max_lag_observed_at"] == "2023-11-14T22:13:21.930+00:00"
+
+
+def test_scheduler_lag_preserves_scheduled_time_across_clock_adjustment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wall-clock jump while overdue must not rewrite the original scheduled time."""
+    detector = _detector()
+    loop = _LoopClock()
+    detector._loop = loop
+    wall_clock = SimpleNamespace(now=1_700_000_000.0)
+    monkeypatch.setattr(event_loop_stall.time, "time", lambda: wall_clock.now)
+    detector._schedule_heartbeat(1.0)
+    loop.now = 1.4
+    wall_clock.now = 1_700_003_601.4
+
+    with capture_logs() as logs:
+        loop.run_next()
+        detector._report_scheduler_lag(60.0)
+
+    assert logs[0]["max_ms"] == 400.0
+    assert logs[0]["max_lag_scheduled_at"] == "2023-11-14T22:13:21.000+00:00"
+    assert logs[0]["max_lag_observed_at"] == "2023-11-14T23:13:21.400+00:00"
+
+
+def test_separate_stalls_share_a_stack_capture_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repeated short stalls retain lifecycle logs without repeatedly sampling stacks."""
+    detector = _detector(repeat_log_interval_seconds=1.0)
+    captures: list[None] = []
+
+    def capture_frames() -> dict:
+        captures.append(None)
+        return {}
+
+    monkeypatch.setattr(event_loop_stall.sys, "_current_frames", capture_frames)
+    with capture_logs() as logs:
+        for last_beat, detected_at, recovered_at in ((1.0, 1.2, 1.3), (1.3, 1.5, 1.6), (2.0, 2.2, 2.3)):
+            heartbeat = event_loop_stall._Heartbeat(monotonic_seconds=last_beat, process_cpu_seconds=0.0)
+            detector._note_stalled(detected_at, heartbeat)
+            detector._note_stall_ended(recovered_at)
+
+    detected = [entry for entry in logs if entry["event"] == "event_loop_stall_detected"]
+    assert [entry["stack_capture_suppressed"] for entry in detected] == [False, True, False]
+    assert "stack" not in detected[1]
+    assert len(captures) == 2
+    ended = [entry for entry in logs if entry["event"] == "event_loop_stall_ended"]
+    assert [entry["stall_duration_seconds"] for entry in ended] == [0.3, 0.3, 0.3]
+
+
+def test_suppressed_stall_captures_a_stack_when_budget_recovers() -> None:
+    """A new long stall can get a stack after its initial capture was suppressed."""
+    detector = _detector(repeat_log_interval_seconds=1.0)
+    first = event_loop_stall._Heartbeat(monotonic_seconds=1.0, process_cpu_seconds=0.0)
+    second = event_loop_stall._Heartbeat(monotonic_seconds=1.3, process_cpu_seconds=0.0)
+    with capture_logs() as logs:
+        detector._note_stalled(1.2, first)
+        detector._note_stall_ended(1.3)
+        detector._note_stalled(1.5, second)
+        detector._note_stalled(2.0, second)
+        detector._note_stalled(2.2, second)
+
+    ongoing = [entry for entry in logs if entry["event"] == "event_loop_stall_ongoing"]
+    assert len(ongoing) == 1
+    assert ongoing[0]["stack_capture_suppressed"] is False
+    assert "stack" in ongoing[0]
+    assert ongoing[0]["stalled_for_seconds"] == 0.9
 
 
 @pytest.mark.asyncio
