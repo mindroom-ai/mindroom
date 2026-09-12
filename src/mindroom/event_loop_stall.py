@@ -8,6 +8,10 @@ heartbeat goes stale the thread captures the loop thread's current stack via
 ``sys._current_frames()`` and logs it. That identifies the blocking code
 without ptrace capabilities, so it works in hardened non-root containers
 where external profilers such as py-spy cannot attach.
+
+Minute summaries retain the scheduled and observed UTC times of the worst
+heartbeat delay. Stack captures share a cooldown across separate stalls;
+suppressed captures still emit brief detection and recovery records.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import time
 import traceback
 from collections import deque
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
@@ -112,7 +117,7 @@ class EventLoopStallDetector:
         self._heartbeat = _Heartbeat(monotonic_seconds=0.0, process_cpu_seconds=0.0)
         self._stalled_beat: float | None = None
         self._next_repeat_log: float = 0.0
-        self._scheduler_lag_samples: deque[float] = deque(
+        self._scheduler_lag_samples: deque[tuple[float, float]] = deque(
             maxlen=max(1, math.ceil(_SCHEDULER_LAG_WINDOW_SECONDS / heartbeat_interval_seconds)),
         )
         self._scheduler_lag_window_started_at: float = 0.0
@@ -161,12 +166,13 @@ class EventLoopStallDetector:
         """Refresh heartbeat, sample callback lag, and re-arm from actual loop time."""
         assert self._loop is not None
         actual_loop_time = self._loop.time()
+        observed_at = time.time()
         self._heartbeat = _Heartbeat(
             monotonic_seconds=time.monotonic(),
             process_cpu_seconds=time.process_time(),
         )
         with self._scheduler_lag_lock:
-            self._scheduler_lag_samples.append(max(0.0, actual_loop_time - scheduled_loop_time))
+            self._scheduler_lag_samples.append((max(0.0, actual_loop_time - scheduled_loop_time), observed_at))
         if not self._stop_event.is_set():
             self._schedule_heartbeat(actual_loop_time + self.heartbeat_interval_seconds)
 
@@ -180,7 +186,8 @@ class EventLoopStallDetector:
             self._scheduler_lag_window_started_at = now
         if not samples:
             return
-        milliseconds = sorted(elapsed_ms_between(0.0, sample, ndigits=3) for sample in samples)
+        milliseconds = sorted(elapsed_ms_between(0.0, lag, ndigits=3) for lag, _ in samples)
+        max_lag, max_observed_at = max(samples, key=lambda sample: sample[0])
         logger.info(
             "event_loop_scheduler_lag_summary",
             sample_count=len(milliseconds),
@@ -188,6 +195,11 @@ class EventLoopStallDetector:
             p95_ms=_nearest_rank_percentile(milliseconds, 95),
             p99_ms=_nearest_rank_percentile(milliseconds, 99),
             max_ms=milliseconds[-1],
+            # This brackets callback lateness, not necessarily one blocking operation.
+            max_lag_scheduled_at=datetime.fromtimestamp(max_observed_at - max_lag, UTC).isoformat(
+                timespec="milliseconds",
+            ),
+            max_lag_observed_at=datetime.fromtimestamp(max_observed_at, UTC).isoformat(timespec="milliseconds"),
         )
 
     def _loop_thread_stack(self, frames: dict[int, FrameType]) -> str | None:
@@ -258,32 +270,31 @@ class EventLoopStallDetector:
         self._stalled_beat = None
 
     def _note_stalled(self, now: float, heartbeat: _Heartbeat) -> None:
-        """Log one stalled heartbeat, rate-limited to once per repeat interval."""
+        """Log each stall while sharing one stack-capture budget across incidents."""
         last_beat = heartbeat.monotonic_seconds
         stalled_for_seconds = round(now - last_beat, 3)
-        if self._stalled_beat is None:
+        new_stall = self._stalled_beat is None
+        if new_stall:
             self._stalled_beat = last_beat
+        elif now < self._next_repeat_log:
+            return
+        stack_capture_suppressed = now < self._next_repeat_log
+        diagnostics: dict[str, object] = {}
+        if not stack_capture_suppressed:
             self._next_repeat_log = now + self.repeat_log_interval_seconds
             current_process_cpu = time.process_time()
             frames = sys._current_frames()
-            logger.error(
-                "event_loop_stall_detected",
-                stalled_for_seconds=stalled_for_seconds,
-                threshold_seconds=self.threshold_seconds,
-                stack=self._loop_thread_stack(frames),
+            diagnostics = {
+                "stack": self._loop_thread_stack(frames),
                 **self._stall_diagnostics(heartbeat, frames=frames, current_process_cpu=current_process_cpu),
-            )
-        elif now >= self._next_repeat_log:
-            self._next_repeat_log = now + self.repeat_log_interval_seconds
-            current_process_cpu = time.process_time()
-            frames = sys._current_frames()
-            logger.error(
-                "event_loop_stall_ongoing",
-                stalled_for_seconds=stalled_for_seconds,
-                threshold_seconds=self.threshold_seconds,
-                stack=self._loop_thread_stack(frames),
-                **self._stall_diagnostics(heartbeat, frames=frames, current_process_cpu=current_process_cpu),
-            )
+            }
+        logger.error(
+            "event_loop_stall_detected" if new_stall else "event_loop_stall_ongoing",
+            stalled_for_seconds=stalled_for_seconds,
+            threshold_seconds=self.threshold_seconds,
+            stack_capture_suppressed=stack_capture_suppressed,
+            **diagnostics,
+        )
 
     def _watch(self) -> None:
         """Poll the heartbeat off-loop and log stalls with the blocking stack."""
