@@ -19,7 +19,7 @@ from agno.models.message import Message
 from agno.models.openai import OpenAIChat
 from agno.models.response import ModelResponse
 from agno.utils.models.claude import format_messages as claude_format_messages
-from openai.types.responses import Response, ResponseOutputItemDoneEvent, ResponseTextDeltaEvent
+from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputItemDoneEvent, ResponseTextDeltaEvent
 
 from mindroom import codex_model
 from mindroom.codex_model import (
@@ -462,6 +462,26 @@ def _output_item_done_event(item: dict[str, object], index: int) -> ResponseOutp
     )
 
 
+def _response_completed_event(response_id: str) -> ResponseCompletedEvent:
+    return ResponseCompletedEvent.model_validate(
+        {
+            "type": "response.completed",
+            "sequence_number": 3,
+            "response": {
+                "id": response_id,
+                "created_at": 1,
+                "model": "gpt-5.6",
+                "object": "response",
+                "status": "completed",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        },
+    )
+
+
 class _FakeResponsesAPI:
     def __init__(self, event_batches: list[list[object]]) -> None:
         self._event_batches = iter(event_batches)
@@ -586,8 +606,9 @@ def test_codex_tool_search_items_round_trip_through_streaming_history() -> None:
         _output_item_done_event(_TOOL_SEARCH_CALL_ITEM, 0),
         _output_item_done_event(_TOOL_SEARCH_OUTPUT_ITEM, 1),
         text_event,
+        _response_completed_event("resp_1"),
     ]
-    client = _FakeCodexClient([first_batch, []])
+    client = _FakeCodexClient([first_batch, [_response_completed_event("resp_2")]])
     model = CodexResponses(id="gpt-5.6")
     vars(model)["get_client"] = lambda: client
 
@@ -599,7 +620,7 @@ def test_codex_tool_search_items_round_trip_through_streaming_history() -> None:
         _output_item_done_event(_TOOL_SEARCH_CALL_ITEM, 0).item.model_dump(exclude_none=True),
         _output_item_done_event(_TOOL_SEARCH_OUTPUT_ITEM, 1).item.model_dump(exclude_none=True),
     ]
-    assert messages[1].provider_data == {"tool_search_items": expected_items}
+    assert messages[1].provider_data == {"tool_search_items": expected_items, "response_id": "resp_1"}
     assert client.responses.captured_kwargs[1]["input"] == [
         {"role": "user", "content": "What is the weather?"},
         *expected_items,

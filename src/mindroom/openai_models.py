@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from agno.exceptions import ModelProviderError
 from agno.models.deepseek import DeepSeek
 from agno.models.llama_cpp import LlamaCpp
 from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
-from openai.types.responses import ResponseOutputItemDoneEvent
+from openai.types.responses import ResponseCompletedEvent, ResponseCreatedEvent, ResponseOutputItemDoneEvent
 
 from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
 from mindroom.openai_tool_search import (
@@ -21,6 +22,8 @@ from mindroom.openai_tool_search import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+
     from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
@@ -83,7 +86,7 @@ class MindRoomLlamaCpp(ChatToolArgumentsCompat, LlamaCpp):
 
 @dataclass
 class MindRoomOpenAIResponses(OpenAIResponses):
-    """OpenAI Responses model that preserves native tool-search state."""
+    """OpenAI Responses model that preserves completed response and tool-search state."""
 
     approval_receipt_after_response_id: ClassVar[bool] = True
 
@@ -141,14 +144,86 @@ class MindRoomOpenAIResponses(OpenAIResponses):
         record_tool_search_items(model_response, response.output)
         return model_response
 
+    def invoke_stream(
+        self,
+        messages: list[Message],
+        assistant_message: Message,
+        response_format: dict[Any, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | None = None,
+        compress_tool_results: bool = False,
+    ) -> Iterator[ModelResponse]:
+        """Require a successful terminal event for each provider invocation."""
+        completed = False
+        for chunk in super().invoke_stream(
+            messages,
+            assistant_message,
+            response_format,
+            tools,
+            tool_choice,
+            run_response,
+            compress_tool_results,
+        ):
+            # The parser publishes response_id only on response.completed.
+            completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
+            yield chunk
+        if not completed:
+            msg = "OpenAI Responses stream ended without response.completed"
+            raise ModelProviderError(
+                msg,
+                model_name=self.name,
+                model_id=self.id,
+            )
+
+    async def ainvoke_stream(
+        self,
+        messages: list[Message],
+        assistant_message: Message,
+        response_format: dict[Any, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | None = None,
+        compress_tool_results: bool = False,
+    ) -> AsyncIterator[ModelResponse]:
+        """Require a successful terminal event for each async provider invocation."""
+        completed = False
+        async for chunk in super().ainvoke_stream(
+            messages,
+            assistant_message,
+            response_format,
+            tools,
+            tool_choice,
+            run_response,
+            compress_tool_results,
+        ):
+            completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
+            yield chunk
+        if not completed:
+            msg = "OpenAI Responses stream ended without response.completed"
+            raise ModelProviderError(
+                msg,
+                model_name=self.name,
+                model_id=self.id,
+            )
+
     def _parse_provider_response_delta(
         self,
         stream_event: ResponseStreamEvent,
         assistant_message: Message,
         tool_use: dict[str, Any],
     ) -> tuple[ModelResponse, dict[str, Any]]:
-        """Capture streamed tool-search output items that Agno drops."""
+        """Publish only completed response IDs and capture native tool-search items."""
         model_response, tool_use = super()._parse_provider_response_delta(stream_event, assistant_message, tool_use)
+        if isinstance(stream_event, ResponseCreatedEvent) and model_response.provider_data is not None:
+            # An unfinished response may contain tool calls we never received.
+            # Chaining to it would require outputs that we cannot supply.
+            model_response.provider_data.pop("response_id", None)
+        elif isinstance(stream_event, ResponseCompletedEvent):
+            model_response.provider_data = {
+                **(model_response.provider_data or {}),
+                "response_id": stream_event.response.id,
+            }
         if isinstance(stream_event, ResponseOutputItemDoneEvent):
             record_tool_search_items(model_response, [stream_event.item])
         return model_response, tool_use
