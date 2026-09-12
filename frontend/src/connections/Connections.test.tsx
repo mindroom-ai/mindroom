@@ -52,6 +52,26 @@ const catalog = (services: (typeof service)[]) => ({
   ],
 });
 
+it("falls back cleanly when an agent's Matrix picture cannot load", async () => {
+  installApi({
+    "/api/connections": async () => json(catalog([])),
+    "/api/connections/mcp/selection": async () => json({ enabled: false }),
+  });
+  render(<Connections />);
+  const rowButton = await screen.findByRole("button", {
+    name: "Expand Personal assistant",
+  });
+  const image = rowButton.querySelector("img")!;
+  expect(image).toHaveAttribute(
+    "src",
+    "/api/connections/agents/personal/avatar",
+  );
+  fireEvent.error(image);
+  expect(rowButton.querySelector("img")).toBeNull();
+  fireEvent.click(rowButton);
+  expect(rowButton).toHaveAttribute("aria-expanded", "true");
+});
+
 it("shows shared connection availability without account controls for agent users", async () => {
   installApi({
     "/api/connections": async () =>
