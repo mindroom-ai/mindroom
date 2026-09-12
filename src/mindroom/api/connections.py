@@ -2,24 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, cast
 from urllib.parse import urlsplit
 
+import nio
+from aiohttp import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.auth import require_connections_user
-from mindroom.api.connection_agents import CONNECTIONS_HEADERS, resolve_connection_agent, resolve_connection_user
+from mindroom.api.connection_agents import (
+    CONNECTIONS_HEADERS,
+    ConnectionUserContext,
+    resolve_connection_agent,
+    resolve_connection_user,
+)
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.matrix.users import create_agent_http_client
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
-    from mindroom.api.connection_agents import ConnectionUserContext
     from mindroom.constants import RuntimePaths
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.catalog import ToolMetadata
@@ -89,7 +97,7 @@ class _Connections:
     providers: dict[str, OAuthProvider]
 
 
-async def _connections(request: Request, response: Response) -> _Connections:
+async def _connection_user(request: Request, response: Response) -> ConnectionUserContext:
     response.headers.update(CONNECTIONS_HEADERS)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     agent_name = (snapshot.runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()
@@ -105,11 +113,18 @@ async def _connections(request: Request, response: Response) -> _Connections:
         requester_id,
         membership_index=config_lifecycle.app_state(request.app).agent_reply_memberships,
     )
-    config = user.config
     if not user.visible_agent_names:
         raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)
+    return user
+
+
+_ConnectionUserContext = Annotated[ConnectionUserContext, Depends(_connection_user)]
+
+
+async def _connections(request: Request, user: _ConnectionUserContext) -> _Connections:
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
     providers = load_oauth_providers_for_snapshot(snapshot)
-    metadata = resolved_tool_metadata_for_runtime(snapshot.runtime_paths, config, tolerate_plugin_load_errors=True)
+    metadata = resolved_tool_metadata_for_runtime(snapshot.runtime_paths, user.config, tolerate_plugin_load_errors=True)
     agents = [_agent_connections(name, user, providers, metadata) for name in user.visible_agent_names]
     return _Connections(
         runtime_paths=snapshot.runtime_paths,
@@ -210,6 +225,51 @@ def _require_same_origin(request: Request, context: _Connections) -> None:
 async def catalog(context: _ConnectionsContext) -> ConnectionsCatalog:
     """List allowed services without waiting for any upstream account status."""
     return context.catalog
+
+
+@router.get("/agents/{agent_name}/avatar")
+async def avatar(agent_name: str, user: _ConnectionUserContext) -> Response:
+    """Serve a visible agent's current Matrix thumbnail without exposing its token."""
+    if agent_name not in user.visible_agent_names:
+        raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
+    try:
+        client = create_agent_http_client(agent_name, user.runtime_paths)
+    except ValueError as exc:
+        raise HTTPException(404, "Avatar is not available", headers=CONNECTIONS_HEADERS) from exc
+    try:
+        async with asyncio.timeout(5):
+            profile = await client.get_profile(client.user_id)
+            if not isinstance(profile, nio.ProfileGetResponse) or not profile.avatar_url:
+                raise HTTPException(404, "Avatar is not available", headers=CONNECTIONS_HEADERS)
+            uri = urlsplit(profile.avatar_url)
+            if (
+                uri.scheme != "mxc"
+                or not uri.netloc
+                or not uri.path.strip("/")
+                or uri.path.count("/") != 1
+                or uri.query
+                or uri.fragment
+            ):
+                raise HTTPException(404, "Avatar is not available", headers=CONNECTIONS_HEADERS)
+            thumbnail = await client.thumbnail(uri.netloc, uri.path[1:], width=96, height=96)
+            if (
+                not isinstance(thumbnail, nio.ThumbnailResponse)
+                or not isinstance(thumbnail.body, bytes)
+                or not 0 < len(thumbnail.body) <= 1024 * 1024
+                or thumbnail.content_type not in {"image/png", "image/jpeg", "image/gif", "image/webp"}
+            ):
+                raise HTTPException(404, "Avatar is not available", headers=CONNECTIONS_HEADERS)
+            return Response(
+                thumbnail.body,
+                media_type=thumbnail.content_type,
+                headers={**CONNECTIONS_HEADERS, "X-Content-Type-Options": "nosniff"},
+            )
+    except (ClientError, TimeoutError) as exc:
+        raise HTTPException(502, "Avatar is temporarily unavailable", headers=CONNECTIONS_HEADERS) from exc
+    except ValueError as exc:
+        raise HTTPException(404, "Avatar is not available", headers=CONNECTIONS_HEADERS) from exc
+    finally:
+        await client.close()
 
 
 @router.get("/agents/{agent_name}/{provider_id}/status")
