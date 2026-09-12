@@ -2654,7 +2654,7 @@ class AgentBot:
             self.logger.debug("ignoring_tool_approval_response_without_sender")
             return
         payload = parse_approval_response_event(event)
-        if payload.status is None or payload.card_event_id is None:
+        if (payload.status is None and payload.action is None) or payload.card_event_id is None:
             return
         await handle_tool_approval_action(
             room=room,
@@ -2666,6 +2666,9 @@ class AgentBot:
             approval_event_id=payload.card_event_id,
             status=payload.status,
             reason=payload.reason,
+            auto_approve_seconds=payload.auto_approve_seconds,
+            action=payload.action,
+            grant_id=payload.grant_id,
             membership_index=self._runtime_view.agent_reply_memberships,
         )
 

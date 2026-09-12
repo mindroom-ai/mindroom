@@ -36,6 +36,7 @@ class PendingApproval:
     agent_name: str | None = None
     requested_at: str | None = None
     expires_at: str | None = None
+    auto_approve_options: tuple[int, ...] = ()
 
     @classmethod
     def from_card_event(cls, event: dict[str, Any], *, room_id: str) -> PendingApproval:
@@ -95,6 +96,9 @@ class PendingApproval:
             agent_name=agent_name,
             requested_at=requested_at,
             expires_at=expires_at,
+            auto_approve_options=tuple(content["auto_approve_options"])
+            if content.get("auto_approve_options") == [300, 600, 1800]
+            else (),
         )
 
     def latest_status(self, latest_edit: dict[str, Any] | None) -> PendingApprovalStatus:

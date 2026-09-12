@@ -52,6 +52,55 @@ POSTGRES_DIALECT = _SchemaDialect(
 
 _TABLES = (
     """
+    CREATE TABLE IF NOT EXISTS approval_grant_locks (
+        principal_id TEXT PRIMARY KEY
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_grant_cards (
+        principal_id TEXT NOT NULL,
+        continuation_id TEXT NOT NULL,
+        continuation_generation BIGINT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        invoking_agent TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        responder_principal_id TEXT NOT NULL,
+        responder_epoch BIGINT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        grant_id TEXT,
+        PRIMARY KEY (principal_id, delivery_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_grants (
+        principal_id TEXT NOT NULL,
+        grant_id TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        card_event_id TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        invoking_agent TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        responder_principal_id TEXT NOT NULL,
+        responder_epoch BIGINT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        expires_at_ns BIGINT NOT NULL,
+        revoked_at_ns BIGINT,
+        resolution_json TEXT NOT NULL,
+        original_delivery_id TEXT NOT NULL,
+        PRIMARY KEY (principal_id, grant_id),
+        UNIQUE (principal_id, card_event_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS matrix_sync_consumers (
         principal_id TEXT NOT NULL PRIMARY KEY,
         consumer_generation TEXT NOT NULL,
@@ -365,6 +414,12 @@ _TABLES = (
 
 
 _INDEXES = (
+    """
+    CREATE INDEX IF NOT EXISTS approval_grants_scope ON approval_grants (principal_id, scope_key, expires_at_ns)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS approval_grant_cards_scope ON approval_grant_cards (principal_id, scope_key)
+    """,
     """
     CREATE INDEX IF NOT EXISTS interactive_selections_revision
     ON interactive_selections (principal_id, question_event_id, revision_event_id)

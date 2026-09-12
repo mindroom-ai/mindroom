@@ -17,9 +17,11 @@ from mindroom.history_recovery import (
     HistoryRecoveryOutcome,
     RoomHistoryRecovery,
 )
+from mindroom.tool_approval_grants import ApprovalGrant  # noqa: TC001
 
 from . import (
     approval_continuations,
+    approval_grants,
     approvals,
     background_approvals,
     interactive_questions,
@@ -1175,6 +1177,67 @@ class PrincipalStore:
                 requested_status=requested_status,
                 reason=reason,
                 resolution=resolution,
+            ),
+        )
+
+    async def create_approval_grant(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+        sender_id: str,
+        seconds: int,
+        resolution: Mapping[str, Any],
+        current_binding: str | None = None,
+    ) -> tuple[RecordedApprovalDecision, ...]:
+        """Commit the originating decision, fixed grant, and matching pending decisions."""
+        return await self._backend.write(
+            lambda transaction: approval_grants.create(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                card_event_id=card_event_id,
+                sender_id=sender_id,
+                seconds=seconds,
+                resolution=resolution,
+                current_binding=current_binding,
+            ),
+        )
+
+    async def approval_grant_for_card(self, *, room_id: str, card_event_id: str) -> ApprovalGrant | None:
+        """Load a grant independently of its retired card."""
+        return await self._backend.read(
+            lambda transaction: approval_grants.for_card(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                card_event_id=card_event_id,
+            ),
+        )
+
+    async def prepare_approval_grant_revocations(self) -> tuple[str, ...]:
+        """Enqueue durable revoked state after its originating approval edit."""
+        return await self._backend.write(
+            lambda transaction: approval_grants.prepare_revocations(transaction, self._principal_id),
+        )
+
+    async def revoke_approval_grant(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+        sender_id: str,
+        grant_id: str,
+    ) -> str | None:
+        """Durably revoke and reserve the separate acknowledgement delivery."""
+        return await self._backend.write(
+            lambda transaction: approval_grants.revoke(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                card_event_id=card_event_id,
+                sender_id=sender_id,
+                grant_id=grant_id,
             ),
         )
 

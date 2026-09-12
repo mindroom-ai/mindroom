@@ -38,6 +38,7 @@ class ApprovalCardReservation:
     tool_call_id: str
     event_type: str
     payload: Mapping[str, object]
+    grant_operation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +142,8 @@ def _resolved_content(
     if decision == requested_status:
         return stored
     stored["status"] = decision
+    if decision != "approved":
+        stored.pop("auto_approval", None)
     stored["resolution_reason"] = reason
     stored["resolved_by"] = None
     body = stored.get("body")

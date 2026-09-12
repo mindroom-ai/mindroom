@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
     from .backend import Row, Transaction
 
-from . import approval_card_state, approval_continuations, background_approvals, outbox, reads
+from . import approval_card_state, approval_continuations, approval_grants, background_approvals, outbox, reads
 from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
 from .identity import decode_thread_id
 from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
@@ -94,6 +94,7 @@ def reserve_deliveries(
     cards: tuple[ApprovalCardReservation, ...],
 ) -> bool:
     """Atomically own every exact call, frozen card, and publication lease."""
+    approval_grants.lock(transaction, card_principal_id)
     # Reservation and a failure fence can arrive through different processes.
     # Lock the aggregate before reading its publication lease so either every
     # card and activation wins, or the failure wins without orphan deliveries.
@@ -147,6 +148,16 @@ def reserve_deliveries(
     ):
         return False
     for card in cards:
+        approval_grants.reserve_identity(
+            transaction,
+            card_principal_id,
+            continuation_principal_id,
+            continuation,
+            card,
+            membership_epoch,
+        )
+        if approval_grants.apply_active(transaction, card_principal_id, delivery_id=card.delivery_id):
+            continue
         approval_card_state.reserve_delivery(
             transaction,
             card_principal_id,

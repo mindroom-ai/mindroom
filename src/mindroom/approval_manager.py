@@ -24,6 +24,7 @@ from mindroom.event_journal import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.redaction import redact_sensitive_data
+from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, valid_auto_approve_seconds
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
@@ -263,6 +264,7 @@ class _ApprovalManager:
         expires_at_ns: int,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        grant_operation: str | None = None,
     ) -> ApprovalCardReservation | None:
         """Prepare one exact frozen payload without creating delivery debt."""
         return await self._prepare_approval_card(
@@ -276,6 +278,7 @@ class _ApprovalManager:
             requester_id=requester_id,
             approver_user_id=approver_user_id,
             expires_at_ns=expires_at_ns,
+            grant_operation=grant_operation,
             target_fields={
                 "continuation_id": continuation_id,
                 "continuation_generation": continuation_generation,
@@ -371,6 +374,7 @@ class _ApprovalManager:
         approver_user_id: str,
         expires_at_ns: int,
         target_fields: dict[str, object],
+        grant_operation: str | None = None,
     ) -> ApprovalCardReservation | None:
         """Prepare one shared pending-card payload for a typed exact-call target."""
         if self.prepare_event is None:
@@ -393,15 +397,29 @@ class _ApprovalManager:
             expires_at=datetime.fromtimestamp(expires_at_ns / 1_000_000_000, tz=UTC),
             status="pending",
         )
+        if (
+            grant_operation is not None
+            and thread_id
+            and agent_name
+            and requester_id == approver_user_id
+            and content.get("approvable", True)
+        ):
+            content["auto_approve_options"] = list(AUTO_APPROVE_OPTIONS)
+        else:
+            grant_operation = None
         content.update(target_fields)
         prepared = await self.prepare_event(room_id, thread_id, content)
         if prepared is None:
             return None
+        if prepared.get("approvable", True) is not True:
+            grant_operation = None
+            prepared.pop("auto_approve_options", None)
         return ApprovalCardReservation(
             delivery_id=approval_id,
             tool_call_id=tool_call_id,
             event_type=_EVENT_TYPE,
             payload=prepared,
+            grant_operation=grant_operation,
         )
 
     async def settle_background_approval(
@@ -487,7 +505,7 @@ class _ApprovalManager:
             resolve_delivered=self.resolve_delivery,
         )
 
-    async def handle_card_response(  # noqa: C901 - transport recovery and domain terminal states meet here
+    async def handle_card_response(  # noqa: C901, PLR0911, PLR0912 - transport recovery and domain terminal states meet here
         self,
         *,
         room_id: str,
@@ -497,6 +515,8 @@ class _ApprovalManager:
         reason: str | None,
         authorize_responder: Callable[[str], bool],
         before_consume: Callable[[], Awaitable[None]] | None = None,
+        auto_approve_seconds: int | None = None,
+        current_binding: str | None = None,
     ) -> ApprovalActionResult:
         """Atomically choose the exact-call winner and enqueue its terminal edit."""
         if self.has_active_in_memory_approval_card(card_event_id):
@@ -562,6 +582,15 @@ class _ApprovalManager:
             pending is None
             or pending.approver_user_id != sender_id
             or not _approval_action_authorized(pending, stored, authorize_responder)
+            or (
+                auto_approve_seconds is not None
+                and (
+                    status != "approved"
+                    or not valid_auto_approve_seconds(auto_approve_seconds)
+                    or auto_approve_seconds not in pending.auto_approve_options
+                    or not pending.approvable
+                )
+            )
         ):
             return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
         if before_consume is not None:
@@ -571,6 +600,15 @@ class _ApprovalManager:
             status=status,
             reason=reason,
         )
+        if auto_approve_seconds is not None:
+            return await self._approve_with_grant(
+                pending,
+                sender_id=sender_id,
+                seconds=auto_approve_seconds,
+                status=resolved_status,
+                reason=reason,
+                current_binding=current_binding,
+            )
         with self._claimed_resolution(card_event_id):
             delivered = await self._record_and_flush_resolution(
                 pending,
@@ -585,6 +623,86 @@ class _ApprovalManager:
             error_reason=_DEFAULT_TRUNCATED_APPROVAL_REASON if resolution_was_truncated else None,
             thread_id=pending.thread_id,
             card_event_id=card_event_id,
+        )
+
+    async def _approve_with_grant(
+        self,
+        pending: PendingApproval,
+        *,
+        sender_id: str,
+        seconds: int,
+        status: _ApprovalStatus,
+        reason: str | None,
+        current_binding: str | None,
+    ) -> ApprovalActionResult:
+        """Commit the grant batch and wake every newly executable continuation."""
+        if status != "approved" or self.cards is None:
+            return ApprovalActionResult(consumed=True, resolved=False, card_event_id=pending.card_event_id)
+        offered = self._resolved_event_content(
+            pending,
+            status="approved",
+            reason=reason,
+            resolved_by=sender_id,
+            resolved_at=_utcnow(),
+        )
+        decisions = await self.cards.create_approval_grant(
+            room_id=pending.room_id,
+            card_event_id=pending.card_event_id,
+            sender_id=sender_id,
+            seconds=seconds,
+            resolution=offered,
+            current_binding=current_binding,
+        )
+        for decision in decisions:
+            if decision.recorded and decision.continuation_ready:
+                await self._wake_continuation(decision)
+        if decisions:
+            await self.recover_cards_on_startup()
+        return ApprovalActionResult(
+            consumed=True,
+            resolved=bool(decisions and decisions[0].recorded),
+            thread_id=pending.thread_id,
+            card_event_id=pending.card_event_id,
+        )
+
+    async def handle_grant_revocation(
+        self,
+        *,
+        room_id: str,
+        sender_id: str,
+        card_event_id: str,
+        grant_id: str,
+        authorize_responder: Callable[[str], bool],
+        before_consume: Callable[[], Awaitable[None]] | None = None,
+    ) -> ApprovalActionResult:
+        """Authenticate a retained grant and deliver its durable revocation edit."""
+        if self.cards is None:
+            return ApprovalActionResult(consumed=False, resolved=False)
+        grant = await self.cards.approval_grant_for_card(room_id=room_id, card_event_id=card_event_id)
+        if (
+            grant is None
+            or grant.grant_id != grant_id
+            or grant.requester_id != sender_id
+            or not authorize_responder(grant.entity_name)
+        ):
+            return ApprovalActionResult(consumed=False, resolved=False)
+        if before_consume is not None:
+            await before_consume()
+        delivery_id = await self.cards.revoke_approval_grant(
+            room_id=room_id,
+            card_event_id=card_event_id,
+            sender_id=sender_id,
+            grant_id=grant_id,
+        )
+        if delivery_id is None:
+            return ApprovalActionResult(consumed=True, resolved=False)
+        await self.recover_cards_on_startup()
+        self._ensure_deadline_sweep()
+        return ApprovalActionResult(
+            consumed=True,
+            resolved=True,
+            card_event_id=card_event_id,
+            thread_id=grant.thread_id,
         )
 
     async def _bind_action_delivery(
@@ -783,15 +901,30 @@ class _ApprovalManager:
             return await self._expire_stored(room_id, stored)
         return None
 
+    async def _flush_ready_revocations(self) -> set[tuple[str, DeliveryStage]]:
+        """Flush newly unblocked acknowledgements and preserve retryable failures."""
+        assert self.cards is not None
+        failed: set[tuple[str, DeliveryStage]] = set()
+        for delivery_id in await self.cards.prepare_approval_grant_revocations():
+            try:
+                acknowledged = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+            except Exception:
+                logger.warning("approval_grant_revocation_delivery_deferred", delivery_id=delivery_id, exc_info=True)
+                acknowledged = None
+            if acknowledged is None:
+                failed.add((delivery_id, DeliveryStage.FINAL))
+        return failed
+
     async def recover_cards_on_startup(self) -> _ApprovalStartupSweep:
         """Run generic delivery recovery, deadline decisions, and domain retirement."""
         if self.cards is None or self.send_delivery is None:
             return _ApprovalStartupSweep(discarded=0, failed=1)
         outcome = await self._worker().recover()
         transport_failures = set(outcome.failed_deliveries)
+        failed = outcome.failed - len(transport_failures)
+        transport_failures.update(await self._flush_ready_revocations())
         scanned = 0
         retired = 0
-        failed = outcome.failed - len(transport_failures)
         for room_id in await self.cards.pending_approval_room_ids():
             cursor: tuple[int, str] | None = None
             while True:
