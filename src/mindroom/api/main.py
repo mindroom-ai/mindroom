@@ -6,7 +6,6 @@ import threading
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Any, Literal
-from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +16,7 @@ from mindroom import constants, file_watcher
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
+from mindroom.api.auth import ApiAuthState, public_origin, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
 from mindroom.api.config_reload import router as config_reload_router
@@ -593,23 +592,14 @@ def _api_docs_kwargs(runtime_paths: constants.RuntimePaths) -> dict[str, str | N
     return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
 
 
-def _origin_from_url(value: str | None) -> str | None:
-    if not value:
-        return None
-    parsed = urlsplit(value.strip())
-    if not parsed.scheme or not parsed.netloc:
-        return None
-    return f"{parsed.scheme}://{parsed.netloc}"
-
-
 def _api_cors_origins(runtime_paths: constants.RuntimePaths) -> list[str]:
     """Return hosted browser origins allowed to make credentialed API calls."""
     return list(
         dict.fromkeys(
             origin
             for origin in (
-                _origin_from_url(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
-                _origin_from_url(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+                public_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
+                public_origin(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
             )
             if origin is not None
         ),

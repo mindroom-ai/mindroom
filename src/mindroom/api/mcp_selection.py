@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from mindroom.api.auth import require_connections_user
+from mindroom.api.auth import require_connections_user, require_same_origin
 from mindroom.api.config_lifecycle import app_state, rebind_current_request_snapshot
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS, resolve_connection_user
 from mindroom.api.mcp_identity import resolve_gateway_browser_owner
@@ -40,8 +40,7 @@ class _SelectionRuntime(Protocol):
 
 
 async def _selection_choices(request: Request, origin: str) -> AgentSelections:
-    if request.headers.get("origin") != origin or request.headers.get("sec-fetch-site") == "cross-site":
-        raise HTTPException(403, "Selection changes require a same-origin request")
+    require_same_origin(request, origin, detail="Selection changes require a same-origin request")
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
         raise HTTPException(415, "JSON content required")
     try:

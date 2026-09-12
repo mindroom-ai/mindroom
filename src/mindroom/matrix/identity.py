@@ -21,9 +21,11 @@ __all__ = [
     "MatrixID",
     "managed_account_key",
     "managed_account_user_id",
+    "matrix_user_id_from_email",
     "parse_current_matrix_user_id",
     "parse_historical_matrix_user_id",
     "try_parse_historical_matrix_user_id",
+    "validate_email_to_matrix_mapping",
 ]
 
 
@@ -132,6 +134,35 @@ def try_parse_historical_matrix_user_id(value: str | None) -> str | None:
         return parse_historical_matrix_user_id(value)
     except ValueError:
         return None
+
+
+def validate_email_to_matrix_mapping(template: str, email_domain: str | None) -> None:
+    """Require an explicit email domain and an unambiguous Matrix identity template."""
+    if (
+        template.count("{localpart}") != 1
+        or "{" in template.replace("{localpart}", "")
+        or "}" in template.replace("{localpart}", "")
+        or try_parse_historical_matrix_user_id(template.replace("{localpart}", "example")) is None
+        or email_domain is None
+        or re.fullmatch(r"[A-Za-z0-9.-]+", email_domain) is None
+    ):
+        msg = "Email mapping requires a valid Matrix template and explicit email domain"
+        raise ValueError(msg)
+
+
+def matrix_user_id_from_email(email: str, template: str, email_domain: str | None) -> str:
+    """Map an email from the configured domain to its canonical Matrix identity."""
+    localpart, separator, domain = email.partition("@")
+    if (
+        not separator
+        or not localpart
+        or any(char.isspace() for char in email)
+        or email_domain is None
+        or domain.lower() != email_domain.lower()
+    ):
+        msg = "Email does not match the configured identity domain"
+        raise ValueError(msg)
+    return parse_historical_matrix_user_id(template.replace("{localpart}", localpart))
 
 
 def _validate_matrix_user_id_common(parsed: MatrixID, matrix_id: str) -> None:

@@ -355,6 +355,7 @@ def test_personal_identity_can_derive_matrix_from_signed_email(
     client = connections_auth_client(
         MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM=None,
         MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE="@{localpart}:example.org",
+        MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN="example.org",
     )
     response = client.get("/api/connections/identity", headers=signed_connections_headers("alice"))
     assert response.status_code == 200
