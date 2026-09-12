@@ -9,6 +9,8 @@ import { useMcpSelection } from "./useMcpSelection";
 import type { ConnectionList } from "./types";
 
 export function Connections() {
+  const gatewayUrl =
+    "'" + window.location.origin.replace(/'/g, "'\\''") + "/mcp'";
   const mcp = useMcpSelection();
   const [connections, setConnections] = useState<ConnectionList | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -46,15 +48,14 @@ export function Connections() {
               Your connections
             </h1>
             <p className="max-w-2xl text-sm text-muted-foreground">
-              Manage accounts and choose which tools your MCP clients can use.
+              See each agent’s tools and connect the accounts they need.
             </p>
           </div>
         </header>
         {mcp.selection?.enabled && (
           <p className="text-sm text-muted-foreground">
-            MCP access applies to every connected MCP client for your account.
-            Select all compatible tools for an agent, or expand it to choose
-            individual tools.
+            The MCP gateway column controls access from external apps. It does
+            not change which tools your agents can use in MindRoom.
           </p>
         )}
         {mcp.loading && (
@@ -93,6 +94,42 @@ export function Connections() {
           />
         )}
         <ConnectedClients />
+        {mcp.selection?.enabled && (
+          <footer className="space-y-3 border-t pt-5 text-xs text-muted-foreground">
+            <div className="space-y-1">
+              <h2 className="text-sm font-medium text-foreground">
+                MindRoom MCP gateway
+              </h2>
+              <p>
+                Use your selected agent tools outside MindRoom, in Claude Code,
+                Codex, or another MCP client. Your selection applies to every
+                connected MCP client for your account.
+              </p>
+            </div>
+            {[
+              [
+                "Claude Code",
+                `claude mcp add --transport http --scope user mindroom ${gatewayUrl}`,
+              ],
+              ["Codex", `codex mcp add mindroom --url ${gatewayUrl}`],
+            ].map(([name, command]) => (
+              <div
+                key={name}
+                className="grid gap-1.5 sm:grid-cols-[6rem_minmax(0,1fr)] sm:items-center sm:gap-3"
+              >
+                <span className="font-medium">{name}</span>
+                <code className="block overflow-x-auto whitespace-nowrap rounded-md bg-muted/60 px-3 py-2 text-foreground">
+                  {command}
+                </code>
+              </div>
+            ))}
+            <p>
+              Run a command in your terminal, then sign in using{" "}
+              <code>/mcp</code> in Claude Code or{" "}
+              <code>codex mcp login mindroom</code> in Codex.
+            </p>
+          </footer>
+        )}
       </div>
     </main>
   );

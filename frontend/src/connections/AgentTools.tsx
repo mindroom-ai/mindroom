@@ -39,7 +39,7 @@ export function AgentTools({
               Connection
             </th>
             <th scope="col" className="w-[15%] px-4 py-3 font-medium">
-              MCP access
+              MCP gateway
             </th>
             <th scope="col" className="px-5 py-3 text-right font-medium">
               Actions

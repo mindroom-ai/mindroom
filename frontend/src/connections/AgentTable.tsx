@@ -84,7 +84,7 @@ const columns: ColumnDef<AgentTableRow>[] = [
   },
   {
     id: "mcp",
-    header: "MCP access",
+    header: "MCP gateway",
     cell: ({ row }) => {
       const mcp = row.original.mcp;
       if (!row.original.can_use)
@@ -211,7 +211,7 @@ export function AgentTable({
             <option value="personal">Personal</option>
             <option value="shared">Shared</option>
             {mcp.selection?.enabled && (
-              <option value="exposed">MCP enabled</option>
+              <option value="exposed">On MCP gateway</option>
             )}
           </select>
         </div>
