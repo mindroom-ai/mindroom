@@ -814,13 +814,25 @@ def is_terminal_card(
     room_id: str,
     card_event_id: str,
 ) -> bool:
-    """Return whether a delivered terminal approval owns this Matrix event."""
+    """Recognize terminal approvals before and after their payloads are retired."""
     row = transaction.fetchone(
         """
         SELECT 1 AS present FROM approval_action_tombstones
         WHERE principal_id = ? AND room_id = ? AND card_event_id = ?
+        UNION ALL
+        SELECT 1 AS present FROM matrix_delivery_outbox AS initial
+        JOIN approval_grant_cards AS audit
+          ON audit.principal_id = initial.principal_id AND audit.delivery_id = initial.delivery_id
+        WHERE initial.principal_id = ? AND initial.room_id = ?
+          AND initial.acknowledged_event_id = ? AND initial.stage = 'initial'
+          AND audit.grant_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM approval_cards AS cards
+              WHERE cards.principal_id = initial.principal_id AND cards.delivery_id = initial.delivery_id
+          )
+        LIMIT 1
         """,
-        (principal_id, room_id, card_event_id),
+        (principal_id, room_id, card_event_id, principal_id, room_id, card_event_id),
     )
     return row is not None
 

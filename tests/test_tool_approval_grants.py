@@ -399,6 +399,62 @@ async def test_subsequent_granted_call_publishes_exact_terminal_receipt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("lost_acknowledgement", [False, True])
+async def test_automatic_receipt_reply_is_consumed_before_maintenance(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lost_acknowledgement: bool,
+) -> None:
+    """Receipt replies cannot become chat turns while background cleanup is queued."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
+    owner = journal.principal("router@shared")
+    try:
+        first = await _card(journal, manager, "first")
+        await _approve(manager, first)
+        if lost_acknowledgement:
+
+            async def lose_acknowledgement(_delivery: MatrixDelivery) -> str:
+                msg = "Matrix accepted the receipt but its response was lost"
+                raise TimeoutError(msg)
+
+            manager.send_delivery = lose_acknowledgement
+        receipt_event_id = await _card(journal, manager, "subsequent")
+
+        async def resolve_receipt(room_id: str, event_id: str) -> str | None:
+            return "card-subsequent" if (room_id, event_id) == ("!room:test", receipt_event_id) else None
+
+        manager.resolve_action_delivery = resolve_receipt
+        delivery = await owner.load_matrix_delivery(delivery_id="card-subsequent", stage=DeliveryStage.INITIAL)
+        assert delivery is not None
+        assert delivery.acknowledged_event_id == (None if lost_acknowledgement else receipt_event_id)
+        before_consume = AsyncMock()
+        result = await manager.handle_card_response(
+            room_id="!room:test",
+            sender_id="@human:test",
+            card_event_id=receipt_event_id,
+            status="denied",
+            reason="Do not run this.",
+            authorize_responder=lambda _agent: True,
+            before_consume=before_consume,
+        )
+        assert result.consumed is True
+        before_consume.assert_awaited_once()
+        assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=receipt_event_id)
+        assert not await owner.is_terminal_approval_card(room_id="!other:test", card_event_id=receipt_event_id)
+        assert not await owner.is_terminal_approval_card(room_id="!room:test", card_event_id="$unknown")
+        continuation = await journal.principal("agent@code").approval_continuation("subsequent")
+        assert continuation is not None
+        assert continuation.calls[0].decision.value == "approved"
+        await owner.maintain_approval_grants()
+        assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=receipt_event_id)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_approval_receipts_preserve_scope_and_original_timed_decision(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
