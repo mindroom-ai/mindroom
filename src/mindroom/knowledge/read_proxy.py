@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from contextlib import closing
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agno.knowledge.document import Document
@@ -19,8 +22,29 @@ logger = get_logger(__name__)
 
 
 def collection_exists(path: str, collection: str) -> bool:
-    """Probe native metadata in the isolated reader process."""
-    return read_chroma(ReadRequest(path=path, collection=collection)).exists
+    """Read fresh publication metadata without booting the native search engine.
+
+    This is Chroma's persisted sysdb schema (tenants/databases migration 4),
+    not its vector index. Keep reads scoped to the default tenant/database used
+    by our published handles. Call off-loop, like native reads; a lock has a
+    short deadline and never turns a busy or corrupt database into a missing one.
+    """
+    database_path = Path(path).resolve() / "chroma.sqlite3"
+    if not database_path.is_file():
+        return False
+    try:
+        with closing(sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=0.1)) as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM collections AS c JOIN databases AS d ON c.database_id = d.id "
+                    "WHERE c.name = ? AND d.name = 'default_database' AND d.tenant_id = 'default_tenant' LIMIT 1",
+                    (collection,),
+                ).fetchone()
+                is not None
+            )
+    except sqlite3.Error as exc:
+        message = "Knowledge collection metadata unavailable"
+        raise RuntimeError(message) from exc
 
 
 def _dict_filters(filters: dict[str, Any] | list[Any] | None) -> dict[str, Any] | None:

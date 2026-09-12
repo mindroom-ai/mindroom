@@ -56,6 +56,7 @@ from mindroom.streaming import (
     build_restart_interrupted_body,
     clean_partial_reply_text,
 )
+from mindroom.timing import emit_elapsed_timing
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Sequence
@@ -638,13 +639,7 @@ async def _process_stale_room_candidate(
     """Repair or classify one bot-owned candidate from a shared room scan."""
     assert state.latest_body is not None
     agent_name = _agent_name_for_bot_user_id(bot_user_id, config, runtime_paths)
-    if agent_name is None or _should_skip_for_startup_cleanup_window(
-        state,
-        now_ms=current_time_ms,
-        scan_policy=scan_policy,
-    ):
-        return False, None
-    if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
+    if agent_name is None or not _needs_recovery(state, now_ms=current_time_ms, scan_policy=scan_policy):
         return False, None
     if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
@@ -658,8 +653,6 @@ async def _process_stale_room_candidate(
             agent_name=agent_name,
             prior_edit_succeeded=prior_edit_succeeded,
         )
-    if not (_has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)):
-        return False, None
     return await _handle_interrupted_message(
         client,
         room_id=room_id,
@@ -672,6 +665,23 @@ async def _process_stale_room_candidate(
         runtime_paths=runtime_paths,
         agent_name=agent_name,
         prior_edit_succeeded=prior_edit_succeeded,
+    )
+
+
+def _needs_recovery(state: _MessageState, *, now_ms: int, scan_policy: _CleanupScanPolicy) -> bool:
+    """Select work before resolving requester chains, using the execution policy."""
+    if state.latest_body is None or _should_skip_for_startup_cleanup_window(
+        state,
+        now_ms=now_ms,
+        scan_policy=scan_policy,
+    ):
+        return False
+    if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
+        return False
+    return (
+        _is_cleanup_candidate(state)
+        or _has_restart_interrupted_note(state.latest_body)
+        or _has_resumable_interrupted_note(state)
     )
 
 
@@ -848,6 +858,7 @@ async def _scan_room_message_states(
     scan_policy: _CleanupScanPolicy,
 ) -> _ScannedRoomMessageStates:
     """Scan room history and return latest state by original event ID."""
+    stage_start = time.monotonic()
     message_states, message_events = await _collect_room_history_events(
         client,
         room_id=room_id,
@@ -855,6 +866,7 @@ async def _scan_room_message_states(
         now_ms=now_ms,
         scan_policy=scan_policy,
     )
+    emit_elapsed_timing("startup_recovery.history", stage_start, room_id=room_id, message_count=len(message_events))
 
     trusted_sender_ids = _cleanup_trusted_sender_ids(
         bot_user_ids=bot_user_ids,
@@ -862,6 +874,7 @@ async def _scan_room_message_states(
         runtime_paths=runtime_paths,
     )
     bot_message_events = [event for event in message_events if event.sender in cleanup_bot_user_ids]
+    stage_start = time.monotonic()
     resolved_messages = await resolve_latest_visible_messages(
         bot_message_events,
         client,
@@ -870,26 +883,46 @@ async def _scan_room_message_states(
     bot_resolved_messages = {
         event_id: message for event_id, message in resolved_messages.items() if message.sender in cleanup_bot_user_ids
     }
+    emit_elapsed_timing(
+        "startup_recovery.canonical_messages",
+        stage_start,
+        room_id=room_id,
+        message_count=len(bot_resolved_messages),
+    )
     scanned_message_data_by_event_id = await _scanned_message_data_by_event_id(message_events)
     auto_resume_target_event_ids = _auto_resume_target_event_ids(
         scanned_message_data_by_event_id.values(),
         bot_user_ids=bot_user_ids | set(trusted_sender_ids),
     )
+    _merge_bot_resolved_message_states(
+        message_states,
+        bot_resolved_messages,
+        bot_user_ids=cleanup_bot_user_ids,
+        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
+    )
+    target_event_ids = {
+        event_id
+        for event_id, state in message_states.items()
+        if _needs_recovery(state, now_ms=now_ms, scan_policy=scan_policy)
+    }
+    stage_start = time.monotonic()
     requester_ids_by_event_id = await _derive_requester_ids_for_bot_messages(
         client,
         resolved_messages=bot_resolved_messages,
+        target_event_ids=target_event_ids,
         scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         room_id=room_id,
         bot_user_ids=cleanup_bot_user_ids,
         config=config,
         runtime_paths=runtime_paths,
     )
-    _merge_bot_resolved_message_states(
-        message_states,
-        bot_resolved_messages,
-        bot_user_ids=cleanup_bot_user_ids,
-        requester_ids_by_event_id=requester_ids_by_event_id,
-        scanned_message_data_by_event_id=scanned_message_data_by_event_id,
+    for event_id, requester in requester_ids_by_event_id.items():
+        message_states[event_id].requester_user_id = requester
+    emit_elapsed_timing(
+        "startup_recovery.requesters",
+        stage_start,
+        room_id=room_id,
+        candidate_count=len(target_event_ids),
     )
     return _ScannedRoomMessageStates(
         message_states=message_states,
@@ -940,7 +973,8 @@ async def _collect_room_history_events(
                 room_id=room_id,
                 error=str(response),
             )
-            return {}, []
+            msg = f"Incomplete room history during stale stream cleanup for {room_id!r}"
+            raise RuntimeError(msg)  # noqa: TRY004 - A homeserver error response, not a caller type error.
 
         if not response.chunk:
             break
@@ -984,21 +1018,19 @@ def _merge_bot_resolved_message_states(
     resolved_messages: dict[str, ResolvedVisibleMessage],
     *,
     bot_user_ids: set[str],
-    requester_ids_by_event_id: dict[str, str],
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
 ) -> None:
     """Merge resolved bot-authored messages into cleanup state."""
     for target_event_id, message in resolved_messages.items():
         if message.sender not in bot_user_ids:
             continue
-        requester_user_id = requester_ids_by_event_id.get(target_event_id)
         scanned_message = scanned_message_data_by_event_id.get(target_event_id)
         _merge_resolved_message_state(
             message_states,
             target_event_id=target_event_id,
             message=message,
             bot_user_id=message.sender,
-            requester_user_id=requester_user_id,
+            requester_user_id=None,
             fallback_thread_id=scanned_message.thread_id if scanned_message is not None else None,
         )
 
@@ -1080,6 +1112,7 @@ async def _derive_requester_ids_for_bot_messages(
     resolved_messages: dict[str, ResolvedVisibleMessage],
     scanned_message_data_by_event_id: dict[str, ResolvedVisibleMessage],
     *,
+    target_event_ids: set[str],
     room_id: str,
     bot_user_ids: set[str],
     config: Config,
@@ -1097,7 +1130,7 @@ async def _derive_requester_ids_for_bot_messages(
         ),
     )
     sorted_messages = sorted(
-        resolved_messages.items(),
+        ((event_id, message) for event_id, message in resolved_messages.items() if event_id in target_event_ids),
         key=lambda item: (item[1].timestamp, item[0]),
     )
 

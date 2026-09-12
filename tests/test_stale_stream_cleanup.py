@@ -249,6 +249,68 @@ def _room_get_event_response(event: object) -> nio.RoomGetEventResponse:
     return response
 
 
+@pytest.mark.asyncio
+async def test_requester_fetches_are_only_for_recovery_candidates(tmp_path: Path) -> None:
+    """Completed replies incur no exact-parent requests; real recovery retains identity."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    events = [
+        _make_message_event(
+            event_id=f"$completed{i}",
+            body="Done",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread", f"$off-page{i}"),
+            extra_content={STREAM_STATUS_KEY: "completed"},
+        )
+        for i in range(20)
+    ]
+    events.append(
+        _make_message_event(
+            event_id="$candidate",
+            body="Partial",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread", "$requester"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+    client.room_messages.return_value = _room_messages_response(*events)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_get_event.side_effect = None
+    client.room_get_event.return_value = _room_get_event_response(
+        _make_message_event(event_id="$requester", body="Request", timestamp_ms=1, sender=USER_ID),
+    )
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID], now_ms=NOW_MS)
+    assert cleaned == 1
+    assert interrupted[0].original_sender_id == USER_ID
+    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$requester")
+
+
+@pytest.mark.asyncio
+async def test_failed_history_page_remains_retryable(tmp_path: Path) -> None:
+    """An unavailable page is not an empty successful scan of the room."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.room_messages.side_effect = [nio.RoomMessagesError("unavailable"), _room_messages_response()]
+    scanned: set[str] = set()
+    with patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", AsyncMock(return_value=[ROOM_ID])):
+        for attempt in range(2):
+            await recover_stale_streaming_messages(
+                {BOT_USER_ID: client},
+                resume_client=None,
+                response_recovery_scope=_permitted_recovery_scope,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                startup_cutoff_ms=NOW_MS,
+                scanned_room_ids=scanned,
+            )
+            assert scanned == (set() if attempt == 0 else {ROOM_ID})
+    assert client.room_messages.await_count == 2
+
+
 def _thread_reply_relation(thread_id: str, reply_to_event_id: str) -> dict[str, object]:
     return {
         "rel_type": "m.thread",

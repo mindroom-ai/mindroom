@@ -1,4 +1,4 @@
-"""One-off repairs survive a fresh import with the normal single-layer reader."""
+"""Explicit source repairs flatten history independently of reader-side hydration."""
 
 from __future__ import annotations
 
@@ -129,11 +129,14 @@ class MatrixAPI:
 
 
 @pytest.mark.asyncio
-async def test_repair_survives_a_fresh_database_without_nested_reader_support(journal_store: EventJournalStore) -> None:
+async def test_repair_flattens_history_for_a_fresh_database(journal_store: EventJournalStore) -> None:
     """Repair source history rather than an existing projection or resolver cache."""
     api = MatrixAPI()
-    unresolved = await resolve_event_source_content(api.events["$broken"], api.history_client())
-    assert holds_unresolved_sidecar(unresolved["content"])
+    original_client = api.history_client()
+    resolved = await resolve_event_source_content(api.events["$broken"], original_client)
+    assert not holds_unresolved_sidecar(resolved["content"])
+    assert resolved["content"]["m.new_content"]["body"] == "Complete original answer"
+    assert original_client.downloads == ["mxc://example.org/outer", "mxc://example.org/inner"]
     with api.client() as client:
         assert repair(client, ROOM, "$broken")["status"] == "would_repair"
         assert api.writes == []

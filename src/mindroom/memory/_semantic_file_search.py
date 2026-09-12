@@ -106,14 +106,14 @@ def _memory_results_from_documents(
     return results
 
 
-def _search_knowledge_with_timing(
+async def _search_knowledge_with_timing(
     knowledge: Knowledge,
     *,
     query: str,
     limit: int,
 ) -> list[Document]:
     search_start = time.monotonic()
-    documents = knowledge.search(query=query, max_results=limit)
+    documents = await knowledge.asearch(query=query, max_results=limit)
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.knowledge_search",
         search_start,
@@ -196,8 +196,7 @@ async def search_semantic_file_memories(
         )
 
     query_start = time.monotonic()
-    documents = await asyncio.to_thread(
-        _search_knowledge_with_timing,
+    documents = await _search_knowledge_with_timing(
         resolution.knowledge,
         query=query,
         limit=limit,

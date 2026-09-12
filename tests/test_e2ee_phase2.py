@@ -203,6 +203,7 @@ class TestManagedRoomEncryptionReconcile:
             room_policy=resolve_room_policy(config, "lobby"),
             room_name="Lobby",
             power_users=[],
+            room_locks={},
         )
 
         assert room_id == "!lobby:example.com"
@@ -246,6 +247,7 @@ class TestManagedRoomEncryptionReconcile:
             room_policy=resolve_room_policy(config, "vault"),
             room_name="Vault",
             power_users=[],
+            room_locks={},
         )
 
         assert room_id == "!new:example.com"

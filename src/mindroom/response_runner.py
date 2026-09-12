@@ -4296,10 +4296,14 @@ class ResponseRunner:
         show_tool_calls = runtime.show_tool_calls
 
         async def build_response_text() -> str:
+            if pipeline_timing is not None:
+                pipeline_timing.mark("knowledge_access_start")
             knowledge_resolution = await self.deps.knowledge_access.resolve_for_agent_async(
                 self.deps.agent_name,
                 execution_identity=runtime.tool_dispatch.execution_identity,
             )
+            if pipeline_timing is not None:
+                pipeline_timing.mark("knowledge_access_ready")
             transient_enrichment_items = append_knowledge_availability_enrichment(
                 request.transient_enrichment_items,
                 knowledge_resolution.unavailable,
@@ -4398,10 +4402,14 @@ class ResponseRunner:
                 visible_event_id_callback(response_event_id)
 
         try:
+            if pipeline_timing is not None:
+                pipeline_timing.mark("knowledge_access_start")
             knowledge_resolution = await self.deps.knowledge_access.resolve_for_agent_async(
                 self.deps.agent_name,
                 execution_identity=runtime.tool_dispatch.execution_identity,
             )
+            if pipeline_timing is not None:
+                pipeline_timing.mark("knowledge_access_ready")
             transient_enrichment_items = append_knowledge_availability_enrichment(
                 request.transient_enrichment_items,
                 knowledge_resolution.unavailable,

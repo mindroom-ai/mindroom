@@ -280,12 +280,12 @@ def test_concurrent_cold_lookups_keep_returned_readers_queryable(
 
 
 @pytest.mark.parametrize("cached", [False, True])
-def test_busy_published_lookup_reports_unavailable_then_recovers(
+def test_published_metadata_lookup_does_not_consume_search_capacity(
     published_lookup: tuple[Config, RuntimePaths],
     monkeypatch: pytest.MonkeyPatch,
     cached: bool,
 ) -> None:
-    """Reader saturation stays a per-base availability result, including cached handles."""
+    """Search-worker saturation does not make fresh published metadata unavailable."""
     # Exercise saturation independently of the production reader capacity.
     monkeypatch.setattr("mindroom.knowledge.read_process._read_slots", BoundedSemaphore(1))
     config, runtime_paths = published_lookup
@@ -293,9 +293,9 @@ def test_busy_published_lookup_reports_unavailable_then_recovers(
         assert resolve_knowledge_base_access("docs", config, runtime_paths).knowledge is not None
 
     with _read_slot():
-        busy = resolve_knowledge_base_access("docs", config, runtime_paths)
-        assert busy.knowledge is None
-        assert busy.availability is KnowledgeAvailability.REFRESH_FAILED
+        available = resolve_knowledge_base_access("docs", config, runtime_paths)
+        assert available.knowledge is not None
+        assert available.availability is KnowledgeAvailability.READY
 
     recovered = resolve_knowledge_base_access("docs", config, runtime_paths)
     assert recovered.knowledge is not None
