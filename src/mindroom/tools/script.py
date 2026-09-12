@@ -20,10 +20,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="script",
     display_name="Background Scripts",
-    description=(
-        "Run trusted arbitrary Python code with scoped worker filesystem and environment access plus "
-        "deployment-policy network access"
-    ),
+    description="Run Python scripts in the background, monitor them, or cancel them",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

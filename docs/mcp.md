@@ -104,6 +104,8 @@ Use `worker_scope: shared` when one connected account belongs to the agent and e
 | Option | Type | Default | Notes |
 |--------|------|---------|-------|
 | `enabled` | bool | `true` | Set to `false` to disable one server without removing its config |
+| `display_name` | string | `null` | Dashboard and catalog name; defaults to `auth.display_name`, then a name derived from the server ID |
+| `summary` | string | `null` | Short capability summary for the dashboard and tool catalog, with or without OAuth |
 | `icon` | string | `null` | Optional dashboard icon name, such as `SiConfluence` or `Calendar` |
 | `description` | string | `null` | What the server provides; appended to the OAuth bridge tool descriptions shown to the model; requires `auth` |
 | `required` | bool | `false` | Block dependent agent startup while this server is unavailable instead of degrading |
@@ -126,6 +128,19 @@ Use `worker_scope: shared` when one connected account belongs to the agent and e
 `tool_prefix` must use only letters, numbers, and underscores.
 `include_tools` and `exclude_tools` are matched against the remote MCP tool names, not the MindRoom-prefixed function names.
 `include_tools` and `exclude_tools` cannot overlap.
+
+Use `display_name` and `summary` to explain what people can do with a connection.
+Keep detailed model instructions in the OAuth-only `description` field; those instructions are not shown on the Connections page.
+Display metadata does not change tool IDs, function names, or permissions.
+
+```yaml
+mcp_servers:
+  team_wiki:
+    display_name: Team Wiki
+    summary: Search and edit team documentation
+    transport: streamable-http
+    url: https://wiki.example.com/mcp
+```
 
 Set `icon` to choose how an MCP server appears in the dashboard and on Connections, including OAuth connection cards:
 

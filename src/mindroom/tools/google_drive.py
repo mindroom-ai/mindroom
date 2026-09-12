@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="google_drive",
     display_name="Google Drive",
-    description="Search, read, upload, and organize files in the connected user's Google Drive",
+    description="Search, read, upload, and organize files in Google Drive",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,

@@ -131,6 +131,37 @@ def test_sync_mcp_tool_registry_registers_dynamic_tool(tmp_path: Path) -> None:
     assert TOOL_METADATA[tool_name].agent_override_fields is not None
 
 
+@pytest.mark.parametrize(
+    ("with_oauth", "provider_name", "expected_name"),
+    [
+        (False, None, "MCP Demo"),
+        (True, "  Example Workspace  ", "Example Workspace"),
+        (True, "   ", "MCP Demo"),
+        (True, None, "MCP Demo"),
+    ],
+)
+def test_mcp_display_metadata_falls_back_when_blank(
+    tmp_path: Path,
+    with_oauth: bool,
+    provider_name: str | None,
+    expected_name: str,
+) -> None:
+    """Empty display overrides preserve useful provider or server names."""
+    config = _oauth_config(tmp_path) if with_oauth else _config(tmp_path)
+    payload = config.model_dump()
+    server = payload["mcp_servers"]["demo"]
+    server.update(display_name="  ", summary="  ")
+    if with_oauth:
+        server["auth"]["display_name"] = provider_name
+    config = Config.validate_with_runtime(payload, _runtime_paths(tmp_path))
+
+    sync_mcp_tool_registry(config)
+
+    metadata = TOOL_METADATA["mcp_demo"]
+    assert metadata.display_name == expected_name
+    assert metadata.description == "Tools provided by this MCP server"
+
+
 def test_resolved_mcp_tool_state_ignores_unsynced_bound_manager(tmp_path: Path) -> None:
     """Metadata resolution should stay best-effort when a manager is bound but has no catalog yet."""
 

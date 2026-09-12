@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="gmail",
     display_name="Gmail",
-    description="Read, search, and manage Gmail emails",
+    description="Search, read, send, and organize email in Gmail",
     category=ToolCategory.EMAIL,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,

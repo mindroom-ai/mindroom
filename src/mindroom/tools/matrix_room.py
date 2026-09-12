@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="matrix_room",
     display_name="Matrix Room",
-    description="Inspect Matrix room metadata, members, threads, and state",
+    description="View Matrix room details, members, and conversation threads",
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

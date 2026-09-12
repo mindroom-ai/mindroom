@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="attachments",
     display_name="Attachments",
-    description="List and register context-scoped file attachments",
+    description="Find files attached to a conversation and make workspace files available as attachments",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

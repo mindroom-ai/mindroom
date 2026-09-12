@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="todo",
     display_name="Todo",
-    description="Create and manage per-thread work plans with dependencies",
+    description="Track tasks, progress, and dependencies in a conversation thread",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

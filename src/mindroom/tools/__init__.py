@@ -369,7 +369,7 @@ def _homeassistant_tools() -> type[Toolkit]:
 @register_tool_with_metadata(
     name="agent_vault_access",
     display_name="Agent Vault Access",
-    description="Grant yourself UI access to manage this agent's Agent Vault secrets",
+    description="Get a link to manage this agent's passwords and API keys in Agent Vault",
     category=ToolCategory.INTEGRATIONS,
     icon="Lock",
     icon_color="text-amber-600",
