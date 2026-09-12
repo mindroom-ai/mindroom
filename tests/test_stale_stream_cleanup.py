@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import json
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
@@ -14,6 +15,7 @@ from uuid import uuid4
 
 import nio
 import pytest
+from nio.api import RelationshipType
 from nio.durable import RecordKind, SyncBatch, SyncRecord
 
 from mindroom.bot import AgentBot
@@ -32,6 +34,7 @@ from mindroom.event_journal import DeliveryStage, EventJournalStore
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.durable_ingestion import validate_ingestion_batch
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.room_history_reads import OpaqueEncryptedThreadHistoryError
 from mindroom.matrix.stale_stream_cleanup import (
@@ -45,9 +48,6 @@ from mindroom.matrix.stale_stream_cleanup import (
 )
 from mindroom.matrix.stale_stream_cleanup import (
     _StaleStreamRecoveryResult as StaleStreamRecoveryResult,
-)
-from mindroom.matrix.stale_stream_cleanup import (
-    recover_stale_streaming_messages,
 )
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -286,29 +286,8 @@ async def test_requester_fetches_are_only_for_recovery_candidates(tmp_path: Path
         cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID], now_ms=NOW_MS)
     assert cleaned == 1
     assert interrupted[0].original_sender_id == USER_ID
-    client.room_get_event.assert_awaited_once_with(ROOM_ID, "$requester")
-
-
-@pytest.mark.asyncio
-async def test_failed_history_page_remains_retryable(tmp_path: Path) -> None:
-    """An unavailable page is not an empty successful scan of the room."""
-    config = _make_config(tmp_path)
-    client = _make_client()
-    client.room_messages.side_effect = [nio.RoomMessagesError("unavailable"), _room_messages_response()]
-    scanned: set[str] = set()
-    with patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", AsyncMock(return_value=[ROOM_ID])):
-        for attempt in range(2):
-            await recover_stale_streaming_messages(
-                {BOT_USER_ID: client},
-                resume_client=None,
-                response_recovery_scope=_permitted_recovery_scope,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                startup_cutoff_ms=NOW_MS,
-                scanned_room_ids=scanned,
-            )
-            assert scanned == (set() if attempt == 0 else {ROOM_ID})
-    assert client.room_messages.await_count == 2
+    assert client.room_get_event.await_args_list.count(call(ROOM_ID, "$requester")) == 1
+    assert not any(args.args[1].startswith("$off-page") for args in client.room_get_event.await_args_list)
 
 
 def _thread_reply_relation(thread_id: str, reply_to_event_id: str) -> dict[str, object]:
@@ -336,7 +315,7 @@ async def _permitted_recovery_scope(*_args: str) -> AsyncIterator[bool]:
     yield True
 
 
-async def _run_cleanup(
+async def _run_cleanup(  # noqa: C901 - Adapts static originals, edits and reactions to exact Matrix reads.
     client: AsyncMock,
     config: Config,
     *,
@@ -345,15 +324,73 @@ async def _run_cleanup(
     now_ms: int = NOW_MS,
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
+    target_thread_ids: dict[str, str | None] | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
+    """Exercise exact cleanup using the existing static Matrix event fixtures."""
     client.user_id = BOT_USER_ID
     assert joined_rooms == [ROOM_ID]
+    response = client.room_messages.return_value
+    if client.room_messages.side_effect is not None:
+        pages = list(client.room_messages.side_effect)
+        events = [event for page in pages for event in page.chunk]
+    else:
+        events = list(response.chunk)
+    by_id = {event.event_id: event for event in events}
+    original_get_event = client.room_get_event.side_effect
+    fallback_response = client.room_get_event.return_value
+
+    async def get_event(room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+        if event_id in by_id and (
+            by_id[event_id].sender == BOT_USER_ID or not EventInfo.from_event(by_id[event_id].source).is_edit
+        ):
+            return _room_get_event_response(by_id[event_id])
+        if callable(original_get_event):
+            result = original_get_event(room_id, event_id)
+            return await result if inspect.isawaitable(result) else result
+        if original_get_event is not None:
+            return next(original_get_event)
+        return fallback_response
+
+    original_relations = client.room_get_event_relations
+
+    async def relations(
+        room_id: str,
+        event_id: str,
+        relation_type: object,
+        *args: object,
+        **kwargs: object,
+    ) -> AsyncIterator[nio.Event]:
+        if relation_type == RelationshipType.replacement:
+            for event in events:
+                relation = event.source.get("content", {}).get("m.relates_to", {})
+                if relation.get("rel_type") == "m.replace" and relation.get("event_id") == event_id:
+                    yield event
+        else:
+            for event in events:
+                if (
+                    isinstance(event, nio.ReactionEvent)
+                    and EventInfo.from_event(event.source).reaction_target_event_id == event_id
+                ):
+                    yield event
+            async for event in original_relations(room_id, event_id, relation_type, *args, **kwargs):
+                yield event
+
+    client.room_get_event.side_effect = get_event
+    client.room_get_event_relations = MagicMock(side_effect=relations)
+    targets = {
+        event.event_id: EventInfo.from_event(event.source).thread_id
+        for event in events
+        if isinstance(event, nio.RoomMessageText | nio.RoomMessageNotice)
+        and event.sender == BOT_USER_ID
+        and not EventInfo.from_event(event.source).is_edit
+    }
     with patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000):
         return await cleanup_stale_streaming_room(
             client,
             response_recovery_scope=_permitted_recovery_scope,
             room_id=ROOM_ID,
             actors={BOT_USER_ID: client},
+            target_thread_ids=targets if target_thread_ids is None else target_thread_ids,
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -476,8 +513,8 @@ async def test_relations_api_filters_reactions_and_unions_history_ids(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_relations_api_error_falls_back_to_history_scan_ids(tmp_path: Path) -> None:
-    """Cleanup should still redact history-scanned IDs when relations lookup fails."""
+async def test_relations_api_error_does_not_invent_reaction_targets(tmp_path: Path) -> None:
+    """A failed exact relation lookup must not invent reaction IDs."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     client.room_messages.return_value = _room_messages_response(
@@ -503,8 +540,7 @@ async def test_relations_api_error_falls_back_to_history_scan_ids(tmp_path: Path
         cleaned, _ = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
 
     assert cleaned == 1
-    client.room_redact.assert_awaited_once()
-    assert client.room_redact.await_args.kwargs["event_id"] == "$history-stop"
+    client.room_redact.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -602,46 +638,6 @@ async def test_cleanup_skips_completed_stream_status_even_with_trailing_marker(t
     assert cleaned == 0
     assert interrupted == []
     mock_edit.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_cleanup_scans_until_history_end_for_deep_stale_messages(tmp_path: Path) -> None:
-    """Cleanup should keep paginating until history ends, not stop after an arbitrary page cap."""
-    config = _make_config(tmp_path)
-    client = _make_client()
-    stale_message = _make_message_event(
-        event_id="$page12-stale",
-        body="Deep history partial",
-        timestamp_ms=NOW_MS - STALE_AGE_MS,
-        extra_content={STREAM_STATUS_KEY: "streaming"},
-    )
-    history_pages = [
-        _room_messages_response(
-            _make_message_event(
-                event_id=f"$page{page_number}-filler",
-                body="Ignore me",
-                timestamp_ms=NOW_MS - page_number,
-                sender="@user:example.com",
-            ),
-            end=f"page-{page_number + 1}",
-        )
-        for page_number in range(1, 12)
-    ]
-    client.room_messages = AsyncMock(
-        side_effect=[*history_pages, _room_messages_response(stale_message)],
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    with patch(
-        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
-        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-    ) as mock_edit:
-        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 1
-    assert interrupted == []
-    assert client.room_messages.await_count == 12
-    assert mock_edit.await_args.args[2] == "$page12-stale"
 
 
 @pytest.mark.asyncio
@@ -801,7 +797,12 @@ async def test_cleanup_returns_interrupted_thread_for_transitive_plain_reply(tmp
         "mindroom.matrix.stale_stream_cleanup.edit_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$cleanup-edit")),
     ):
-        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+        cleaned, interrupted = await _run_cleanup(
+            client,
+            config,
+            joined_rooms=[ROOM_ID],
+            target_thread_ids={"$plain-reply": "$thread-root"},
+        )
 
     assert cleaned == 1
     assert len(interrupted) == 1
@@ -1324,16 +1325,6 @@ def test_ordered_auto_resume_candidates_returns_all_unique_threads_when_unlimite
     assert [thread.target_event_id for thread in selected] == ["$target-two", "$newer-one", "$target-three"]
 
 
-def test_deep_history_scan_limit_is_independent_of_resume_count(tmp_path: Path) -> None:
-    """Uncapped resume delivery must not make each room scan more old pages."""
-    config = _make_config(tmp_path)
-    config.defaults.auto_resume_after_restart = True
-
-    scan_policy = stale_stream_cleanup_module._cleanup_scan_policy(config, startup_cutoff_ms=NOW_MS)
-
-    assert scan_policy.max_extra_old_pages == 10
-
-
 @pytest.mark.asyncio
 async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
     """Auto-resume should skip interrupted records that do not have a thread ID."""
@@ -1548,7 +1539,7 @@ async def test_cleanup_uses_exact_replied_to_requester_not_latest_thread_speaker
             original_sender_id=USER_ID,
         ),
     ]
-    client.room_get_event.assert_not_called()
+    assert client.room_get_event.await_args_list == [call(ROOM_ID, "$original"), call(ROOM_ID, "$thread-root")]
 
 
 @pytest.mark.asyncio
@@ -1598,7 +1589,7 @@ async def test_cleanup_uses_scanned_history_when_edited_bot_message_lacks_visibl
             original_sender_id=USER_ID,
         ),
     ]
-    client.room_get_event.assert_not_called()
+    assert client.room_get_event.await_args_list == [call(ROOM_ID, "$original"), call(ROOM_ID, "$thread-root")]
 
 
 @pytest.mark.asyncio
@@ -1664,6 +1655,7 @@ async def test_cleanup_follows_agent_reply_chain_outside_scanned_history(tmp_pat
         ),
     ]
     assert [call.args[1] for call in client.room_get_event.await_args_list] == [
+        "$original",
         "$agent-a",
         "$user-root",
     ]
@@ -1832,6 +1824,7 @@ async def test_cleanup_fetches_exact_scanned_edit_ancestor_for_requester_resolut
         ),
     ]
     assert [call.args[1] for call in client.room_get_event.await_args_list] == [
+        "$original",
         "$agent-a-edit",
         "$user-root",
     ]
@@ -2084,43 +2077,6 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
 
 
 @pytest.mark.asyncio
-async def test_targeted_recovery_scans_only_handoff_rooms_without_a_clock_cutoff(tmp_path: Path) -> None:
-    """Replacement recovery must exclude unrelated rooms and preserve the Matrix clock domain."""
-    config = _make_config(tmp_path)
-    client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {BOT_USER_ID: client}
-
-    with (
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
-            new=AsyncMock(return_value=[ROOM_ID, "!unrelated:example.org"]),
-        ),
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
-            new=AsyncMock(return_value=(0, [])),
-        ) as cleanup_room,
-    ):
-        scanned_room_ids: set[str] = set()
-        result = await recover_stale_streaming_messages(
-            actors,
-            resume_client=None,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=None,
-            scanned_room_ids=scanned_room_ids,
-            target_room_ids={ROOM_ID},
-            response_recovery_scope=_permitted_recovery_scope,
-        )
-
-    assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
-    cleanup_room.assert_awaited_once()
-    assert cleanup_room.await_args.kwargs["room_id"] == ROOM_ID
-    assert cleanup_room.await_args.kwargs["startup_cutoff_ms"] is None
-    assert cleanup_room.await_args.kwargs["terminal_interrupted_only"] is True
-    assert scanned_room_ids == {ROOM_ID}
-
-
-@pytest.mark.asyncio
 async def test_targeted_recovery_does_not_clobber_live_replacement_stream(tmp_path: Path) -> None:
     """Replacement handoff recovery must ignore active output from the new bot generation."""
     config = _make_config(tmp_path)
@@ -2153,39 +2109,6 @@ async def test_targeted_recovery_does_not_clobber_live_replacement_stream(tmp_pa
     assert cleaned == 0
     assert interrupted == []
     client.room_send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_failed_targeted_room_scan_remains_unscanned_for_retry(tmp_path: Path) -> None:
-    """A transient room-history failure must leave the claimed handoff retryable."""
-    config = _make_config(tmp_path)
-    client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {BOT_USER_ID: client}
-
-    with (
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
-            new=AsyncMock(return_value=[ROOM_ID]),
-        ),
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
-            new=AsyncMock(side_effect=RuntimeError("temporary history failure")),
-        ),
-    ):
-        scanned_room_ids: set[str] = set()
-        result = await recover_stale_streaming_messages(
-            actors,
-            resume_client=client,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=None,
-            scanned_room_ids=scanned_room_ids,
-            target_room_ids={ROOM_ID},
-            response_recovery_scope=_permitted_recovery_scope,
-        )
-
-    assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
-    assert scanned_room_ids == set()
 
 
 @pytest.mark.asyncio
@@ -2272,130 +2195,6 @@ async def test_cleanup_returns_old_terminal_interrupted_thread_for_auto_resume(t
 
 
 @pytest.mark.asyncio
-async def test_cleanup_scans_past_lookback_page_for_old_terminal_interruption(tmp_path: Path) -> None:
-    """A busy room may push old terminal interrupted notes behind a lookback-crossing page."""
-    config = _make_config(tmp_path)
-    config.defaults.auto_resume_after_restart = True
-    client = _make_client()
-    client.rooms = _joined_room_cache()
-    client.room_messages = AsyncMock(
-        side_effect=[
-            _room_messages_response(
-                _make_message_event(
-                    event_id="$old-filler",
-                    body="Later unrelated chatter",
-                    sender=USER_ID,
-                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
-                ),
-                end="older-page",
-            ),
-            _room_messages_response(
-                _make_message_event(
-                    event_id="$thread-root",
-                    body="Question",
-                    sender=USER_ID,
-                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - 20_000,
-                ),
-                _make_message_event(
-                    event_id="$old-interrupted",
-                    body="Partial answer\n\n**[Response interrupted]**",
-                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - 10_000,
-                    relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
-                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED},
-                ),
-            ),
-        ],
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 0
-    assert client.room_messages.await_count == 2
-    assert [thread.target_event_id for thread in interrupted] == ["$old-interrupted"]
-
-
-@pytest.mark.asyncio
-async def test_cleanup_stops_at_lookback_page_when_auto_resume_disabled(tmp_path: Path) -> None:
-    """Opted-out startup cleanup must not full-scan busy rooms when no resume relay will be queued."""
-    config = _make_config(tmp_path)
-    config.defaults.auto_resume_after_restart = False
-    client = _make_client()
-    client.rooms = _joined_room_cache()
-    client.room_messages = AsyncMock(
-        side_effect=[
-            _room_messages_response(
-                _make_message_event(
-                    event_id="$old-filler",
-                    body="Later unrelated chatter",
-                    sender=USER_ID,
-                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
-                ),
-                end="older-page",
-            ),
-            _room_messages_response(
-                _make_message_event(
-                    event_id="$old-interrupted",
-                    body="Partial answer\n\n**[Response interrupted]**",
-                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - 10_000,
-                    relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
-                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED},
-                ),
-            ),
-        ],
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 0
-    assert interrupted == []
-    assert client.room_messages.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_cleanup_caps_old_terminal_interruption_scan_when_auto_resume_enabled(tmp_path: Path) -> None:
-    """Auto-resume opt-in may scan past the outage window, but never the whole room history."""
-    config = _make_config(tmp_path)
-    config.defaults.auto_resume_after_restart = True
-    client = _make_client()
-    client.rooms = _joined_room_cache()
-    old_pages = [
-        _room_messages_response(
-            _make_message_event(
-                event_id=f"$old-filler-{page_number}",
-                body="Later unrelated chatter",
-                sender=USER_ID,
-                timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - page_number,
-            ),
-            end=f"old-page-{page_number}",
-        )
-        for page_number in range(1, 13)
-    ]
-    client.room_messages = AsyncMock(
-        side_effect=[
-            *old_pages,
-            _room_messages_response(
-                _make_message_event(
-                    event_id="$too-deep-interrupted",
-                    body="Partial answer\n\n**[Response interrupted]**",
-                    timestamp_ms=NOW_MS - OLD_STALE_AGE_MS - 20_000,
-                    relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
-                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED},
-                ),
-            ),
-        ],
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 0
-    assert interrupted == []
-    assert client.room_messages.await_count == 10
-
-
-@pytest.mark.asyncio
 async def test_cleanup_skips_completed_message_ending_with_generic_interrupted_note(tmp_path: Path) -> None:
     """Completed responses that happen to mention the generic note are not restart-resumable."""
     config = _make_config(tmp_path)
@@ -2458,7 +2257,26 @@ async def test_cleanup_skips_restart_interrupted_thread_after_auto_resume_was_qu
     cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
 
     assert cleaned == 0
-    assert interrupted == []
+    assert len(interrupted) == 1
+    history = [
+        _history_message("$message", body=restart_body),
+        _history_message(
+            "$resume",
+            sender=entity_ids(config, runtime_paths_for(config))[ROUTER_AGENT_NAME].full_id,
+            body=f"@Test Agent {AUTO_RESUME_MESSAGE}",
+            content={"m.relates_to": _thread_reply_relation("$thread-root", "$message")},
+        ),
+    ]
+    with patch("mindroom.matrix.stale_stream_cleanup.fetch_thread_messages_from_source", return_value=history):
+        resumed = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            response_recovery_scope=_permitted_recovery_scope,
+        )
+    assert resumed == 0
+    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2783,8 +2601,8 @@ async def test_cleanup_does_not_hydrate_sidecars_for_unrelated_user_messages(tmp
 
 
 @pytest.mark.asyncio
-async def test_cleanup_sidecar_hydration_failure_falls_back_gracefully(tmp_path: Path) -> None:
-    """Cleanup should still work when sidecar hydration fails."""
+async def test_cleanup_sidecar_hydration_failure_retains_retryable_response(tmp_path: Path) -> None:
+    """An incomplete preview must never replace the full interrupted response."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     client.rooms = _joined_room_cache()
@@ -2805,23 +2623,9 @@ async def test_cleanup_sidecar_hydration_failure_falls_back_gracefully(tmp_path:
     client.download = AsyncMock(return_value=MagicMock(spec=nio.DownloadError))
     client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$cleanup", room_id=ROOM_ID))
 
-    cleaned, _ = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 1
-    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
-    _assert_preserved_edit_payload(
-        sent_content,
-        {
-            "io.mindroom.ai_run": {"version": 1, "run_id": "run-preview"},
-            "io.mindroom.stream_status": "error",
-        },
-    )
-    new_content = cast("dict[str, object]", sent_content["m.new_content"])
-    assert "io.mindroom.long_text" not in sent_content
-    assert "io.mindroom.long_text" not in new_content
-    assert "url" not in sent_content
-    assert "url" not in new_content
-    assert "io.mindroom.tool_trace" not in new_content
+    with pytest.raises(RuntimeError, match="Cannot resolve owned recovery response"):
+        await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3057,379 +2861,6 @@ async def test_auto_resume_sends_threads_from_every_room(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(tmp_path: Path) -> None:
-    """One shared room scan should serve every bot and stream completed-room resumes."""
-    config = _make_config(tmp_path)
-    config.defaults.auto_resume_after_restart = True
-    router_user_id = "@actual_router:localhost"
-    router_client = make_matrix_client_mock(user_id=router_user_id)
-    agent_client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {
-        router_user_id: router_client,
-        BOT_USER_ID: agent_client,
-    }
-    slow_room_started = asyncio.Event()
-    release_slow_room = asyncio.Event()
-    resume_sent = asyncio.Event()
-    scanned_rooms: dict[str, tuple[object, set[str]]] = {}
-    scanned_room_ids: set[str] = set()
-    include_new_room = False
-
-    async def joined_rooms(client: object) -> list[str]:
-        if client is router_client:
-            joined_room_ids = ["!shared:example.com", "!fast:example.com"]
-            if include_new_room:
-                joined_room_ids.append("!new:example.com")
-            return joined_room_ids
-        assert client is agent_client
-        return ["!shared:example.com", "!slow:example.com"]
-
-    async def cleanup_room(scan_client: object, **kwargs: object) -> tuple[int, list[InterruptedThread]]:
-        room_id = cast("str", kwargs["room_id"])
-        room_actors = cast("dict[str, nio.AsyncClient]", kwargs["actors"])
-        scanned_rooms[room_id] = (scan_client, set(room_actors))
-        if room_id == "!slow:example.com":
-            slow_room_started.set()
-            await release_slow_room.wait()
-            return 0, []
-        if room_id == "!fast:example.com":
-            return 1, [
-                InterruptedThread(
-                    room_id=room_id,
-                    thread_id="$thread",
-                    target_event_id="$target",
-                    partial_text="Partial",
-                    agent_name="test_agent",
-                ),
-            ]
-        return 0, []
-
-    async def auto_resume(*_args: object, **_kwargs: object) -> int:
-        resume_sent.set()
-        return 1
-
-    with (
-        patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", side_effect=joined_rooms),
-        patch("mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room", side_effect=cleanup_room),
-        patch("mindroom.matrix.stale_stream_cleanup._auto_resume_interrupted_threads", side_effect=auto_resume),
-    ):
-        recovery_task = asyncio.create_task(
-            recover_stale_streaming_messages(
-                actors,
-                resume_client=router_client,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                startup_cutoff_ms=NOW_MS,
-                scanned_room_ids=scanned_room_ids,
-                response_recovery_scope=_permitted_recovery_scope,
-            ),
-        )
-        await asyncio.wait_for(slow_room_started.wait(), timeout=1.0)
-        await asyncio.wait_for(resume_sent.wait(), timeout=1.0)
-        assert not recovery_task.done()
-        release_slow_room.set()
-        result = await asyncio.wait_for(recovery_task, timeout=1.0)
-        include_new_room = True
-        delta_result = await recover_stale_streaming_messages(
-            actors,
-            resume_client=router_client,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=NOW_MS,
-            scanned_room_ids=scanned_room_ids,
-            response_recovery_scope=_permitted_recovery_scope,
-        )
-
-    assert result == StaleStreamRecoveryResult(room_count=3, cleaned_count=1, resumed_count=1)
-    assert delta_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
-    assert set(scanned_rooms) == {
-        "!shared:example.com",
-        "!fast:example.com",
-        "!slow:example.com",
-        "!new:example.com",
-    }
-    assert scanned_rooms["!shared:example.com"] == (router_client, {router_user_id, BOT_USER_ID})
-    assert scanned_rooms["!fast:example.com"] == (router_client, {router_user_id})
-    assert scanned_rooms["!slow:example.com"] == (agent_client, {BOT_USER_ID})
-    assert scanned_rooms["!new:example.com"] == (router_client, {router_user_id})
-    assert scanned_room_ids == set(scanned_rooms)
-
-
-@pytest.mark.asyncio
-async def test_recovery_skips_auto_resume_when_resume_identity_is_not_joined(tmp_path: Path) -> None:
-    """A resume identity must not read or write a room it is not joined to."""
-    config = _make_config(tmp_path)
-    config.defaults.auto_resume_after_restart = True
-    router_client = make_matrix_client_mock(user_id="@actual_router:localhost")
-    agent_client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {
-        "@actual_router:localhost": router_client,
-        BOT_USER_ID: agent_client,
-    }
-    interrupted = InterruptedThread(
-        room_id=ROOM_ID,
-        thread_id="$thread",
-        target_event_id="$target",
-        partial_text="Partial",
-        agent_name="test_agent",
-    )
-
-    async def joined_rooms(client: object) -> list[str]:
-        if client is router_client:
-            return []
-        assert client is agent_client
-        return [ROOM_ID]
-
-    with (
-        patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", side_effect=joined_rooms),
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
-            new=AsyncMock(return_value=(1, [interrupted])),
-        ),
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._auto_resume_interrupted_threads",
-            new=AsyncMock(return_value=1),
-        ) as auto_resume,
-    ):
-        scanned_room_ids: set[str] = set()
-        result = await recover_stale_streaming_messages(
-            actors,
-            resume_client=router_client,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=NOW_MS,
-            scanned_room_ids=scanned_room_ids,
-            response_recovery_scope=_permitted_recovery_scope,
-        )
-
-    assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=0)
-    assert scanned_room_ids == set()
-    auto_resume.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_recovery_retries_auto_resume_after_resume_identity_joins(tmp_path: Path) -> None:
-    """A pre-join cleanup scan must not hide the room from the post-setup delta."""
-    config = _make_config(tmp_path)
-    config.defaults.auto_resume_after_restart = True
-    router_user_id = "@actual_router:localhost"
-    router_client = make_matrix_client_mock(user_id=router_user_id)
-    agent_client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {
-        router_user_id: router_client,
-        BOT_USER_ID: agent_client,
-    }
-    interrupted = InterruptedThread(
-        room_id=ROOM_ID,
-        thread_id="$thread",
-        target_event_id="$target",
-        partial_text="Partial",
-        agent_name="test_agent",
-    )
-    router_is_joined = False
-
-    async def joined_rooms(client: object) -> list[str]:
-        if client is router_client:
-            return [ROOM_ID] if router_is_joined else []
-        assert client is agent_client
-        return [ROOM_ID]
-
-    with (
-        patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", side_effect=joined_rooms),
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
-            new=AsyncMock(return_value=(1, [interrupted])),
-        ) as cleanup_room,
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._auto_resume_interrupted_threads",
-            new=AsyncMock(return_value=1),
-        ) as auto_resume,
-    ):
-        scanned_room_ids: set[str] = set()
-        initial_result = await recover_stale_streaming_messages(
-            actors,
-            resume_client=router_client,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=NOW_MS,
-            scanned_room_ids=scanned_room_ids,
-            response_recovery_scope=_permitted_recovery_scope,
-        )
-        router_is_joined = True
-        delta_result = await recover_stale_streaming_messages(
-            actors,
-            resume_client=router_client,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=NOW_MS,
-            scanned_room_ids=scanned_room_ids,
-            response_recovery_scope=_permitted_recovery_scope,
-        )
-
-    assert initial_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=0)
-    assert delta_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=1)
-    assert cleanup_room.await_count == 2
-    auto_resume.assert_awaited_once()
-    assert scanned_room_ids == {ROOM_ID}
-
-
-@pytest.mark.asyncio
-async def test_targeted_recovery_tracks_resume_membership_outside_scan_actors(tmp_path: Path) -> None:
-    """Replacement recovery must check its separate resume client's membership."""
-    config = _make_config(tmp_path)
-    config.defaults.auto_resume_after_restart = True
-    router_client = make_matrix_client_mock(user_id="@actual_router:localhost")
-    agent_client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    interrupted = InterruptedThread(
-        room_id=ROOM_ID,
-        thread_id="$thread",
-        target_event_id="$target",
-        partial_text="Partial",
-        agent_name="test_agent",
-    )
-
-    with (
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
-            new=AsyncMock(return_value=[ROOM_ID]),
-        ) as joined_rooms,
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
-            new=AsyncMock(return_value=(0, [interrupted])),
-        ),
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._auto_resume_interrupted_threads",
-            new=AsyncMock(return_value=1),
-        ) as auto_resume,
-    ):
-        result = await recover_stale_streaming_messages(
-            {BOT_USER_ID: agent_client},
-            resume_client=router_client,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=None,
-            scanned_room_ids=set(),
-            target_room_ids={ROOM_ID},
-            response_recovery_scope=_permitted_recovery_scope,
-        )
-
-    assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=1)
-    assert {call.args[0] for call in joined_rooms.await_args_list} == {agent_client, router_client}
-    auto_resume.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_recovery_resumes_all_51_rooms_even_when_newest_room_finishes_last(tmp_path: Path) -> None:
-    """Completion order must not impose a hidden total resume cap."""
-    config = _make_config(tmp_path)
-    config.defaults.auto_resume_after_restart = True
-    router_client = make_matrix_client_mock(user_id="@actual_router:localhost")
-    actors = {
-        "@actual_router:localhost": router_client,
-    }
-    room_ids = [f"!room-{index}:example.com" for index in range(51)]
-    slow_room_id = room_ids[-1]
-    slow_room_started = asyncio.Event()
-    release_slow_room = asyncio.Event()
-    fast_rooms_resumed = asyncio.Event()
-    resumed_room_ids: list[str] = []
-    scanned_room_ids: set[str] = set()
-
-    async def cleanup_room(_: object, **kwargs: object) -> tuple[int, list[InterruptedThread]]:
-        room_id = cast("str", kwargs["room_id"])
-        room_index = room_ids.index(room_id)
-        if room_id == slow_room_id:
-            slow_room_started.set()
-            await release_slow_room.wait()
-        return 0, [
-            InterruptedThread(
-                room_id=room_id,
-                thread_id=f"$thread-{room_index}",
-                target_event_id=f"$target-{room_index}",
-                partial_text="Partial",
-                agent_name="test_agent",
-                timestamp_ms=room_index,
-            ),
-        ]
-
-    async def auto_resume(_: object, interrupted: list[InterruptedThread], **__: object) -> int:
-        resumed_room_ids.extend(item.room_id for item in interrupted)
-        if len(resumed_room_ids) == 50:
-            fast_rooms_resumed.set()
-        return len(interrupted)
-
-    with (
-        patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", new=AsyncMock(return_value=room_ids)),
-        patch("mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room", side_effect=cleanup_room),
-        patch("mindroom.matrix.stale_stream_cleanup._auto_resume_interrupted_threads", side_effect=auto_resume),
-    ):
-        recovery_task = asyncio.create_task(
-            recover_stale_streaming_messages(
-                actors,
-                resume_client=router_client,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                startup_cutoff_ms=NOW_MS,
-                scanned_room_ids=scanned_room_ids,
-                room_concurrency=51,
-                response_recovery_scope=_permitted_recovery_scope,
-            ),
-        )
-        await asyncio.wait_for(slow_room_started.wait(), timeout=1.0)
-        await asyncio.wait_for(fast_rooms_resumed.wait(), timeout=1.0)
-        assert not recovery_task.done()
-        release_slow_room.set()
-        result = await asyncio.wait_for(recovery_task, timeout=1.0)
-
-    assert result == StaleStreamRecoveryResult(room_count=51, cleaned_count=0, resumed_count=51)
-    assert set(resumed_room_ids) == set(room_ids)
-    assert resumed_room_ids[-1] == slow_room_id
-    assert scanned_room_ids == set(room_ids)
-
-
-@pytest.mark.asyncio
-async def test_recovery_without_resume_client_still_cleans_rooms(tmp_path: Path) -> None:
-    """Router loss should disable only resume delivery, not Matrix cleanup."""
-    config = _make_config(tmp_path)
-    config.defaults.auto_resume_after_restart = True
-    client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {BOT_USER_ID: client}
-    interrupted = InterruptedThread(
-        room_id=ROOM_ID,
-        thread_id="$thread",
-        target_event_id="$target",
-        partial_text="Partial",
-        agent_name="test_agent",
-    )
-
-    with (
-        patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", new=AsyncMock(return_value=[ROOM_ID])),
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
-            new=AsyncMock(return_value=(1, [interrupted])),
-        ),
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._auto_resume_interrupted_threads",
-            new=AsyncMock(),
-        ) as auto_resume,
-    ):
-        scanned_room_ids: set[str] = set()
-        result = await recover_stale_streaming_messages(
-            actors,
-            resume_client=None,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=NOW_MS,
-            scanned_room_ids=scanned_room_ids,
-            response_recovery_scope=_permitted_recovery_scope,
-        )
-
-    assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=0)
-    assert scanned_room_ids == {ROOM_ID}
-    auto_resume.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_path: Path) -> None:
     """A shared history scan must use each bot's own client for Matrix edits."""
     config = _make_config(tmp_path)
@@ -3439,30 +2870,27 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
         BOT_USER_ID: first_client,
         OTHER_BOT_USER_ID: second_client,
     }
-    scanned_state = stale_stream_cleanup_module._ScannedRoomMessageStates(
-        message_states={
-            "$first": stale_stream_cleanup_module._MessageState(
-                latest_body="First partial",
-                latest_timestamp=NOW_MS - STALE_AGE_MS,
-                latest_event_id="$first",
-                stream_status="streaming",
-                bot_user_id=BOT_USER_ID,
-            ),
-            "$second": stale_stream_cleanup_module._MessageState(
-                latest_body="Second partial",
-                latest_timestamp=NOW_MS - STALE_AGE_MS + 1,
-                latest_event_id="$second",
-                stream_status="streaming",
-                bot_user_id=OTHER_BOT_USER_ID,
-            ),
-        },
-        auto_resume_target_event_ids=set(),
-    )
+    scanned_state = {
+        "$first": stale_stream_cleanup_module._MessageState(
+            latest_body="First partial",
+            latest_timestamp=NOW_MS - STALE_AGE_MS,
+            latest_event_id="$first",
+            stream_status="streaming",
+            bot_user_id=BOT_USER_ID,
+        ),
+        "$second": stale_stream_cleanup_module._MessageState(
+            latest_body="Second partial",
+            latest_timestamp=NOW_MS - STALE_AGE_MS + 1,
+            latest_event_id="$second",
+            stream_status="streaming",
+            bot_user_id=OTHER_BOT_USER_ID,
+        ),
+    }
 
     with (
         patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000),
         patch(
-            "mindroom.matrix.stale_stream_cleanup._scan_room_message_states",
+            "mindroom.matrix.stale_stream_cleanup._load_recovery_message_states",
             new=AsyncMock(return_value=scanned_state),
         ),
         patch(
@@ -3475,6 +2903,7 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
             response_recovery_scope=_permitted_recovery_scope,
             room_id=ROOM_ID,
             actors=actors,
+            target_thread_ids={"$first": None, "$second": None},
             bot_user_ids=set(actors),
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -3555,7 +2984,8 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
     ):
         runtime_task = asyncio.create_task(orchestrator.start())
         try:
-            await asyncio.wait_for(ready.wait(), timeout=1.0)
+            # Ordering is under test, not cold-import or machine scheduling latency.
+            await asyncio.wait_for(ready.wait(), timeout=5.0)
             await asyncio.wait_for(recovery_finished.wait(), timeout=5.0)
             await orchestrator.stop()
             await asyncio.wait_for(runtime_task, timeout=1.0)
@@ -3847,7 +3277,9 @@ async def test_startup_resume_requires_current_journal_ownership_across_restarts
             extra_content={STREAM_STATUS_KEY: status},
         ),
     ]
-    client.room_messages.return_value = _room_messages_response(*events)
+    client.room_get_event.side_effect = lambda _room, event_id: _room_get_event_response(
+        next(event for event in events if event.event_id == event_id),
+    )
     client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _aiter())
     database = tmp_path / "journal.db"
     store = EventJournalStore.open_sqlite(database)

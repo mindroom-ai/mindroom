@@ -261,8 +261,12 @@ The owning turn's typed physical revision map retains edit ordering independentl
 One draining owner folds each source's newest Matrix revision into a complete response request and loops when newer edits arrive.
 Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
 A committed service-restart or generic terminal interruption note records its exact source room in `InterruptedTurnRooms`.
-Replacement recovery uses the registered room directly, while next-startup cleanup can rediscover the durable note and an interrupted edit revision remains uncommitted for re-drive.
-Startup scans route repair and relay publication through the same per-delivery owner as normal Matrix delivery.
+Replacement recovery uses the registered room directly, while next-startup cleanup discovers acknowledged INITIAL deliveries without an owning FINAL in the current membership epoch.
+Discovery pages the existing delivery outbox, including acknowledgements made before turn attribution, and an empty inventory requires no Matrix history calls.
+Recovery reads each owned response and its complete same-sender replacement history by exact event ID; unreadable content remains untouched for retry.
+Repair and relay publication use the same per-delivery owner as normal Matrix delivery, with ownership checked inside bounded room tasks and again before mutation.
+Before publishing a continuation, recovery reads the complete candidate thread to check for later human work and an already-published continuation.
+An interrupted edit revision remains uncommitted for re-drive.
 Pending journal replay, active generation, and owed or acknowledged FINAL delivery preclude synthetic continuation.
 Same-requester supersession preserves canonical replay when an INITIAL already owns durable delivery work, including unattempted sends and acknowledgements that precede response attribution.
 When every current source is deleted and no FINAL owns the response, its unfinished INITIAL remains durable cleanup debt until Matrix disappearance and visible-response attribution detachment are confirmed.

@@ -324,6 +324,79 @@ async def _latest_relation_or_original_body(
     return body
 
 
+async def fetch_latest_visible_message(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    event_id: str,
+    trusted_sender_ids: Collection[str] = (),
+) -> ResolvedVisibleMessage | None:
+    """Read one exact original and its complete replacement state, failing closed."""
+    response = await client.room_get_event(room_id, event_id)
+    if not isinstance(response, nio.RoomGetEventResponse):
+        return None
+    original = response.event
+    if isinstance(original, nio.MegolmEvent):
+        original = client.decrypt_event(original)
+    if not is_visible_room_message(original) or original.event_id != event_id:
+        return None
+    info = EventInfo.from_event(original.source)
+    if info.is_edit:
+        return None
+
+    edits = await _fetch_exact_replacements(client, room_id=room_id, original=original)
+    if edits is None:
+        return None
+    data = await extract_and_resolve_message(original, client, trusted_sender_ids=trusted_sender_ids)
+    message = ResolvedVisibleMessage.from_message_data(data, thread_id=info.thread_id, latest_event_id=event_id)
+    winner = edits.winner_for(event_id, sender=original.sender)
+    await apply_latest_edits_to_messages(
+        client,
+        messages_by_event_id={event_id: message},
+        edit_candidates=edits,
+        synthesize_unseen_originals=False,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+    if winner is not None and message.latest_event_id != winner.event_id:
+        return None
+    # Replacements cannot change the original conversation or reply target.
+    original_relation = original.source["content"].get("m.relates_to")
+    message.content = dict(message.content)
+    message.content.pop("m.relates_to", None)
+    if original_relation is not None:
+        message.content["m.relates_to"] = original_relation
+    return None if holds_unresolved_sidecar(message.content) else message
+
+
+async def _fetch_exact_replacements(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    original: nio.RoomMessage,
+) -> ThreadEditCandidates | None:
+    """Collect complete same-sender edits, refusing unreadable replacement state."""
+    edits = ThreadEditCandidates()
+    relations = client.room_get_event_relations(
+        room_id,
+        original.event_id,
+        RelationshipType.replacement,
+        direction=nio.MessageDirection.back,
+    )
+    async with contextlib.aclosing(relations):
+        async for event in relations:
+            if event.sender != original.sender:
+                continue
+            candidate = client.decrypt_event(event) if isinstance(event, nio.MegolmEvent) else event
+            if isinstance(candidate, nio.RedactedEvent):
+                continue
+            if not is_visible_room_message(candidate):
+                return None
+            candidate_info = EventInfo.from_event(candidate.source)
+            if candidate_info.is_edit and candidate_info.original_event_id == original.event_id:
+                edits.record(candidate, event_info=candidate_info)
+    return edits
+
+
 async def fetch_latest_visible_body(
     client: nio.AsyncClient,
     *,
@@ -772,6 +845,7 @@ __all__ = [
     "extract_visible_edit_body",
     "extract_visible_message",
     "fetch_latest_visible_body",
+    "fetch_latest_visible_message",
     "is_visible_room_message",
     "message_preview",
     "replace_visible_message",

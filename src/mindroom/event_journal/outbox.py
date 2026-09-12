@@ -658,6 +658,37 @@ def deleted_initials(
     return tuple(_recovery_delivery(row) for row in rows)
 
 
+def recovery_initials(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    after: tuple[int, str] | None = None,
+) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
+    """Enumerate owned visible INITIALs without a FINAL, not arbitrary room history."""
+    cursor_clause = "" if after is None else " AND (created_at_ns, delivery_id/*bytes*/) > (?, ?)"
+    rows = transaction.fetchall(
+        f"""
+        SELECT {_OUTBOX_COLUMNS} FROM matrix_delivery_outbox AS delivery
+        WHERE principal_id = ? AND event_type = 'm.room.message' AND stage = 'initial'
+          AND attempted = 1 AND acknowledged_event_id IS NOT NULL AND retired = 0
+          AND EXISTS (
+            SELECT 1 FROM room_membership AS membership
+            WHERE membership.principal_id = delivery.principal_id AND membership.room_id = delivery.room_id
+              AND membership.membership_epoch = delivery.membership_epoch AND membership.departure_fenced = 0
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM matrix_delivery_outbox AS final
+            WHERE final.principal_id = delivery.principal_id AND final.delivery_id = delivery.delivery_id
+              AND final.stage = 'final' AND (final.acknowledged_event_id IS NOT NULL
+                OR (final.retired = 0 AND final.permanent_failure_reason IS NULL))
+          ){cursor_clause}
+        ORDER BY created_at_ns, delivery_id/*bytes*/ LIMIT 100
+        """,  # noqa: S608 - fixed columns and cursor clause
+        (principal_id, *(after or ())),
+    )
+    return tuple(_recovery_delivery(row) for row in rows)
+
+
 def retire_deleted_initial(transaction: Transaction, principal_id: str, delivery_id: str) -> None:
     """Retain exact ACK identity while fencing sends after proven disappearance."""
     _lock_delivery_stages(transaction, principal_id, delivery_id)
