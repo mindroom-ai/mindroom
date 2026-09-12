@@ -1417,6 +1417,11 @@ def _run_forkserver_template() -> int:
     socket_path = sys.argv[sys.argv.index(sandbox_forkserver.TEMPLATE_ARG) + 1]
     # Pre-warm the full tool import graph once so fork children skip it; this
     # belongs to template startup, not to importing this module.
+    # Agno resolves these types while building tool schemas. Import them in the
+    # single-threaded template, not afresh in every isolated request child.
+    from agno.agent import Agent  # noqa: F401, PLC0415
+    from agno.team import Team  # noqa: F401, PLC0415
+
     import mindroom.tools  # noqa: F401, PLC0415
 
     # `python -m` prepended the runner's cwd to sys.path at template startup;

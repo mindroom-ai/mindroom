@@ -157,6 +157,31 @@ async def test_run_shell_command_accepts_shell_command_string(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "command",
+    [
+        "if shopt -q login_shell; then echo login; else echo plain; fi",
+        ["if shopt -q login_shell; then echo login; else echo plain; fi"],
+    ],
+)
+async def test_implicit_shell_does_not_run_login_startup(tmp_path: Path, command: str | list[str]) -> None:
+    """Ordinary commands must not pay for or acquire side effects from login profiles."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+    assert await entrypoint(command) == "plain"
+
+
+@pytest.mark.asyncio
+async def test_explicit_login_shell_remains_available(tmp_path: Path) -> None:
+    """Callers opting into login initialization still get it."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+    assert await entrypoint(["bash", "-lc", "shopt -q login_shell && echo login"]) == "login"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("command", "expected"),
     [
         ("[ 1 -eq 1 ] && echo ok", "ok"),
