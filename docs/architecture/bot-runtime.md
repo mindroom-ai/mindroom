@@ -270,7 +270,8 @@ Fallback eligibility and edits share the delivery lock with cleanup, and the tra
 Cleanup preserves the INITIAL identity for surviving sources, and stale history for a surviving request retries canonical preparation with a refreshed payload.
 An approval continuation retains its response INITIAL even when all source messages are deleted; the approval card remains the explicit consent surface.
 
-Native approval events expose a canonical `approval_scope` containing an opaque scope ID, entity, invoking agent, and concrete operation (including MCP server and remote tool when applicable).
+Policy approval events eligible for timed grants expose a canonical `approval_scope` containing an opaque scope ID, entity, invoking agent, and concrete operation (including MCP server and remote tool when applicable).
+One-shot-only approvals omit this optional scope and remain individually reviewable.
 The same operation descriptor supplies the private configuration-bound grant identity and the public review metadata.
 `response_event_id` associates approval history with the response that paused; clients must not infer this association from tool names or argument similarity.
 Approved calls retain immutable `approval_provenance`: `kind: once`, or `kind: timed_grant` with grant ID, originating card, granting user, decision time, duration, and fixed expiry.
