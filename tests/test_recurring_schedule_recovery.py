@@ -6,6 +6,7 @@ import asyncio
 import json
 from contextlib import suppress
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
 
@@ -14,13 +15,33 @@ import pytest
 
 from mindroom import recurring_schedule, scheduling, scheduling_executor
 from mindroom.config.main import Config
+from mindroom.config.plugin import PluginEntryConfig
+from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
 from mindroom.matrix import client_delivery
+from mindroom.matrix.large_messages import MatrixEventTooLargeError
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow
 from tests.conftest import delivered_matrix_event, delivered_matrix_side_effect
 from tests.conftest import test_runtime_paths as runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.hooks import HookCallback
+
+
+def install_schedule_hook(monkeypatch: pytest.MonkeyPatch, callback: HookCallback) -> None:
+    """Install one real hook with test-scoped registry restoration."""
+    plugin = SimpleNamespace(
+        name="schedule-test",
+        discovered_hooks=(callback,),
+        entry_config=PluginEntryConfig(path="./schedule-test"),
+        plugin_order=0,
+    )
+    monkeypatch.setattr(
+        scheduling_executor._SCHEDULING_HOOK_REGISTRY_STATE,
+        "registry",
+        HookRegistry.from_plugins([plugin]),
+    )
 
 
 class Clock:
@@ -483,6 +504,211 @@ async def test_frozen_sidecar_survives_encryption_enabled_before_retry(
     assert frozen["file"]["key"]
     assert frozen["file"]["iv"]
     assert client.upload.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["plan", "prepare", "complete"])
+async def test_checkpoint_io_failure_keeps_runner_alive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+    stage: str,
+) -> None:
+    """A transient checkpoint failure must recover without another process restart."""
+    task = workflow()
+    client = client_for(task)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    save = recurring_schedule._save
+    plan = recurring_schedule._plan
+    failed = False
+    pauses = 0
+
+    def flaky_plan(
+        path: Path,
+        workflow_key: str,
+        cron: str,
+        now: datetime,
+        grace_seconds: int,
+    ) -> recurring_schedule.RecurringOccurrence:
+        nonlocal failed
+        if stage == "plan" and not failed:
+            failed = True
+            msg = "temporary checkpoint read failure"
+            raise OSError(msg)
+        return plan(path, workflow_key, cron, now, grace_seconds)
+
+    def flaky_save(path: Path, checkpoint: recurring_schedule._RecurringCheckpoint) -> None:
+        nonlocal failed
+        target_stage = "prepare" if checkpoint.prepared is not None else "complete"
+        if stage == target_stage and not failed:
+            failed = True
+            msg = "temporary checkpoint write failure"
+            raise OSError(msg)
+        save(path, checkpoint)
+
+    async def retry_pause(_delay: float) -> None:
+        nonlocal pauses
+        pauses += 1
+        assert pauses == 1
+
+    monkeypatch.setattr(recurring_schedule, "_plan", flaky_plan)
+    monkeypatch.setattr(recurring_schedule, "_save", flaky_save)
+    monkeypatch.setattr(scheduling.asyncio, "sleep", retry_pause)
+    await run_until_wait(task, client, tmp_path)
+    assert failed
+    assert pauses == 1
+    assert sent.await_count == 1
+    checkpoint = json.loads(next((tmp_path / "mindroom_data/tracking/recurring_schedules").glob("*.json")).read_text())
+    assert checkpoint["next_run_at"] == "2026-01-16T07:00:00Z"
+    assert checkpoint["prepared"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["plan", "prepare"])
+@pytest.mark.parametrize("change", ["elapsed", "cancelled", "edited"])
+async def test_checkpoint_retry_rechecks_time_and_task_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+    stage: str,
+    change: str,
+) -> None:
+    """Recovery must not send an old occurrence after time or authoritative state changed."""
+    task = workflow()
+    client = client_for(task)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    plan = recurring_schedule._plan
+    save = recurring_schedule._save
+    plans = 0
+    failed = False
+    pauses = 0
+
+    def fail_final_plan(
+        path: Path,
+        workflow_key: str,
+        cron: str,
+        now: datetime,
+        grace_seconds: int,
+    ) -> recurring_schedule.RecurringOccurrence:
+        nonlocal plans
+        plans += 1
+        if stage == "plan" and plans == 2:
+            msg = "temporary final planning failure"
+            raise OSError(msg)
+        return plan(path, workflow_key, cron, now, grace_seconds)
+
+    def fail_preparation(path: Path, checkpoint: recurring_schedule._RecurringCheckpoint) -> None:
+        nonlocal failed
+        if stage == "prepare" and checkpoint.prepared is not None and not failed:
+            failed = True
+            msg = "temporary preparation checkpoint failure"
+            raise OSError(msg)
+        save(path, checkpoint)
+
+    async def change_during_retry(_delay: float) -> None:
+        nonlocal pauses
+        pauses += 1
+        if pauses > 1:
+            raise asyncio.CancelledError
+        if change == "elapsed":
+            controlled_clock.now = datetime(2026, 1, 15, 9, 0, tzinfo=UTC)
+        else:
+            if change == "edited":
+                task.message = "Revised summary"
+            client.room_get_state_event.return_value = nio.RoomGetStateEventResponse.from_dict(
+                {"workflow": task.model_dump_json(), "status": "cancelled" if change == "cancelled" else "pending"},
+                room_id="!room:example.org",
+                event_type="com.mindroom.scheduled.task",
+                state_key="daily",
+            )
+
+    monkeypatch.setattr(recurring_schedule, "_plan", fail_final_plan)
+    monkeypatch.setattr(recurring_schedule, "_save", fail_preparation)
+    monkeypatch.setattr(scheduling.asyncio, "sleep", change_during_retry)
+    await run_until_wait(task, client, tmp_path)
+    assert pauses >= 1
+    assert sent.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_hook_retry_identity_is_specific_to_the_occurrence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """Hooks can deduplicate replay before freezing without suppressing tomorrow's run."""
+    identities: list[str] = []
+
+    @hook(EVENT_SCHEDULE_FIRED)
+    async def record_identity(ctx: ScheduleFiredContext) -> None:
+        identities.append(ctx.correlation_id)
+
+    install_schedule_hook(monkeypatch, record_identity)
+    task = workflow()
+    client = client_for(task)
+    content = {"body": "summary", "msgtype": "m.text"}
+    monkeypatch.setattr(
+        scheduling_executor,
+        "prepare_matrix_message",
+        AsyncMock(side_effect=[RuntimeError("temporary preparation failure"), content, content]),
+    )
+    sent = AsyncMock(
+        side_effect=[asyncio.CancelledError, delivered_matrix_event("$first"), delivered_matrix_event("$next")],
+    )
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path)
+    assert len(identities) == 2  # Frozen delivery retries no longer invoke hooks.
+    controlled_clock.now = datetime(2026, 1, 16, 7, 1, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    assert len(identities) == 3
+    assert identities[0] == identities[1]
+    assert identities[1] != identities[2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["empty", "too_large"])
+async def test_permanent_preparation_failure_advances_occurrence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+    failure: str,
+) -> None:
+    """Invalid content fails visibly once rather than being retried every thirty seconds."""
+    if failure == "empty":
+
+        @hook(EVENT_SCHEDULE_FIRED)
+        async def empty_body(ctx: ScheduleFiredContext) -> None:
+            ctx.message_text = ""
+
+        install_schedule_hook(monkeypatch, empty_body)
+    else:
+        monkeypatch.setattr(
+            client_delivery,
+            "prepare_large_message",
+            AsyncMock(side_effect=MatrixEventTooLargeError("unrepresentable payload")),
+        )
+    task = workflow()
+    client = client_for(task)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$failure"))
+    monkeypatch.setattr(scheduling_executor, "send_matrix_message", sent)
+    await run_until_wait(task, client, tmp_path)
+    controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
+    await run_until_wait(task, client, tmp_path)
+    assert sent.await_count == 1
+    assert "Scheduled task failed" in sent.await_args.args[2]["body"]
+    checkpoint = json.loads(next((tmp_path / "mindroom_data/tracking/recurring_schedules").glob("*.json")).read_text())
+    assert checkpoint["next_run_at"] == "2026-01-16T07:00:00Z"
+    assert checkpoint["prepared"] is None
 
 
 @pytest.mark.asyncio

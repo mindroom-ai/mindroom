@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import dataclass, replace
@@ -10,18 +11,47 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from croniter import croniter
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+_CHECKPOINT_RETRY_SECONDS = 30
+
+
+class _CheckpointValidationError(ValueError):
+    """A persisted cursor cannot safely be used until its storage is repaired."""
+
+
+class RecurringCheckpointUnavailableError(RuntimeError):
+    """The scheduler must refresh time and task state before retrying preparation."""
+
+
+async def _checkpoint_operation[Result](operation: Callable[[], Result]) -> Result:
+    """Expose storage failures separately from invalid schedule definitions."""
+    try:
+        return await run_blocking_until_complete(operation)
+    except (OSError, ValidationError, _CheckpointValidationError) as error:
+        logger.exception("recurring_checkpoint_unavailable")
+        msg = "Recurring checkpoint is unavailable"
+        raise RecurringCheckpointUnavailableError(msg) from error
+
+
+async def _retry_checkpoint_operation[Result](operation: Callable[[], Result]) -> Result:
+    """Retry acknowledgement writes in place so delivered triggers are never resent."""
+    while True:
+        try:
+            return await _checkpoint_operation(operation)
+        except RecurringCheckpointUnavailableError:
+            await asyncio.sleep(_CHECKPOINT_RETRY_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -80,7 +110,7 @@ def _plan(
     checkpoint = _CHECKPOINT_ADAPTER.validate_json(path.read_bytes()) if path.exists() else None
     if checkpoint is not None and checkpoint.next_run_at.tzinfo is None:
         msg = "Recurring checkpoint requires an aware next_run_at"
-        raise ValueError(msg)
+        raise _CheckpointValidationError(msg)
     if checkpoint is None or checkpoint.workflow_key != workflow_key:
         # First adoption and edits establish a future cursor. We cannot prove
         # whether the old runtime fired an earlier occurrence.
@@ -136,7 +166,7 @@ async def plan_recurring_occurrence(
     name = hashlib.sha256(identity.encode()).hexdigest()
     path = runtime_paths.storage_root / "tracking" / "recurring_schedules" / f"{name}.json"
     workflow_key = hashlib.sha256(workflow_json.encode()).hexdigest()
-    return await run_blocking_until_complete(partial(_plan, path, workflow_key, cron, now, grace_seconds))
+    return await _checkpoint_operation(partial(_plan, path, workflow_key, cron, now, grace_seconds))
 
 
 async def prepare_recurring_delivery(
@@ -147,9 +177,9 @@ async def prepare_recurring_delivery(
     """Commit the exact trigger before the first network attempt."""
     if not device_id:
         msg = "Recurring delivery requires an authenticated Matrix device"
-        raise ValueError(msg)
+        raise RuntimeError(msg)
     checkpoint = replace(occurrence.checkpoint, prepared=_PreparedRecurringDelivery(content, device_id))
-    await run_blocking_until_complete(partial(_save, occurrence.path, checkpoint))
+    await _checkpoint_operation(partial(_save, occurrence.path, checkpoint))
 
 
 def recurring_delivery_content(occurrence: RecurringOccurrence, device_id: str | None) -> dict[str, Any] | None:
@@ -178,11 +208,12 @@ async def complete_recurring_occurrence(occurrence: RecurringOccurrence, cron: s
             last_skipped_at=latest,
             skip_reason="coalesced while previous trigger was pending",
         )
-    await run_blocking_until_complete(partial(_save, occurrence.path, checkpoint))
+    await _retry_checkpoint_operation(partial(_save, occurrence.path, checkpoint))
     if latest > occurrence.checkpoint.next_run_at:
+        assert checkpoint.last_skipped_at is not None
         logger.info(
             "recurring_schedule_coalesced",
             scheduled_at=occurrence.checkpoint.next_run_at.isoformat(),
-            skipped_through=checkpoint.last_skipped_at,
+            skipped_through=checkpoint.last_skipped_at.isoformat(),
             reason=checkpoint.skip_reason,
         )

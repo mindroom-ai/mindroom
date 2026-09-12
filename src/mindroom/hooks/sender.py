@@ -24,10 +24,16 @@ async def prepare_matrix_message(
 ) -> dict[str, Any]:
     """Prepare transport content before freezing a durable delivery."""
     # why-lazy: client_delivery imports config during hooks facade startup.
-    from mindroom.matrix.client_delivery import MatrixDeliveryFailure, prepare_message_content  # noqa: PLC0415
+    from mindroom.matrix.client_delivery import (  # noqa: PLC0415
+        MatrixDeliveryFailure,
+        MatrixDeliveryFailureKind,
+        prepare_message_content,
+    )
 
     prepared = await prepare_message_content(client, room_id, content)
     if isinstance(prepared, MatrixDeliveryFailure):
+        if prepared.kind is MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
+            raise ValueError(prepared.detail)
         # The typed result reports a transport failure, not invalid input.
         raise RuntimeError(prepared.detail)  # noqa: TRY004
     return prepared

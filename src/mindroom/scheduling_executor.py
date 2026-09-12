@@ -180,8 +180,9 @@ async def _prepare_scheduled_trigger(
     task_id: str,
     matrix_admin: HookMatrixAdmin | None,
     target: MessageTarget,
+    correlation_id: str,
 ) -> dict[str, typing.Any] | None:
-    """Run hooks and build content once, before a recurring delivery is frozen."""
+    """Run hooks and build content before a recurring delivery is frozen."""
     assert workflow.room_id is not None
     message_text = workflow.message
     hook_registry = _SCHEDULING_HOOK_REGISTRY_STATE.registry
@@ -193,7 +194,7 @@ async def _prepare_scheduled_trigger(
             config=config,
             runtime_paths=runtime_paths,
             logger=logger.bind(event_name=EVENT_SCHEDULE_FIRED),
-            correlation_id=f"{EVENT_SCHEDULE_FIRED}:{task_id}",
+            correlation_id=correlation_id,
             message_sender=build_hook_message_sender(
                 client,
                 config,
@@ -257,6 +258,7 @@ async def execute_scheduled_workflow(
     )
 
     with bound_log_context(**target.log_context):
+        delivery_prepared = occurrence is not None and occurrence.checkpoint.prepared is not None
         try:
             content = recurring_delivery_content(occurrence, client.device_id) if occurrence is not None else None
             if content is None:
@@ -269,12 +271,14 @@ async def execute_scheduled_workflow(
                     task_id,
                     matrix_admin,
                     target,
+                    f"{EVENT_SCHEDULE_FIRED}:{occurrence.transaction_id if occurrence is not None else task_id}",
                 )
                 if content is None:
                     return ScheduledWorkflowOutcome(delivered=False, failure_reason="suppressed by hook")
                 if occurrence is not None:
                     content = await prepare_matrix_message(client, workflow.room_id, content)
                     await prepare_recurring_delivery(occurrence, content, client.device_id)
+                    delivery_prepared = True
             delivery_kwargs: dict[str, typing.Any] = {
                 "message_type": SILENT_SCHEDULE_EVENT_TYPE if workflow.silent else "m.room.message",
             }
@@ -298,7 +302,8 @@ async def execute_scheduled_workflow(
             )
         except Exception as e:
             logger.exception("Failed to execute scheduled workflow")
-            if occurrence is None:
+            retryable = occurrence is not None and (delivery_prepared or not isinstance(e, ValueError))
+            if not retryable:
                 await _notify_scheduled_workflow_failure(
                     client,
                     workflow,
@@ -306,6 +311,6 @@ async def execute_scheduled_workflow(
                     e,
                     conversation_reader,
                 )
-            return ScheduledWorkflowOutcome(delivered=False, failure_reason=str(e), retryable=occurrence is not None)
+            return ScheduledWorkflowOutcome(delivered=False, failure_reason=str(e), retryable=retryable)
         else:
             return ScheduledWorkflowOutcome(delivered=True)

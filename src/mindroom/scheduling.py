@@ -28,7 +28,11 @@ from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
 from mindroom.message_target import MessageTarget
-from mindroom.recurring_schedule import complete_recurring_occurrence, plan_recurring_occurrence
+from mindroom.recurring_schedule import (
+    RecurringCheckpointUnavailableError,
+    complete_recurring_occurrence,
+    plan_recurring_occurrence,
+)
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 
 if TYPE_CHECKING:
@@ -1038,7 +1042,11 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     cron=cron_string,
                     grace_seconds=config.scheduler_catch_up_grace_seconds,
                 )
-                occurrence = await plan_occurrence(now=datetime.now(UTC))
+                try:
+                    occurrence = await plan_occurrence(now=datetime.now(UTC))
+                except RecurringCheckpointUnavailableError:
+                    await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+                    continue
                 next_run = occurrence.checkpoint.next_run_at
                 workflow_changed = False
 
@@ -1093,7 +1101,11 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 # Cron has second precision; normal subsecond wake-up jitter
                 # must still fire a live timer when catch-up is disabled.
                 execute_now = datetime.now(UTC).replace(microsecond=0)
-                occurrence = await plan_occurrence(now=execute_now)
+                try:
+                    occurrence = await plan_occurrence(now=execute_now)
+                except RecurringCheckpointUnavailableError:
+                    await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+                    continue
                 if occurrence.checkpoint.next_run_at > execute_now:
                     continue
 
