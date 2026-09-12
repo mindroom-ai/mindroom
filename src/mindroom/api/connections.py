@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
-from mindroom.api.auth import require_connections_user
+from mindroom.api.auth import require_connections_user, require_same_origin
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     ConnectionUserContext,
@@ -213,12 +213,12 @@ def _require_same_origin(request: Request, context: _Connections) -> None:
     if parsed.scheme != "https" or not parsed.netloc:
         raise HTTPException(403, "Connections require an HTTPS public origin", headers=CONNECTIONS_HEADERS)
     expected = f"{parsed.scheme}://{parsed.netloc}"
-    if request.headers.get("origin") != expected or request.headers.get("sec-fetch-site") == "cross-site":
-        raise HTTPException(
-            403,
-            "Connection changes require a same-origin request",
-            headers=CONNECTIONS_HEADERS,
-        )
+    require_same_origin(
+        request,
+        expected,
+        detail="Connection changes require a same-origin request",
+        headers=CONNECTIONS_HEADERS,
+    )
 
 
 @router.get("")

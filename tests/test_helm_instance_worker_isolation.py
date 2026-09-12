@@ -656,6 +656,33 @@ def test_instance_chart_rejects_email_template_without_email_header() -> None:
     )
 
 
+@pytest.mark.parametrize("chart", ["instance", "platform"])
+@pytest.mark.parametrize("email_domain", ["", "example.com"])
+def test_chart_email_mapping_requires_explicit_domain(chart: str, email_domain: str) -> None:
+    """Both deployment paths must carry the email namespace into runtime configuration."""
+    prefix = "provisioner.trustedUpstreamAuth" if chart == "platform" else "trustedUpstreamAuth"
+    completed = _run_helm_template(
+        Path("cluster/k8s") / chart,
+        f"{prefix}.enabled=true",
+        f"{prefix}.userIdHeader=X-Trusted-User",
+        f"{prefix}.emailHeader=X-Trusted-Email",
+        f"{prefix}.emailDomain={email_domain}",
+        set_string_args=(f"{prefix}.emailToMatrixUserIdTemplate=@{{localpart}}:example.org",),
+    )
+    if not email_domain:
+        assert completed.returncode != 0
+        assert f"{prefix}.emailDomain is required" in completed.stderr
+    else:
+        completed.check_returncode()
+        variable = (
+            "INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN"
+            if chart == "platform"
+            else "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"
+        )
+        assert variable in completed.stdout
+        assert email_domain in completed.stdout
+
+
 def test_instance_chart_renders_strict_trusted_upstream_jwt_env() -> None:
     """Strict trusted upstream settings should render to MindRoom runtime env vars."""
     docs = _render_chart(

@@ -28,6 +28,7 @@ MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER=X-MindRoom-User-Id
 MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER=X-MindRoom-User-Email
 MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER=X-MindRoom-Matrix-User-Id
 MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE='@{localpart}:example.org'
+MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN=example.com
 ```
 
 `MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER` is required when trusted upstream auth is enabled.
@@ -39,7 +40,10 @@ When present, the email value is stored in `request.scope["auth_user"]["email"]`
 For private `user` and `user_agent` OAuth flows, the trusted identity must resolve to the requester identity used by Matrix-backed tool execution.
 Prefer `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` when your access layer can supply a real Matrix ID.
 When the access layer only supplies email, set `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` to derive the Matrix ID from the trusted email localpart.
-For example, the template `@{localpart}:example.org` maps `alice@example.com` to `@alice:example.org`.
+Set `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` to the single allowed email domain before upgrading a deployment that derives Matrix identities from email.
+Missing domain configuration fails closed; emails from any other domain, including subdomains, are rejected.
+Domain comparison is case-insensitive.
+For example, with email domain `example.com`, the template `@{localpart}:example.org` maps `alice@example.com` to `@alice:example.org`.
 The template must contain exactly one `{localpart}` placeholder.
 Derived Matrix IDs must pass MindRoom's Matrix user ID parser.
 
@@ -147,6 +151,7 @@ trustedUpstreamAuth:
   emailHeader: X-MindRoom-User-Email
   matrixUserIdHeader: X-MindRoom-Matrix-User-Id
   emailToMatrixUserIdTemplate: "@{localpart}:example.org"
+  emailDomain: example.com
   requireJwt: "true"
   jwtHeader: X-Trusted-Jwt
   jwksUrl: https://gateway.example.com/.well-known/jwks.json
@@ -160,6 +165,7 @@ trustedUpstreamAuth:
 The chart renders these values as the `MINDROOM_TRUSTED_UPSTREAM_*` runtime environment variables.
 The instance chart fails rendering when `trustedUpstreamAuth.emailToMatrixUserIdTemplate` is set without `trustedUpstreamAuth.emailHeader`.
 The instance chart also fails rendering when `trustedUpstreamAuth.requireJwt` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, or `jwtIssuer`.
+Both charts require `emailDomain` when an email template is configured.
 The template value must contain exactly one `{localpart}` placeholder.
 When using the platform provisioner, configure the platform chart with matching provisioner values:
 
@@ -171,6 +177,7 @@ provisioner:
     emailHeader: X-MindRoom-User-Email
     matrixUserIdHeader: X-MindRoom-Matrix-User-Id
     emailToMatrixUserIdTemplate: "@{localpart}:example.org"
+    emailDomain: example.com
     requireJwt: "true"
     jwtHeader: X-Trusted-Jwt
     jwksUrl: https://gateway.example.com/.well-known/jwks.json
@@ -196,3 +203,14 @@ If the configured trusted user ID header is missing, MindRoom returns `401`.
 If strict JWT mode is enabled and the configured JWT header is missing or invalid, MindRoom returns `401`.
 If a trusted browser identity does not map to the Matrix requester stored in an OAuth connect token, MindRoom returns `403`.
 Existing Supabase platform auth and standalone API-key auth remain available when trusted upstream auth is not enabled.
+
+## Browser mutation protection
+
+Requests that use trusted upstream browser authentication or dashboard cookies must send an `Origin` matching `MINDROOM_PUBLIC_URL` for POST, PUT, PATCH, and DELETE operations.
+If no public URL is configured, MindRoom uses the request origin.
+Requests marked `Sec-Fetch-Site: cross-site` are rejected even when the Origin matches.
+A successfully validated API bearer token does not require these browser headers.
+Adding a bearer header to a request authenticated by trusted upstream identity does not bypass this protection.
+
+Conversation-issued OAuth links for requester-scoped credentials require the intended requester to authenticate before starting authorization and again at the callback.
+Shared-agent credential links retain their short-lived, single-use delegation behavior.
