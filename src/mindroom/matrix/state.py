@@ -149,8 +149,32 @@ def load_rooms(runtime_paths: constants.RuntimePaths) -> dict[str, MatrixRoom]:
 
 
 def _room_aliases(runtime_paths: constants.RuntimePaths) -> dict[str, str]:
-    """Get mapping of room aliases to room IDs."""
-    return matrix_state_for_runtime(runtime_paths).get_room_aliases()
+    """Return a read-only alias map with the same freshness as cached state."""
+    state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
+    return _room_aliases_cached(
+        *_matrix_state_cache_key(state_file),
+        current_domain=_current_runtime_domain(runtime_paths),
+    )
+
+
+@lru_cache(maxsize=64)
+def _room_aliases_cached(
+    state_file: Path,
+    write_generation: int,
+    mtime_ns: int | None,
+    size: int | None,
+    *,
+    current_domain: str,
+) -> dict[str, str]:
+    """Build the alias map once per persisted state snapshot."""
+    state = _load_matrix_state_file_cached(
+        state_file,
+        write_generation,
+        mtime_ns,
+        size,
+        current_domain=current_domain,
+    )
+    return state.get_room_aliases()
 
 
 def get_room_id(room_key: str, runtime_paths: constants.RuntimePaths) -> str | None:
