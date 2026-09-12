@@ -470,7 +470,7 @@ def _response_completed_event(response_id: str) -> ResponseCompletedEvent:
             "response": {
                 "id": response_id,
                 "created_at": 1,
-                "model": "gpt-5.6",
+                "model": "gpt-6-astra",
                 "object": "response",
                 "status": "completed",
                 "output": [],
@@ -609,7 +609,7 @@ def test_codex_tool_search_items_round_trip_through_streaming_history() -> None:
         _response_completed_event("resp_1"),
     ]
     client = _FakeCodexClient([first_batch, [_response_completed_event("resp_2")]])
-    model = CodexResponses(id="gpt-5.6")
+    model = CodexResponses(id="gpt-6-astra")
     vars(model)["get_client"] = lambda: client
 
     messages = [Message(role="user", content="What is the weather?")]
