@@ -13,6 +13,7 @@ from agno.models.response import ToolExecution
 from mindroom.approval_inbound import parse_approval_response_event
 from mindroom.approval_manager import ApprovalActionResult, _ApprovalManager
 from mindroom.approval_response import ApprovalResponseCoordinator
+from mindroom.approval_transport import _approval_delivery_content
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
@@ -31,6 +32,54 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_approval_grants import grant_operation
 from tests.conftest import test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
+
+
+@pytest.mark.asyncio
+async def test_terminal_wire_edits_preserve_thread_scope_for_grant_and_revocation(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """SDK replacement content must retain the scope needed to revoke the grant."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    wire_edits = {}
+    revoked = asyncio.Event()
+
+    async def send(delivery: MatrixDelivery) -> str:
+        content = _approval_delivery_content(delivery)
+        if delivery.stage is DeliveryStage.FINAL:
+            wire_edits[delivery.transaction_id] = content
+            if content["m.new_content"]["auto_approval"]["revoked_at"] is not None:
+                revoked.set()
+        return "$" + delivery.delivery_id
+
+    manager.send_delivery = send
+    try:
+        card = await _card(journal, manager, "first")
+        await _approve(manager, card)
+        grant = await journal.principal("router@shared").approval_grant_for_card(
+            room_id="!room:test",
+            card_event_id=card,
+        )
+        assert grant is not None
+        await manager.handle_grant_revocation(
+            room_id="!room:test",
+            sender_id="@human:test",
+            card_event_id=card,
+            grant_id=grant.grant_id,
+            authorize_responder=lambda _agent: True,
+        )
+        await asyncio.wait_for(revoked.wait(), timeout=2)
+        edits = list(wire_edits.values())
+        assert len(edits) == 2
+        for content in edits:
+            assert content["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$card-first"}
+            assert content["m.new_content"]["thread_id"] == "$thread"
+            assert content["m.new_content"]["auto_approval"]["grant_id"] == grant.grant_id
+        assert edits[0]["m.new_content"]["auto_approval"]["revoked_at"] is None
+        assert edits[1]["m.new_content"]["auto_approval"]["revoked_at"] is not None
+    finally:
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio

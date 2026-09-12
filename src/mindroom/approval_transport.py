@@ -47,7 +47,6 @@ def _approval_delivery_content(claimed: MatrixDelivery) -> dict[str, object]:
     content = dict(claimed.payload)
     if claimed.edits_event_id is None:
         return content
-    content.pop("thread_id", None)
     return build_matrix_edit_content(claimed.edits_event_id, content)
 
 
