@@ -1,6 +1,6 @@
 # MindRoom logo source
 
-![Generated MindRoom logo](preview.png)
+![Generated MindRoom logo](logo.svg)
 
 This directory contains the editable source and generated artwork for the logo refinement in [#2044](https://github.com/mindroom-ai/mindroom/issues/2044).
 The SVG is generated locally with Python.
@@ -79,6 +79,10 @@ Content-Type: image/svg+xml
 Content-Encoding: gzip
 ```
 
+For GitHub README images, link to the ordinary `.svg` file.
+A browser check on 2026-09-13 confirmed that GitHub gzip-compresses it automatically; the static background SVG transferred at about 140 KB and decoded to the exact exported bytes.
+GitHub's raw `.svgz` response was compressed a second time and failed to display as an image.
+
 ## Animated version
 
 The cube gently warms and dims over a 6.4-second cycle.
@@ -118,4 +122,4 @@ The logo workflow runs these tests and regenerates the committed outputs in chec
 For visual review, rasterize the complete SVG at the desired resolution before cropping individual junctions; keep the original `viewBox` so pattern coordinates remain unchanged.
 Inspect enlarged junctions as well as the full logo, because a whole-image pixel error can hide local edge defects.
 
-These are source artwork and review exports; application asset adoption can be reviewed separately.
+The repository README uses the static SVG; application asset adoption can be reviewed separately.
