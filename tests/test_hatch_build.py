@@ -239,12 +239,12 @@ def test_build_frontend_rejects_git_lfs_pointer_assets(
         hatch_build_module._build_frontend(frontend_dir, output_dir, "/usr/local/bin/bun")
 
 
-def test_dashboard_shell_uses_canonical_png_logo() -> None:
-    """The installed dashboard should use the canonical PNG logo assets."""
+def test_dashboard_shell_uses_canonical_logo_exports() -> None:
+    """The installed dashboard uses the SVG mark and generated PNG favicon."""
     repo_root = Path(__file__).resolve().parents[1]
 
     assert 'href="/favicon.png"' in (repo_root / "frontend/index.html").read_text()
-    assert 'src="/logo.png"' in (repo_root / "frontend/src/App.tsx").read_text()
+    assert 'src="/logo.svg"' in (repo_root / "frontend/src/App.tsx").read_text()
 
 
 def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:

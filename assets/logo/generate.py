@@ -25,6 +25,7 @@ from geometry import joined_polygons, subtract
 from lxml import etree
 from optimize import compact_xml, optimize_document
 from PIL import Image
+from publication import application_outputs, framed_mark
 from shading import Colors, color_hex, edge_paint, pixels, render, sample, shade_surfaces
 
 ROOT = Path(__file__).resolve().parent
@@ -193,6 +194,8 @@ def generate() -> dict[str, bytes]:
     background = transparent.find(f"{SVG}g[@id='background']")
     transparent.remove(background)
     outputs["logo-transparent.svg"] = serialize(transparent)
+    outputs["logo-transparent.png"] = render(transparent)
+    outputs["logo-mark.svg"] = framed_mark(outputs["logo-transparent.svg"])
     animated = animated_document(root)
     outputs["logo-animated.svg"] = serialize(animated)
     background = animated.find(f"{SVG}g[@id='background']")
@@ -213,10 +216,13 @@ def main() -> None:
         help="fail if committed outputs differ from regenerated artwork",
     )
     args = parser.parse_args()
-    outputs = generate()
+    artwork = generate()
+    repository = ROOT.parents[1]
+    outputs = {ROOT / name: content for name, content in artwork.items()}
+    outputs.update({repository / name: content for name, content in application_outputs(artwork).items()})
     mismatches = []
-    for name, content in outputs.items():
-        destination = ROOT / name
+    for destination, content in outputs.items():
+        name = destination.relative_to(repository).as_posix()
         if args.check:
             matches = destination.exists()
             if matches:
@@ -233,7 +239,8 @@ def main() -> None:
             destination.write_bytes(content)
     if mismatches:
         parser.exit(1, f"Logo outputs need regeneration: {', '.join(mismatches)}\n")
-    print("Logo outputs are current." if args.check else f"Generated {', '.join(outputs)}.")
+    names = [path.relative_to(repository).as_posix() for path in outputs]
+    print("Logo outputs are current." if args.check else f"Generated {', '.join(names)}.")
 
 
 if __name__ == "__main__":

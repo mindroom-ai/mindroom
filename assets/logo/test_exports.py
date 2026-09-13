@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize("name", ["logo", "logo-transparent", "logo-animated", "logo-animated-transparent"])
+@pytest.mark.parametrize(
+    "name",
+    ["logo", "logo-transparent", "logo-mark", "logo-animated", "logo-animated-transparent"],
+)
 def test_export_size_and_lossless_compression(name: str) -> None:
     """Export budgets prevent accidental bulk; SVGZ must decode to the exact SVG."""
     directory = Path(__file__).resolve().parent

@@ -15,11 +15,12 @@ uv run assets/logo/generate.py
 ```
 
 The PNG files use Git LFS.
-If your checkout contains pointer files, fetch the images with `git lfs pull --include='assets/logo/*.png'` first.
+If your checkout contains pointer files, fetch the images with `git lfs pull` first.
 
 The script declares its own pinned rendering dependencies; they are separate from the application dependencies.
 It writes the static `logo.svg`, `logo-transparent.svg`, and `preview.png`, plus `logo-animated.svg` and `logo-animated-transparent.svg`.
 Each SVG also has a losslessly compressed `.svgz` copy.
+It also writes `logo-transparent.png` as a raster preview of the complete M with a transparent background, and `logo-mark.svg` with tighter framing for small icons.
 
 | File | Purpose |
 | --- | --- |
@@ -29,11 +30,13 @@ Each SVG also has a losslessly compressed `.svgz` copy.
 | `generate.py` | Builds, shades, formats, and exports the artwork. |
 | `animation.py` | Cube pulse, curved electrical filaments, and their shared timing. |
 | `optimize.py` | Lossless sharing of identical gradients and stops, unused-paint removal, and compact XML. |
+| `publication.py` | Frames the unchanged M and derives the app, documentation, favicon, desktop, and Matrix avatar exports. |
 | `preview.html` | Browser preview with a pause/play control. |
 | `reference.png` | Cleaned raster design used as the lighting reference. |
 | `test_geometry.py` | Regression checks for closed junctions and angled terminal cuts. |
 | `test_exports.py` | File-size budgets and exact SVGZ decompression checks. |
 | `test_optimize.py` | Preservation of repeated stops through shared gradient templates. |
+| `test_publication.py` | Complete M coverage, exact transparent PNG pixels, and unchanged artwork after reframing. |
 
 Faces and highlights refer to the same named corner coordinates.
 At a junction, adjacent offset edges intersect to form a shared miter, and each filled edge polygon reaches the corner center.
@@ -83,6 +86,18 @@ For GitHub README images, link to the ordinary `.svg` file.
 A browser check on 2026-09-13 confirmed that GitHub gzip-compresses it automatically; the static background SVG transferred at about 140 KB and decoded to the exact exported bytes.
 GitHub's raw `.svgz` response was compressed a second time and failed to display as an image.
 
+## Transparent artwork and application assets
+
+The transparent variants remove only the canvas background; the complete M, its navy frame, glass, and illumination remain opaque.
+The transparent PNG matches the SVG render, and every opaque pixel matches the background preview.
+The compact `logo-mark.svg` changes only the viewport, keeping the original vector geometry and paint definitions intact.
+Its regression test checks that the crop removes no painted pixels and that restoring the original viewport reproduces the exact RGBA image.
+
+Regeneration also updates the dashboard and documentation SVGs, portal branding, PNG fallbacks, both web favicons, the macOS app icon source, and the bundled Matrix root-space avatar.
+The portal's public logo aliases resolve within its own public directory so container builds retain them.
+Application assets use the static version; animation remains optional.
+The generated root-space avatar is a default asset; existing uploaded or custom Matrix avatars follow the existing avatar management behavior.
+
 ## Animated version
 
 The cube gently warms and dims over a 6.4-second cycle.
@@ -111,7 +126,8 @@ The animated SVGs can also be embedded as ordinary SVG images.
 uv run assets/logo/generate.py --check
 
 # Exercise geometry and export budgets without application dependencies.
-uv run --isolated --no-project --with pytest==8.4.2 --with lxml==5.4.0 pytest \
+uv run --isolated --no-project --with pytest==8.4.2 --with lxml==5.4.0 \
+  --with numpy==2.4.4 --with pillow==10.4.0 --with resvg-py==0.5.0 --with scipy==1.17.1 pytest \
   -c /dev/null -p no:cacheprovider assets/logo/ -q
 ```
 
@@ -122,4 +138,4 @@ The logo workflow runs these tests and regenerates the committed outputs in chec
 For visual review, rasterize the complete SVG at the desired resolution before cropping individual junctions; keep the original `viewBox` so pattern coordinates remain unchanged.
 Inspect enlarged junctions as well as the full logo, because a whole-image pixel error can hide local edge defects.
 
-The repository README uses the static SVG; application asset adoption can be reviewed separately.
+The repository README uses the background SVG, while application headers use the framed transparent mark.
