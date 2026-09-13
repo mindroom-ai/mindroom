@@ -413,3 +413,25 @@ async def test_saturated_reads_leave_executor_available(monkeypatch: pytest.Monk
     errors = [result for result in results if isinstance(result, RuntimeError)]
     assert len(errors) == 2
     assert all("Knowledge reader is busy" in str(error) for error in errors)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_search_burst_preserves_results(published_index: Path) -> None:
+    """More searches than reader slots still return each requested document and filter."""
+    proxy = ChromaReadProxy("published", str(published_index), _Embedder())
+    results = await asyncio.gather(
+        *(proxy.async_search("alpha", limit=2, filters={"team": "a"}) for _ in range(8)),
+        return_exceptions=True,
+    )
+    for documents in results:
+        assert not isinstance(documents, BaseException)
+        assert len(documents) == 1
+        document = documents[0]
+        assert (document.id, document.name, document.content, document.content_id) == (
+            "a",
+            "Alpha",
+            "alpha document",
+            "source-a",
+        )
+        assert document.embedding == [1.0, 0.0]
+        assert document.meta_data == {"team": "a", "similarity_score": 0.0, "distances": 0.0}
