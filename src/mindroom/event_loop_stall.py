@@ -148,7 +148,10 @@ class EventLoopStallDetector:
         self._gc_reported = 0
 
     def start(self) -> None:
-        """Arm the heartbeat on the running loop and start the watcher thread."""
+        """Arm this one-shot detector on the running loop and start its watcher."""
+        if self._loop is not None or self._stop_event.is_set():
+            msg = "Event-loop stall detector can only be started once"
+            raise RuntimeError(msg)
         self._loop = asyncio.get_running_loop()
         self._loop_thread_ident = threading.get_ident()
         self._heartbeat = _Heartbeat(

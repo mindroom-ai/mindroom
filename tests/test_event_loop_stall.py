@@ -661,3 +661,37 @@ def test_gc_overflow_count_survives_watcher_draining_during_record_creation(
         detector._report_gc()
     assert len([entry for entry in logs if entry["event"] == "event_loop_gc_collection"]) == 129
     assert not any(entry["event"] == "event_loop_gc_records_dropped" for entry in logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["running", "stopped", "stopped_before_start"])
+async def test_detector_rejects_repeated_or_stopped_start_without_leaking_callback(lifecycle: str) -> None:
+    """Rejected starts must neither replace owned resources nor retain global GC callbacks."""
+    import gc  # noqa: PLC0415
+
+    detector = _detector()
+    existing_callbacks = list(gc.callbacks)
+    first_thread = None
+    try:
+        if lifecycle != "stopped_before_start":
+            detector.start()
+            first_thread = detector._thread
+        if lifecycle != "running":
+            detector.stop()
+        thread = detector._thread
+        heartbeat = detector._heartbeat_handle
+        callbacks = list(gc.callbacks)
+        with pytest.raises(RuntimeError, match="only be started once"):
+            detector.start()
+        assert detector._thread is thread
+        assert detector._heartbeat_handle is heartbeat
+        assert gc.callbacks == callbacks
+        detector.stop()
+        assert gc.callbacks == existing_callbacks
+    finally:
+        detector.stop()
+        # Keep the red regression run from leaving a callback or watcher behind.
+        while detector._gc_callback in gc.callbacks:
+            gc.callbacks.remove(detector._gc_callback)
+        if first_thread is not None:
+            first_thread.join(timeout=2.0)
