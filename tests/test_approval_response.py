@@ -19,7 +19,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
-def test_identify_approval_tools_keeps_team_member_owner() -> None:
+@pytest.mark.parametrize("member_agent_id", ["researcher-a", "Researcher_A"])
+def test_identify_approval_tools_keeps_team_member_owner(member_agent_id: str) -> None:
     """Approval policy uses the raw config identity behind Agno's provider member ID."""
     tool = ToolExecution(
         tool_call_id="call-1",
@@ -27,7 +28,7 @@ def test_identify_approval_tools_keeps_team_member_owner() -> None:
         requires_confirmation=True,
     )
     requirement = RunRequirement(tool_execution=tool)
-    requirement.member_agent_id = "researcher-a"
+    requirement.member_agent_id = member_agent_id
     requirement.member_agent_name = "Researcher"
 
     identified = identify_approval_tools(
@@ -54,6 +55,100 @@ def test_identify_approval_tools_keeps_team_member_owner() -> None:
     )
 
     assert identified == ((tool, "call-1", "dangerous", "Researcher_A"),)
+
+
+@pytest.fixture
+def member_pause() -> PausedAttempt:
+    """Create a visible member approval with frozen config and presentation identities."""
+    tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True)
+    requirement = RunRequirement(tool_execution=tool)
+    requirement.member_agent_id = "test_agent"
+    requirement.member_agent_name = "Test Agent"
+    return PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(tool,),
+        requirements=(requirement,),
+        response_text="🔧 `dangerous` [1] ⏳",
+        tool_trace=(
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="dangerous",
+                tool_call_id="call-1",
+                scope_key="agent:test-agent",
+            ),
+        ),
+        response_presentation_state={
+            "kind": "team_stream",
+            "version": 2,
+            "members": [
+                {
+                    "id": "test-agent",
+                    "config_name": "test_agent",
+                    "display_name": "Test Agent",
+                    "content": "🔧 `dangerous` [1] ⏳",
+                },
+                {"id": "other", "config_name": "other", "display_name": "Other", "content": ""},
+            ],
+            "consensus": "",
+        },
+    )
+
+
+@pytest.mark.parametrize("member_agent_id", ["test_agent", "test-agent"])
+def test_ordered_team_pause_accepts_frozen_member_aliases(member_pause: PausedAttempt, member_agent_id: str) -> None:
+    """Raw config and frozen IDs must select the same visible tool anchor."""
+    member_pause.requirements[0].member_agent_id = member_agent_id
+
+    require_ordered_pause_presentation(member_pause, show_tool_calls=True)
+
+
+@pytest.mark.parametrize("member_agent_id", ["unknown", "Test Agent", "TEST_AGENT", "other"])
+def test_ordered_team_pause_rejects_wrong_member_owner(member_pause: PausedAttempt, member_agent_id: str) -> None:
+    """Similar names, missing members, and another valid member cannot own this anchor."""
+    member_pause.requirements[0].member_agent_id = member_agent_id
+
+    with pytest.raises(RuntimeError):
+        require_ordered_pause_presentation(member_pause, show_tool_calls=True)
+
+
+@pytest.mark.parametrize("member_agent_id", ["unknown", "Test Agent", "TEST_AGENT"])
+def test_identify_approval_tools_rejects_unknown_member_owner(
+    member_pause: PausedAttempt,
+    member_agent_id: str,
+) -> None:
+    """Ownership requires an exact frozen identity even when the display name matches."""
+    member_pause.requirements[0].member_agent_id = member_agent_id
+
+    with pytest.raises(RuntimeError, match="frozen member"):
+        identify_approval_tools(member_pause, default_agent_name="test-team")
+
+
+def test_identify_approval_tools_keeps_simple_member_owner(member_pause: PausedAttempt) -> None:
+    """A member whose raw and frozen IDs coincide keeps its own approval policy."""
+    member_pause.requirements[0].member_agent_id = "other"
+
+    identified = identify_approval_tools(member_pause, default_agent_name="test-team")
+
+    assert identified[0][1:] == ("call-1", "dangerous", "other")
+
+
+@pytest.mark.parametrize("member_agent_id", ["test_agent", "test-agent"])
+def test_team_pause_rejects_ambiguous_frozen_member_identity(
+    member_pause: PausedAttempt,
+    member_agent_id: str,
+) -> None:
+    """Conflicting aliases must never silently select another member's approval policy."""
+    member_pause.requirements[0].member_agent_id = member_agent_id
+    member_pause.response_presentation_state["members"] = [
+        {"id": "test-agent", "config_name": "test_agent"},
+        {"id": "different", "config_name": "test-agent"},
+    ]
+
+    with pytest.raises(RuntimeError):
+        identify_approval_tools(member_pause, default_agent_name="test-team")
+    with pytest.raises(RuntimeError):
+        require_ordered_pause_presentation(member_pause, show_tool_calls=True)
 
 
 def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> None:
