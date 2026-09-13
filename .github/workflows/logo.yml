@@ -1,0 +1,32 @@
+name: Logo artwork
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - assets/logo/**
+      - .github/workflows/logo.yml
+  pull_request:
+    paths:
+      - assets/logo/**
+      - .github/workflows/logo.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - name: Test joined edge geometry
+        run: >-
+          uv run --isolated --no-project --with pytest==8.4.2 pytest
+          -c /dev/null -p no:cacheprovider assets/logo/test_geometry.py -q
+      - name: Check generated artwork
+        run: uv run assets/logo/generate.py --check
