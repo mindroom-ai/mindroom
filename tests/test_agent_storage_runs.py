@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -573,3 +575,44 @@ def test_cache_diagnostics_count_history_without_retaining_closed_adapters(
     finally:
         first.close()
         second.close()
+
+
+def test_cache_diagnostics_ignore_read_finishing_after_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read paused before publishing cannot restore a closed adapter's snapshot."""
+    from mindroom import agent_storage  # noqa: PLC0415
+
+    storage = _storage(tmp_path)
+    seed_session(storage, _session("s1", ["r1"]))
+    report_started = threading.Event()
+    resume_report = threading.Event()
+    report_cache_counts = storage._report_cache_counts
+
+    def paused_report() -> None:
+        report_started.set()
+        assert resume_report.wait(timeout=5)
+        report_cache_counts()
+
+    monkeypatch.setattr(storage, "_report_cache_counts", paused_report)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        read = executor.submit(get_agent_session, storage, "s1")
+        try:
+            assert report_started.wait(timeout=5)
+            storage.close()
+            resume_report.set()
+            loaded = read.result(timeout=5)
+            assert loaded is not None
+            assert [run.run_id for run in loaded.runs or []] == ["r1"]
+            with agent_storage._CACHE_DIAGNOSTICS_LOCK:
+                assert storage not in agent_storage._CACHE_DIAGNOSTICS
+            # Disposing SQLAlchemy's pool still permits later SQL reads, but
+            # explicit close ends this adapter's diagnostic lifetime.
+            assert get_agent_session(storage, "s1") is not None
+            with agent_storage._CACHE_DIAGNOSTICS_LOCK:
+                assert storage not in agent_storage._CACHE_DIAGNOSTICS
+        finally:
+            resume_report.set()
+            read.result(timeout=5)
+            storage.close()

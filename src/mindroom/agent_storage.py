@@ -269,6 +269,8 @@ class _ConversationSqliteDb(SqliteDb):
         counts = (len(sessions), sum(len(runs) for runs in sessions.values()))
         now = time.monotonic()
         with _CACHE_DIAGNOSTICS_LOCK:
+            if self not in _CACHE_DIAGNOSTICS:
+                return
             _CACHE_DIAGNOSTICS[self] = counts
             if now < _CACHE_DIAGNOSTICS_NEXT_REPORT:
                 return
