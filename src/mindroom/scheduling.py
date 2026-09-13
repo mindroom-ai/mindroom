@@ -702,15 +702,46 @@ async def _get_pending_task_record(
     return task_record
 
 
+async def _scheduled_task_creator_is_joined(client: nio.AsyncClient, task: ScheduledTaskRecord) -> bool:
+    """Check current Matrix membership without trusting a partial or stale room cache."""
+    creator = task.workflow.created_by
+    if not creator:
+        return True
+    try:
+        response = await client.room_get_state_event(
+            room_id=task.room_id,
+            event_type="m.room.member",
+            state_key=creator,
+        )
+    except Exception as exc:
+        msg = f"Failed to read schedule creator membership for {creator!r} in room {task.room_id!r}"
+        raise _ScheduledTaskStateReadError(msg) from exc
+    if isinstance(response, nio.RoomGetStateEventResponse) and isinstance(response.content, dict):
+        membership = response.content.get("membership")
+        if membership in ("join", "leave", "ban", "invite", "knock"):
+            return membership == "join"
+    # Errors (including missing/inaccessible state) do not prove a departure.
+    msg = f"Could not establish schedule creator membership for {creator!r} in room {task.room_id!r}"
+    raise _ScheduledTaskStateReadError(msg)
+
+
 async def _get_pending_task_record_retrying(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
+    matrix_admin: HookMatrixAdmin | None = None,
 ) -> ScheduledTaskRecord | None:
-    """Read runner-owned task state until Matrix proves its current status."""
+    """Return runnable state, cancelling departed creators' tasks and retrying uncertainty."""
+    departed_creator: str | None = None
     while True:
         try:
-            return await _get_pending_task_record(client=client, room_id=room_id, task_id=task_id)
+            task = await _get_pending_task_record(client=client, room_id=room_id, task_id=task_id)
+            if task is None:
+                return None
+            if departed_creator is None or departed_creator != task.workflow.created_by:
+                if await _scheduled_task_creator_is_joined(client, task):
+                    return task
+                departed_creator = task.workflow.created_by
         except _ScheduledTaskStateReadError as exc:
             logger.warning(
                 "scheduled_task_state_read_failed_retrying",
@@ -719,6 +750,34 @@ async def _get_pending_task_record_retrying(
                 error=str(exc),
             )
             await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+            continue
+
+        try:
+            await _persist_scheduled_task_state(
+                client=client,
+                room_id=room_id,
+                task_id=task_id,
+                workflow=task.workflow,
+                status="cancelled",
+                created_at=task.created_at,
+                matrix_admin=matrix_admin,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "scheduled_task_owner_cancellation_failed_retrying",
+                room_id=room_id,
+                task_id=task_id,
+                error=str(exc),
+            )
+            await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+        else:
+            logger.info(
+                "scheduled_task_cancelled_after_creator_left",
+                room_id=room_id,
+                task_id=task_id,
+                created_by=departed_creator,
+            )
+            return None
 
 
 def _serialize_scheduled_task_created_at(created_at: datetime | str | None) -> str:
@@ -1015,6 +1074,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 client=client,
                 room_id=task_room_id,
                 task_id=task_id,
+                matrix_admin=matrix_admin,
             )
             if not latest_task:
                 with bound_log_context(**current_target.log_context):
@@ -1060,6 +1120,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         client=client,
                         room_id=task_room_id,
                         task_id=task_id,
+                        matrix_admin=matrix_admin,
                     )
                     if not refreshed_task:
                         logger.info("Recurring task cancelled while waiting, stopping", task_id=task_id)
@@ -1083,6 +1144,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     client=client,
                     room_id=task_room_id,
                     task_id=task_id,
+                    matrix_admin=matrix_admin,
                 )
                 if not latest_before_execute:
                     logger.info("Recurring task cancelled before execution, stopping", task_id=task_id)
@@ -1169,6 +1231,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 client=client,
                 room_id=task_room_id,
                 task_id=task_id,
+                matrix_admin=matrix_admin,
             )
             if not latest_task:
                 with bound_log_context(**current_target.log_context):
@@ -1193,6 +1256,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
             client=client,
             room_id=task_room_id,
             task_id=task_id,
+            matrix_admin=matrix_admin,
         )
         if not latest_before_execute:
             with bound_log_context(**current_target.log_context):
