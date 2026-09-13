@@ -8,7 +8,9 @@ import json
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from time import monotonic
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 from weakref import WeakValueDictionary
 
 import mcp.types as mcp_types
@@ -73,6 +75,7 @@ if TYPE_CHECKING:
 
     from agno.tools.function import ToolResult
     from mcp.client.session import MessageHandlerFnT
+    from mcp.shared.session import ProgressFnT
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -1035,29 +1038,104 @@ class MCPServerManager:
         exclude_tools: Collection[str] | None = None,
         before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> ToolResult:
-        async with state.semaphore, state.call_lock.read():
-            self._require_desired_oauth_lease(state, authorization_lease)
-            self._require_active_state(state)
-            if state.last_error is not None:
-                raise state.last_error
-            if before_dispatch is not None:
-                await before_dispatch()
-            await self._validate_authoritative_oauth_lease(state, authorization_lease)
-            self._require_session_oauth_lease(state, authorization_lease)
-            if state.session is None or state.catalog is None or not state.connected:
-                msg = f"MCP server '{state.server_id}' is not connected"
-                raise MCPConnectionError(state.server_id, msg)
-            self._require_catalog_tool(
-                state,
-                remote_tool_name,
-                include_tools=include_tools,
-                exclude_tools=exclude_tools,
+        # Attempt timings exclude initial connection setup and post-failure reconnects.
+        started_at = monotonic()
+        call_id = uuid4().hex
+        acquired_at: float | None = None
+        dispatched_at: float | None = None
+        first_progress_at: float | None = None
+        last_progress_at: float | None = None
+        progress_count = 0
+        outcome = "success"
+        error_type: str | None = None
+
+        async def record_progress(progress: float, total: float | None, message: str | None) -> None:
+            # Keep only timing scalars: progress messages can contain tool input/output.
+            nonlocal first_progress_at, last_progress_at, progress_count
+            del progress, total, message
+            last_progress_at = monotonic()
+            if first_progress_at is None:
+                first_progress_at = last_progress_at
+            progress_count += 1
+
+        try:
+            async with state.semaphore, state.call_lock.read():
+                acquired_at = monotonic()
+                self._require_desired_oauth_lease(state, authorization_lease)
+                self._require_active_state(state)
+                if state.last_error is not None:
+                    raise state.last_error  # noqa: TRY301 - record failure at the owning call boundary
+                if before_dispatch is not None:
+                    await before_dispatch()
+                await self._validate_authoritative_oauth_lease(state, authorization_lease)
+                self._require_session_oauth_lease(state, authorization_lease)
+                if state.session is None or state.catalog is None or not state.connected:
+                    msg = f"MCP server '{state.server_id}' is not connected"
+                    raise MCPConnectionError(state.server_id, msg)  # noqa: TRY301
+                self._require_catalog_tool(
+                    state,
+                    remote_tool_name,
+                    include_tools=include_tools,
+                    exclude_tools=exclude_tools,
+                )
+                dispatched_at = monotonic()
+                logger.info(
+                    "MCP tool call dispatched",
+                    server_id=state.server_id,
+                    tool_name=remote_tool_name,
+                    mcp_call_id=call_id,
+                    timeout_seconds=timeout_seconds,
+                    queue_wait_ms=(acquired_at - started_at) * 1000,
+                    pre_dispatch_ms=(dispatched_at - acquired_at) * 1000,
+                )
+                return await self._call_tool_once(
+                    state,
+                    remote_tool_name,
+                    arguments,
+                    timeout_seconds=timeout_seconds,
+                    progress_callback=record_progress,
+                )
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            error_type = "CancelledError"
+            raise
+        except Exception as exc:
+            error_type = type(exc).__name__
+            error_outcomes: dict[type[Exception], str] = {
+                MCPToolCallError: "tool_error",
+                MCPConnectionError: "connection_error",
+                MCPTimeoutError: "timeout",
+                MCPProtocolError: "protocol_error",
+            }
+            outcome = next(
+                (label for error_class, label in error_outcomes.items() if isinstance(exc, error_class)),
+                "error",
             )
-            return await self._call_tool_once(
-                state,
-                remote_tool_name,
-                arguments,
+            raise
+        finally:
+            finished_at = monotonic()
+            queue_end = acquired_at if acquired_at is not None else finished_at
+            pre_dispatch_end = dispatched_at if dispatched_at is not None else finished_at
+            logger.info(
+                "MCP tool call attempt finished",
+                server_id=state.server_id,
+                tool_name=remote_tool_name,
+                mcp_call_id=call_id,
                 timeout_seconds=timeout_seconds,
+                queue_wait_ms=(queue_end - started_at) * 1000,
+                pre_dispatch_ms=(pre_dispatch_end - acquired_at) * 1000 if acquired_at is not None else 0.0,
+                remote_call_ms=(finished_at - dispatched_at) * 1000 if dispatched_at is not None else 0.0,
+                attempt_total_ms=(finished_at - started_at) * 1000,
+                dispatched=dispatched_at is not None,
+                outcome=outcome,
+                error_type=error_type,
+                progress_count=progress_count,
+                first_progress_ms=(first_progress_at - dispatched_at) * 1000
+                if first_progress_at is not None and dispatched_at is not None
+                else None,
+                last_progress_ms=(last_progress_at - dispatched_at) * 1000
+                if last_progress_at is not None and dispatched_at is not None
+                else None,
             )
 
     async def _request_catalog_with_lock(
@@ -1085,6 +1163,7 @@ class MCPServerManager:
         arguments: dict[str, object],
         *,
         timeout_seconds: float,
+        progress_callback: ProgressFnT,
     ) -> ToolResult:
         session = state.session
         if session is None:
@@ -1095,6 +1174,7 @@ class MCPServerManager:
                 remote_tool_name,
                 arguments=arguments,
                 read_timeout_seconds=timedelta(seconds=timeout_seconds),
+                progress_callback=progress_callback,
             )
         except Exception as exc:
             raise self._wrap_runtime_exception(state.server_id, exc) from exc

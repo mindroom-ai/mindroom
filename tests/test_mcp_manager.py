@@ -237,7 +237,7 @@ class _FakeClientSession:
         progress_callback: object | None = None,
     ) -> CallToolResult:
         """Pop and return the next planned tool result."""
-        assert progress_callback is None
+        assert callable(progress_callback)
         _FakeClientSession.call_tool_arguments.append(arguments)
         assert read_timeout_seconds is not None
         _FakeClientSession.call_tool_invocation_count += 1
@@ -3168,6 +3168,187 @@ async def test_mcp_manager_preserves_empty_tool_arguments(
 
     assert result.content == "pong"
     assert _FakeClientSession.call_tool_arguments == [{}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queue_owner", ["semaphore", "catalog"])
+async def test_mcp_call_timings_separate_queue_preflight_and_remote(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    queue_owner: str,
+) -> None:
+    """Separate local contention from authorization and the remote response wait."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")}))
+    state = manager._states["demo"]
+    clock = [10.0]
+    monkeypatch.setattr(mcp_manager_module, "monotonic", lambda: clock[0], raising=False)
+
+    async def preflight() -> None:
+        clock[0] = 15.0
+
+    async def remote_call(
+        _self: _FakeClientSession,
+        _name: str,
+        arguments: dict[str, object],
+        read_timeout_seconds: timedelta,
+        progress_callback: Callable[[float, float | None, str | None], Awaitable[None]] | None = None,
+    ) -> CallToolResult:
+        assert arguments == {"private_argument": "never log me"}
+        assert read_timeout_seconds.total_seconds() == 123
+        if progress_callback is not None:
+            clock[0] = 17.0
+            await progress_callback(1, 2, "private progress message")
+            clock[0] = 19.0
+            await progress_callback(2, 2, "private progress message")
+        clock[0] = 22.0
+        return CallToolResult(content=[mcp_types.TextContent(type="text", text="private result")])
+
+    monkeypatch.setattr(_FakeClientSession, "call_tool", remote_call)
+    queue_lock = state.semaphore if queue_owner == "semaphore" else state.call_lock.write()
+    with patch.object(mcp_manager_module, "logger") as log:
+        async with queue_lock:
+            pending = asyncio.create_task(
+                manager.call_tool(
+                    "demo",
+                    "echo",
+                    {"private_argument": "never log me"},
+                    timeout_seconds=123,
+                    before_dispatch=preflight,
+                ),
+            )
+            await asyncio.sleep(0)
+            assert not pending.done()
+            clock[0] = 13.0
+        result = await pending
+
+    assert result.content == "private result"
+    dispatch = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call dispatched",)]
+    finished = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call attempt finished",)]
+    assert len(dispatch) == len(finished) == 1
+    assert dispatch[0]["mcp_call_id"] == finished[0]["mcp_call_id"]
+    assert finished[0] == {
+        "server_id": "demo",
+        "tool_name": "echo",
+        "mcp_call_id": dispatch[0]["mcp_call_id"],
+        "timeout_seconds": 123,
+        "queue_wait_ms": 3000.0,
+        "pre_dispatch_ms": 2000.0,
+        "remote_call_ms": 7000.0,
+        "attempt_total_ms": 12000.0,
+        "dispatched": True,
+        "outcome": "success",
+        "error_type": None,
+        "progress_count": 2,
+        "first_progress_ms": 2000.0,
+        "last_progress_ms": 4000.0,
+    }
+    assert "private" not in str(log.mock_calls)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_dispatch", [False, True])
+async def test_mcp_call_timings_preserve_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    after_dispatch: bool,
+) -> None:
+    """Cancellation records whether a request reached the transport, without replay."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.call_started_event = asyncio.Event()
+    _FakeClientSession.call_continue_event = asyncio.Event()
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")}))
+    state = manager._states["demo"]
+    if not after_dispatch:
+        await state.semaphore.acquire()
+    with patch.object(mcp_manager_module, "logger") as log:
+        pending = asyncio.create_task(manager.call_tool("demo", "echo", {}))
+        if after_dispatch:
+            await asyncio.wait_for(_FakeClientSession.call_started_event.wait(), timeout=1)
+        else:
+            await asyncio.sleep(0)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    if not after_dispatch:
+        state.semaphore.release()
+    finished = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call attempt finished",)]
+    assert len(finished) == 1
+    assert finished[0]["outcome"] == "cancelled"
+    assert finished[0]["dispatched"] is after_dispatch
+    assert _FakeClientSession.call_tool_invocation_count == int(after_dispatch)
+    assert len(_FakeClientSession.sessions) == 1
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "expected_error", "expected_outcome"),
+    [
+        (
+            CallToolResult(content=[mcp_types.TextContent(type="text", text="private error")], isError=True),
+            MCPToolCallError,
+            "tool_error",
+        ),
+        (BrokenPipeError("private transport detail"), MCPConnectionError, "connection_error"),
+        (TimeoutError("private timeout detail"), MCPTimeoutError, "timeout"),
+    ],
+)
+async def test_mcp_call_timings_classify_failures_without_replaying(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    result: CallToolResult | Exception,
+    expected_error: type[MCPConnectionError | MCPTimeoutError | MCPToolCallError],
+    expected_outcome: str,
+) -> None:
+    """A server error response differs from an unknown remote outcome."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    _FakeClientSession.planned_tool_results = [result]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(
+        _ConfigStub(
+            {
+                "demo": MCPServerConfig(transport="stdio", command="npx", auto_reconnect=False),
+            },
+        ),
+    )
+    with patch.object(mcp_manager_module, "logger") as log, pytest.raises(expected_error):
+        await manager.call_tool("demo", "echo", {"private": "argument"})
+    finished = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call attempt finished",)]
+    assert len(finished) == 1
+    assert finished[0]["outcome"] == expected_outcome
+    assert finished[0]["error_type"] == expected_error.__name__
+    assert finished[0]["dispatched"] is True
+    assert "private" not in str(log.mock_calls)
+    assert _FakeClientSession.call_tool_invocation_count == 1
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_call_timings_classify_unavailable_tools_as_protocol_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A protocol-error subtype keeps its family and concrete type before dispatch."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")}))
+    with patch.object(mcp_manager_module, "logger") as log, pytest.raises(MCPToolUnavailableError):
+        await manager.call_tool("demo", "missing", {})
+    finished = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call attempt finished",)]
+    assert len(finished) == 1
+    assert finished[0]["outcome"] == "protocol_error"
+    assert finished[0]["error_type"] == "MCPToolUnavailableError"
+    assert finished[0]["dispatched"] is False
+    assert _FakeClientSession.call_tool_invocation_count == 0
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio
