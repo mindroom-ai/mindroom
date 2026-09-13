@@ -186,11 +186,11 @@ def _update_tokens(tokens: dict[str, Any], refreshed: dict[str, Any]) -> None:
             tokens[key] = refreshed[key]
 
 
-def _codex_prompt_cache_headers(prompt_cache_key: str) -> dict[str, str]:
+def _codex_session_headers(session_id: str) -> dict[str, str]:
     return {
-        "session_id": prompt_cache_key,
-        "x-client-request-id": prompt_cache_key,
-        _CODEX_WINDOW_ID_HEADER: f"{prompt_cache_key}:0",
+        "session_id": session_id,
+        "x-client-request-id": session_id,
+        _CODEX_WINDOW_ID_HEADER: f"{session_id}:0",
     }
 
 
@@ -241,6 +241,7 @@ class CodexResponses(MindRoomOpenAIResponses):
     store: bool = False
     codex_home: str | None = None
     prompt_cache_key: str | None = None
+    session_id: str | None = None
     default_instructions: str = CODEX_DEFAULT_INSTRUCTIONS
 
     def __post_init__(self) -> None:
@@ -272,9 +273,6 @@ class CodexResponses(MindRoomOpenAIResponses):
         instructions = [self.system_prompt, *(self.instructions or [])]
         return "\n\n".join(instruction for instruction in instructions if instruction) or self.default_instructions
 
-    def _prompt_cache_key(self) -> str | None:
-        return self.prompt_cache_key
-
     def get_request_params(
         self,
         messages: list[Message] | None = None,
@@ -292,13 +290,15 @@ class CodexResponses(MindRoomOpenAIResponses):
             run_response=run_response,
         )
         request_params.setdefault("instructions", self._instructions_text())
-        prompt_cache_key = self._prompt_cache_key()
+        prompt_cache_key = self.prompt_cache_key
         if prompt_cache_key:
             request_params.setdefault("prompt_cache_key", prompt_cache_key)
+        if self.session_id:
             extra_headers = dict(request_params.get("extra_headers") or {})
-            for header_name, header_value in _codex_prompt_cache_headers(prompt_cache_key).items():
+            for header_name, header_value in _codex_session_headers(self.session_id).items():
                 extra_headers.setdefault(header_name, header_value)
             request_params["extra_headers"] = extra_headers
+        if prompt_cache_key or self.session_id:
             _merge_codex_extra_body(
                 request_params,
                 _codex_prompt_cache_extra_body(

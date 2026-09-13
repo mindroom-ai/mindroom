@@ -1823,7 +1823,12 @@ def create_agent(
     )
 
     # Create agent with defaults applied
-    model = _load_agent_model_instance(config, runtime_paths, role_context.model_name, execution_identity)
+    model = _load_agent_model_instance(
+        config,
+        runtime_paths,
+        role_context.model_name,
+        replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
+    )
     if tool_assembly.deferred_wire_tool_names:
         # Each installer no-ops on the other provider family's model class.
         install_claude_deferred_tool_search(model, deferred_tool_names=tool_assembly.deferred_wire_tool_names)

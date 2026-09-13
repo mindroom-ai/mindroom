@@ -268,7 +268,7 @@ models:
     provider: codex
     id: gpt-6-astra
     context_window: 258000
-    # Prompt caching is enabled automatically per active agent session.
+    # Related agent conversations share a prompt-cache key automatically.
     extra_kwargs:
       reasoning_effort: medium
 ```
@@ -285,12 +285,15 @@ The Codex provider supports text and image input with text output; transcription
 This adapter follows the local Codex CLI authentication-file and backend contracts, so upstream Codex changes can require a MindRoom update.
 Use `provider: openai` when you want the public OpenAI API contract and API billing instead.
 
-MindRoom sends a Codex prompt-cache key plus the Codex CLI session headers for each active agent session.
-By default, that key is derived from the current execution identity, so separate Matrix threads can run concurrently without sharing one global cache key.
-You can set `extra_kwargs.prompt_cache_key` to override that derived key for a model, but avoid a single low-cardinality value for many busy threads unless you intentionally want those requests routed together.
-Live testing against the Codex ChatGPT endpoint reported `cached_tokens` only when the request included Codex CLI-style session headers tied to the prompt-cache key.
-Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
-Treat Codex prompt caching as best-effort rather than guaranteed.
+MindRoom derives the Codex `prompt_cache_key` from the storage-root path, tenant, account, channel, agent, and requester.
+Rooms, threads, and session IDs are excluded, so related conversations can share a cache group while different agents, requesters, and storage roots remain separate.
+The storage-root path is a local namespace, not a globally unique installation identifier; deployments with identical paths and execution scopes can share a cache group within the same provider account.
+Use explicit cache-key overrides if those deployments need separate cache accounting.
+Codex CLI session headers use a separate key for each conversation; changing the cache group does not combine session identities.
+Set `extra_kwargs.prompt_cache_key` to override the cache group, or set it to `null` to omit the key while retaining the conversation headers.
+Model calls without an execution identity do not receive a derived cache key or session headers.
+Identical prefixes and tools are still required for reuse, and provider routing and cache availability can produce misses even with a shared key.
+Live probes accepted separate cache keys and session headers and reported some repeated-request cache hits, but did not establish reliable cache reuse across conversations.
 
 ## Kimi Models with Kimi Code Login
 
@@ -324,8 +327,8 @@ Kimi K3 always reasons before replying, so responses include reasoning tokens ev
 This adapter follows the local Kimi Code CLI authentication-file and backend contracts, so upstream Kimi Code changes can require a MindRoom update.
 
 Prompt caching is automatic on the Kimi Code endpoint: repeated request prefixes come back as `cached_tokens` with no opt-in.
-Like the Kimi Code CLI, MindRoom pins each active agent session to a stable `prompt_cache_key` derived from the execution identity (the same derivation the Codex provider uses), which keeps cache routing stable per Matrix thread.
-You can set `extra_kwargs.prompt_cache_key` to override the derived key for a model.
+MindRoom uses the same agent-and-requester cache grouping as Codex, so rooms and threads share a `prompt_cache_key` within the same storage-root path, tenant, account, and channel.
+Set `extra_kwargs.prompt_cache_key` to override that group, or set it to `null` to omit the key.
 
 ## OpenRouter Provider Routing
 

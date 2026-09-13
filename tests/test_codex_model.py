@@ -39,7 +39,6 @@ from mindroom.openai_tool_search import (
     install_openai_deferred_tool_search,
     openai_native_tool_search_supported,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -248,11 +247,7 @@ def test_codex_responses_request_params_include_prompt_cache_key(tmp_path: Path)
     params = model.get_request_params()
 
     assert params["prompt_cache_key"] == "mindroom-code-agent"
-    assert params["extra_headers"] == {
-        "session_id": "mindroom-code-agent",
-        "x-client-request-id": "mindroom-code-agent",
-        "x-codex-window-id": "mindroom-code-agent:0",
-    }
+    assert "extra_headers" not in params
 
 
 def test_codex_responses_request_params_include_installation_metadata(tmp_path: Path) -> None:
@@ -299,57 +294,20 @@ def test_codex_responses_request_params_preserve_existing_extra_body(tmp_path: P
 
 
 def test_codex_responses_request_params_preserve_existing_extra_headers(tmp_path: Path) -> None:
-    """Codex prompt-cache headers should not clobber caller-supplied headers."""
+    """Codex session headers should not clobber caller-supplied headers."""
     model = CodexResponses(
         id="gpt-5.6",
         prompt_cache_key="mindroom-code-agent",
+        session_id="conversation-a",
         codex_home=str(tmp_path),
         extra_headers={"X-Test": "1", "x-codex-window-id": "custom-window"},
     )
 
     assert model.get_request_params()["extra_headers"] == {
         "X-Test": "1",
-        "session_id": "mindroom-code-agent",
-        "x-client-request-id": "mindroom-code-agent",
+        "session_id": "conversation-a",
+        "x-client-request-id": "conversation-a",
         "x-codex-window-id": "custom-window",
-    }
-
-
-def test_codex_model_loader_derives_prompt_cache_key_from_execution_identity(tmp_path: Path) -> None:
-    """MindRoom should use a stable per-agent/session Codex cache key by default."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
-    )
-    config = Config(
-        models={
-            "default": ModelConfig(
-                provider="codex",
-                id="gpt-5.6",
-            ),
-        },
-        agents={},
-    )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="code",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread:example.org",
-        resolved_thread_id="$thread:example.org",
-        session_id="!room:example.org:$thread:example.org",
-    )
-
-    model = get_model_instance(config, runtime_paths, execution_identity=identity)
-    params = model.get_request_params()
-
-    assert isinstance(model, CodexResponses)
-    assert params["prompt_cache_key"] == "mindroom-7ac97f304c4001bd9939c88ddba8b0e2"
-    assert params["extra_headers"] == {
-        "session_id": "mindroom-7ac97f304c4001bd9939c88ddba8b0e2",
-        "x-client-request-id": "mindroom-7ac97f304c4001bd9939c88ddba8b0e2",
-        "x-codex-window-id": "mindroom-7ac97f304c4001bd9939c88ddba8b0e2:0",
     }
 
 
