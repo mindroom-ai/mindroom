@@ -987,11 +987,14 @@ async def _register_thread_history_media_attachment(
     thread_id: str | None,
     event: FileOrVideoMessageEvent | ImageMessageEvent,
 ) -> AttachmentRecord | None:
-    existing_record = _load_existing_context_attachment(
-        storage_path,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_id=event.event_id,
+    existing_record = await run_blocking_until_complete(
+        partial(
+            _load_existing_context_attachment,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_id=event.event_id,
+        ),
     )
     if existing_record is not None:
         return existing_record
@@ -1082,11 +1085,14 @@ async def resolve_thread_attachment_ids(
     if not is_matrix_media_dispatch_event(event) and not is_audio_message_event(event):
         return finish([], "not_media_root")
 
-    existing_record = _load_existing_context_attachment(
-        storage_path,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_id=event.event_id,
+    existing_record = await run_blocking_until_complete(
+        partial(
+            _load_existing_context_attachment,
+            storage_path,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_id=event.event_id,
+        ),
     )
     if existing_record is not None:
         return finish([existing_record.attachment_id], "existing_record")

@@ -1090,3 +1090,91 @@ def test_register_local_attachment_prunes_expired_metadata_without_deleting_unma
 
     assert load_attachment(tmp_path, "att_external") is None
     assert external_file_path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow_operation", ["metadata_read", "media_stat"])
+@pytest.mark.parametrize("lookup", ["history", "thread_root"])
+async def test_cached_history_attachment_does_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slow_operation: str,
+    lookup: str,
+) -> None:
+    """A cached history attachment must yield during metadata and media validation."""
+    file_path = tmp_path / "cached.png"
+    file_path.write_bytes(b"image")
+    record = register_local_attachment(
+        tmp_path,
+        file_path,
+        kind="image",
+        attachment_id=_attachment_id_for_event("$cached"),
+        room_id="!room:example.org",
+        thread_id="$thread",
+    )
+    assert record is not None
+    assert await attachments_module.wait_for_attachment_cleanup_tasks()
+    event = nio.RoomMessageImage.from_dict(
+        {
+            "event_id": "$cached",
+            "sender": "@user:example.org",
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.image", "body": "cached.png", "url": "mxc://example.org/cached"},
+        },
+    )
+    started = threading.Event()
+    release = threading.Event()
+    timed_out = threading.Event()
+    original_read = Path.read_text
+    original_stat = Path.stat
+
+    def pause() -> None:
+        started.set()
+        if not release.wait(2):
+            timed_out.set()
+
+    def slow_read(path: Path, *args: object, **kwargs: object) -> str:
+        if path.suffix == ".json":
+            pause()
+        return original_read(path, *args, **kwargs)
+
+    def slow_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if path == file_path:
+            pause()
+        return original_stat(path, *args, **kwargs)
+
+    if slow_operation == "metadata_read":
+        monkeypatch.setattr(Path, "read_text", slow_read)
+    else:
+        monkeypatch.setattr(Path, "stat", slow_stat)
+
+    async def heartbeat() -> None:
+        assert await asyncio.to_thread(started.wait, 5)
+        release.set()
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    try:
+        if lookup == "history":
+            loaded = await attachments_module._register_thread_history_media_attachment(
+                AsyncMock(),
+                tmp_path,
+                room_id="!room:example.org",
+                thread_id="$thread",
+                event=event,
+            )
+            assert loaded == record
+        else:
+            attachment_ids = await resolve_thread_attachment_ids(
+                AsyncMock(),
+                tmp_path,
+                room_id="!room:example.org",
+                thread_id="$thread",
+                thread_root_event=event,
+            )
+            assert attachment_ids == [record.attachment_id]
+        await heartbeat_task
+        assert not timed_out.is_set(), "Cached attachment validation blocked the event loop"
+    finally:
+        release.set()
+        await heartbeat_task

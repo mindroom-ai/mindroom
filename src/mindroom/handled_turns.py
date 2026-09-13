@@ -37,6 +37,7 @@ from types import MappingProxyType
 from typing import Any
 
 from mindroom import constants
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_handled_turns import import_legacy_ledger, restore_legacy_revision_replay
 from mindroom.logging_config import get_logger
@@ -410,13 +411,9 @@ class HandledTurnLedger:
     def _responses(self) -> dict[str, TurnRecord]:
         return self._state.responses
 
-    @_responses.setter
-    def _responses(self, responses: dict[str, TurnRecord]) -> None:
-        self._state.responses = {}
-        self._state.conversation_responses.clear()
-        self._state.cleanup_responses.clear()
-        for event_id, record in responses.items():
-            self._set_response(event_id, record)
+    def _publish_responses(self, indexes: _ResponseIndexes) -> None:
+        """Install a detached map and its indexes with the state lock held."""
+        self._state.responses, self._state.conversation_responses, self._state.cleanup_responses = indexes
 
     def _set_response(self, event_id: str, record: TurnRecord | None) -> None:
         """Publish or restore one alias and its read indexes with the state lock held.
@@ -485,12 +482,9 @@ class HandledTurnLedger:
             codec=TurnRecordCodec,
         ):
             stored = imported
+        indexes = await run_blocking_until_complete(_decode_response_indexes, stored)
         with self._state.lock:
-            self._responses = {
-                index_event_id: record
-                for index_event_id, _anchor_event_id, record_json in stored
-                if (record := TurnRecordCodec._from_ledger_record(index_event_id, json.loads(record_json))) is not None
-            }
+            self._publish_responses(indexes)
             self._state.loaded = True
 
     async def cleanup(self, *, unsettled_source_event_ids: Collection[str] = ()) -> None:
@@ -818,23 +812,66 @@ class HandledTurnLedger:
             await asyncio.gather(*(asyncio.shield(write) for write in set(self._state.pending_writes.values())))
             with self._state.lock:
                 self._require_loaded()
-                retained = _cleaned_responses(
-                    dict(self._responses),
-                    max_events=max_events,
-                    max_age_days=max_age_days,
-                    unsettled_source_event_ids=unsettled_source_event_ids,
-                )
-                dropped = tuple(sorted(set(self._responses) - set(retained)))
+                snapshot = dict(self._responses)
+            indexes, dropped = await run_blocking_until_complete(
+                _prepare_response_cleanup,
+                snapshot,
+                max_events,
+                max_age_days,
+                tuple(unsettled_source_event_ids),
+            )
             if dropped:
                 await self.records.forget(index_event_ids=dropped)
             with self._state.lock:
-                self._responses = retained
+                self._publish_responses(indexes)
         logger.info(
             "handled_turn_cleanup_completed",
             agent=self.agent_name,
             kept_event_count=len(self._responses),
             dropped_event_count=len(dropped),
         )
+
+
+type _ResponseIndexes = tuple[dict[str, TurnRecord], dict[str, dict[str, TurnRecord]], dict[str, TurnRecord]]
+
+
+def _index_responses(responses: dict[str, TurnRecord]) -> _ResponseIndexes:
+    """Build detached lookup maps before publishing them to synchronous readers."""
+    conversations: dict[str, dict[str, TurnRecord]] = {}
+    cleanup: dict[str, TurnRecord] = {}
+    for event_id, record in responses.items():
+        if record.conversation_target is not None:
+            conversations.setdefault(record.conversation_target.session_id, {})[event_id] = record
+        if record.pending_redaction_cleanup_event_ids:
+            cleanup[event_id] = record
+    return responses, conversations, cleanup
+
+
+def _decode_response_indexes(stored: Sequence[tuple[str, str, str]]) -> _ResponseIndexes:
+    """Decode persisted aliases and prepare all read indexes in one worker."""
+    return _index_responses(
+        {
+            index_event_id: record
+            for index_event_id, _anchor_event_id, record_json in stored
+            if (record := TurnRecordCodec._from_ledger_record(index_event_id, json.loads(record_json))) is not None
+        },
+    )
+
+
+def _prepare_response_cleanup(
+    responses: dict[str, TurnRecord],
+    max_events: int,
+    max_age_days: int,
+    unsettled_source_event_ids: Collection[str],
+) -> tuple[_ResponseIndexes, tuple[str, ...]]:
+    """Compute retention and replacement indexes without mutating live state."""
+    retained = _cleaned_responses(
+        responses,
+        max_events=max_events,
+        max_age_days=max_age_days,
+        unsettled_source_event_ids=unsettled_source_event_ids,
+    )
+    return _index_responses(retained), tuple(sorted(set(responses) - set(retained)))
 
 
 def resolve_turn_record(

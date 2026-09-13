@@ -16,6 +16,8 @@ from queue import SimpleQueue
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.agent import _session as agent_session
+from agno.agent import _storage as agent_storage
+from agno.db.base import SessionType
 from agno.session import AgentSession, TeamSession, WorkflowSession
 from agno.team import _session as team_session
 
@@ -42,6 +44,8 @@ type _PersistenceTarget = tuple[str, str]
 #   agno-agi/agno#9939  delete_runs scrubs the 2.x blob atomically  -> agent_storage delete_runs blob part
 #   agno-agi/agno#9938  run_index never below MAX+1 (or #9342)      -> agent_storage upsert_run
 _SUPPORTED_AGNO_VERSION = "3.0.9"
+_ORIGINAL_AGENT_AREAD_SESSION = agent_storage.aread_session
+_ORIGINAL_AGENT_READ_SESSION = agent_storage.read_session
 _ORIGINAL_AGENT_ASAVE_SESSION = agent_session.asave_session
 _ORIGINAL_AGENT_SAVE_SESSION = agent_session.save_session
 _ORIGINAL_AGENT_ASAVE_RUN = agent_session.asave_run
@@ -170,6 +174,32 @@ def _team_lane(team: Team) -> _PersistenceLane | None:
     return _registered_lane(cast("BaseDb", database))
 
 
+async def _agent_aread_session(
+    agent: Agent,
+    session_id: str,
+    session_type: SessionType = SessionType.AGENT,
+    user_id: str | None = None,
+    runs_limit: int | None = None,
+) -> _AgentSession | None:
+    """Read registered storage after accepted writes, retaining ownership on cancellation."""
+    # Startup preload will use this seam after https://github.com/agno-agi/agno/pull/10148 ships.
+    # Keep scheduling here: arbitrary synchronous adapters may be bound to their original thread.
+    lane = _agent_lane(agent)
+    if lane is None:
+        return await _ORIGINAL_AGENT_AREAD_SESSION(agent, session_id, session_type, user_id, runs_limit)
+    context = contextvars.copy_context()
+    worker = lane.executor.submit(
+        context.run,
+        _ORIGINAL_AGENT_READ_SESSION,
+        agent,
+        session_id,
+        session_type,
+        user_id,
+        runs_limit,
+    )
+    return cast("_AgentSession | None", await wait_for_future_until_complete(asyncio.wrap_future(worker)))
+
+
 async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
     lane = _agent_lane(agent) if session.session_data is not None else None
     if lane is None:
@@ -215,9 +245,10 @@ async def _team_asave_run(
 
 
 def _is_applied() -> bool:
-    """Return whether every guarded async save replacement is installed."""
+    """Return whether every guarded async read/save replacement is installed."""
     return (
         _PATCHED
+        and agent_storage.aread_session is _agent_aread_session
         and agent_session.asave_session is _agent_asave_session
         and agent_session.asave_run is _agent_asave_run
         and team_session.asave_session is _team_asave_session
@@ -236,12 +267,14 @@ def _apply_patch() -> bool:
         if (
             _PATCHED
             or version("agno") != _SUPPORTED_AGNO_VERSION
+            or agent_storage.aread_session is not _ORIGINAL_AGENT_AREAD_SESSION
             or agent_session.asave_session is not _ORIGINAL_AGENT_ASAVE_SESSION
             or agent_session.asave_run is not _ORIGINAL_AGENT_ASAVE_RUN
             or team_session.asave_session is not _ORIGINAL_TEAM_ASAVE_SESSION
             or team_session.asave_run is not _ORIGINAL_TEAM_ASAVE_RUN
         ):
             return False
+        agent_storage.aread_session = cast("Any", _agent_aread_session)
         agent_session.asave_session = cast("Any", _agent_asave_session)
         agent_session.asave_run = cast("Any", _agent_asave_run)
         team_session.asave_session = cast("Any", _team_asave_session)
