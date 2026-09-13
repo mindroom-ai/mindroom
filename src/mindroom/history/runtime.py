@@ -339,6 +339,7 @@ async def prepare_scope_history(
     scope: HistoryScope | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    requester_id: str | None = None,
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning."""
     resolved_scope = scope or _resolve_history_scope(agent)
@@ -404,6 +405,7 @@ async def prepare_scope_history(
             pipeline_timing.mark("required_compaction_start")
         compaction_result = await _run_scope_compaction_with_lifecycle(
             active_agent=agent,
+            requester_id=requester_id,
             mode="manual" if state.force_compact_before_next_run else "auto",
             storage=scope_context.storage,
             session=session,
@@ -457,6 +459,7 @@ async def _run_scope_compaction_with_lifecycle(
     runtime_paths: RuntimePaths,
     compaction_lifecycle: CompactionLifecycle | None,
     active_agent: Agent | None = None,
+    requester_id: str | None = None,
 ) -> _ScopeCompactionLifecycleResult:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
@@ -502,6 +505,7 @@ async def _run_scope_compaction_with_lifecycle(
     try:
         outcome = await _run_scope_compaction(
             active_agent=active_agent,
+            requester_id=requester_id,
             storage=storage,
             session=session,
             scope=scope,
@@ -563,6 +567,7 @@ async def _run_scope_compaction(
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
     active_agent: Agent | None = None,
+    requester_id: str | None = None,
 ) -> CompactionOutcome | None:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
@@ -598,6 +603,7 @@ async def _run_scope_compaction(
                 exc_info=True,
             )
     return await compact_scope_history(
+        requester_id=requester_id,
         active_agent=(
             active_agent
             if scope.kind == "agent" and execution_plan.compaction_model_name == resolved_inputs.active_model_name

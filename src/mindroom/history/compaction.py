@@ -215,6 +215,7 @@ async def compact_scope_history(
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
     active_agent: Agent | None = None,
+    requester_id: str | None = None,
 ) -> CompactionOutcome | None:
     """Compact one scope by rewriting session.summary and session.runs."""
     visible_runs = scope_visible_runs(session, scope)
@@ -270,6 +271,7 @@ async def compact_scope_history(
 
     rewrite_result = await _rewrite_working_session_for_compaction(
         active_agent=active_agent,
+        requester_id=requester_id,
         storage=storage,
         persisted_session=session,
         working_session=working_session,
@@ -392,6 +394,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     fallback_summary_input_budget: int | None = None,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
     active_agent: Agent | None = None,
+    requester_id: str | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     token_estimator, estimate_kind = _compaction_sizing(summary_model)
@@ -433,6 +436,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
         new_summary = await _generate_compaction_summary_with_retry(
             warm_request=await _warm_request_for_chunk(
                 active_agent=active_agent,
+                requester_id=requester_id,
                 session=working_session,
                 included_runs=included_runs,
                 summary_prompt=summary_prompt,
@@ -532,6 +536,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
 async def _warm_request_for_chunk(
     *,
     active_agent: Agent | None,
+    requester_id: str | None,
     session: AgentSession | TeamSession,
     included_runs: Sequence[RunOutput | TeamRunOutput],
     summary_prompt: str,
@@ -552,6 +557,7 @@ async def _warm_request_for_chunk(
         async with asyncio.timeout(timeout_seconds):
             return await build_warm_prefix_request(
                 agent=active_agent,
+                requester_id=requester_id,
                 session=session,
                 included_runs=included_runs,
                 summary_prompt=summary_prompt,

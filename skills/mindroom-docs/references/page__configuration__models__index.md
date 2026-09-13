@@ -74,12 +74,14 @@ This option applies to Responses models; Chat Completions providers keep their e
 
 When an agent uses its reply model for compaction, MindRoom can reuse the agent's system instructions, tool schemas, and selected conversation prefix for the summary request.
 The stable system instructions define a handoff format that takes precedence over persona and reply-format rules during compaction, while retaining safety and privacy restrictions.
+The snapshot uses the current requester's learning context, including anonymous turns, rather than treating the session creator as its owner.
 The summary call preserves the active model's cache identity, conversation routing, thinking settings, and SDK configuration, with the configured compaction timeout bounding the call.
 It invokes the model once with tool schemas and no executable callbacks; a tool request or malformed handoff triggers a standalone summary retry before history is removed.
 
 This applies to Claude-family and OpenAI-compatible agent models, including Codex and Kimi, when the full request fits the summary budget.
 Teams, distinct compaction models, custom compaction prompts, tool-history limits, hosted tools, and provider settings that override the request or silently truncate history use standalone summarization.
 Claude models with prompt caching disabled also use standalone summarization.
+OpenAI Responses requires `extra_kwargs.store: false` and foreground mode so the provider receives the complete selected history and current summary.
 Warm request preparation has its own compaction timeout; setup errors or timeouts fall back to standalone summarization without removing history first.
 Provider-native tool discovery may remain in the cached schema surface, but compaction never executes client tools.
 An oversized warm request falls back to the standalone input within the existing retry limit, preserving all selected runs.

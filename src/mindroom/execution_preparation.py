@@ -961,6 +961,7 @@ async def prepare_agent_execution_context(
         return await prepare_scope_history(
             agent=agent,
             agent_name=agent_name,
+            requester_id=ctx.requester_id,
             resolved_inputs=resolved_inputs,
             runtime_paths=runtime_paths,
             config=config,

@@ -13,7 +13,9 @@ import httpx
 import pytest
 from agno.agent import Agent
 from agno.db.in_memory import InMemoryDb
-from agno.learn import LearningMachine
+from agno.learn import LearningMachine, LearningMode, UserProfileConfig
+from agno.learn.schemas import UserProfile
+from agno.learn.stores.user_profile import UserProfileStore
 from agno.media import Image
 from agno.models.anthropic import Claude
 from agno.models.message import Message
@@ -22,6 +24,7 @@ from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 
 from mindroom.agents import create_agent
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, install_claude_prompt_cache_hook
@@ -29,14 +32,17 @@ from mindroom.codex_model import CodexResponses
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionOverrideConfig, DefaultsConfig, ModelConfig
+from mindroom.execution_preparation import prepare_agent_execution_context
 from mindroom.history.compaction import compact_scope_history
+from mindroom.history.runtime import ScopeSessionContext
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
 from mindroom.history.warm_prefix import build_warm_prefix_request
+from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.prompts import COMPACTION_MODE_INSTRUCTION, COMPACTION_SUMMARY_PROMPT
 from mindroom.system_prompt import render_session_context
-from tests.conftest import prepare_history_for_run_for_test, seed_session, test_runtime_paths
+from tests.conftest import make_turn_context, seed_session, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -181,7 +187,7 @@ async def test_unsupported_warm_requests_use_standalone_summary(reason: str) -> 
 @pytest.mark.parametrize("model_id", ["o3-deep-research", "o3-deep-research-2025-06-26"])
 async def test_provider_injected_hosted_tools_disable_warm_compaction(model_id: str) -> None:
     """Pin both SDK-recognized research variants: hosted tools need no agent schema."""
-    model = OpenAIResponses(id=model_id)
+    model = OpenAIResponses(id=model_id, store=False)
     assert model.get_request_params()["tools"] == [{"type": "web_search_preview"}]
     run = RunOutput(run_id="r1", messages=[Message(role="user", content="Research Project Atlas.")])
     request = await build_warm_prefix_request(
@@ -372,12 +378,14 @@ async def test_codex_compaction_preserves_cache_key_and_conversation_headers(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("distinct_model", [False, True])
 @pytest.mark.parametrize("learning", [False, True])
+@pytest.mark.parametrize("requester_id", ["bob", None])
 async def test_runtime_uses_warm_compaction_only_for_the_active_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     distinct_model: bool,
     learning: bool,
+    requester_id: str | None,
 ) -> None:
     """Exercise real agent creation and runtime wiring through a persisted compaction."""
     requests: list[dict] = []
@@ -421,7 +429,7 @@ async def test_runtime_uses_warm_compaction_only_for_the_active_model(
         agent_id="writer",
         messages=[Message(role="user", content="Project Atlas uses port 4321.")],
     )
-    session = AgentSession(session_id="thread", agent_id="writer", user_id="owner", runs=[run])
+    session = AgentSession(session_id="thread", agent_id="writer", user_id="alice", runs=[run])
     write_scope_state(
         session,
         HistoryScope(kind="agent", scope_id="writer"),
@@ -448,16 +456,25 @@ async def test_runtime_uses_warm_compaction_only_for_the_active_model(
             session_id="thread",
             history_storage=storage,
         )
-        prepared = await prepare_history_for_run_for_test(
+        if learning:
+            assert isinstance(agent.learning, LearningMachine)
+            profiles = UserProfileStore(config=UserProfileConfig(db=agent.learning.db, mode=LearningMode.AGENTIC))
+            profiles.save(user_id="alice", profile=UserProfile(user_id="alice", name="ALICE_PRIVATE_PROFILE"))
+            profiles.save(user_id="bob", profile=UserProfile(user_id="bob", name="BOB_CURRENT_PROFILE"))
+        prepared = await prepare_agent_execution_context(
+            make_turn_context("writer", session_id="thread", requester_id=requester_id),
             agent=agent,
-            agent_name="writer",
-            full_prompt="Continue",
-            session_id="thread",
+            prompt="Continue",
+            thread_history=None,
             runtime_paths=runtime_paths,
             config=config,
-            execution_identity=None,
-            storage=storage,
-            session=session,
+            scope_context=ScopeSessionContext(
+                scope=HistoryScope(kind="agent", scope_id="writer"),
+                storage=storage,
+                session=session,
+                session_id="thread",
+            ),
+            include_openai_compat_guidance=True,
         )
         assert agent._learning is None
         if learning:
@@ -466,18 +483,111 @@ async def test_runtime_uses_warm_compaction_only_for_the_active_model(
             assert agent.learning._stores is None
         # A fresh reply initializes learning; the earlier warm request must
         # already have exactly the same system instructions and schemas.
-        await agent.arun("Continue", session_id="baseline", user_id="owner")
-    assert len(prepared.compaction_outcomes) == 1
+        await agent.arun("Continue", session_id="baseline", user_id=requester_id)
+    assert prepared.prepared_history is not None
+    assert len(prepared.prepared_history.compaction_outcomes) == 1
     assert len(requests) == 2
+    assert "ALICE_PRIVATE_PROFILE" not in str(requests[0])
+    assert ("BOB_CURRENT_PROFILE" in str(requests[0])) is (learning and requester_id == "bob" and not distinct_model)
     if not distinct_model:
         assert requests[0]["system"] == requests[1]["system"]
         assert requests[0].get("tools") == requests[1].get("tools")
-        if learning:
+        if learning and requester_id is not None:
             assert {"update_profile", "update_user_memory"} <= {tool["name"] for tool in requests[0]["tools"]}
     assert ("PERSONA_CANARY" in str(requests[0]["system"])) is not distinct_model
     assert requests[0]["model"] == ("claude-fable-5-1" if distinct_model else "claude-sonnet-5")
     assert session.summary is not None
     assert session.summary.summary == _SUMMARY
+    assert session.runs == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store", [None, True, False])
+async def test_responses_compaction_sends_current_summary_and_selected_history(store: bool | None) -> None:
+    """Stored continuation must not replace facts from a newly compacted chunk."""
+    requests: list[dict] = []
+    summary = _SUMMARY + "\nPRIOR_CHUNK_METADATA: keep port 4321."
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_summary",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "model": "gpt-6-astra",
+                "parallel_tool_calls": True,
+                "tools": [],
+                "tool_choice": "auto",
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg_summary",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": summary, "annotations": []}],
+                    },
+                ],
+                "usage": {"input_tokens": 100, "output_tokens": 60, "total_tokens": 160},
+            },
+        )
+
+    storage = InMemoryDb()
+    run = RunOutput(
+        run_id="r1",
+        agent_id="writer",
+        messages=[
+            Message(role="user", content="SELECTED_RUN_FACT: use SQLite."),
+            Message(role="assistant", content="Agreed.", provider_data={"response_id": "resp_before_compaction"}),
+        ],
+    )
+    session = seed_session(
+        storage,
+        AgentSession(
+            session_id="thread",
+            agent_id="writer",
+            runs=[run],
+            summary=SessionSummary(summary="PRIOR_CHUNK_METADATA: keep port 4321."),
+        ),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as http_client:
+        client = AsyncOpenAI(api_key="test", http_client=http_client)
+        active = MindRoomOpenAIResponses(id="gpt-6-astra", store=store, async_client=client)
+        agent = Agent(
+            id="writer",
+            model=active,
+            instructions=[COMPACTION_MODE_INSTRUCTION],
+            add_session_summary_to_context=True,
+        )
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            scope=HistoryScope(kind="agent", scope_id="writer"),
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="all"),
+                max_tool_calls_from_history=None,
+            ),
+            available_history_budget=None,
+            summary_input_budget=100_000,
+            summary_model=MindRoomOpenAIResponses(id="gpt-6-astra", store=store, async_client=client),
+            summary_model_name="default",
+            replay_window_tokens=100_000,
+            threshold_tokens=None,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=10,
+            active_agent=agent,
+        )
+    assert outcome is not None
+    assert len(requests) == 1
+    assert "previous_response_id" not in requests[0]
+    assert "PRIOR_CHUNK_METADATA" in str(requests[0]["input"])
+    assert "SELECTED_RUN_FACT" in str(requests[0]["input"])
+    assert ("<mindroom_compaction_request>" in str(requests[0]["input"])) is (store is False)
+    assert session.summary is not None
+    assert session.summary.summary == summary
     assert session.runs == []
 
 

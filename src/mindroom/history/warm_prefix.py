@@ -57,6 +57,7 @@ async def build_warm_prefix_request(
     max_input_tokens: int,
     token_estimator: Callable[[str], int],
     supplemental_context: str,
+    requester_id: str | None = None,
 ) -> WarmPrefixRequest | None:
     """Reuse an eligible agent prefix, or leave this chunk to the standalone caller.
 
@@ -104,12 +105,14 @@ async def build_warm_prefix_request(
             f"{supplemental_context}\n</mindroom_compaction_request>"
         ),
     )
-    run_context = RunContext(run_id=run_id, session_id=fork.session_id, user_id=fork.user_id, session_state={})
+    # A session is a shared conversation, not an authoritative requester.
+    # Keep anonymous turns anonymous instead of borrowing its creator's profile.
+    run_context = RunContext(run_id=run_id, session_id=fork.session_id, user_id=requester_id, session_state={})
     run_response = RunOutput(
         run_id=run_id,
         session_id=fork.session_id,
         agent_id=agent.id,
-        user_id=fork.user_id,
+        user_id=requester_id,
         input=RunInput(input_content=final_message),
         session_state={},
     )
@@ -117,7 +120,7 @@ async def build_warm_prefix_request(
         run_response=run_response,
         run_context=run_context,
         session=fork,
-        user_id=fork.user_id,
+        user_id=requester_id,
     )
     # Dict tools may execute on the provider (web search, remote MCP, code).
     # Never send them in a compaction request with tool choice left unchanged.
@@ -143,7 +146,7 @@ async def build_warm_prefix_request(
         run_context=run_context,
         input=final_message,
         session=fork,
-        user_id=fork.user_id,
+        user_id=requester_id,
         tools=prepared_tools,
         add_history_to_context=True,
         add_dependencies_to_context=False,
@@ -186,7 +189,9 @@ def _model_supports_warm_compaction(model: Model) -> bool:
         return False
     if isinstance_of_loaded(model, ("agno.models.openai.responses", "OpenAIResponses")):
         responses_model = cast("OpenAIResponses", model)
-        if responses_model.truncation == "auto":
+        # Stored continuation can discard the current durable summary and
+        # selected history in favor of an older server-side response chain.
+        if responses_model.store is not False or responses_model.background or responses_model.truncation == "auto":
             return False
 
     return True
