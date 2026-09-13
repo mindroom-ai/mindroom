@@ -17,6 +17,7 @@ from agno.learn import LearningMachine
 from agno.media import Image
 from agno.models.anthropic import Claude
 from agno.models.message import Message
+from agno.models.openai import OpenAIResponses
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
@@ -174,6 +175,25 @@ async def test_unsupported_warm_requests_use_standalone_summary(reason: str) -> 
         supplemental_context="",
     )
     assert prepared is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_id", ["o3-deep-research", "o3-deep-research-2025-06-26"])
+async def test_provider_injected_hosted_tools_disable_warm_compaction(model_id: str) -> None:
+    """Pin both SDK-recognized research variants: hosted tools need no agent schema."""
+    model = OpenAIResponses(id=model_id)
+    assert model.get_request_params()["tools"] == [{"type": "web_search_preview"}]
+    run = RunOutput(run_id="r1", messages=[Message(role="user", content="Research Project Atlas.")])
+    request = await build_warm_prefix_request(
+        agent=Agent(id="writer", model=model, instructions=[COMPACTION_MODE_INSTRUCTION]),
+        session=AgentSession(session_id="thread", agent_id="writer", runs=[run]),
+        included_runs=[run],
+        summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        max_input_tokens=100_000,
+        token_estimator=len,
+        supplemental_context="",
+    )
+    assert request is None
 
 
 @pytest.mark.asyncio

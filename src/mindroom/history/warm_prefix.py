@@ -182,7 +182,7 @@ def _model_supports_warm_compaction(model: Model) -> bool:
         return False
     openai_model = cast("OpenAIChat | OpenAIResponses", model)
     # Raw request overrides can introduce hosted tools or replace messages.
-    if openai_model.request_params or openai_model.extra_body or model.id.endswith("deep-research"):
+    if openai_model.request_params or openai_model.extra_body or "deep-research" in model.id:
         return False
     if isinstance_of_loaded(model, ("agno.models.openai.responses", "OpenAIResponses")):
         responses_model = cast("OpenAIResponses", model)
