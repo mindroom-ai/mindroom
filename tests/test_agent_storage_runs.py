@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -538,3 +540,79 @@ def test_delete_runs_tolerates_malformed_legacy_blob_entries(tmp_path: Path) -> 
     finally:
         connection.close()
     assert json.loads(blob) == legacy_runs[2:]
+
+
+def test_cache_diagnostics_count_history_without_retaining_closed_adapters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counts cover current adapters, not closed stores or private conversation identifiers."""
+    from structlog.testing import capture_logs  # noqa: PLC0415
+
+    from mindroom import agent_storage  # noqa: PLC0415
+
+    monkeypatch.setattr(agent_storage, "_CACHE_DIAGNOSTICS_NEXT_REPORT", 0.0, raising=False)
+    first = _storage(tmp_path / "first")
+    second = _storage(tmp_path / "second")
+    try:
+        seed_session(first, _session("private-first", ["r1", "r2"]))
+        seed_session(second, _session("private-second", ["r3"]))
+        with capture_logs() as logs:
+            get_agent_session(first, "private-first")
+            get_agent_session(second, "private-second")
+        summaries = [entry for entry in logs if entry["event"] == "conversation_cache_summary"]
+        assert len(summaries) == 1
+        assert summaries[0]["observed_cached_runs"] == 2
+        first.close()
+        monkeypatch.setattr(agent_storage, "_CACHE_DIAGNOSTICS_NEXT_REPORT", 0.0)
+        with capture_logs() as logs:
+            get_agent_session(second, "private-second")
+        summary = next(entry for entry in logs if entry["event"] == "conversation_cache_summary")
+        assert summary["adapters"] == 1
+        assert summary["observed_cached_sessions"] == 1
+        assert summary["observed_cached_runs"] == 1
+        assert "private" not in str(summary)
+    finally:
+        first.close()
+        second.close()
+
+
+def test_cache_diagnostics_ignore_read_finishing_after_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read paused before publishing cannot restore a closed adapter's snapshot."""
+    from mindroom import agent_storage  # noqa: PLC0415
+
+    storage = _storage(tmp_path)
+    seed_session(storage, _session("s1", ["r1"]))
+    report_started = threading.Event()
+    resume_report = threading.Event()
+    report_cache_counts = storage._report_cache_counts
+
+    def paused_report() -> None:
+        report_started.set()
+        assert resume_report.wait(timeout=5)
+        report_cache_counts()
+
+    monkeypatch.setattr(storage, "_report_cache_counts", paused_report)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        read = executor.submit(get_agent_session, storage, "s1")
+        try:
+            assert report_started.wait(timeout=5)
+            storage.close()
+            resume_report.set()
+            loaded = read.result(timeout=5)
+            assert loaded is not None
+            assert [run.run_id for run in loaded.runs or []] == ["r1"]
+            with agent_storage._CACHE_DIAGNOSTICS_LOCK:
+                assert storage not in agent_storage._CACHE_DIAGNOSTICS
+            # Disposing SQLAlchemy's pool still permits later SQL reads, but
+            # explicit close ends this adapter's diagnostic lifetime.
+            assert get_agent_session(storage, "s1") is not None
+            with agent_storage._CACHE_DIAGNOSTICS_LOCK:
+                assert storage not in agent_storage._CACHE_DIAGNOSTICS
+        finally:
+            resume_report.set()
+            read.result(timeout=5)
+            storage.close()

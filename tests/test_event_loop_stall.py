@@ -574,3 +574,124 @@ async def test_start_helper_honors_disable_knob() -> None:
     assert detector is not None
     assert detector.threshold_seconds == _DEFAULT_EVENT_LOOP_STALL_THRESHOLD_SECONDS
     detector.stop()
+
+
+def test_gc_timing_is_deferred_and_keeps_collecting_thread_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Collection callbacks never log; their captured clocks survive deferred reporting."""
+    detector = _detector()
+    detector._gc_tracking = True
+    monotonic = iter((10.0, 12.0))
+    cpu = iter((3.0, 4.5))
+    monkeypatch.setattr(event_loop_stall.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(event_loop_stall.time, "thread_time", lambda: next(cpu))
+    with capture_logs() as logs:
+        detector._gc_callback("start", {"generation": 2})
+        detector._gc_callback("stop", {"generation": 2, "collected": 7, "uncollectable": 1})
+        assert logs == []
+        detector._report_gc()
+        detector._report_gc()
+    assert len(logs) == 1
+    assert logs[0]["event"] == "event_loop_gc_collection"
+    assert logs[0]["duration_seconds"] == 2.0
+    assert logs[0]["thread_cpu_seconds"] == 1.5
+    assert logs[0]["generation"] == 2
+    assert logs[0]["collected"] == 7
+    assert logs[0]["uncollectable"] == 1
+    assert logs[0]["thread_ident"] == threading.get_ident()
+
+
+def test_gc_records_are_bounded_and_report_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unavailable watcher cannot accumulate unbounded diagnostic records."""
+    detector = _detector()
+    detector._gc_tracking = True
+    ticks = iter(float(i) for i in range(600))
+    monkeypatch.setattr(event_loop_stall.time, "monotonic", lambda: next(ticks))
+    for _ in range(300):
+        detector._gc_callback("start", {"generation": 0})
+        detector._gc_callback("stop", {"generation": 0, "collected": 0, "uncollectable": 0})
+    with capture_logs() as logs:
+        detector._report_gc()
+    collections = [entry for entry in logs if entry["event"] == "event_loop_gc_collection"]
+    overflow = [entry for entry in logs if entry["event"] == "event_loop_gc_records_dropped"]
+    assert 0 < len(collections) < 300
+    assert sum(entry["count"] for entry in overflow) + len(collections) == 300
+
+
+@pytest.mark.asyncio
+async def test_gc_callback_follows_detector_lifecycle() -> None:
+    """Stopping diagnostics removes only its callback and drops incomplete collection state."""
+    import gc  # noqa: PLC0415
+
+    detector = _detector()
+    existing = list(gc.callbacks)
+    detector.start()
+    try:
+        assert detector._gc_callback in gc.callbacks
+        detector._gc_callback("start", {"generation": 2})
+    finally:
+        detector.stop()
+    assert gc.callbacks == existing
+    with capture_logs() as logs:
+        detector._gc_callback("stop", {"generation": 2, "collected": 1, "uncollectable": 0})
+        detector._report_gc()
+    assert logs == []
+
+
+def test_gc_overflow_count_survives_watcher_draining_during_record_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queue that was full before a concurrent drain has not lost its next record."""
+    detector = _detector()
+    detector._gc_tracking = True
+    ticks = iter(float(i) for i in range(2 * (event_loop_stall._MAX_GC_RECORDS + 1)))
+    monkeypatch.setattr(event_loop_stall.time, "monotonic", lambda: next(ticks))
+    for _ in range(event_loop_stall._MAX_GC_RECORDS):
+        detector._gc_callback("start", {"generation": 0})
+        detector._gc_callback("stop", {"generation": 0, "collected": 0, "uncollectable": 0})
+    record_type = event_loop_stall._GcCollection
+
+    def create_after_drain(*args: object) -> object:
+        detector._report_gc()
+        return record_type(*args)
+
+    monkeypatch.setattr(event_loop_stall, "_GcCollection", create_after_drain)
+    with capture_logs() as logs:
+        detector._gc_callback("start", {"generation": 0})
+        detector._gc_callback("stop", {"generation": 0, "collected": 0, "uncollectable": 0})
+        detector._report_gc()
+    assert len([entry for entry in logs if entry["event"] == "event_loop_gc_collection"]) == 129
+    assert not any(entry["event"] == "event_loop_gc_records_dropped" for entry in logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["running", "stopped", "stopped_before_start"])
+async def test_detector_rejects_repeated_or_stopped_start_without_leaking_callback(lifecycle: str) -> None:
+    """Rejected starts must neither replace owned resources nor retain global GC callbacks."""
+    import gc  # noqa: PLC0415
+
+    detector = _detector()
+    existing_callbacks = list(gc.callbacks)
+    first_thread = None
+    try:
+        if lifecycle != "stopped_before_start":
+            detector.start()
+            first_thread = detector._thread
+        if lifecycle != "running":
+            detector.stop()
+        thread = detector._thread
+        heartbeat = detector._heartbeat_handle
+        callbacks = list(gc.callbacks)
+        with pytest.raises(RuntimeError, match="only be started once"):
+            detector.start()
+        assert detector._thread is thread
+        assert detector._heartbeat_handle is heartbeat
+        assert gc.callbacks == callbacks
+        detector.stop()
+        assert gc.callbacks == existing_callbacks
+    finally:
+        detector.stop()
+        # Keep the red regression run from leaving a callback or watcher behind.
+        while detector._gc_callback in gc.callbacks:
+            gc.callbacks.remove(detector._gc_callback)
+        if first_thread is not None:
+            first_thread.join(timeout=2.0)

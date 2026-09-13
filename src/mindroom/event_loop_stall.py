@@ -17,6 +17,7 @@ suppressed captures still emit brief detection and recovery records.
 from __future__ import annotations
 
 import asyncio
+import gc
 import math
 import sys
 import threading
@@ -48,6 +49,8 @@ _MAX_STACK_FRAMES = 32
 # Eight one-thousand-character stacks bound stack text to eight thousand characters.
 _MAX_OTHER_THREAD_STACK_CHARACTERS = 1_000
 _STACK_TRUNCATION_MARKER = "\n...\n"
+_GC_REPORT_THRESHOLD_SECONDS = 0.05
+_MAX_GC_RECORDS = 128
 
 
 def _event_loop_stall_threshold_seconds(runtime_paths: RuntimePaths) -> float:
@@ -92,6 +95,20 @@ class _Heartbeat:
     process_cpu_seconds: float
 
 
+@dataclass(frozen=True, slots=True)
+class _GcCollection:
+    """Scalar collection evidence retained until the watcher can report it."""
+
+    sequence: int
+    generation: int
+    started_at: float
+    duration_seconds: float
+    thread_cpu_seconds: float
+    thread_ident: int
+    collected: int
+    uncollectable: int
+
+
 class EventLoopStallDetector:
     """Watch one event loop's heartbeat from a native daemon thread."""
 
@@ -124,9 +141,17 @@ class EventLoopStallDetector:
         self._scheduler_lag_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._gc_tracking = False
+        self._gc_started: tuple[float, float, float, int] | None = None
+        self._gc_records: deque[_GcCollection] = deque(maxlen=_MAX_GC_RECORDS)
+        self._gc_sequence = 0
+        self._gc_reported = 0
 
     def start(self) -> None:
-        """Arm the heartbeat on the running loop and start the watcher thread."""
+        """Arm this one-shot detector on the running loop and start its watcher."""
+        if self._loop is not None or self._stop_event.is_set():
+            msg = "Event-loop stall detector can only be started once"
+            raise RuntimeError(msg)
         self._loop = asyncio.get_running_loop()
         self._loop_thread_ident = threading.get_ident()
         self._heartbeat = _Heartbeat(
@@ -140,6 +165,8 @@ class EventLoopStallDetector:
             name="event-loop-stall-detector",
             daemon=True,
         )
+        self._gc_tracking = True
+        gc.callbacks.append(self._gc_callback)
         self._thread.start()
         logger.info(
             "event_loop_stall_detector_started",
@@ -149,6 +176,11 @@ class EventLoopStallDetector:
 
     def stop(self) -> None:
         """Stop the watcher thread and disarm the heartbeat."""
+        self._gc_tracking = False
+        if self._gc_callback in gc.callbacks:
+            gc.callbacks.remove(self._gc_callback)
+        self._gc_started = None
+        self._gc_records.clear()
         self._stop_event.set()
         if self._heartbeat_handle is not None:
             self._heartbeat_handle.cancel()
@@ -156,6 +188,66 @@ class EventLoopStallDetector:
         if self._thread is not None:
             self._thread.join(timeout=_THREAD_JOIN_TIMEOUT_SECONDS)
             self._thread = None
+
+    def _gc_callback(self, phase: str, info: dict[str, int]) -> None:
+        """Record slow collections without logging, locks, or heap inspection.
+
+        GC invokes this on the collecting thread. Blocking on a lock here can
+        deadlock a thread suspended by collection, so only publish bounded scalar
+        records; the watcher owns formatting and logging.
+        """
+        if not self._gc_tracking:
+            return
+        if phase == "start":
+            self._gc_started = (time.monotonic(), time.time(), time.thread_time(), threading.get_ident())
+            return
+        started = self._gc_started
+        self._gc_started = None
+        if started is None or phase != "stop":
+            return
+        monotonic, wall_time, cpu, thread_ident = started
+        duration = time.monotonic() - monotonic
+        thread_cpu = time.thread_time() - cpu
+        if duration < _GC_REPORT_THRESHOLD_SECONDS:
+            return
+        self._gc_sequence += 1
+        self._gc_records.append(
+            _GcCollection(
+                self._gc_sequence,
+                info["generation"],
+                wall_time,
+                duration,
+                thread_cpu,
+                thread_ident,
+                info["collected"],
+                info["uncollectable"],
+            ),
+        )
+
+    def _report_gc(self) -> None:
+        """Drain at most one bounded batch outside the collecting callback."""
+        dropped = 0
+        for _ in range(len(self._gc_records)):
+            try:
+                record = self._gc_records.popleft()
+            except IndexError:  # stop() may discard pending evidence concurrently.
+                break
+            # Sequence gaps remain accurate if the watcher drains while a new
+            # record is being built; checking queue fullness in the producer does not.
+            dropped += record.sequence - self._gc_reported - 1
+            self._gc_reported = record.sequence
+            logger.info(
+                "event_loop_gc_collection",
+                generation=record.generation,
+                started_at=datetime.fromtimestamp(record.started_at, UTC).isoformat(timespec="milliseconds"),
+                duration_seconds=round(record.duration_seconds, 6),
+                thread_cpu_seconds=round(record.thread_cpu_seconds, 6),
+                thread_ident=record.thread_ident,
+                collected=record.collected,
+                uncollectable=record.uncollectable,
+            )
+        if dropped:
+            logger.info("event_loop_gc_records_dropped", count=dropped)
 
     def _schedule_heartbeat(self, scheduled_loop_time: float) -> None:
         """Schedule one heartbeat while retaining its requested loop time."""
@@ -198,6 +290,7 @@ class EventLoopStallDetector:
             p95_ms=_nearest_rank_percentile(milliseconds, 95),
             p99_ms=_nearest_rank_percentile(milliseconds, 99),
             max_ms=milliseconds[-1],
+            gc_collections_total=[generation["collections"] for generation in gc.get_stats()],
             # Wall-clock boundaries aid correlation; elapsed lag uses the monotonic clock.
             max_lag_scheduled_at=datetime.fromtimestamp(max_scheduled_at, UTC).isoformat(timespec="milliseconds"),
             max_lag_observed_at=datetime.fromtimestamp(max_observed_at, UTC).isoformat(timespec="milliseconds"),
@@ -301,6 +394,7 @@ class EventLoopStallDetector:
         """Poll the heartbeat off-loop and log stalls with the blocking stack."""
         while not self._stop_event.wait(self.poll_interval_seconds):
             now = time.monotonic()
+            self._report_gc()
             self._report_scheduler_lag(now)
             heartbeat = self._heartbeat
             last_beat = heartbeat.monotonic_seconds
