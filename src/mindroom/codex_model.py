@@ -8,7 +8,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import httpx
 from agno.models.response import ModelResponse
@@ -233,6 +233,9 @@ def _merge_codex_extra_body(request_params: dict[str, Any], codex_extra_body: di
 @dataclass
 class CodexResponses(MindRoomOpenAIResponses):
     """Agno Responses model backed by the local Codex CLI ChatGPT OAuth credentials."""
+
+    # The ChatGPT Codex endpoint rejects the public API's explicit-cache field.
+    supports_prompt_cache_breakpoints: ClassVar[bool] = False
 
     id: str = CODEX_GPT
     name: str = "CodexResponses"

@@ -2604,6 +2604,18 @@ Changing those later sections does not invalidate the shared instruction prefix;
 The conversation cache boundaries still include the full system prompt, so repeated turns can reuse session context too.
 Set `extra_kwargs.cache_system_prompt: false` to disable MindRoom's automatic Claude cache boundaries, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime.
 
+## OpenAI Responses Prompt Caching
+
+The `openai` Responses API and `codex` providers send shared agent instructions as an initial developer message, followed by a separate developer message containing the current date and session context.
+Both messages retain system-instruction priority, and compaction summaries remain in the session-specific suffix.
+On the public OpenAI API, GPT-5.6 and later receive an explicit cache breakpoint at the end of the shared prefix, alongside the provider's default implicit caching.
+See [OpenAI's prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching) for cache eligibility and accounting.
+
+Codex, older models, and custom OpenAI-compatible endpoints receive the same split without the explicit breakpoint field.
+The Codex backend currently rejects that field, so cache reuse there still depends on provider-managed caching; splitting messages alone does not guarantee cross-conversation cache hits.
+Set `extra_kwargs.cache_system_prompt: false` to preserve the original unsplit system message.
+This option applies to Responses models; Chat Completions providers keep their existing request format.
+
 ## Configuration Examples
 
 ```yaml

@@ -15,6 +15,7 @@ from openai.types.responses import ResponseCompletedEvent, ResponseCreatedEvent,
 
 from mindroom.error_handling import IncompleteResponsesStreamError
 from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
+from mindroom.openai_prompt_cache import formatted_input_with_shared_system_prefix, supports_openai_cache_breakpoints
 from mindroom.openai_tool_search import (
     formatted_input_with_tool_search_items,
     model_deferred_tool_names,
@@ -90,6 +91,8 @@ class MindRoomOpenAIResponses(OpenAIResponses):
     """OpenAI Responses model that preserves completed response and tool-search state."""
 
     approval_receipt_after_response_id: ClassVar[bool] = True
+    supports_prompt_cache_breakpoints: ClassVar[bool] = True
+    cache_system_prompt: bool = True
 
     def __post_init__(self) -> None:
         """Use one storage setting for request construction and history replay."""
@@ -137,6 +140,11 @@ class MindRoomOpenAIResponses(OpenAIResponses):
         """Reinsert captured tool-search items that Agno drops from history."""
         messages = repair_legacy_openai_tool_replay(messages)
         formatted_input = super()._format_messages(messages, compress_tool_results, tools=tools)
+        if self.cache_system_prompt:
+            formatted_input = formatted_input_with_shared_system_prefix(
+                formatted_input,
+                explicit_breakpoint=self.supports_prompt_cache_breakpoints and supports_openai_cache_breakpoints(self),
+            )
         return formatted_input_with_tool_search_items(messages, formatted_input)
 
     def _parse_provider_response(self, response: Response, **kwargs: object) -> ModelResponse:

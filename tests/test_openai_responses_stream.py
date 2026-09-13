@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -26,6 +26,7 @@ from mindroom.codex_model import CodexResponses
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.provider_media_fallback import install_provider_media_fallback
+from mindroom.system_prompt import render_session_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -129,6 +130,61 @@ async def _invoke(model: MindRoomOpenAIResponses, *, sync: bool) -> AsyncIterato
     else:
         async for chunk in model.ainvoke_stream(messages, assistant):
             yield chunk
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+@pytest.mark.parametrize("stream", [True, False], ids=["stream", "blocking"])
+async def test_shared_prompt_breakpoint_reaches_api(
+    *,
+    sync: bool,
+    stream: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All Responses request paths serialize the stable boundary through the real SDK."""
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        completed = _response("resp_cached", "completed")
+        if stream:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_created("resp_cached") + _event("response.completed", response=completed),
+            )
+        return httpx.Response(200, json=completed)
+
+    transport = httpx.MockTransport(respond)
+    with OpenAI(api_key="test-key", http_client=httpx.Client(transport=transport)) as client:
+        async with AsyncOpenAI(api_key="test-key", http_client=httpx.AsyncClient(transport=transport)) as async_client:
+            model = MindRoomOpenAIResponses(id="gpt-6-astra", client=client, async_client=async_client, store=False)
+            for context in ("First conversation.", "Different conversation."):
+                messages = [
+                    Message(role="system", content="Shared instructions.\n" + render_session_context(context)),
+                    Message(role="user", content="Hello"),
+                ]
+                assistant = Message(role="assistant")
+                if stream and sync:
+                    list(model.invoke_stream(messages, assistant))
+                elif stream:
+                    async for _ in model.ainvoke_stream(messages, assistant):
+                        pass
+                elif sync:
+                    model.invoke(messages, assistant)
+                else:
+                    await model.ainvoke(messages, assistant)
+
+    first, second = requests
+    assert first["input"][0] == second["input"][0]
+    assert first["input"][0] == {
+        "role": "developer",
+        "content": [
+            {"type": "input_text", "text": "Shared instructions.\n", "prompt_cache_breakpoint": {"mode": "explicit"}},
+        ],
+    }
+    assert first["input"][1] != second["input"][1]
+    assert "prompt_cache_options" not in first
 
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
