@@ -403,6 +403,7 @@ async def prepare_scope_history(
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
         compaction_result = await _run_scope_compaction_with_lifecycle(
+            active_agent=agent,
             mode="manual" if state.force_compact_before_next_run else "auto",
             storage=scope_context.storage,
             session=session,
@@ -455,6 +456,7 @@ async def _run_scope_compaction_with_lifecycle(
     config: Config,
     runtime_paths: RuntimePaths,
     compaction_lifecycle: CompactionLifecycle | None,
+    active_agent: Agent | None = None,
 ) -> _ScopeCompactionLifecycleResult:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
@@ -499,6 +501,7 @@ async def _run_scope_compaction_with_lifecycle(
     progress_callback = _progress if lifecycle.enabled else None
     try:
         outcome = await _run_scope_compaction(
+            active_agent=active_agent,
             storage=storage,
             session=session,
             scope=scope,
@@ -559,6 +562,7 @@ async def _run_scope_compaction(
     runtime_paths: RuntimePaths,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    active_agent: Agent | None = None,
 ) -> CompactionOutcome | None:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
@@ -594,6 +598,11 @@ async def _run_scope_compaction(
                 exc_info=True,
             )
     return await compact_scope_history(
+        active_agent=(
+            active_agent
+            if scope.kind == "agent" and execution_plan.compaction_model_name == resolved_inputs.active_model_name
+            else None
+        ),
         storage=storage,
         session=session,
         scope=scope,

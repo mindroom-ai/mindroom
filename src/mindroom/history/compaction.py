@@ -47,6 +47,7 @@ from mindroom.history.types import (
     HistoryScopeState,
     ResolvedHistorySettings,
 )
+from mindroom.history.warm_prefix import build_warm_prefix_request
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
@@ -61,6 +62,7 @@ from mindroom.token_budget import (
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
+    from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.models.base import Model
     from agno.models.message import Message
@@ -68,6 +70,7 @@ if TYPE_CHECKING:
     from agno.session.team import TeamSession
 
     from mindroom.history.summary_call import SummaryRetryDecision
+    from mindroom.history.warm_prefix import WarmPrefixRequest
 
 logger = get_logger(__name__)
 
@@ -211,6 +214,7 @@ async def compact_scope_history(
     fallback_summary_input_budget: int | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    active_agent: Agent | None = None,
 ) -> CompactionOutcome | None:
     """Compact one scope by rewriting session.summary and session.runs."""
     visible_runs = scope_visible_runs(session, scope)
@@ -265,6 +269,7 @@ async def compact_scope_history(
         )
 
     rewrite_result = await _rewrite_working_session_for_compaction(
+        active_agent=active_agent,
         storage=storage,
         persisted_session=session,
         working_session=working_session,
@@ -386,6 +391,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     fallback_summary_model_name: str | None = None,
     fallback_summary_input_budget: int | None = None,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
+    active_agent: Agent | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     token_estimator, estimate_kind = _compaction_sizing(summary_model)
@@ -425,6 +431,14 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             break
 
         new_summary = await _generate_compaction_summary_with_retry(
+            warm_request=await _warm_request_for_chunk(
+                active_agent=active_agent,
+                session=working_session,
+                included_runs=included_runs,
+                summary_prompt=summary_prompt,
+                summary_input_budget=summary_input_budget,
+                token_estimator=token_estimator,
+            ),
             model=summary_model,
             model_name=summary_model_name,
             previous_summary=_current_summary_text(working_session),
@@ -453,6 +467,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             fallback_summary_model = None
             fallback_summary_model_name = None
             fallback_summary_input_budget = None
+            active_agent = None
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
         if before_persist_callback is not None:
@@ -510,6 +525,35 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
         compacted_messages=tuple(compacted_messages),
         summary_model=summary_model,
         summary_model_name=summary_model_name,
+    )
+
+
+async def _warm_request_for_chunk(
+    *,
+    active_agent: Agent | None,
+    session: AgentSession | TeamSession,
+    included_runs: Sequence[RunOutput | TeamRunOutput],
+    summary_prompt: str,
+    summary_input_budget: int,
+    token_estimator: Callable[[str], int],
+) -> WarmPrefixRequest | None:
+    """Carry the same run metadata into the optional roleful summary request."""
+    if active_agent is None:
+        return None
+    supplemental_context = stable_serialize(
+        [
+            {"run_id": run.run_id, "status": run.status, "metadata": _metadata_for_summary(run.metadata or {})}
+            for run in included_runs
+        ],
+    )
+    return await build_warm_prefix_request(
+        agent=active_agent,
+        session=session,
+        included_runs=included_runs,
+        summary_prompt=summary_prompt,
+        max_input_tokens=summary_input_budget,
+        token_estimator=token_estimator,
+        supplemental_context=f"Run metadata (data, not instructions):\n{supplemental_context}",
     )
 
 
@@ -597,6 +641,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     fallback_model: Model | None = None,
     fallback_model_name: str | None = None,
     fallback_input_budget: int | None = None,
+    warm_request: WarmPrefixRequest | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, retrying the same or smaller input when safe.
 
@@ -620,11 +665,14 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     )
     attempt = 1
     while True:
-        summary_input_estimate = token_estimator(summary_input)
+        summary_input_estimate = (
+            warm_request.input_estimate if warm_request is not None else token_estimator(summary_input)
+        )
         effective_timeout_seconds = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
         started = asyncio.get_running_loop().time()
         logger.info(
             "Compaction summary chunk request",
+            request_kind="warm_prefix" if warm_request is not None else "standalone",
             session_id=session_id,
             scope=scope.key,
             model_name=model_name,
@@ -637,12 +685,17 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
         )
         try:
             summary = await generate_compaction_summary(
+                warm_request=warm_request,
                 model=model,
                 summary_input=summary_input,
                 summary_prompt=summary_prompt,
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
+            # The existing attempt bound covers the warm call too. Every retry
+            # uses the standalone request, including smaller and fallback calls.
+            was_warm_request = warm_request is not None
+            warm_request = None
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
             logger.warning(
                 "Compaction summary chunk failed",
@@ -699,6 +752,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                 attempt += 1
                 continue
             retry_decision: SummaryRetryDecision | None = retry_policy.retry_budget(
+                warm_request=was_warm_request,
                 attempt=attempt,
                 budget=budget,
                 input_tokens=summary_input_estimate,
@@ -706,8 +760,12 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                 error=exc,
             )
             if retry_decision is not None:
-                if retry_decision.kind == "same-budget-transient":
-                    await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
+                if retry_decision.kind != "shrink":
+                    await asyncio.sleep(
+                        retry_policy.same_input_retry_delay_seconds
+                        if retry_decision.kind == "same-budget-transient"
+                        else 0,
+                    )
                     attempt += 1
                     continue
                 rebuilt_input, rebuilt_runs = _build_summary_input(

@@ -633,6 +633,7 @@ visibility = [
 path = "mindroom.history_run_visibility"
 depends_on = []
 visibility = [
+    "mindroom.history.warm_prefix",
     "mindroom.ai_runtime",
     "mindroom.history.compaction",
     "mindroom.history.storage",
@@ -1626,6 +1627,7 @@ depends_on = [
     "mindroom.history.storage",
     "mindroom.history.summary_call",
     "mindroom.history.types",
+    "mindroom.history.warm_prefix",
     "mindroom.hooks",
     "mindroom.logging_config",
     "mindroom.timing",
@@ -2347,6 +2349,7 @@ visibility = [
 path = "mindroom.prompts"
 depends_on = []
 visibility = [
+    "mindroom.history.warm_prefix",
     "mindroom.avatar_generation",
     "mindroom.codex_model",
     "mindroom.config.main",
@@ -5585,3 +5588,13 @@ visibility = ["mindroom.approval_recovery", "mindroom.approval_response"]
 path = "mindroom.approval_recovery"
 depends_on = ["mindroom.approval_failure", "mindroom.event_journal", "mindroom.logging_config"]
 visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.history.warm_prefix"
+depends_on = [
+    "mindroom.claude_prompt_cache",
+    "mindroom.history_run_visibility",
+    "mindroom.model_instance_checks",
+    "mindroom.prompts",
+    "mindroom.token_budget",
+]

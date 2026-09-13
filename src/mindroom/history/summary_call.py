@@ -4,8 +4,8 @@ This module is the only path for issuing a compaction summary model call.
 It enforces the call-side half of the compaction invariants
 (see ``tests/test_compaction_invariants.py``):
 
-3. Summary calls get exactly one model configuration path.
-   ``configure_summary_model`` applies all compaction-specific provider tuning in
+3. Standalone summary calls get exactly one model configuration path.
+   ``configure_summary_model`` applies all standalone provider tuning in
    one place: prompt-cache writes off, Claude thinking cleared (a thinking budget
    at or above max_tokens is a 400 from Anthropic), SDK retries disabled, and
    one SDK timeout coordinated with the caller's resolved chunk timeout
@@ -15,6 +15,9 @@ It enforces the call-side half of the compaction invariants
    enforced value without re-deriving the rule. Claude summary output uses the
    loaded model's own max_tokens as the truncation guard. Unknown providers pass
    through untouched and rely on the outer chunk timeout alone.
+   Eligible warm requests borrow the active model without mutating it: its
+   cache settings, thinking, SDK configuration, and routing identity survive.
+   The same outer timeout bounds both request modes.
 
 4. Retry on provider failure is deterministic.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
@@ -34,14 +37,16 @@ It enforces the call-side half of the compaction invariants
    and the retry wrapper can shrink input through ``SummaryRetryPolicy`` without
    depending on owned error-message text.
 
-``build_summary_request_messages`` is the single replaceable request builder; a
-future cache-friendly builder that reuses the active provider prefix (PR #861)
-plugs in behind it without another cross-cutting diff.
+``build_summary_request_messages`` builds standalone requests; ``warm_prefix``
+supplies optional agent-prefix snapshots. Warm requests use one ``ainvoke``
+without an executable tool loop. Rejected handoffs and oversized warm requests
+switch to standalone input within the existing retry limit.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -62,6 +67,8 @@ from mindroom.timing import timed
 if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.models.response import ModelResponse
+
+    from mindroom.history.warm_prefix import WarmPrefixRequest
 
 logger = get_logger(__name__)
 
@@ -128,6 +135,10 @@ class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
 
 
+class _CompactionWarmSummaryRejectedError(RuntimeError):
+    """An internal handoff attempted tools or failed to produce the handoff format."""
+
+
 _TYPED_SHRINKABLE_ERRORS = (
     _CompactionSummaryEmptyResultError,
     TimeoutError,
@@ -141,7 +152,7 @@ class SummaryRetryDecision:
     """One policy-owned retry action for the compaction summary caller."""
 
     budget: int
-    kind: Literal["shrink", "same-budget-transient"]
+    kind: Literal["shrink", "same-budget-transient", "standalone"]
 
 
 @dataclass(frozen=True)
@@ -177,6 +188,7 @@ class SummaryRetryPolicy:
         input_tokens: int,
         minimum_progress_input_tokens: int,
         error: Exception,
+        warm_request: bool = False,
     ) -> SummaryRetryDecision | None:
         """Return the next retry action, or None when retries end.
 
@@ -189,6 +201,8 @@ class SummaryRetryPolicy:
         """
         if attempt >= self.max_attempts:
             return None
+        if isinstance(error, _CompactionWarmSummaryRejectedError) or (warm_request and self.should_shrink(error)):
+            return SummaryRetryDecision(budget=budget, kind="standalone")
         if self.should_shrink(error):
             smaller_budget = min(
                 budget,
@@ -247,7 +261,7 @@ def configure_summary_model(model: Model, *, timeout_seconds: float) -> Model:
 
 
 def build_summary_request_messages(*, summary_prompt: str, summary_input: str) -> list[Message]:
-    """Build the model request for one summary call (single replaceable seam for #861)."""
+    """Build the standalone model request for one summary call."""
     return [
         Message(role="system", content=summary_prompt),
         Message(role="user", content=summary_input),
@@ -320,13 +334,28 @@ async def generate_compaction_summary(
     summary_input: str,
     summary_prompt: str,
     timeout_seconds: float,
+    warm_request: WarmPrefixRequest | None = None,
 ) -> SessionSummary:
     """Issue one compaction summary call with tuned provider config and one timeout."""
-    configured_model = configure_summary_model(model, timeout_seconds=timeout_seconds)
+    # A warm request borrows the active model unchanged: copying a model with
+    # installed method wrappers would keep closures bound to the original.
+    # Standalone requests still use their dedicated, tuned model instance.
+    configured_model = (
+        configure_summary_model(model, timeout_seconds=timeout_seconds) if warm_request is None else warm_request.model
+    )
     summary_output_limit = _summary_output_token_limit(configured_model)
 
     async def _request_summary() -> ModelResponse:
         try:
+            if warm_request is not None:
+                # aresponse owns a tool loop even with schema-only tools.
+                # ainvoke is one provider invocation and cannot run callbacks.
+                return await configured_model.ainvoke(
+                    messages=[message.model_copy(deep=True) for message in warm_request.messages],
+                    assistant_message=Message(role="assistant"),
+                    tools=list(warm_request.tools) or None,
+                    tool_choice=warm_request.tool_choice,
+                )
             return await model.aresponse(
                 messages=build_summary_request_messages(
                     summary_prompt=summary_prompt,
@@ -368,6 +397,15 @@ async def generate_compaction_summary(
         raise exc.original from exc
     raw_text = response.content if isinstance(response.content, str) else ""
     normalized_text = _normalize_compaction_summary_text(raw_text)
+    if warm_request is not None and (
+        response.tool_calls
+        or response.tool_executions
+        or not normalized_text.startswith("## Goal\n")
+        or re.findall(r"^## (.+)$", normalized_text, re.MULTILINE)
+        != ["Goal", "Constraints", "Progress", "Decisions", "Next Steps", "Critical Context"]
+    ):
+        msg = "compaction handoff requested tools or returned an invalid summary format"
+        raise _CompactionWarmSummaryRejectedError(msg)
     if not normalized_text:
         msg = (
             "summary generation returned no result "

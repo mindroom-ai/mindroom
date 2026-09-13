@@ -1654,6 +1654,8 @@ def _build_agent_instructions(
     if include_interactive_questions:
         instructions.append(config.get_prompt("INTERACTIVE_QUESTION_PROMPT"))
 
+    instructions.append(config.get_prompt("COMPACTION_MODE_INSTRUCTION"))
+
     dynamic_tooling_state_suffix = None
     if not disable_runtime_capabilities:
         dynamic_tooling_state_suffix = _build_dynamic_tooling_state_suffix(

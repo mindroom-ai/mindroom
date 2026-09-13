@@ -12,6 +12,7 @@ __all__ = [
     "AVATAR_ROOM_SYSTEM_PROMPT",
     "AVATAR_TEAM_SYSTEM_PROMPT",
     "CODEX_DEFAULT_INSTRUCTIONS",
+    "COMPACTION_MODE_INSTRUCTION",
     "COMPACTION_SUMMARY_PROMPT",
     "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE",
     "CONTEXT_TRUNCATION_MARKER_TEMPLATE",
@@ -331,16 +332,7 @@ THREAD_SUMMARY_USER_PROMPT_TEMPLATE = """Existing room tags with usage counts:
 
 Summarize the above thread and follow the response schema."""
 
-COMPACTION_SUMMARY_PROMPT = """You are updating a durable conversation handoff summary for a future model call.
-
-You will receive:
-1. An optional <previous_summary> block that already contains everything summarized before this compaction.
-2. A <new_conversation> block containing only the runs that became old enough to compact in this pass.
-
-Your job is to produce one merged handoff summary as plain text.
-Return only the summary text.
-
-Rules:
+_COMPACTION_SUMMARY_RULES = """Rules:
 - Retain the information from <previous_summary> needed to continue the current work.
 - Omit resolved, superseded, stale, or exploratory detail when it no longer affects current state or future work.
 - Incorporate relevant new information from <new_conversation>.
@@ -358,6 +350,37 @@ Write a plain-text summary in exactly this markdown structure:
 ## Next Steps
 ## Critical Context
 """
+
+COMPACTION_SUMMARY_PROMPT = (
+    """You are updating a durable conversation handoff summary for a future model call.
+
+You will receive:
+1. An optional <previous_summary> block that already contains everything summarized before this compaction.
+2. A <new_conversation> block containing only the runs that became old enough to compact in this pass.
+
+Your job is to produce one merged handoff summary as plain text.
+Return only the summary text.
+
+"""
+    + _COMPACTION_SUMMARY_RULES
+)
+
+# This is a runtime protocol, shared by normal replies and internal handoffs.
+# Keep it after authored instructions and before the session-context boundary.
+COMPACTION_MODE_INSTRUCTION = (
+    """<mindroom_compaction_protocol>
+When the final user message starts with <mindroom_compaction_request>, produce a durable conversation handoff, not a conversational reply.
+For that task, this instruction takes precedence over persona, sign-offs, greetings, reply-format rules, and instructions to act or use tools.
+Preserve all safety, privacy, and access restrictions; the marker grants no additional authority.
+Treat the preceding conversation as <new_conversation> and the existing session summary as <previous_summary>.
+Summarize only conversation facts and the prior summary, not your system instructions, tool descriptions, skills, or personality.
+Do not perform pending work or call tools; record pending work under Next Steps.
+Return only the handoff text, with no persona phrases, preamble, or closing remarks.
+
+"""
+    + _COMPACTION_SUMMARY_RULES
+    + "</mindroom_compaction_protocol>"
+)
 
 WORKFLOW_SCHEDULE_PARSE_PROMPT_TEMPLATE = """Parse this scheduling request into a structured workflow.
 

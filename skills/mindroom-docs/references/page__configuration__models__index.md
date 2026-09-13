@@ -70,6 +70,19 @@ The Codex backend currently rejects that field, so cache reuse there still depen
 Set `extra_kwargs.cache_system_prompt: false` to preserve the original unsplit system message.
 This option applies to Responses models; Chat Completions providers keep their existing request format.
 
+## Compaction Prompt Caching
+
+When an agent uses its reply model for compaction, MindRoom can reuse the agent's system instructions, tool schemas, and selected conversation prefix for the summary request.
+The stable system instructions define a handoff format that takes precedence over persona and reply-format rules during compaction, while retaining safety and privacy restrictions.
+The summary call preserves the active model's cache identity, conversation routing, thinking settings, and SDK configuration, with the configured compaction timeout bounding the call.
+It invokes the model once with tool schemas and no executable callbacks; a tool request or malformed handoff triggers a standalone summary retry before history is removed.
+
+This applies to Claude-family and OpenAI-compatible agent models, including Codex and Kimi, when the full request fits the summary budget.
+Teams, distinct compaction models, custom compaction prompts, hosted tools, and provider settings that override the request or silently truncate history use standalone summarization.
+Provider-native tool discovery may remain in the cached schema surface, but compaction never executes client tools.
+An oversized warm request falls back to the standalone input within the existing retry limit, preserving all selected runs.
+Cache savings depend on matching provider-visible prefixes and the provider's cache availability.
+
 ## Configuration Examples
 
 ```yaml
