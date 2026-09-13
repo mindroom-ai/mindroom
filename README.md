@@ -9,7 +9,7 @@
 [![Downloads](https://img.shields.io/pypi/dm/mindroom)](https://pypi.org/project/mindroom/)
 [![GitHub](https://img.shields.io/badge/github-mindroom--ai%2Fmindroom-blue?logo=github)](https://github.com/mindroom-ai/mindroom)
 
-<img src="frontend/public/logo.png" alt="MindRoom Logo" align="right" width="150" />
+<img src="assets/logo/logo.svg" alt="MindRoom Logo" align="right" width="150" />
 
 **AI agents that live in your chat rooms.**
 
