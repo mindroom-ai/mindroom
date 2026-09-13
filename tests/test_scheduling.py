@@ -2062,6 +2062,16 @@ async def test_save_edited_scheduled_task_preserves_created_at() -> None:
         workflow=existing_workflow,
     )
 
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={
+            "status": "pending",
+            "workflow": existing_task.workflow.model_dump_json(),
+            "created_at": created_at.isoformat(),
+        },
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
+        state_key="task123",
+        room_id="!test:server",
+    )
     updated_task = await save_edited_scheduled_task(
         client=client,
         room_id="!test:server",
@@ -2108,6 +2118,16 @@ async def test_save_edited_scheduled_task_is_state_only() -> None:
         room_id="!test:server",
     )
 
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={
+            "status": "pending",
+            "workflow": existing_task.workflow.model_dump_json(),
+            "created_at": created_at.isoformat(),
+        },
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
+        state_key="task123",
+        room_id="!test:server",
+    )
     updated_task = await save_edited_scheduled_task(
         client=client,
         room_id="!test:server",

@@ -9,9 +9,10 @@ Schedule agents or teams to perform tasks at specific times or intervals using n
 By default, tasks run in the same scope where they were created: the room timeline for room-level schedules, or the current thread for threaded schedules.
 The `schedule()` tool accepts `new_thread=True` to start a fresh thread per fire: each fire posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
 
-Schedules are automatically canceled when their creator leaves or is removed from the room, including when account deactivation removes their room membership.
+Schedules with a recorded creator are automatically canceled when that creator leaves or is removed from the room, including when account deactivation removes their room membership.
 The scheduler checks membership every 30 seconds while waiting and again before execution, including after a restart.
 If membership cannot be verified, execution waits for a successful lookup.
+Legacy schedules without a recorded creator remain usable.
 
 ## Commands
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, patch
@@ -62,6 +63,7 @@ def _owner_schedule(
 
     async def write_state(room_id: str, event_type: str, state_key: str, content: dict[str, Any]) -> object:
         assert (room_id, event_type, state_key) == ("!test:server", "com.mindroom.scheduled.task", "owner_task")
+        state.clear()
         state.update(content)
         return nio.RoomPutStateResponse("$state", room_id)
 
@@ -82,7 +84,7 @@ async def test_departed_owner_cancels_persisted_schedule(membership: str) -> Non
     """Leaving, removal, or deactivation must retire the creator's pending task."""
     client, workflow, state = _owner_schedule([{"membership": membership}])
 
-    task = await scheduling._get_pending_task_record_retrying(client, "!test:server", "owner_task")
+    task = await scheduling._reconcile_runnable_task_retrying(client, "!test:server", "owner_task")
 
     assert task is None
     assert state["status"] == "cancelled"
@@ -96,7 +98,7 @@ async def test_joined_or_unowned_schedule_stays_pending(created_by: str | None) 
     """Other owners and existing schedules without ownership must remain usable."""
     client, _, state = _owner_schedule([{"membership": "join"}], created_by=created_by)
 
-    task = await scheduling._get_pending_task_record_retrying(client, "!test:server", "owner_task")
+    task = await scheduling._reconcile_runnable_task_retrying(client, "!test:server", "owner_task")
 
     assert task is not None
     assert state["status"] == "pending"
@@ -189,10 +191,156 @@ async def test_unknown_membership_waits_for_authoritative_state(
         client.room_put_state.assert_not_awaited()
 
     with patch("mindroom.scheduling.asyncio.sleep", side_effect=wait_for_retry) as sleep:
-        task = await scheduling._get_pending_task_record_retrying(client, "!test:server", "owner_task")
+        task = await scheduling._reconcile_runnable_task_retrying(client, "!test:server", "owner_task")
 
     assert task is not None
     sleep.assert_awaited_once()
+    assert state["status"] == "pending"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("editor", "message"),
+    [("@alice:server", "Edited request"), ("@bob:server", "Edited request"), ("@alice:server", "Check the queue")],
+)
+async def test_edit_during_membership_lookup_survives_stale_departure(
+    editor: str,
+    message: str,
+    tmp_path: Path,
+) -> None:
+    """A completed edit must invalidate departure evidence for the old workflow."""
+    client, workflow, state = _owner_schedule([{"membership": "leave"}])
+    existing = await scheduling.get_scheduled_task(client, "!test:server", "owner_task")
+    assert existing is not None
+    lookup_started = asyncio.Event()
+    resume_lookup = asyncio.Event()
+    read_state = client.room_get_state_event.side_effect
+
+    async def blocked_lookup(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == "m.room.member":
+            if not lookup_started.is_set():
+                lookup_started.set()
+                await resume_lookup.wait()
+                membership = "leave"
+            else:
+                assert state_key == editor
+                membership = "join"
+            return nio.RoomGetStateEventResponse({"membership": membership}, event_type, state_key, room_id)
+        return await read_state(room_id, event_type, state_key)
+
+    client.room_get_state_event.side_effect = blocked_lookup
+    updated = workflow.model_copy(update={"message": message, "created_by": editor})
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    with patch(
+        "mindroom.scheduling_executor.execute_scheduled_workflow",
+        return_value=ScheduledWorkflowOutcome(status="delivered"),
+    ) as execute:
+        async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
+            tasks.create_task(
+                scheduling._run_once_task(
+                    client,
+                    "owner_task",
+                    workflow,
+                    Config(),
+                    runtime_paths,
+                    make_conversation_reader_mock(),
+                ),
+            )
+            await lookup_started.wait()
+            await scheduling.save_edited_scheduled_task(client, "!test:server", "owner_task", updated, existing)
+            resume_lookup.set()
+
+    execute.assert_awaited_once()
+    assert execute.await_args.args[1] == updated
+    assert state["status"] == "completed"
+    assert state["workflow"] == updated.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_edit_cannot_resurrect_schedule_while_cancellation_is_persisting() -> None:
+    """Runtime cancellation and a separate API client must serialize their writes."""
+    client, workflow, state = _owner_schedule([{"membership": "leave"}])
+    existing = await scheduling.get_scheduled_task(client, "!test:server", "owner_task")
+    assert existing is not None
+    write_started = asyncio.Event()
+    resume_write = asyncio.Event()
+    edit_started = asyncio.Event()
+    write_state = client.room_put_state.side_effect
+
+    async def blocked_write(room_id: str, event_type: str, state_key: str, content: dict[str, Any]) -> object:
+        if content["status"] == "cancelled":
+            write_started.set()
+            await resume_write.wait()
+        return await write_state(room_id, event_type, state_key, content)
+
+    client.room_put_state.side_effect = blocked_write
+    api_client = make_matrix_client_mock(user_id="@router:server")
+    api_client.homeserver = client.homeserver
+    api_client.room_get_state_event.side_effect = client.room_get_state_event.side_effect
+    api_client.room_put_state.side_effect = write_state
+
+    async def edit() -> None:
+        edit_started.set()
+        with pytest.raises(ValueError, match="cannot be edited"):
+            await scheduling.save_edited_scheduled_task(
+                api_client,
+                "!test:server",
+                "owner_task",
+                workflow.model_copy(update={"message": "Late edit"}),
+                existing,
+            )
+
+    async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
+        tasks.create_task(scheduling._reconcile_runnable_task_retrying(client, "!test:server", "owner_task"))
+        await write_started.wait()
+        tasks.create_task(edit())
+        await edit_started.wait()
+        resume_write.set()
+
+    assert state["status"] == "cancelled"
+    api_client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_edit_during_cancellation_retry_invalidates_old_departure() -> None:
+    """Retry sleep must allow a rejoined creator to replace the departed workflow."""
+    client, workflow, state = _owner_schedule([{"membership": "leave"}, {"membership": "join"}])
+    existing = await scheduling.get_scheduled_task(client, "!test:server", "owner_task")
+    assert existing is not None
+    updated = workflow.model_copy(update={"message": "New request after rejoining"})
+    write_state = client.room_put_state.side_effect
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateError("unavailable", "M_UNKNOWN")
+
+    async def edit_on_retry(_delay: float) -> None:
+        client.room_put_state.side_effect = write_state
+        await scheduling.save_edited_scheduled_task(client, "!test:server", "owner_task", updated, existing)
+
+    with patch("mindroom.scheduling.asyncio.sleep", side_effect=edit_on_retry):
+        runnable = await scheduling._reconcile_runnable_task_retrying(client, "!test:server", "owner_task")
+
+    assert runnable is not None
+    assert runnable.workflow == updated
+    assert state["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_stale_edit_cannot_overwrite_a_newer_workflow() -> None:
+    """Slow parsing must not overwrite an intervening committed edit."""
+    client, workflow, state = _owner_schedule([{"membership": "join"}])
+    existing = await scheduling.get_scheduled_task(client, "!test:server", "owner_task")
+    assert existing is not None
+    updated = workflow.model_copy(update={"message": "First edit"})
+    await scheduling.save_edited_scheduled_task(client, "!test:server", "owner_task", updated, existing)
+
+    with pytest.raises(ValueError, match="changed"):
+        await scheduling.save_edited_scheduled_task(client, "!test:server", "owner_task", workflow, existing)
+
+    assert state["workflow"] == updated.model_dump_json()
     assert state["status"] == "pending"
 
 
@@ -255,7 +403,7 @@ async def test_cancellation_write_failure_retries_without_reviving_departed_owne
         client.room_put_state.side_effect = write_state
 
     with patch("mindroom.scheduling.asyncio.sleep", side_effect=recover_state_write) as sleep:
-        task = await scheduling._get_pending_task_record_retrying(client, "!test:server", "owner_task")
+        task = await scheduling._reconcile_runnable_task_retrying(client, "!test:server", "owner_task")
 
     assert task is None
     assert state["status"] == "cancelled"
