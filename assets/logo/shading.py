@@ -38,9 +38,9 @@ def render(root: etree._Element, size: int = 1024) -> bytes:
 
 
 def pixels(png: bytes) -> NDArray[np.uint8]:
-    """Decode a PNG render into its RGB pixel array."""
+    """Decode RGBA pixels so output verification also checks transparency."""
     with Image.open(BytesIO(png)) as image:
-        return np.asarray(image.convert("RGB"))
+        return np.asarray(image.convert("RGBA"))
 
 
 def color_hex(color: Colors) -> str:
