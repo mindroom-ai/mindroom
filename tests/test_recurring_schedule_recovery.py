@@ -85,6 +85,14 @@ def client_for(task: ScheduledWorkflow) -> AsyncMock:
         event_type="com.mindroom.scheduled.task",
         state_key="daily",
     )
+
+    async def read_state(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
+        if event_type == "m.room.member":
+            assert state_key == task.created_by
+            return nio.RoomGetStateEventResponse({"membership": "join"}, event_type, state_key, room_id)
+        return client.room_get_state_event.return_value
+
+    client.room_get_state_event.side_effect = read_state
     return client
 
 

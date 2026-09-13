@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Literal, NamedTuple
+from weakref import WeakValueDictionary
 from zoneinfo import ZoneInfo
 
 import humanize
@@ -69,6 +70,19 @@ _DEFERRED_OVERDUE_TASK_START_DELAY_SECONDS = 0.25
 _running_tasks: dict[str, asyncio.Task] = {}
 _deferred_overdue_tasks: deque[_DeferredOverdueTaskStart] = deque()
 _deferred_overdue_task_ids: set[str] = set()
+
+# Shared by the runtime and API clients in this process; Matrix state has no compare-and-swap.
+_schedule_edit_locks: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = WeakValueDictionary()
+
+
+def _schedule_edit_lock(client: nio.AsyncClient, room_id: str, task_id: str) -> asyncio.Lock:
+    """Serialize edits with creator-departure cancellation across local clients."""
+    key = (client.homeserver, room_id, task_id)
+    lock = _schedule_edit_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _schedule_edit_locks[key] = lock
+    return lock
 
 
 class _ScheduledTaskStateReadError(RuntimeError):
@@ -164,6 +178,7 @@ class ScheduledTaskRecord:
     status: str
     created_at: datetime | None
     workflow: ScheduledWorkflow
+    revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -359,12 +374,14 @@ def _parse_scheduled_task_record(
         return None
 
     created_at = _parse_datetime(content.get("created_at"))
+    revision = content.get("revision")
     return ScheduledTaskRecord(
         task_id=task_id,
         room_id=room_id,
         status=status,
         created_at=created_at,
         workflow=workflow,
+        revision=revision if isinstance(revision, str) else None,
     )
 
 
@@ -702,15 +719,62 @@ async def _get_pending_task_record(
     return task_record
 
 
-async def _get_pending_task_record_retrying(
+async def _scheduled_task_creator_is_joined(client: nio.AsyncClient, task: ScheduledTaskRecord) -> bool:
+    """Check current Matrix membership without trusting a partial or stale room cache."""
+    creator = task.workflow.created_by
+    if not creator:
+        return True
+    try:
+        response = await client.room_get_state_event(
+            room_id=task.room_id,
+            event_type="m.room.member",
+            state_key=creator,
+        )
+    except Exception as exc:
+        msg = f"Failed to read schedule creator membership for {creator!r} in room {task.room_id!r}"
+        raise _ScheduledTaskStateReadError(msg) from exc
+    if isinstance(response, nio.RoomGetStateEventResponse) and isinstance(response.content, dict):
+        membership = response.content.get("membership")
+        if membership in ("join", "leave", "ban", "invite", "knock"):
+            return membership == "join"
+    # Errors (including missing/inaccessible state) do not prove a departure.
+    msg = f"Could not establish schedule creator membership for {creator!r} in room {task.room_id!r}"
+    raise _ScheduledTaskStateReadError(msg)
+
+
+async def _reconcile_runnable_task_retrying(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
+    matrix_admin: HookMatrixAdmin | None = None,
 ) -> ScheduledTaskRecord | None:
-    """Read runner-owned task state until Matrix proves its current status."""
+    """Return runnable state, cancelling departed creators' tasks and retrying uncertainty."""
+    departed_task: ScheduledTaskRecord | None = None
     while True:
         try:
-            return await _get_pending_task_record(client=client, room_id=room_id, task_id=task_id)
+            task = await _get_pending_task_record(client=client, room_id=room_id, task_id=task_id)
+            if task is None:
+                return None
+            if departed_task != task:
+                if await _scheduled_task_creator_is_joined(client, task):
+                    return task
+                departed_task = task
+
+            async with _schedule_edit_lock(client, room_id, task_id):
+                current_task = await _get_pending_task_record(client=client, room_id=room_id, task_id=task_id)
+                if current_task is None:
+                    return None
+                if current_task != departed_task:
+                    continue
+                await _persist_scheduled_task_state(
+                    client=client,
+                    room_id=room_id,
+                    task_id=task_id,
+                    workflow=current_task.workflow,
+                    status="cancelled",
+                    created_at=current_task.created_at,
+                    matrix_admin=matrix_admin,
+                )
         except _ScheduledTaskStateReadError as exc:
             logger.warning(
                 "scheduled_task_state_read_failed_retrying",
@@ -719,6 +783,22 @@ async def _get_pending_task_record_retrying(
                 error=str(exc),
             )
             await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+        except ValueError as exc:
+            logger.warning(
+                "scheduled_task_owner_cancellation_failed_retrying",
+                room_id=room_id,
+                task_id=task_id,
+                error=str(exc),
+            )
+            await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
+        else:
+            logger.info(
+                "scheduled_task_cancelled_after_creator_left",
+                room_id=room_id,
+                task_id=task_id,
+                created_by=task.workflow.created_by,
+            )
+            return None
 
 
 def _serialize_scheduled_task_created_at(created_at: datetime | str | None) -> str:
@@ -786,10 +866,12 @@ async def _persist_scheduled_task_state(
     status: str = "pending",
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
-) -> None:
-    """Persist scheduled task state to Matrix."""
+) -> str:
+    """Persist scheduled task state to Matrix and return its unique revision."""
+    revision = str(uuid.uuid4())
     content = {
         "task_id": task_id,
+        "revision": revision,
         "workflow": workflow.model_dump_json(),
         "cron_description": (
             workflow.cron_schedule.to_natural_language()
@@ -807,6 +889,7 @@ async def _persist_scheduled_task_state(
         content=content,
         matrix_admin=matrix_admin,
     )
+    return revision
 
 
 async def _save_pending_scheduled_task(
@@ -876,15 +959,23 @@ async def save_edited_scheduled_task(
     if workflow.schedule_type != existing_task.workflow.schedule_type:
         raise ValueError(_SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
 
-    await _persist_scheduled_task_state(
-        client=client,
-        room_id=room_id,
-        task_id=task_id,
-        workflow=workflow,
-        status="pending",
-        created_at=existing_task.created_at,
-        matrix_admin=matrix_admin,
-    )
+    async with _schedule_edit_lock(client, room_id, task_id):
+        current_task = await get_scheduled_task(client, room_id, task_id)
+        if current_task is None or current_task.status != "pending":
+            msg = f"Task `{task_id}` cannot be edited because it is no longer pending."
+            raise ValueError(msg)
+        if current_task != existing_task:
+            msg = f"Task `{task_id}` changed while it was being edited; refresh and retry."
+            raise ValueError(msg)
+        revision = await _persist_scheduled_task_state(
+            client=client,
+            room_id=room_id,
+            task_id=task_id,
+            workflow=workflow,
+            status="pending",
+            created_at=current_task.created_at,
+            matrix_admin=matrix_admin,
+        )
 
     return ScheduledTaskRecord(
         task_id=task_id,
@@ -892,6 +983,7 @@ async def save_edited_scheduled_task(
         status="pending",
         created_at=existing_task.created_at,
         workflow=workflow,
+        revision=revision,
     )
 
 
@@ -1011,10 +1103,11 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     current_target = MessageTarget.for_scheduled_task(workflow)
     try:
         while True:
-            latest_task = await _get_pending_task_record_retrying(
+            latest_task = await _reconcile_runnable_task_retrying(
                 client=client,
                 room_id=task_room_id,
                 task_id=task_id,
+                matrix_admin=matrix_admin,
             )
             if not latest_task:
                 with bound_log_context(**current_target.log_context):
@@ -1056,10 +1149,11 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         break
                     await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
 
-                    refreshed_task = await _get_pending_task_record_retrying(
+                    refreshed_task = await _reconcile_runnable_task_retrying(
                         client=client,
                         room_id=task_room_id,
                         task_id=task_id,
+                        matrix_admin=matrix_admin,
                     )
                     if not refreshed_task:
                         logger.info("Recurring task cancelled while waiting, stopping", task_id=task_id)
@@ -1079,10 +1173,11 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 if workflow_changed:
                     continue
 
-                latest_before_execute = await _get_pending_task_record_retrying(
+                latest_before_execute = await _reconcile_runnable_task_retrying(
                     client=client,
                     room_id=task_room_id,
                     task_id=task_id,
+                    matrix_admin=matrix_admin,
                 )
                 if not latest_before_execute:
                     logger.info("Recurring task cancelled before execution, stopping", task_id=task_id)
@@ -1165,10 +1260,11 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
     latest_pending_task: ScheduledTaskRecord | None = None
     try:
         while True:
-            latest_task = await _get_pending_task_record_retrying(
+            latest_task = await _reconcile_runnable_task_retrying(
                 client=client,
                 room_id=task_room_id,
                 task_id=task_id,
+                matrix_admin=matrix_admin,
             )
             if not latest_task:
                 with bound_log_context(**current_target.log_context):
@@ -1189,10 +1285,11 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                     break
                 await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
 
-        latest_before_execute = await _get_pending_task_record_retrying(
+        latest_before_execute = await _reconcile_runnable_task_retrying(
             client=client,
             room_id=task_room_id,
             task_id=task_id,
+            matrix_admin=matrix_admin,
         )
         if not latest_before_execute:
             with bound_log_context(**current_target.log_context):

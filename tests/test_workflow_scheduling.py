@@ -1093,6 +1093,18 @@ class TestIntegrationWithScheduling:
             ),
         )
 
+        assert existing_task.created_at is not None
+        client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+            content={
+                "status": "pending",
+                "workflow": existing_task.workflow.model_dump_json(),
+                "created_at": existing_task.created_at.isoformat(),
+            },
+            event_type="com.mindroom.scheduled.task",
+            state_key="task123",
+            room_id="!room:server",
+        )
+
         task_id, message = await schedule_task(
             runtime=make_test_scheduling_runtime(
                 client=client,
@@ -1186,6 +1198,18 @@ class TestIntegrationWithScheduling:
                 thread_id="$thread123",
                 created_by="@user:server",
             ),
+        )
+
+        assert existing_task.created_at is not None
+        client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+            content={
+                "status": "pending",
+                "workflow": existing_task.workflow.model_dump_json(),
+                "created_at": existing_task.created_at.isoformat(),
+            },
+            event_type="com.mindroom.scheduled.task",
+            state_key="task123",
+            room_id="!room:server",
         )
 
         task_id, message = await schedule_task(
