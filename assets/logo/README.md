@@ -138,4 +138,5 @@ The logo workflow runs these tests and regenerates the committed outputs in chec
 For visual review, rasterize the complete SVG at the desired resolution before cropping individual junctions; keep the original `viewBox` so pattern coordinates remain unchanged.
 Inspect enlarged junctions as well as the full logo, because a whole-image pixel error can hide local edge defects.
 
-The repository README uses the background SVG, while application headers use the framed transparent mark.
+The repository README selects the animated transparent SVG when motion is allowed, with the static transparent SVG as its reduced-motion and compatibility fallback.
+Application headers use the static framed transparent mark.
