@@ -143,6 +143,7 @@ def test_installation_is_exact_version_guarded_and_idempotent() -> None:
         agent_storage_module.aread_session,
         agent_session_module.asave_session,
         agent_session_module.asave_run,
+        team_session_module.aget_session,
         team_session_module.asave_session,
         team_session_module.asave_run,
     )
@@ -153,6 +154,7 @@ def test_installation_is_exact_version_guarded_and_idempotent() -> None:
         agent_storage_module.aread_session,
         agent_session_module.asave_session,
         agent_session_module.asave_run,
+        team_session_module.aget_session,
         team_session_module.asave_session,
         team_session_module.asave_run,
     ) == installed
@@ -1175,16 +1177,20 @@ async def test_registered_run_saves_run_on_a_dedicated_thread(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_read", [False, True])
+@pytest.mark.parametrize("surface", ["agent", "team"])
 async def test_async_session_read_shares_save_lane_and_drains_cancellation(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cancel_read: bool,
+    surface: _Surface,
 ) -> None:
     """A preload follows queued writes and owns its lane until a cancelled read ends."""
     storage = _storage(tmp_path, "read-order")
-    owner = Agent(db=storage, telemetry=False)
-    before = AgentSession(session_id="shared", session_data={}, metadata={"value": "before"})
-    after = AgentSession(session_id="shared", session_data={}, metadata={"value": "after"})
+    owner, before = _owner_and_session(surface, storage, "shared")
+    before.metadata = {"value": "before"}
+    after = copy_session(before)
+    after.metadata = {"value": "after"}
+    session_class = AgentSession if surface == "agent" else TeamSession
     save_started = threading.Event()
     release_save = threading.Event()
     read_started = threading.Event()
@@ -1193,7 +1199,7 @@ async def test_async_session_read_shares_save_lane_and_drains_cancellation(  # n
     original_upsert = storage.upsert_session
     original_read = storage.get_session
 
-    def blocked_upsert(session: AgentSession, deserialize: bool | None = True) -> object:
+    def blocked_upsert(session: AgentSession | TeamSession, deserialize: bool | None = True) -> object:
         value = str((session.metadata or {})["value"])
         order.append(value)
         if value == "before":
@@ -1214,7 +1220,7 @@ async def test_async_session_read_shares_save_lane_and_drains_cancellation(  # n
     next_save: asyncio.Task[None] | None = None
     try:
         assert await asyncio.to_thread(save_started.wait, 5)
-        reading = asyncio.create_task(agent_storage_module.aread_session(owner, "shared"))
+        reading = asyncio.create_task(owner.aget_session("shared", user_id="before"))
         await asyncio.sleep(0)
         assert not read_started.is_set(), "Session read overtook its queued save"
         release_save.set()
@@ -1233,12 +1239,12 @@ async def test_async_session_read_shares_save_lane_and_drains_cancellation(  # n
                 await reading
         else:
             loaded = await reading
-            assert isinstance(loaded, AgentSession)
+            assert isinstance(loaded, session_class)
             assert loaded.metadata == {"value": "before"}
         await asyncio.gather(saving, next_save)
         assert order == ["before", "read", "after"]
-        persisted = original_read("shared")
-        assert isinstance(persisted, AgentSession)
+        persisted = original_read("shared", session_type=SessionType.AGENT if surface == "agent" else SessionType.TEAM)
+        assert isinstance(persisted, session_class)
         assert persisted.metadata == {"value": "after"}
     finally:
         release_save.set()
@@ -1254,9 +1260,15 @@ async def test_async_session_read_shares_save_lane_and_drains_cancellation(  # n
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native_async", [False, True])
-async def test_async_session_read_preserves_unregistered_database_behavior(tmp_path: Path, native_async: bool) -> None:
+@pytest.mark.parametrize("surface", ["agent", "team"])
+async def test_async_session_read_preserves_unregistered_database_behavior(
+    tmp_path: Path,
+    native_async: bool,
+    surface: _Surface,
+) -> None:
     """The guarded boundary delegates both ordinary sync and native async adapters."""
-    session = AgentSession(session_id="shared", metadata={"value": "stored"})
+    session_class = AgentSession if surface == "agent" else TeamSession
+    session = session_class(session_id="shared", metadata={"value": "stored"})
     database = (
         AsyncSqliteDb(db_file=str(tmp_path / "plain.db"))
         if native_async
@@ -1269,8 +1281,13 @@ async def test_async_session_read_preserves_unregistered_database_behavior(tmp_p
             await database.upsert_session(session)
         else:
             database.upsert_session(session)
-        loaded = await agent_storage_module.aread_session(Agent(db=database, telemetry=False), "shared")
-        assert isinstance(loaded, AgentSession)
+        owner = (
+            Agent(db=database, telemetry=False)
+            if surface == "agent"
+            else Team(db=database, members=[], telemetry=False)
+        )
+        loaded = await owner.aget_session("shared")
+        assert isinstance(loaded, session_class)
         assert loaded.metadata == {"value": "stored"}
     finally:
         if isinstance(database, AsyncSqliteDb):

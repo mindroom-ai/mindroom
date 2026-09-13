@@ -50,6 +50,8 @@ _ORIGINAL_AGENT_ASAVE_SESSION = agent_session.asave_session
 _ORIGINAL_AGENT_SAVE_SESSION = agent_session.save_session
 _ORIGINAL_AGENT_ASAVE_RUN = agent_session.asave_run
 _ORIGINAL_AGENT_SAVE_RUN = agent_session.save_run
+_ORIGINAL_TEAM_AGET_SESSION = team_session.aget_session
+_ORIGINAL_TEAM_GET_SESSION = team_session.get_session
 _ORIGINAL_TEAM_ASAVE_SESSION = team_session.asave_session
 _ORIGINAL_TEAM_SAVE_SESSION = team_session.save_session
 _ORIGINAL_TEAM_ASAVE_RUN = team_session.asave_run
@@ -187,17 +189,30 @@ async def _agent_aread_session(
     lane = _agent_lane(agent)
     if lane is None:
         return await _ORIGINAL_AGENT_AREAD_SESSION(agent, session_id, session_type, user_id, runs_limit)
-    context = contextvars.copy_context()
-    worker = lane.executor.submit(
-        context.run,
-        _ORIGINAL_AGENT_READ_SESSION,
-        agent,
-        session_id,
-        session_type,
-        user_id,
-        runs_limit,
+    return await _offload_sync_read(
+        lane,
+        partial(_ORIGINAL_AGENT_READ_SESSION, agent, session_id, session_type, user_id, runs_limit),
     )
-    return cast("_AgentSession | None", await wait_for_future_until_complete(asyncio.wrap_future(worker)))
+
+
+async def _offload_sync_read[Result](lane: _PersistenceLane, read: Callable[[], Result]) -> Result:
+    """Read after accepted writes and drain cancellation before releasing ownership."""
+    context = contextvars.copy_context()
+    worker = lane.executor.submit(context.run, read)
+    return cast("Result", await wait_for_future_until_complete(asyncio.wrap_future(worker)))
+
+
+async def _team_aget_session(
+    team: Team,
+    session_id: str | None = None,
+    user_id: str | None = None,
+) -> TeamSession | None:
+    """Keep registered team continuation reads in the same FIFO lane as saves."""
+    lane = _team_lane(team)
+    if lane is None:
+        return await _ORIGINAL_TEAM_AGET_SESSION(team, session_id, user_id)
+    # Pinned Agno's aget_session bypasses _aread_session for synchronous databases.
+    return await _offload_sync_read(lane, partial(_ORIGINAL_TEAM_GET_SESSION, team, session_id, user_id))
 
 
 async def _agent_asave_session(agent: Agent, session: _AgentSession) -> None:
@@ -251,6 +266,7 @@ def _is_applied() -> bool:
         and agent_storage.aread_session is _agent_aread_session
         and agent_session.asave_session is _agent_asave_session
         and agent_session.asave_run is _agent_asave_run
+        and team_session.aget_session is _team_aget_session
         and team_session.asave_session is _team_asave_session
         and team_session.asave_run is _team_asave_run
     )
@@ -270,6 +286,7 @@ def _apply_patch() -> bool:
             or agent_storage.aread_session is not _ORIGINAL_AGENT_AREAD_SESSION
             or agent_session.asave_session is not _ORIGINAL_AGENT_ASAVE_SESSION
             or agent_session.asave_run is not _ORIGINAL_AGENT_ASAVE_RUN
+            or team_session.aget_session is not _ORIGINAL_TEAM_AGET_SESSION
             or team_session.asave_session is not _ORIGINAL_TEAM_ASAVE_SESSION
             or team_session.asave_run is not _ORIGINAL_TEAM_ASAVE_RUN
         ):
@@ -277,6 +294,7 @@ def _apply_patch() -> bool:
         agent_storage.aread_session = cast("Any", _agent_aread_session)
         agent_session.asave_session = cast("Any", _agent_asave_session)
         agent_session.asave_run = cast("Any", _agent_asave_run)
+        team_session.aget_session = cast("Any", _team_aget_session)
         team_session.asave_session = cast("Any", _team_asave_session)
         team_session.asave_run = cast("Any", _team_asave_run)
         _PATCHED = True
