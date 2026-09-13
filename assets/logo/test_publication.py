@@ -4,6 +4,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from lxml import etree
 from shading import pixels, render
 
@@ -24,9 +25,10 @@ def test_transparent_png_preserves_the_full_m() -> None:
     assert np.array_equal(transparent[opaque, :3], background[opaque, :3])
 
 
-def test_framed_mark_only_removes_empty_canvas() -> None:
+@pytest.mark.parametrize("name", ["logo-mark", "logo-mark-animated"])
+def test_framed_mark_only_removes_empty_canvas(name: str) -> None:
     """The cropped mark keeps coverage, and restoring its viewport is exact."""
-    path = ROOT / "logo-mark.svg"
+    path = ROOT / f"{name}.svg"
     assert path.is_file(), "Export a tightly framed mark for small app icons."
     mark = etree.parse(str(path)).getroot()
     left, top, width, height = map(int, mark.get("viewBox").split())

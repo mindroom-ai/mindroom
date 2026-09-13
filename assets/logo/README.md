@@ -20,7 +20,8 @@ If your checkout contains pointer files, fetch the images with `git lfs pull` fi
 The script declares its own pinned rendering dependencies; they are separate from the application dependencies.
 It writes the static `logo.svg`, `logo-transparent.svg`, and `preview.png`, plus `logo-animated.svg` and `logo-animated-transparent.svg`.
 Each SVG also has a losslessly compressed `.svgz` copy.
-It also writes `logo-transparent.png` as a raster preview of the complete M with a transparent background, and `logo-mark.svg` with tighter framing for small icons.
+It also writes `logo-transparent.png` as a raster preview of the complete M with a transparent background.
+The `logo-mark.svg` and `logo-mark-animated.svg` exports tightly frame the static and animated M for small icons and the README.
 
 | File | Purpose |
 | --- | --- |
@@ -90,8 +91,9 @@ GitHub's raw `.svgz` response was compressed a second time and failed to display
 
 The transparent variants remove only the canvas background; the complete M, its navy frame, glass, and illumination remain opaque.
 The transparent PNG matches the SVG render, and every opaque pixel matches the background preview.
-The compact `logo-mark.svg` changes only the viewport, keeping the original vector geometry and paint definitions intact.
-Its regression test checks that the crop removes no painted pixels and that restoring the original viewport reproduces the exact RGBA image.
+The compact `logo-mark.svg` and `logo-mark-animated.svg` change only the viewport, keeping the original vector geometry and paint definitions intact.
+Both use the same 720-pixel square viewport with a small border, so the M fills more of its displayed area without jumping when the motion preference changes.
+Their regression tests check that the crop removes no painted pixels and that restoring the original viewport reproduces the exact RGBA image.
 
 Regeneration also updates the dashboard and documentation SVGs, portal branding, PNG fallbacks, both web favicons, the macOS app icon source, and the bundled Matrix root-space avatar.
 The portal's public logo aliases resolve within its own public directory so container builds retain them.
@@ -138,5 +140,5 @@ The logo workflow runs these tests and regenerates the committed outputs in chec
 For visual review, rasterize the complete SVG at the desired resolution before cropping individual junctions; keep the original `viewBox` so pattern coordinates remain unchanged.
 Inspect enlarged junctions as well as the full logo, because a whole-image pixel error can hide local edge defects.
 
-The repository README selects the animated transparent SVG when motion is allowed, with the static transparent SVG as its reduced-motion and compatibility fallback.
+The repository README selects the tightly framed `logo-mark-animated.svg` when motion is allowed, with `logo-mark.svg` as its reduced-motion and compatibility fallback.
 Application headers use the static framed transparent mark.

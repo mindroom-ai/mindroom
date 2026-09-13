@@ -201,6 +201,7 @@ def generate() -> dict[str, bytes]:
     background = animated.find(f"{SVG}g[@id='background']")
     animated.remove(background)
     outputs["logo-animated-transparent.svg"] = serialize(animated)
+    outputs["logo-mark-animated.svg"] = framed_mark(outputs["logo-animated-transparent.svg"])
     for name, content in list(outputs.items()):
         if name.endswith(".svg"):
             outputs[name.removesuffix(".svg") + ".svgz"] = gzip.compress(content, mtime=0)
