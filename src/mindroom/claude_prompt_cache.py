@@ -23,6 +23,12 @@ also why Agno's ``cache_tools`` flag must stay off: it always emits a 5m tools
 marker ahead of a potentially 1h system marker). The total marker count,
 including markers Agno itself adds, is capped at the API limit of four.
 
+Agent-built system prompts carry an explicit boundary before their session
+context. Split that text into two system blocks and move the existing system
+marker to the shared prefix. Dates, summaries, and learning can then change
+without invalidating the agent's instructions. The message rungs still cache
+the full system and conversation prefix within each thread.
+
 The ladder operates on the wire-format request (after Agno's
 ``format_messages``) because Agno rebuilds assistant and tool_result blocks
 from scratch on every request, so markers placed on Agno ``Message`` objects
@@ -59,6 +65,7 @@ from mindroom.llm_request_logging import record_llm_request_tools
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
 from mindroom.model_instance_checks import isinstance_of_loaded
+from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -511,6 +518,27 @@ def _request_kwargs_with_deferred_tool_search(
     return prepared_kwargs
 
 
+def _request_kwargs_with_shared_system_prefix(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep the shared instructions cacheable independently of session context."""
+    system = request_kwargs.get("system")
+    if not isinstance(system, list) or not system:
+        return request_kwargs
+    first_block = system[0]
+    if not isinstance(first_block, dict) or first_block.get("type") != "text":
+        return request_kwargs
+    text = first_block.get("text")
+    if not isinstance(text, str) or "cache_control" not in first_block:
+        return request_kwargs
+    shared_text, boundary, session_text = text.partition(SESSION_CONTEXT_BOUNDARY)
+    if not boundary or not shared_text.strip():
+        return request_kwargs
+
+    shared_block = {**first_block, "text": shared_text}
+    session_block = {key: value for key, value in first_block.items() if key != "cache_control"}
+    session_block["text"] = boundary + session_text
+    return {**request_kwargs, "system": [shared_block, session_block, *system[1:]]}
+
+
 def _request_kwargs_with_prompt_cache_ladder(
     request_kwargs: dict[str, Any],
     cache_control: dict[str, str],
@@ -632,6 +660,7 @@ def prepare_claude_request_kwargs(
     )
     if model.cache_system_prompt:
         cache_control = _prompt_cache_control(extended_cache_time=model.extended_cache_time is True)
+        prepared_kwargs = _request_kwargs_with_shared_system_prefix(prepared_kwargs)
         prepared_kwargs = _request_kwargs_with_prompt_cache_ladder(prepared_kwargs, cache_control)
     record_llm_request_tools(prepared_kwargs.get("tools"))
     return prepared_kwargs

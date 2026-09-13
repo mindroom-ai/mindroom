@@ -49,6 +49,15 @@ Call-enabled agents can still restart because their call runtime retains configu
 Increasing `context_window` does not remove an explicit, smaller `compaction.replay_window_tokens` cap.
 Update that cap too if you want a larger replay window.
 
+## Claude Agent Prompt Caching
+
+The `anthropic`, `bedrock_claude`, and `vertexai_claude` providers enable agent prompt caching with a one-hour lifetime by default.
+MindRoom places a cache boundary after the shared agent identity, role, workspace context files, and tool instructions.
+The current date and session context, including compaction summaries, learned context, and system-hook additions, follow that boundary while retaining system-message priority.
+Changing those later sections does not invalidate the shared instruction prefix; identical tool definitions and prefix content can be reused across conversations when the provider cache is available.
+The conversation cache boundaries still include the full system prompt, so repeated turns can reuse session context too.
+Set `extra_kwargs.cache_system_prompt: false` to disable MindRoom's automatic Claude cache boundaries, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime.
+
 ## Configuration Examples
 
 ```yaml

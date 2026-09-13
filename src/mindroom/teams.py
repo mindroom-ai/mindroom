@@ -100,6 +100,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
+from mindroom.system_prompt import render_date_context
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
     materialize_exact_requested_team_members,
@@ -2290,6 +2291,10 @@ def _create_team_instance(
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
         store_history_messages=False,
         show_members_responses=True,
+        additional_context=render_date_context(
+            config.timezone,
+            datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
+        ),
         debug_mode=False,
         telemetry=False,
         # Agno will automatically list members with their names, roles, and tools
