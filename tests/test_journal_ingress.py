@@ -49,6 +49,8 @@ from mindroom.matrix.journal_ingress import (
     parse_journal_event,
 )
 from mindroom.pending_event_worker import _BATCH_SIZE, PendingEventWorker
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
+from tests.conftest import request_envelope
 from tests.journal_helpers import admit_dispatch_event
 from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_event_journal_store import corrupt
@@ -1267,6 +1269,86 @@ class TestPendingEventWorker:
     @staticmethod
     async def _admit_reaction(store: PrincipalStore, event: nio.Event) -> None:
         await store.admit(_inbound_event(ROOM, event, EventKind.REACTION, EventClass.ACTIONABLE))
+
+    @pytest.mark.parametrize("error_type", [None, asyncio.CancelledError, RuntimeError])
+    async def test_reserved_response_wakes_idle_lane_with_fresh_lifecycle(
+        self,
+        alice: PrincipalStore,
+        error_type: type[BaseException] | None,
+    ) -> None:
+        """A resumed response queues behind its waking turn without reusing its reservation."""
+        coordinator = ResponseLifecycleCoordinator()
+        envelope = request_envelope(
+            room_id=ROOM,
+            thread_id="$thread",
+            reply_to_event_id="$selection",
+            agent_name="general",
+        )
+        attempted = asyncio.Event()
+        resumed: list[asyncio.Task[str]] = []
+        order: list[str] = []
+
+        async def deliver(_target: object) -> str:
+            order.append("resume")
+            return "approved response"
+
+        async def resume() -> str:
+            attempted.set()
+            return await coordinator.run_locked_response(
+                target=envelope.target,
+                response_envelope=replace(envelope, source_event_id="$approval"),
+                pipeline_timing=None,
+                locked_operation=deliver,
+            )
+
+        async def handle(event: JournalEvent) -> bool:
+            if event.event_id == "$seed":
+                return True
+            assert event.event_id == "$source"
+            response = asyncio.create_task(resume())
+            resumed.append(response)
+            await response
+            return True
+
+        await self._admit(alice, text_event("$seed"))
+        worker = PendingEventWorker(store=alice, handle=handle)
+        worker.start()
+        reservation = await coordinator.reserve_response_lifecycle(envelope)
+
+        async def publish(_target: object) -> None:
+            order.append("selection")
+            await self._admit(alice, text_event("$source"))
+            assert not worker._lanes
+            worker.wake(room_id=ROOM)
+            await asyncio.wait_for(attempted.wait(), timeout=1.0)
+            assert not resumed[0].done(), resumed[0].exception()
+            assert order == ["selection"]
+            order.append("selection finished")
+            if error_type is not None:
+                msg = "selection failed"
+                raise error_type(msg)
+
+        try:
+            await _eventually_async(alice.pending)
+            await _eventually(lambda: not worker._lanes)
+            with (
+                response_lifecycle_reservation_context(reservation),
+                contextlib.nullcontext() if error_type is None else pytest.raises(error_type, match="selection failed"),
+            ):
+                await coordinator.run_locked_response(
+                    target=envelope.target,
+                    response_envelope=envelope,
+                    pipeline_timing=None,
+                    locked_operation=publish,
+                )
+            assert await asyncio.wait_for(resumed[0], timeout=1.0) == "approved response"
+            await _eventually_async(alice.pending)
+            assert len(resumed) == 1
+            assert order == ["selection", "selection finished", "resume"]
+            assert not coordinator.has_active_response_for_target(envelope.target)
+        finally:
+            await worker.stop()
+            await reservation.release()
 
     async def test_a_rooms_events_run_in_receipt_order(self, alice: PrincipalStore) -> None:
         """A rooms events run in receipt order."""
