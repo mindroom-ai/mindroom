@@ -19,6 +19,7 @@ If your checkout contains pointer files, fetch the images with `git lfs pull --i
 
 The script declares its own pinned rendering dependencies; they are separate from the application dependencies.
 It writes the static `logo.svg`, `logo-transparent.svg`, and `preview.png`, plus `logo-animated.svg` and `logo-animated-transparent.svg`.
+Each SVG also has a losslessly compressed `.svgz` copy.
 
 | File | Purpose |
 | --- | --- |
@@ -27,9 +28,12 @@ It writes the static `logo.svg`, `logo-transparent.svg`, and `preview.png`, plus
 | `shading.py` | Samples illumination from the reference and encodes it as SVG gradients and masks. |
 | `generate.py` | Builds, shades, formats, and exports the artwork. |
 | `animation.py` | Cube pulse, curved electrical filaments, and their shared timing. |
+| `optimize.py` | Lossless sharing of identical gradients and stops, unused-paint removal, and compact XML. |
 | `preview.html` | Browser preview with a pause/play control. |
 | `reference.png` | Cleaned raster design used as the lighting reference. |
 | `test_geometry.py` | Regression checks for closed junctions and angled terminal cuts. |
+| `test_exports.py` | File-size budgets and exact SVGZ decompression checks. |
+| `test_optimize.py` | Preservation of repeated stops through shared gradient templates. |
 
 Faces and highlights refer to the same named corner coordinates.
 At a junction, adjacent offset edges intersect to form a shared miter, and each filled edge polygon reaches the corner center.
@@ -51,7 +55,29 @@ Thin highlights use gradients sampled along each edge, with shared colors at the
 The resulting SVG contains native vector shapes, gradients, patterns, and masks; it embeds no bitmap and loads no external resources.
 The detailed lighting makes the generated files larger than a flat-color logo.
 Generated XML is indented, with named, commented geometry layers first and sampled paint definitions afterward.
+Each generated paint definition occupies one line to reduce formatting overhead.
 Edit the Python source and regenerate, because rebuilding replaces direct changes to the SVG.
+
+## Smaller files without quality loss
+
+The exporter shares exactly identical gradients and complete stop sequences, and discards unused paint definitions.
+Every gradient stop is retained, including repeated colors, because removing redundant stops can change browser rasterization slightly.
+It shortens generated IDs and removes redundant trailing decimal zeros without rounding coordinates or resampling colors.
+Instance-specific masks and patterns remain separate for consistent rendering.
+Before exporting each SVG, the generator compares all RGBA pixels of the original and optimized documents at 1024 pixels and fails if any differ.
+
+The current background export is about 1.47 MB as plain SVG and 135 KB as SVGZ, compared with 2.45 MB before cleanup.
+SVGZ is gzip-compressed SVG; decompressing it produces the exact companion SVG bytes.
+The compressed figure is distinct from the plain XML file size.
+Gzip timestamps are fixed, and check mode compares decompressed content so platform compression differences do not cause false failures.
+
+For web use, ordinary `.svg` files can be served with gzip compression.
+When serving `.svgz` directly, configure these [HTTP response headers](https://developer.mozilla.org/en-US/docs/Web/SVG/Tutorials/SVG_from_scratch/Getting_started):
+
+```http
+Content-Type: image/svg+xml
+Content-Encoding: gzip
+```
 
 ## Animated version
 
@@ -80,12 +106,14 @@ The animated SVGs can also be embedded as ordinary SVG images.
 # Verify that the committed SVGs and PNG match their source.
 uv run assets/logo/generate.py --check
 
-# Exercise the geometry without installing application dependencies.
-uv run --isolated --no-project --with pytest==8.4.2 pytest \
-  -c /dev/null -p no:cacheprovider assets/logo/test_geometry.py -q
+# Exercise geometry and export budgets without application dependencies.
+uv run --isolated --no-project --with pytest==8.4.2 --with lxml==5.4.0 pytest \
+  -c /dev/null -p no:cacheprovider assets/logo/ -q
 ```
 
 The geometry tests cover shared two-, three-, and four-way corners, unequal widths, straight continuations, angled cuts, and rejection of crossed miters.
+Export tests enforce size budgets and byte-identical SVGZ decompression.
+The optimization regression protects repeated gradient stops that affect browser rasterization.
 The logo workflow runs these tests and regenerates the committed outputs in check mode.
 For visual review, rasterize the complete SVG at the desired resolution before cropping individual junctions; keep the original `viewBox` so pattern coordinates remain unchanged.
 Inspect enlarged junctions as well as the full logo, because a whole-image pixel error can hide local edge defects.

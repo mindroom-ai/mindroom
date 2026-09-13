@@ -10,6 +10,7 @@ No network service or API key is used to construct the artwork.
 """
 
 import argparse
+import gzip
 import re
 from collections import defaultdict
 from copy import deepcopy
@@ -22,6 +23,7 @@ from animation import animated_document
 from artwork import SVG, XLINK, Network, build_document, group, polygon
 from geometry import joined_polygons, subtract
 from lxml import etree
+from optimize import compact_xml, optimize_document
 from PIL import Image
 from shading import Colors, color_hex, edge_paint, pixels, render, sample, shade_surfaces
 
@@ -157,12 +159,16 @@ def expand_instance(use: etree._Element, definitions: dict[str, etree._Element],
 
 
 def serialize(root: etree._Element) -> bytes:
-    """Indent native vector elements; keep geometry ahead of generated lighting."""
-    return etree.tostring(root, encoding="UTF-8", xml_declaration=True, pretty_print=True)
+    """Compact the SVG only when all rendered RGBA pixels remain identical."""
+    optimized = optimize_document(root)
+    if not np.array_equal(pixels(render(root)), pixels(render(optimized))):
+        msg = "Lossless SVG optimization changed rendered pixels; refusing to export."
+        raise ValueError(msg)
+    return compact_xml(optimized)
 
 
 def generate() -> dict[str, bytes]:
-    """Produce static and animated SVG variants plus a full-canvas PNG."""
+    """Produce static/animated SVGs, lossless SVGZ copies, and a canvas PNG."""
     with Image.open(ROOT / "reference.png") as image:
         if image.size != (1024, 1024):
             msg = "reference.png must be 1024 by 1024 pixels"
@@ -192,6 +198,9 @@ def generate() -> dict[str, bytes]:
     background = animated.find(f"{SVG}g[@id='background']")
     animated.remove(background)
     outputs["logo-animated-transparent.svg"] = serialize(animated)
+    for name, content in list(outputs.items()):
+        if name.endswith(".svg"):
+            outputs[name.removesuffix(".svg") + ".svgz"] = gzip.compress(content, mtime=0)
     return outputs
 
 
@@ -209,11 +218,15 @@ def main() -> None:
     for name, content in outputs.items():
         destination = ROOT / name
         if args.check:
-            matches = destination.exists() and (
-                np.array_equal(pixels(destination.read_bytes()), pixels(content))
-                if name.endswith(".png")
-                else destination.read_bytes() == content
-            )
+            matches = destination.exists()
+            if matches:
+                existing = destination.read_bytes()
+                if name.endswith(".png"):
+                    matches = np.array_equal(pixels(existing), pixels(content))
+                elif name.endswith(".svgz"):
+                    matches = gzip.decompress(existing) == gzip.decompress(content)
+                else:
+                    matches = existing == content
             if not matches:
                 mismatches.append(name)
         else:

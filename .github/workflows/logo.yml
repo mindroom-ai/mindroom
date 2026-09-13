@@ -25,9 +25,9 @@ jobs:
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           python-version: "3.13"
-      - name: Test joined edge geometry
+      - name: Test geometry and lossless export budgets
         run: >-
-          uv run --isolated --no-project --with pytest==8.4.2 pytest
-          -c /dev/null -p no:cacheprovider assets/logo/test_geometry.py -q
+          uv run --isolated --no-project --with pytest==8.4.2 --with lxml==5.4.0 pytest
+          -c /dev/null -p no:cacheprovider assets/logo/ -q
       - name: Check generated artwork
         run: uv run assets/logo/generate.py --check
