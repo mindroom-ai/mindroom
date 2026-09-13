@@ -281,8 +281,10 @@ The Codex provider supports text and image input with text output; transcription
 This adapter follows the local Codex CLI authentication-file and backend contracts, so upstream Codex changes can require a MindRoom update.
 Use `provider: openai` when you want the public OpenAI API contract and API billing instead.
 
-MindRoom derives the Codex `prompt_cache_key` from the installation storage root, tenant, account, channel, agent, and requester.
-Rooms, threads, and session IDs are excluded, so related conversations can share a cache group while different agents, requesters, and installations remain separate.
+MindRoom derives the Codex `prompt_cache_key` from the storage-root path, tenant, account, channel, agent, and requester.
+Rooms, threads, and session IDs are excluded, so related conversations can share a cache group while different agents, requesters, and storage roots remain separate.
+The storage-root path is a local namespace, not a globally unique installation identifier; deployments with identical paths and execution scopes can share a cache group within the same provider account.
+Use explicit cache-key overrides if those deployments need separate cache accounting.
 Codex CLI session headers use a separate key for each conversation; changing the cache group does not combine session identities.
 Set `extra_kwargs.prompt_cache_key` to override the cache group, or set it to `null` to omit the key while retaining the conversation headers.
 Model calls without an execution identity do not receive a derived cache key or session headers.
@@ -321,7 +323,7 @@ Kimi K3 always reasons before replying, so responses include reasoning tokens ev
 This adapter follows the local Kimi Code CLI authentication-file and backend contracts, so upstream Kimi Code changes can require a MindRoom update.
 
 Prompt caching is automatic on the Kimi Code endpoint: repeated request prefixes come back as `cached_tokens` with no opt-in.
-MindRoom uses the same agent-and-requester cache grouping as Codex, so rooms and threads share a `prompt_cache_key` within the same installation, tenant, account, and channel.
+MindRoom uses the same agent-and-requester cache grouping as Codex, so rooms and threads share a `prompt_cache_key` within the same storage-root path, tenant, account, and channel.
 Set `extra_kwargs.prompt_cache_key` to override that group, or set it to `null` to omit the key.
 
 ## OpenRouter Provider Routing

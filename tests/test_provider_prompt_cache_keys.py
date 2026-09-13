@@ -7,11 +7,14 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.agents import create_agent
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.model_loading import get_model_instance
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -99,12 +102,12 @@ def test_cache_groups_preserve_execution_scope(
 
 
 @pytest.mark.parametrize("provider", ["codex", "kimi"])
-def test_cache_groups_preserve_installation_scope(
+def test_cache_groups_preserve_storage_root_scope(
     tmp_path: Path,
     identity: ToolExecutionIdentity,
     provider: str,
 ) -> None:
-    """Identical agent names in separate installations must keep separate cache groups."""
+    """Identical agent names under different storage roots must keep separate cache groups."""
     first = _request(tmp_path / "one", provider, identity)
     second = _request(tmp_path / "two", provider, identity)
 
@@ -132,3 +135,48 @@ def test_codex_cache_override_preserves_session_headers(
 def test_missing_execution_identity_has_no_derived_key(tmp_path: Path, provider: str) -> None:
     """Model-only calls must not acquire a global fallback cache group."""
     assert "prompt_cache_key" not in _request(tmp_path, provider, None)
+
+
+@pytest.mark.parametrize("session_id", ["configured-session", None])
+def test_codex_active_identity_owns_session_headers(
+    tmp_path: Path,
+    identity: ToolExecutionIdentity,
+    session_id: str | None,
+) -> None:
+    """A shared model definition cannot override an active conversation's routing."""
+    original = _request(tmp_path, "codex", identity)
+    overridden = _request(tmp_path, "codex", identity, session_id=session_id)
+
+    assert overridden["extra_headers"] == original["extra_headers"]
+
+
+@pytest.mark.parametrize("provider", ["codex", "kimi"])
+def test_materialized_agents_keep_distinct_cache_identity(
+    tmp_path: Path,
+    identity: ToolExecutionIdentity,
+    provider: str,
+) -> None:
+    """Members created under one team execution retain their own model identity."""
+    config = Config(
+        agents={
+            name: AgentConfig(display_name=name, include_default_tools=False, learning=False)
+            for name in ("writer", "editor")
+        },
+        models={"default": ModelConfig(provider=provider, id="k3" if provider == "kimi" else "gpt-6-astra")},
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={},
+    )
+    team_identity = replace(identity, agent_name="team")
+    persist_entity_accounts(config, runtime_paths)
+    requests = [
+        create_agent(name, config, runtime_paths, execution_identity=team_identity).model.get_request_params()
+        for name in config.agents
+    ]
+
+    assert requests[0]["prompt_cache_key"] != requests[1]["prompt_cache_key"]
+    if provider == "codex":
+        assert requests[0]["extra_headers"]["session_id"] != requests[1]["extra_headers"]["session_id"]
+    assert team_identity.agent_name == "team"

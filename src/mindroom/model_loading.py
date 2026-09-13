@@ -272,9 +272,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         extra_kwargs.pop("api_key", None)
         _set_agent_prompt_cache_key(extra_kwargs, execution_identity, runtime_paths)
         if execution_identity is not None:
-            extra_kwargs.setdefault(
-                "session_id",
-                derive_session_routing_key(execution_identity, storage_root=runtime_paths.storage_root),
+            extra_kwargs["session_id"] = derive_session_routing_key(
+                execution_identity,
+                storage_root=runtime_paths.storage_root,
             )
         return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
 

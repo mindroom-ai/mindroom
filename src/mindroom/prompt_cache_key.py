@@ -24,7 +24,7 @@ def _hashed_key(parts: tuple[str | None, ...]) -> str:
 
 
 def derive_agent_prompt_cache_key(identity: ToolExecutionIdentity, *, storage_root: Path) -> str:
-    """Group one agent's threads within the same installation and requester scope."""
+    """Group one agent's threads within the same storage-root and requester scope."""
     return _hashed_key(
         (
             str(storage_root),
