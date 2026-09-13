@@ -18,6 +18,7 @@ from math import hypot
 from pathlib import Path
 
 import numpy as np
+from animation import animated_document
 from artwork import SVG, XLINK, Network, build_document, group, polygon
 from geometry import joined_polygons, subtract
 from lxml import etree
@@ -161,7 +162,7 @@ def serialize(root: etree._Element) -> bytes:
 
 
 def generate() -> dict[str, bytes]:
-    """Produce the background and transparent SVGs plus a full-canvas PNG."""
+    """Produce static and animated SVG variants plus a full-canvas PNG."""
     with Image.open(ROOT / "reference.png") as image:
         if image.size != (1024, 1024):
             msg = "reference.png must be 1024 by 1024 pixels"
@@ -186,6 +187,11 @@ def generate() -> dict[str, bytes]:
     background = transparent.find(f"{SVG}g[@id='background']")
     transparent.remove(background)
     outputs["logo-transparent.svg"] = serialize(transparent)
+    animated = animated_document(root)
+    outputs["logo-animated.svg"] = serialize(animated)
+    background = animated.find(f"{SVG}g[@id='background']")
+    animated.remove(background)
+    outputs["logo-animated-transparent.svg"] = serialize(animated)
     return outputs
 
 
@@ -214,7 +220,7 @@ def main() -> None:
             destination.write_bytes(content)
     if mismatches:
         parser.exit(1, f"Logo outputs need regeneration: {', '.join(mismatches)}\n")
-    print("Logo outputs are current." if args.check else "Generated logo.svg, logo-transparent.svg, and preview.png.")
+    print("Logo outputs are current." if args.check else f"Generated {', '.join(outputs)}.")
 
 
 if __name__ == "__main__":

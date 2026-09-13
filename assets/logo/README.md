@@ -18,7 +18,7 @@ The PNG files use Git LFS.
 If your checkout contains pointer files, fetch the images with `git lfs pull --include='assets/logo/*.png'` first.
 
 The script declares its own pinned rendering dependencies; they are separate from the application dependencies.
-It writes `logo.svg`, `logo-transparent.svg`, and `preview.png` beside the source files.
+It writes the static `logo.svg`, `logo-transparent.svg`, and `preview.png`, plus `logo-animated.svg` and `logo-animated-transparent.svg`.
 
 | File | Purpose |
 | --- | --- |
@@ -26,6 +26,8 @@ It writes `logo.svg`, `logo-transparent.svg`, and `preview.png` beside the sourc
 | `geometry.py` | Intersections and shared miter geometry for two-, three-, and four-way junctions. |
 | `shading.py` | Samples illumination from the reference and encodes it as SVG gradients and masks. |
 | `generate.py` | Builds, shades, formats, and exports the artwork. |
+| `animation.py` | Cube pulse, curved electrical filaments, and their shared timing. |
+| `preview.html` | Browser preview with a pause/play control. |
 | `reference.png` | Cleaned raster design used as the lighting reference. |
 | `test_geometry.py` | Regression checks for closed junctions and angled terminal cuts. |
 
@@ -50,6 +52,27 @@ The resulting SVG contains native vector shapes, gradients, patterns, and masks;
 The detailed lighting makes the generated files larger than a flat-color logo.
 Generated XML is indented, with named, commented geometry layers first and sampled paint definitions afterward.
 Edit the Python source and regenerate, because rebuilding replaces direct changes to the SVG.
+
+## Animated version
+
+The cube gently warms and dims over a 6.4-second cycle.
+As the light rises, gold S-shaped currents unfurl toward the inner struts, followed by a fainter echo, then fade into the glass.
+The filaments recall the curved traces in the original PNG.
+Room clipping and layer order keep them inside the glass and behind the central cube.
+
+The SVG carries its own CSS animation and needs no JavaScript to play.
+Only small overlay layers animate; the detailed surface paints stay static.
+The system's [reduced-motion preference](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-motion) shows the static artwork instead.
+Change `--mindroom-cycle`, the keyframes, or `SIGNALS` in `animation.py` to tune the timing, light intensity, or curves.
+
+To inspect the animation with a pause control, serve this directory:
+
+```sh
+uv run --no-project python -m http.server 8768 --directory assets/logo
+```
+
+Then open [the motion preview](http://localhost:8768/preview.html).
+The animated SVGs can also be embedded as ordinary SVG images.
 
 ## Checks
 
