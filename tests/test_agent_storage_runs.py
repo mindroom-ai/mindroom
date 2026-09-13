@@ -538,3 +538,38 @@ def test_delete_runs_tolerates_malformed_legacy_blob_entries(tmp_path: Path) -> 
     finally:
         connection.close()
     assert json.loads(blob) == legacy_runs[2:]
+
+
+def test_cache_diagnostics_count_history_without_retaining_closed_adapters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counts cover current adapters, not closed stores or private conversation identifiers."""
+    from structlog.testing import capture_logs  # noqa: PLC0415
+
+    from mindroom import agent_storage  # noqa: PLC0415
+
+    monkeypatch.setattr(agent_storage, "_CACHE_DIAGNOSTICS_NEXT_REPORT", 0.0, raising=False)
+    first = _storage(tmp_path / "first")
+    second = _storage(tmp_path / "second")
+    try:
+        seed_session(first, _session("private-first", ["r1", "r2"]))
+        seed_session(second, _session("private-second", ["r3"]))
+        with capture_logs() as logs:
+            get_agent_session(first, "private-first")
+            get_agent_session(second, "private-second")
+        summaries = [entry for entry in logs if entry["event"] == "conversation_cache_summary"]
+        assert len(summaries) == 1
+        assert summaries[0]["observed_cached_runs"] == 2
+        first.close()
+        monkeypatch.setattr(agent_storage, "_CACHE_DIAGNOSTICS_NEXT_REPORT", 0.0)
+        with capture_logs() as logs:
+            get_agent_session(second, "private-second")
+        summary = next(entry for entry in logs if entry["event"] == "conversation_cache_summary")
+        assert summary["adapters"] == 1
+        assert summary["observed_cached_sessions"] == 1
+        assert summary["observed_cached_runs"] == 1
+        assert "private" not in str(summary)
+    finally:
+        first.close()
+        second.close()

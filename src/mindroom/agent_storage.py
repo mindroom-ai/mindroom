@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+import weakref
 from contextlib import nullcontext
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
@@ -38,6 +41,9 @@ if TYPE_CHECKING:
 
 _BUSY_TIMEOUT_SECONDS = 30.0
 logger = get_logger(__name__)
+_CACHE_DIAGNOSTICS_LOCK = threading.Lock()
+_CACHE_DIAGNOSTICS_NEXT_REPORT = 0.0
+_CACHE_DIAGNOSTICS: weakref.WeakKeyDictionary[_ConversationSqliteDb, tuple[int, int]] = weakref.WeakKeyDictionary()
 
 agno_session_persistence_patch.install_patch()
 
@@ -240,6 +246,40 @@ class _ConversationSqliteDb(SqliteDb):
         super().__init__(session_table=session_table, db_file=db_file, db_engine=db_engine)
         self._prompt_roles = prompt_roles
         configure_state_engine_pragmas(db_engine)
+        with _CACHE_DIAGNOSTICS_LOCK:
+            _CACHE_DIAGNOSTICS[self] = (0, 0)
+
+    def close(self) -> None:
+        """Remove closed adapters from diagnostics as well as disposing their connections."""
+        try:
+            super().close()
+        finally:
+            with _CACHE_DIAGNOSTICS_LOCK:
+                _CACHE_DIAGNOSTICS.pop(self, None)
+
+    def _report_cache_counts(self) -> None:
+        """Publish counts on the storage owner; never inspect other owners' caches.
+
+        Each snapshot reflects that adapter's latest completed read. Counting
+        session maps is bounded by Agno's session cache limit; no run contents
+        are traversed, serialized, or retained by these diagnostics.
+        """
+        global _CACHE_DIAGNOSTICS_NEXT_REPORT
+        sessions = self._run_object_cache._per_session
+        counts = (len(sessions), sum(len(runs) for runs in sessions.values()))
+        now = time.monotonic()
+        with _CACHE_DIAGNOSTICS_LOCK:
+            _CACHE_DIAGNOSTICS[self] = counts
+            if now < _CACHE_DIAGNOSTICS_NEXT_REPORT:
+                return
+            _CACHE_DIAGNOSTICS_NEXT_REPORT = now + 60.0
+            snapshots = list(_CACHE_DIAGNOSTICS.values())
+        logger.info(
+            "conversation_cache_summary",
+            adapters=len(snapshots),
+            observed_cached_sessions=sum(item[0] for item in snapshots),
+            observed_cached_runs=sum(item[1] for item in snapshots),
+        )
 
     def get_session(
         self,
@@ -255,12 +295,14 @@ class _ConversationSqliteDb(SqliteDb):
         redaction) reasons over the whole run list.
         """
         del user_id, runs_limit
-        return super().get_session(
+        session = super().get_session(
             session_id=session_id,
             session_type=session_type,
             user_id=None,
             deserialize=deserialize,
         )
+        self._report_cache_counts()
+        return session
 
     def upsert_run(
         self,
