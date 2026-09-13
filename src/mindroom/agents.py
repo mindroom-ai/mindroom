@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from zoneinfo import ZoneInfo
 
 from agno.db.base import BaseDb, SessionType
 from agno.knowledge.knowledge import Knowledge
@@ -32,6 +30,7 @@ from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
 )
+from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_system.catalog import (
@@ -206,35 +205,6 @@ def agent_build_can_overlap_file_memory(agent_name: str, config: Config, storage
         return True
     memory_path = agent_workspace_root_path(storage_path, agent_name) / "MEMORY.md"
     return memory_path.is_file()
-
-
-def _get_datetime_context(
-    timezone_str: str,
-    *,
-    datetime_context_template: str,
-) -> str:
-    """Generate current date context for the agent.
-
-    Args:
-        timezone_str: Timezone string (e.g., 'America/New_York', 'UTC')
-        datetime_context_template: Prompt template used for the rendered date context.
-
-    Returns:
-        Formatted string with current date and timezone information
-
-    """
-    tz = ZoneInfo(timezone_str)
-    now = datetime.now(tz)
-
-    date_str = now.strftime("%A, %B %d, %Y")
-    timezone_abbrev = now.tzname() or timezone_str
-
-    return render_prompt_template(
-        datetime_context_template,
-        date_str=date_str,
-        timezone_str=timezone_str,
-        timezone_abbrev=timezone_abbrev,
-    )
 
 
 def _get_mind_runtime_context(agent_name: str, runtime_paths: constants.RuntimePaths) -> str:
@@ -1575,7 +1545,7 @@ def _build_agent_role_context(
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
 ) -> _AgentRoleContext:
-    """Resolve the model name and render identity, datetime, and preload context into the role."""
+    """Resolve the model name and render shared identity and preload context into the role."""
     # Get model config for identity context
     model_name = active_model_name or agent_config.model or "default"
     if model_name in config.models:
@@ -1598,14 +1568,7 @@ def _build_agent_role_context(
             include_openai_compat_guidance=include_openai_compat_guidance,
         )
 
-    # Add current date context with the user's configured timezone
-    datetime_context = _get_datetime_context(
-        config.timezone,
-        datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
-    )
-
-    # Combine identity, datetime, and live installation contexts.
-    full_context = identity_context + datetime_context + _get_mind_runtime_context(agent_name, runtime_paths)
+    full_context = identity_context + _get_mind_runtime_context(agent_name, runtime_paths)
 
     if not disable_runtime_capabilities:
         full_context += "\n\n" + _render_tool_execution_environment(
@@ -1930,6 +1893,12 @@ def create_agent(
         tools=tool_assembly.tools,
         skills=skills,
         instructions=instructions,
+        additional_context=render_session_context(
+            render_date_context(
+                config.timezone,
+                datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
+            ),
+        ),
         db=storage,
         learning=_resolve_agent_learning(agent_config, defaults, learning_storage) if persist_runtime_state else False,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
