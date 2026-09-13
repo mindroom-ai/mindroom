@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Literal, cast
 import pytest
 from agno.agent import Agent
 from agno.agent import _session as agent_session_module
+from agno.agent import _storage as agent_storage_module
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.db.sqlite.async_sqlite import AsyncSqliteDb
@@ -139,8 +140,10 @@ def test_installation_is_exact_version_guarded_and_idempotent() -> None:
     assert persistence_patch.version("agno") == persistence_patch._SUPPORTED_AGNO_VERSION
     persistence_patch.install_patch()
     installed = (
+        agent_storage_module.aread_session,
         agent_session_module.asave_session,
         agent_session_module.asave_run,
+        team_session_module.aget_session,
         team_session_module.asave_session,
         team_session_module.asave_run,
     )
@@ -148,8 +151,10 @@ def test_installation_is_exact_version_guarded_and_idempotent() -> None:
     persistence_patch.install_patch()
 
     assert (
+        agent_storage_module.aread_session,
         agent_session_module.asave_session,
         agent_session_module.asave_run,
+        team_session_module.aget_session,
         team_session_module.asave_session,
         team_session_module.asave_run,
     ) == installed
@@ -1168,3 +1173,124 @@ async def test_registered_run_saves_run_on_a_dedicated_thread(
     assert persisted.runs is not None
     assert [message.role for message in persisted.runs[0].messages or []] == ["user"]
     assert [message.role for message in session.runs[0].messages or []] == ["system", "user"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_read", [False, True])
+@pytest.mark.parametrize("surface", ["agent", "team"])
+async def test_async_session_read_shares_save_lane_and_drains_cancellation(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_read: bool,
+    surface: _Surface,
+) -> None:
+    """A preload follows queued writes and owns its lane until a cancelled read ends."""
+    storage = _storage(tmp_path, "read-order")
+    owner, before = _owner_and_session(surface, storage, "shared")
+    before.metadata = {"value": "before"}
+    after = copy_session(before)
+    after.metadata = {"value": "after"}
+    session_class = AgentSession if surface == "agent" else TeamSession
+    save_started = threading.Event()
+    release_save = threading.Event()
+    read_started = threading.Event()
+    release_read = threading.Event()
+    order: list[str] = []
+    original_upsert = storage.upsert_session
+    original_read = storage.get_session
+
+    def blocked_upsert(session: AgentSession | TeamSession, deserialize: bool | None = True) -> object:
+        value = str((session.metadata or {})["value"])
+        order.append(value)
+        if value == "before":
+            save_started.set()
+            assert release_save.wait(5)
+        return original_upsert(session, deserialize=deserialize)
+
+    def blocked_read(*args: object, **kwargs: object) -> object:
+        order.append("read")
+        read_started.set()
+        assert release_read.wait(5)
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "upsert_session", blocked_upsert)
+    monkeypatch.setattr(storage, "get_session", blocked_read)
+    saving = asyncio.create_task(owner.asave_session(before))
+    reading: asyncio.Task[object] | None = None
+    next_save: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(save_started.wait, 5)
+        reading = asyncio.create_task(owner.aget_session("shared", user_id="before"))
+        await asyncio.sleep(0)
+        assert not read_started.is_set(), "Session read overtook its queued save"
+        release_save.set()
+        assert await asyncio.to_thread(read_started.wait, 5)
+        if cancel_read:
+            for _ in range(2):
+                reading.cancel()
+                await asyncio.sleep(0)
+        next_save = asyncio.create_task(owner.asave_session(after))
+        await asyncio.sleep(0)
+        assert not reading.done()
+        assert order == ["before", "read"]
+        release_read.set()
+        if cancel_read:
+            with pytest.raises(asyncio.CancelledError):
+                await reading
+        else:
+            loaded = await reading
+            assert isinstance(loaded, session_class)
+            assert loaded.metadata == {"value": "before"}
+        await asyncio.gather(saving, next_save)
+        assert order == ["before", "read", "after"]
+        persisted = original_read("shared", session_type=SessionType.AGENT if surface == "agent" else SessionType.TEAM)
+        assert isinstance(persisted, session_class)
+        assert persisted.metadata == {"value": "after"}
+    finally:
+        release_save.set()
+        release_read.set()
+        await asyncio.gather(
+            saving,
+            *([reading] if reading is not None else []),
+            *([next_save] if next_save is not None else []),
+            return_exceptions=True,
+        )
+        storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_async", [False, True])
+@pytest.mark.parametrize("surface", ["agent", "team"])
+async def test_async_session_read_preserves_unregistered_database_behavior(
+    tmp_path: Path,
+    native_async: bool,
+    surface: _Surface,
+) -> None:
+    """The guarded boundary delegates both ordinary sync and native async adapters."""
+    session_class = AgentSession if surface == "agent" else TeamSession
+    session = session_class(session_id="shared", metadata={"value": "stored"})
+    database = (
+        AsyncSqliteDb(db_file=str(tmp_path / "plain.db"))
+        if native_async
+        else SqliteDb(
+            db_file=str(tmp_path / "plain.db"),
+        )
+    )
+    try:
+        if isinstance(database, AsyncSqliteDb):
+            await database.upsert_session(session)
+        else:
+            database.upsert_session(session)
+        owner = (
+            Agent(db=database, telemetry=False)
+            if surface == "agent"
+            else Team(db=database, members=[], telemetry=False)
+        )
+        loaded = await owner.aget_session("shared")
+        assert isinstance(loaded, session_class)
+        assert loaded.metadata == {"value": "stored"}
+    finally:
+        if isinstance(database, AsyncSqliteDb):
+            await database.close()
+        else:
+            database.close()
