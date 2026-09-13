@@ -12,8 +12,9 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from agno.agent._messages import aget_run_messages
+from agno.agent import _messages as agent_messages
 from agno.agent._tools import determine_tools_for_model
+from agno.learn import LearningMachine
 from agno.models.message import Message
 from agno.run import RunContext
 from agno.run.agent import RunInput, RunOutput
@@ -74,6 +75,9 @@ async def build_warm_prefix_request(
         or COMPACTION_MODE_INSTRUCTION not in agent.instructions
         or agent.system_message is not None
         or agent.output_schema is not None
+        # Reply replay caps tool calls across history; compaction caps per run.
+        # Use the standalone projection so selected tool facts cannot disappear.
+        or agent.max_tool_calls_from_history is not None
         or (session.summary is not None and not agent.add_session_summary_to_context)
     ):
         return None
@@ -84,6 +88,12 @@ async def build_warm_prefix_request(
     request_agent.num_history_runs = None
     request_agent.num_history_messages = None
     request_agent._tool_instructions = deepcopy(agent._tool_instructions)
+    if isinstance(agent.learning, LearningMachine):
+        # Copy mutable learning configuration/state, retaining connection owners.
+        # Agno initialization and store resolution inject model/db dependencies.
+        shared = (agent.learning.db, agent.learning.model, agent.learning.knowledge)
+        request_agent.learning = deepcopy(agent.learning, {id(value): value for value in shared if value is not None})
+    request_agent.initialize_agent()
     fork = replace(deepcopy(session), runs=deepcopy(list(included_runs)))
     run_id = str(uuid4())
     final_message = Message(
@@ -127,7 +137,7 @@ async def build_warm_prefix_request(
         for tool in prepared_tools
         if isinstance(tool, Function)
     )
-    run_messages = await aget_run_messages(
+    run_messages = await agent_messages.aget_run_messages(
         request_agent,
         run_response=run_response,
         run_context=run_context,
@@ -161,7 +171,9 @@ def _model_supports_warm_compaction(model: Model) -> bool:
     """Exclude provider features that can execute tools or silently drop input."""
     claude = as_anthropic_claude(model)
     if claude is not None:
-        return not (claude.mcp_servers or claude.skills or claude.context_management or claude.request_params)
+        return bool(claude.cache_system_prompt) and not (
+            claude.mcp_servers or claude.skills or claude.context_management or claude.request_params
+        )
     if not isinstance_of_loaded(
         model,
         ("agno.models.openai.chat", "OpenAIChat"),

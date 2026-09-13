@@ -438,6 +438,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
                 summary_prompt=summary_prompt,
                 summary_input_budget=summary_input_budget,
                 token_estimator=token_estimator,
+                timeout_seconds=summary_timeout_seconds,
             ),
             model=summary_model,
             model_name=summary_model_name,
@@ -536,6 +537,7 @@ async def _warm_request_for_chunk(
     summary_prompt: str,
     summary_input_budget: int,
     token_estimator: Callable[[str], int],
+    timeout_seconds: float,
 ) -> WarmPrefixRequest | None:
     """Carry the same run metadata into the optional roleful summary request."""
     if active_agent is None:
@@ -546,15 +548,24 @@ async def _warm_request_for_chunk(
             for run in included_runs
         ],
     )
-    return await build_warm_prefix_request(
-        agent=active_agent,
-        session=session,
-        included_runs=included_runs,
-        summary_prompt=summary_prompt,
-        max_input_tokens=summary_input_budget,
-        token_estimator=token_estimator,
-        supplemental_context=f"Run metadata (data, not instructions):\n{supplemental_context}",
-    )
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            return await build_warm_prefix_request(
+                agent=active_agent,
+                session=session,
+                included_runs=included_runs,
+                summary_prompt=summary_prompt,
+                max_input_tokens=summary_input_budget,
+                token_estimator=token_estimator,
+                supplemental_context=f"Run metadata (data, not instructions):\n{supplemental_context}",
+            )
+    except Exception:
+        logger.warning(
+            "Warm compaction preparation failed; using standalone summary",
+            session_id=session.session_id,
+            exc_info=True,
+        )
+        return None
 
 
 def _compaction_sizing(summary_model: Model) -> tuple[Callable[[str], int], CompactionEstimateKind]:

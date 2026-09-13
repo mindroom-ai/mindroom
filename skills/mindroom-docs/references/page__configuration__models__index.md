@@ -78,7 +78,9 @@ The summary call preserves the active model's cache identity, conversation routi
 It invokes the model once with tool schemas and no executable callbacks; a tool request or malformed handoff triggers a standalone summary retry before history is removed.
 
 This applies to Claude-family and OpenAI-compatible agent models, including Codex and Kimi, when the full request fits the summary budget.
-Teams, distinct compaction models, custom compaction prompts, hosted tools, and provider settings that override the request or silently truncate history use standalone summarization.
+Teams, distinct compaction models, custom compaction prompts, tool-history limits, hosted tools, and provider settings that override the request or silently truncate history use standalone summarization.
+Claude models with prompt caching disabled also use standalone summarization.
+Warm request preparation has its own compaction timeout; setup errors or timeouts fall back to standalone summarization without removing history first.
 Provider-native tool discovery may remain in the cached schema surface, but compaction never executes client tools.
 An oversized warm request falls back to the standalone input within the existing retry limit, preserving all selected runs.
 Cache savings depend on matching provider-visible prefixes and the provider's cache availability.

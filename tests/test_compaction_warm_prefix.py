@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import nullcontext
 from copy import deepcopy
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from agno.agent import Agent
 from agno.db.in_memory import InMemoryDb
+from agno.learn import LearningMachine
+from agno.media import Image
 from agno.models.anthropic import Claude
 from agno.models.message import Message
 from agno.run.agent import RunOutput
@@ -139,12 +144,15 @@ async def test_compaction_reuses_reply_wire_prefix_and_preserves_live_state(*, d
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["hosted_tool", "custom_prompt", "no_guard", "budget", "hidden_summary"])
+@pytest.mark.parametrize(
+    "reason",
+    ["hosted_tool", "custom_prompt", "no_guard", "budget", "hidden_summary", "cache_disabled"],
+)
 async def test_unsupported_warm_requests_use_standalone_summary(reason: str) -> None:
     """Unsupported execution, missing authority, or an oversized prefix fails closed."""
     agent = Agent(
         id="writer",
-        model=Claude(id="claude-sonnet-5"),
+        model=Claude(id="claude-sonnet-5", cache_system_prompt=reason != "cache_disabled"),
         instructions=[] if reason == "no_guard" else [COMPACTION_MODE_INSTRUCTION],
         add_session_summary_to_context=reason != "hidden_summary",
         tools=[{"type": "web_search_20250305", "name": "web_search"}] if reason == "hosted_tool" else [],
@@ -343,11 +351,13 @@ async def test_codex_compaction_preserves_cache_key_and_conversation_headers(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("distinct_model", [False, True])
+@pytest.mark.parametrize("learning", [False, True])
 async def test_runtime_uses_warm_compaction_only_for_the_active_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     distinct_model: bool,
+    learning: bool,
 ) -> None:
     """Exercise real agent creation and runtime wiring through a persisted compaction."""
     requests: list[dict] = []
@@ -377,7 +387,7 @@ async def test_runtime_uses_warm_compaction_only_for_the_active_model(
                 compaction=CompactionOverrideConfig(model="summary" if distinct_model else None),
             ),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[], learning=learning, learning_mode="agentic"),
         models={
             "default": ModelConfig(provider="anthropic", id="claude-sonnet-5", context_window=100_000),
             "summary": ModelConfig(provider="anthropic", id="claude-fable-5-1", context_window=100_000),
@@ -391,7 +401,7 @@ async def test_runtime_uses_warm_compaction_only_for_the_active_model(
         agent_id="writer",
         messages=[Message(role="user", content="Project Atlas uses port 4321.")],
     )
-    session = AgentSession(session_id="thread", agent_id="writer", runs=[run])
+    session = AgentSession(session_id="thread", agent_id="writer", user_id="owner", runs=[run])
     write_scope_state(
         session,
         HistoryScope(kind="agent", scope_id="writer"),
@@ -429,10 +439,157 @@ async def test_runtime_uses_warm_compaction_only_for_the_active_model(
             storage=storage,
             session=session,
         )
+        assert agent._learning is None
+        if learning:
+            assert isinstance(agent.learning, LearningMachine)
+            assert agent.learning.model is None
+            assert agent.learning._stores is None
+        # A fresh reply initializes learning; the earlier warm request must
+        # already have exactly the same system instructions and schemas.
+        await agent.arun("Continue", session_id="baseline", user_id="owner")
     assert len(prepared.compaction_outcomes) == 1
-    assert len(requests) == 1
+    assert len(requests) == 2
+    if not distinct_model:
+        assert requests[0]["system"] == requests[1]["system"]
+        assert requests[0].get("tools") == requests[1].get("tools")
+        if learning:
+            assert {"update_profile", "update_user_memory"} <= {tool["name"] for tool in requests[0]["tools"]}
     assert ("PERSONA_CANARY" in str(requests[0]["system"])) is not distinct_model
     assert requests[0]["model"] == ("claude-fable-5-1" if distinct_model else "claude-sonnet-5")
     assert session.summary is not None
     assert session.summary.summary == _SUMMARY
     assert session.runs == []
+
+
+@pytest.mark.asyncio
+async def test_warm_request_uses_runtime_historical_media_projection() -> None:
+    """Runtime patches must apply even when the builder was imported first."""
+    run = RunOutput(
+        run_id="r1",
+        messages=[Message(role="user", content="See attachment", images=[Image(content=b"old image")])],
+    )
+    agent = Agent(
+        id="writer",
+        model=Claude(id="claude-sonnet-5", cache_system_prompt=True),
+        instructions=[COMPACTION_MODE_INSTRUCTION],
+    )
+    request = await build_warm_prefix_request(
+        agent=agent,
+        session=AgentSession(session_id="thread", agent_id="writer", runs=[run]),
+        included_runs=[run],
+        summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        max_input_tokens=100_000,
+        token_estimator=len,
+        supplemental_context="",
+    )
+    assert request is not None
+    assert all(message.images is None for message in request.messages)
+    assert run.messages is not None
+    assert run.messages[0].images
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["tool_limit", "tool_setup", "message_setup", "setup_timeout", "setup_cancel"])
+async def test_unavailable_warm_prefix_still_compacts_all_selected_tool_facts(
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warm preparation must never prevent a complete standalone handoff."""
+    runs = [
+        RunOutput(
+            run_id=f"r{index}",
+            agent_id="writer",
+            messages=[
+                Message(role="user", content=f"Find fact {index}"),
+                Message(
+                    role="assistant",
+                    tool_calls=[
+                        {"id": f"c{index}", "type": "function", "function": {"name": "lookup", "arguments": "{}"}},
+                    ],
+                ),
+                Message(role="tool", tool_call_id=f"c{index}", content=f"UNIQUE_TOOL_FACT_{index}"),
+            ],
+        )
+        for index in range(2)
+    ]
+    storage = InMemoryDb()
+    session = seed_session(storage, AgentSession(session_id="thread", agent_id="writer", runs=runs))
+    scope = HistoryScope(kind="agent", scope_id="writer")
+    requests: list[dict] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        assert session.summary is None
+        assert session.runs == runs
+        body = json.loads(request.content)
+        requests.append(body)
+        assert "tools" not in body
+        assert body["system"] == [{"type": "text", "text": COMPACTION_SUMMARY_PROMPT}]
+        assert all(f"UNIQUE_TOOL_FACT_{index}" in str(body["messages"]) for index in range(2))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_summary",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5",
+                "content": [{"type": "text", "text": _SUMMARY}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 100, "output_tokens": 60},
+            },
+        )
+
+    async def wait_for_cancellation(**_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    if reason == "tool_setup":
+        monkeypatch.setattr(Agent, "aget_tools", AsyncMock(side_effect=RuntimeError("tool unavailable")))
+    elif reason == "message_setup":
+        monkeypatch.setattr(
+            "agno.agent._messages.aget_run_messages",
+            AsyncMock(side_effect=RuntimeError("context unavailable")),
+        )
+    elif reason == "setup_timeout":
+        monkeypatch.setattr(Agent, "aget_tools", AsyncMock(side_effect=wait_for_cancellation))
+    elif reason == "setup_cancel":
+        monkeypatch.setattr(Agent, "aget_tools", AsyncMock(side_effect=asyncio.CancelledError))
+
+    limit = 1 if reason == "tool_limit" else None
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as http_client:
+        client = AsyncAnthropic(api_key="test", http_client=http_client)
+        model = Claude(id="claude-sonnet-5", cache_system_prompt=True, async_client=client)
+        agent = Agent(
+            id="writer",
+            model=model,
+            instructions=[COMPACTION_MODE_INSTRUCTION],
+            max_tool_calls_from_history=limit,
+        )
+        with pytest.raises(asyncio.CancelledError) if reason == "setup_cancel" else nullcontext():
+            outcome = await compact_scope_history(
+                storage=storage,
+                session=session,
+                scope=scope,
+                state=HistoryScopeState(force_compact_before_next_run=True),
+                history_settings=ResolvedHistorySettings(
+                    policy=HistoryPolicy(mode="all"),
+                    max_tool_calls_from_history=limit,
+                ),
+                available_history_budget=None,
+                summary_input_budget=100_000,
+                summary_model=Claude(id="claude-sonnet-5", async_client=client),
+                summary_model_name="default",
+                replay_window_tokens=100_000,
+                threshold_tokens=None,
+                summary_prompt=COMPACTION_SUMMARY_PROMPT,
+                summary_timeout_seconds=0.05 if reason == "setup_timeout" else 10,
+                active_agent=agent,
+            )
+    if reason == "setup_cancel":
+        assert requests == []
+        assert session.runs == runs
+        assert session.summary is None
+        return
+    assert outcome is not None
+    assert len(requests) == 1
+    assert session.runs == []
+    assert read_scope_state(session, scope).compacted_run_ids == ("r0", "r1")
