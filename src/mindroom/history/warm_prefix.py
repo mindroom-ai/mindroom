@@ -19,7 +19,6 @@ from agno.models.message import Message
 from agno.run import RunContext
 from agno.run.agent import RunInput, RunOutput
 from agno.session.agent import AgentSession
-from agno.tools.function import Function
 
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.history_run_visibility import is_model_history_visible_run
@@ -135,11 +134,8 @@ async def build_warm_prefix_request(
         session=fork,
         async_mode=True,
     )
-    tools = tuple(
-        {"type": "function", "function": deepcopy(tool.to_dict())}
-        for tool in prepared_tools
-        if isinstance(tool, Function)
-    )
+    # Use the same schema conversion and deterministic ordering as aresponse.
+    tools = tuple(deepcopy(model._format_tools(prepared_tools)))
     run_messages = await agent_messages.aget_run_messages(
         request_agent,
         run_response=run_response,

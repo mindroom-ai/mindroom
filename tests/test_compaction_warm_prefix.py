@@ -75,6 +75,11 @@ async def test_compaction_reuses_reply_wire_prefix_and_preserves_live_state(*, d
         calls.append(text)
         return text
 
+    def read_file() -> str:
+        """Read a project file."""
+        calls.append("read_file")
+        return "Project Atlas"
+
     def serve(request: httpx.Request) -> httpx.Response:
         requests.append(json.loads(request.content))
         return httpx.Response(
@@ -105,7 +110,8 @@ async def test_compaction_reuses_reply_wire_prefix_and_preserves_live_state(*, d
         agent = Agent(
             id="writer",
             model=model,
-            tools=[write_file],
+            # Deliberately reverse name order; normal Agno replies sort schemas.
+            tools=[write_file, read_file],
             db=InMemoryDb(),
             instructions=["Always end replies with PERSONA_CANARY.", COMPACTION_MODE_INSTRUCTION],
             additional_context=render_session_context("Current date: Monday"),
