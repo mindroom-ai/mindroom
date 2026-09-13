@@ -1038,6 +1038,7 @@ class MCPServerManager:
         exclude_tools: Collection[str] | None = None,
         before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> ToolResult:
+        # Attempt timings exclude initial connection setup and post-failure reconnects.
         started_at = monotonic()
         call_id = uuid4().hex
         acquired_at: float | None = None
@@ -1106,14 +1107,17 @@ class MCPServerManager:
                 MCPTimeoutError: "timeout",
                 MCPProtocolError: "protocol_error",
             }
-            outcome = error_outcomes.get(type(exc), "error")
+            outcome = next(
+                (label for error_class, label in error_outcomes.items() if isinstance(exc, error_class)),
+                "error",
+            )
             raise
         finally:
             finished_at = monotonic()
             queue_end = acquired_at if acquired_at is not None else finished_at
             pre_dispatch_end = dispatched_at if dispatched_at is not None else finished_at
             logger.info(
-                "MCP tool call finished",
+                "MCP tool call attempt finished",
                 server_id=state.server_id,
                 tool_name=remote_tool_name,
                 mcp_call_id=call_id,
@@ -1121,7 +1125,7 @@ class MCPServerManager:
                 queue_wait_ms=(queue_end - started_at) * 1000,
                 pre_dispatch_ms=(pre_dispatch_end - acquired_at) * 1000 if acquired_at is not None else 0.0,
                 remote_call_ms=(finished_at - dispatched_at) * 1000 if dispatched_at is not None else 0.0,
-                total_ms=(finished_at - started_at) * 1000,
+                attempt_total_ms=(finished_at - started_at) * 1000,
                 dispatched=dispatched_at is not None,
                 outcome=outcome,
                 error_type=error_type,

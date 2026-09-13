@@ -3226,7 +3226,7 @@ async def test_mcp_call_timings_separate_queue_preflight_and_remote(
 
     assert result.content == "private result"
     dispatch = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call dispatched",)]
-    finished = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call finished",)]
+    finished = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call attempt finished",)]
     assert len(dispatch) == len(finished) == 1
     assert dispatch[0]["mcp_call_id"] == finished[0]["mcp_call_id"]
     assert finished[0] == {
@@ -3237,7 +3237,7 @@ async def test_mcp_call_timings_separate_queue_preflight_and_remote(
         "queue_wait_ms": 3000.0,
         "pre_dispatch_ms": 2000.0,
         "remote_call_ms": 7000.0,
-        "total_ms": 12000.0,
+        "attempt_total_ms": 12000.0,
         "dispatched": True,
         "outcome": "success",
         "error_type": None,
@@ -3277,7 +3277,7 @@ async def test_mcp_call_timings_preserve_cancellation(
             await pending
     if not after_dispatch:
         state.semaphore.release()
-    finished = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call finished",)]
+    finished = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call attempt finished",)]
     assert len(finished) == 1
     assert finished[0]["outcome"] == "cancelled"
     assert finished[0]["dispatched"] is after_dispatch
@@ -3320,13 +3320,34 @@ async def test_mcp_call_timings_classify_failures_without_replaying(
     )
     with patch.object(mcp_manager_module, "logger") as log, pytest.raises(expected_error):
         await manager.call_tool("demo", "echo", {"private": "argument"})
-    finished = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call finished",)]
+    finished = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call attempt finished",)]
     assert len(finished) == 1
     assert finished[0]["outcome"] == expected_outcome
     assert finished[0]["error_type"] == expected_error.__name__
     assert finished[0]["dispatched"] is True
     assert "private" not in str(log.mock_calls)
     assert _FakeClientSession.call_tool_invocation_count == 1
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_call_timings_classify_unavailable_tools_as_protocol_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A protocol-error subtype keeps its family and concrete type before dispatch."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    await manager.sync_servers(_ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")}))
+    with patch.object(mcp_manager_module, "logger") as log, pytest.raises(MCPToolUnavailableError):
+        await manager.call_tool("demo", "missing", {})
+    finished = [call.kwargs for call in log.info.call_args_list if call.args == ("MCP tool call attempt finished",)]
+    assert len(finished) == 1
+    assert finished[0]["outcome"] == "protocol_error"
+    assert finished[0]["error_type"] == "MCPToolUnavailableError"
+    assert finished[0]["dispatched"] is False
+    assert _FakeClientSession.call_tool_invocation_count == 0
     await manager.shutdown()
 
 
