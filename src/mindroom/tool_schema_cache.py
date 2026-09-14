@@ -71,7 +71,7 @@ def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFu
             ),
             sort_keys=True,
         )
-    except TypeError:
+    except (TypeError, ValueError):
         return None
     key = (ref(source), bound_method, output_file_schema, inputs)
     with _SCHEMA_CACHE_LOCK:
@@ -85,7 +85,7 @@ def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFu
         try:
             # JSON values cannot keep owners alive through annotations or container attributes.
             payload = json.dumps({"parameters": prepared.parameters, "description": prepared.description})
-        except TypeError:
+        except (TypeError, ValueError):
             return None
         with _SCHEMA_CACHE_LOCK:
             _SCHEMA_CACHE[key] = payload
