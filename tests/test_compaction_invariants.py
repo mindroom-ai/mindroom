@@ -1160,6 +1160,7 @@ def test_retry_schedule_halves_deterministically() -> None:
 async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_smaller() -> None:
     """A defensive estimate guard prevents a shrink retry from resending equal-size input."""
     run = _completed_run("run-1")
+    initial_input = "original request " * 1_000
     original_error = CompactionSummaryOutputLimitError("renamed owned output-limit signal")
     generate_summary = AsyncMock(side_effect=original_error)
 
@@ -1170,15 +1171,15 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
         ),
         patch(
             "mindroom.history.compaction.build_summary_input",
-            return_value=("rebuilt request with the same estimate", [run]),
-        ),
+            return_value=(initial_input, [run]),
+        ) as rebuild_input,
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
             summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 4_000),
             previous_summary=None,
             compactable_runs=[run],
-            initial_summary_input="original request",
+            initial_summary_input=initial_input,
             initial_included_runs=[run],
             session_id="session-1",
             scope=_SCOPE,
@@ -1188,6 +1189,7 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
         )
 
     assert raised.value is original_error
+    rebuild_input.assert_called_once()
     generate_summary.assert_awaited_once()
 
 
