@@ -77,6 +77,7 @@ def _team_config_names_by_provider_id(state: dict[str, object]) -> dict[str, str
     if not isinstance(stored_members, list):
         return {}
     config_names_by_provider_id: dict[str, str] = {}
+    member_identities: set[str] = set()
     for member in stored_members:
         if not isinstance(member, dict):
             continue
@@ -84,8 +85,25 @@ def _team_config_names_by_provider_id(state: dict[str, object]) -> dict[str, str
         provider_id = stored_member.get("id")
         config_name = stored_member.get("config_name")
         if isinstance(provider_id, str) and provider_id and isinstance(config_name, str) and config_name:
+            if {provider_id, config_name} & member_identities:
+                msg = "Paused approval tool has ambiguous frozen member identity"
+                raise RuntimeError(msg)
+            member_identities.update((provider_id, config_name))
             config_names_by_provider_id[provider_id] = config_name
     return config_names_by_provider_id
+
+
+def _resolve_team_member_identity(member_id: str, config_names_by_provider_id: dict[str, str]) -> tuple[str, str]:
+    """Resolve an exact requirement identity to its frozen presentation ID and config name."""
+    matches = [
+        (provider_id, config_name)
+        for provider_id, config_name in config_names_by_provider_id.items()
+        if member_id in (provider_id, config_name)
+    ]
+    if len(matches) != 1:
+        msg = "Paused approval tool has no unique frozen member config identity"
+        raise RuntimeError(msg)
+    return matches[0]
 
 
 def identify_approval_tools(
@@ -96,13 +114,13 @@ def identify_approval_tools(
     """Resolve exact paused call IDs, names, and invoking member ownership."""
     config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
     owners = {
-        requirement.tool_execution.tool_call_id: config_names_by_provider_id.get(requirement.member_agent_id)
+        requirement.tool_execution.tool_call_id: _resolve_team_member_identity(
+            requirement.member_agent_id,
+            config_names_by_provider_id,
+        )[1]
         for requirement in paused.requirements
         if requirement.tool_execution is not None and requirement.member_agent_id
     }
-    if any(owner is None for owner in owners.values()):
-        msg = "Paused approval tool has no frozen member config identity"
-        raise RuntimeError(msg)
     identified: list[tuple[ToolExecution, str, str, str]] = []
     for tool in paused.tools:
         if not tool.tool_call_id or not tool.tool_name:
@@ -132,6 +150,7 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
         if requirement.tool_execution is not None and requirement.tool_execution.tool_call_id
     }
     is_team_presentation = paused.response_presentation_state.get("kind") == "team_stream"
+    config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
     for tool in paused.tools:
         call_id = tool.tool_call_id
         matches = [
@@ -145,6 +164,8 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
         _, entry = matches[0]
         requirement = requirements_by_call_id.get(call_id)
         member_id = requirement.member_agent_id if requirement is not None else None
+        if member_id is not None:
+            member_id, _ = _resolve_team_member_identity(member_id, config_names_by_provider_id)
         expected_scope = f"agent:{member_id}" if member_id is not None else ("team" if is_team_presentation else None)
         if entry.scope_key != expected_scope:
             msg = "Approval suspension requires an ordered presentation for every pending tool"
